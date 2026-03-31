@@ -1,0 +1,59 @@
+title: Hidden VNC or SOCKS Proxy Server Started by Non-System Process
+id: d1a2b3c4-0318-4000-a000-000000000018
+status: experimental
+description: >
+    Detects VNC servers or SOCKS proxy servers started by non-system processes. The
+    GlassWorm worm (Jan-March 2026) deployed hidden SOCKS proxies and VNC servers
+    on compromised machines to enable remote access and lateral movement. These services
+    running outside of legitimate remote management tools indicate compromise.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1219/
+    - https://attack.mitre.org/techniques/T1090/
+    - https://www.sentinelone.com/labs/glassworm-vscode-worm-2026/
+tags:
+    - attack.command_and_control
+    - attack.t1219
+    - attack.t1090
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_vnc:
+        CommandLine|contains:
+            - 'vnc'
+            - 'VNC'
+            - 'x11vnc'
+            - 'tightvnc'
+            - 'rfb'
+    selection_socks:
+        CommandLine|contains:
+            - 'socks'
+            - 'SOCKS'
+            - '-D 1080'
+            - '-D 9050'
+            - 'socksify'
+            - 'proxychains'
+    selection_listening:
+        CommandLine|contains:
+            - '-listen'
+            - '--listen'
+            - '-L '
+            - 'bind'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple:
+        SignerType: 'apple'
+    filter_screen_sharing:
+        Image|endswith: '/screensharingd'
+    condition: (selection_vnc or selection_socks or selection_listening) and not filter_system and not filter_apple and not filter_screen_sharing
+falsepositives:
+    - Legitimate remote desktop applications (TeamViewer, AnyDesk)
+    - SSH tunneling for development
+    - Corporate VPN/proxy tools
+level: high

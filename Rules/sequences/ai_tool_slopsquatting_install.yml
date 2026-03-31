@@ -1,0 +1,66 @@
+title: AI Coding Tool Triggers Package Install with Suspicious Outcome
+id: e1f2a3b4-0024-4000-b000-000000000024
+status: experimental
+description: >
+    Detects an AI coding tool (Cursor, Copilot, Cline, Continue) spawning a
+    package manager install command, where the installed package then spawns
+    a shell or accesses credential files. Covers the slopsquatting attack
+    vector where AI hallucinated packages are registered by attackers.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://thinkpol.ca/2026/03/28/slopsquatting-the-supply-chain-attack-vibe-coding-made/
+    - https://www.trendmicro.com/vinfo/us/security/news/cybercrime-and-digital-threats/slopsquatting-when-ai-agents-hallucinate-malicious-packages
+tags:
+    - attack.initial_access
+    - attack.execution
+    - attack.t1195.001
+    - attack.t1059
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: ai_tool
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              ParentImage|contains:
+                  - 'Cursor'
+                  - 'Copilot'
+                  - 'Cline'
+                  - 'Continue'
+                  - 'Windsurf'
+                  - 'Cody'
+                  - 'Aider'
+              Image|endswith:
+                  - '/npm'
+                  - '/npx'
+                  - '/pip'
+                  - '/pip3'
+                  - '/node'
+          condition: selection
+
+    - id: suspicious_outcome
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_shell:
+              Image|endswith:
+                  - '/sh'
+                  - '/bash'
+                  - '/zsh'
+          selection_network:
+              Image|endswith:
+                  - '/curl'
+                  - '/wget'
+          condition: selection_shell or selection_network
+      process: ai_tool.descendant
+
+trigger: all
+level: high

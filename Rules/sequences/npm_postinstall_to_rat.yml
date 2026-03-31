@@ -1,0 +1,68 @@
+title: npm Postinstall Drops and Executes RAT (Axios-style)
+id: e1f2a3b4-0020-4000-b000-000000000020
+status: stable
+description: >
+    Detects the full axios-style supply chain attack chain: npm/node runs a
+    postinstall hook that downloads a binary to a system directory, then that
+    binary executes and makes C2 connections. Based on the March 2026 axios
+    compromise where plain-crypto-js dropped a RAT at /Library/Caches/com.apple.act.mond.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://www.aikido.dev/blog/axios-npm-compromised-maintainer-hijacked-rat
+    - https://socket.dev/blog/axios-npm-package-compromised
+tags:
+    - attack.initial_access
+    - attack.execution
+    - attack.command_and_control
+    - attack.t1195.001
+    - attack.t1059.004
+
+type: sequence
+window: 60s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: postinstall
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              ParentImage|endswith:
+                  - '/node'
+                  - '/npm'
+                  - '/npx'
+              Image|endswith:
+                  - '/sh'
+                  - '/bash'
+                  - '/node'
+          condition: selection
+
+    - id: drop_payload
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|startswith:
+                  - '/Library/Caches/'
+                  - '/Library/Application Support/'
+                  - '/tmp/'
+                  - '/private/tmp/'
+          condition: selection
+      process: postinstall.descendant
+
+    - id: c2_callback
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          condition: selection
+      process: postinstall.descendant
+
+trigger: drop_payload and c2_callback
+level: critical

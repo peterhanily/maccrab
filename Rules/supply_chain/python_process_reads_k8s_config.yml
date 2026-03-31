@@ -1,0 +1,47 @@
+title: Python Process Reads Kubernetes Configuration
+id: d1a2b3c4-0312-4000-a000-000000000012
+status: experimental
+description: >
+    Detects Python processes reading Kubernetes configuration files or service account
+    tokens. The TeamPCP/LiteLLM attack (March 2026) specifically targeted ~/.kube/config
+    to harvest cluster access credentials. Python processes rarely need direct access
+    to kubeconfig files outside of known Kubernetes management tools.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1552/001/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://www.reversinglabs.com/blog/teampcp-litellm-supply-chain-attack-2026
+tags:
+    - attack.credential_access
+    - attack.t1552.001
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_process:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+            - '/python3.10'
+            - '/python3.11'
+            - '/python3.12'
+            - '/python3.13'
+    selection_k8s_files:
+        TargetFilename|endswith:
+            - '/.kube/config'
+            - '/serviceaccount/token'
+            - '/serviceaccount/ca.crt'
+        TargetFilename|contains:
+            - '/.kube/config'
+    filter_known_tools:
+        Image|contains:
+            - '/kubectl'
+            - '/helm'
+    condition: selection_process and selection_k8s_files and not filter_known_tools
+falsepositives:
+    - Python Kubernetes client library (kubernetes-client) used for legitimate cluster management
+    - Helm plugins written in Python
+level: high

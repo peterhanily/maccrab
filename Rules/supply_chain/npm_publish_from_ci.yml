@@ -1,0 +1,41 @@
+title: npm Publish Executed from Unusual Context
+id: d1a2b3c4-0321-4000-a000-000000000021
+status: experimental
+description: >
+    Detects npm publish commands executed from suspicious contexts such as temporary
+    directories or by unexpected parent processes. The Shai-Hulud 2.0 worm (November
+    2025) used stolen npm tokens to automatically publish malicious versions of victim's
+    packages, propagating the worm to new installations.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://socket.dev/blog/shai-hulud-npm-worm-2025
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains: 'npm publish'
+    selection_suspicious_cwd:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/folders/'
+    selection_suspicious_parent:
+        ParentImage|endswith:
+            - '/node'
+            - '/python'
+            - '/python3'
+            - '/curl'
+    condition: selection and (selection_suspicious_cwd or selection_suspicious_parent)
+falsepositives:
+    - Automated CI/CD release scripts that use temporary directories
+    - npm workspace publishing from monorepo build tools
+level: critical

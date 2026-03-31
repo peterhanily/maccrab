@@ -1,0 +1,55 @@
+title: pip Install Process Writes Outside site-packages
+id: d1a2b3c4-0330-4000-a000-000000000030
+status: experimental
+description: >
+    Detects pip install processes writing files to directories outside of Python's
+    site-packages/, bin/, or standard installation paths. Malicious PyPI packages may
+    use setup.py or pyproject.toml hooks to write files to arbitrary system locations
+    during installation, as seen in the TeamPCP/LiteLLM attack.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1059/006/
+    - https://www.reversinglabs.com/blog/teampcp-litellm-supply-chain-attack-2026
+tags:
+    - attack.execution
+    - attack.t1059.006
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.persistence
+    - attack.t1546
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_process:
+        Image|endswith:
+            - '/pip'
+            - '/pip3'
+        CommandLine|contains: 'install'
+    selection_process_alt:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+        CommandLine|contains:
+            - 'setup.py install'
+            - 'setup.py develop'
+            - '-m pip install'
+    filter_legitimate_paths:
+        TargetFilename|contains:
+            - '/site-packages/'
+            - '/dist-packages/'
+            - '/bin/'
+            - '/lib/python'
+            - '/Scripts/'
+            - '/pip/'
+            - '/packaging/'
+            - '/__pycache__/'
+            - '/build/'
+            - '/egg-info/'
+    condition: (selection_process or selection_process_alt) and not filter_legitimate_paths
+falsepositives:
+    - Packages that install data files or configuration templates to standard locations
+    - Packages that create wrapper scripts in /usr/local/bin
+level: high

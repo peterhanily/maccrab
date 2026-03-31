@@ -1,0 +1,50 @@
+title: Package Install Process Creates Persistence Mechanism
+id: d1a2b3c4-0327-4000-a000-000000000027
+status: experimental
+description: >
+    Detects package installation processes creating macOS persistence mechanisms such
+    as LaunchAgents, LaunchDaemons, or cron jobs. Supply chain attacks commonly use
+    package install hooks to establish persistence. Legitimate packages should not
+    create system-level persistence during installation.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1543/001/
+    - https://attack.mitre.org/techniques/T1053/003/
+tags:
+    - attack.persistence
+    - attack.t1543.001
+    - attack.t1053.003
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_process:
+        Image|endswith:
+            - '/node'
+            - '/npm'
+            - '/npx'
+            - '/python'
+            - '/python3'
+            - '/pip'
+            - '/pip3'
+            - '/gem'
+            - '/ruby'
+            - '/bundle'
+            - '/yarn'
+            - '/pnpm'
+    selection_persistence_files:
+        TargetFilename|contains:
+            - '/LaunchAgents/'
+            - '/LaunchDaemons/'
+            - '/crontab'
+        TargetFilename|endswith:
+            - '.plist'
+    condition: selection_process and selection_persistence_files
+falsepositives:
+    - Homebrew cask installations that create LaunchAgents for background services
+    - Node.js service managers (pm2) creating LaunchAgents
+level: critical

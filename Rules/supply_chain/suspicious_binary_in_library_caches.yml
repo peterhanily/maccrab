@@ -1,0 +1,36 @@
+title: Non-Apple Binary Created in Library Caches Masquerading as Apple
+id: d1a2b3c4-0304-4000-a000-000000000004
+status: experimental
+description: >
+    Detects creation of binaries in /Library/Caches/ with com.apple.* naming that are
+    not signed by Apple. The Axios NPM supply chain attack (March 2026) placed a RAT
+    at /Library/Caches/com.apple.act.mond. Legitimate Apple cache files are always
+    written by Apple-signed processes.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1036/005/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://blog.phylum.io/axios-npm-supply-chain-compromise-2026/
+tags:
+    - attack.defense_evasion
+    - attack.t1036.005
+    - attack.persistence
+    - attack.t1543
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith: '/Library/Caches/com.apple.'
+    filter_apple_signed:
+        SignerType: 'apple'
+    filter_apple_process:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    condition: selection and not filter_apple_signed and not filter_apple_process
+falsepositives:
+    - Third-party tools that legitimately create files in /Library/Caches/ with com.apple prefix (very unlikely)
+level: high

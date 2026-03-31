@@ -1,0 +1,41 @@
+title: Node.js Process Writes to System Directories
+id: d1a2b3c4-0305-4000-a000-000000000005
+status: experimental
+description: >
+    Detects Node.js processes writing files to /Library/ or /System/ directories.
+    Legitimate Node.js applications should not write to system directories. The Axios
+    NPM compromise (March 2026) dropped a RAT binary into /Library/Caches/ via a
+    postinstall hook running in Node.js.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1059/007/
+    - https://blog.phylum.io/axios-npm-supply-chain-compromise-2026/
+tags:
+    - attack.execution
+    - attack.t1059.007
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.defense_evasion
+    - attack.t1036.005
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_process:
+        Image|endswith: '/node'
+    selection_target:
+        TargetFilename|startswith:
+            - '/Library/'
+            - '/System/'
+    filter_node_dirs:
+        TargetFilename|contains:
+            - '/Library/Caches/node'
+            - '/Library/Application Support/nvm'
+            - '/Library/Application Support/fnm'
+    condition: selection_process and selection_target and not filter_node_dirs
+falsepositives:
+    - Electron applications that use Node.js and write to /Library/Application Support/
+    - Node.js-based system tools installed via Homebrew
+level: high

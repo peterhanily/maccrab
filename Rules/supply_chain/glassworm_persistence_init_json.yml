@@ -1,0 +1,38 @@
+title: GlassWorm Persistence via init.json in Home Directory
+id: d1a2b3c4-0314-4000-a000-000000000014
+status: experimental
+description: >
+    Detects creation of ~/init.json by VS Code-related processes. The GlassWorm worm
+    (Jan-March 2026) used ~/init.json as a persistence and configuration file for its
+    C2 infrastructure. This file in the home directory root is unusual and not part of
+    any standard application configuration.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1547/
+    - https://www.sentinelone.com/labs/glassworm-vscode-worm-2026/
+tags:
+    - attack.persistence
+    - attack.t1547
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_file:
+        TargetFilename|endswith: '/init.json'
+        TargetFilename|startswith: '/Users/'
+    selection_not_nested:
+        TargetFilename|re: '^/Users/[^/]+/init\.json$'
+    selection_process:
+        Image|contains:
+            - 'Code'
+            - 'code-server'
+            - '/node'
+            - 'extensionHost'
+    condition: selection_file and selection_not_nested and selection_process
+falsepositives:
+    - None expected - ~/init.json is not a standard macOS or VS Code configuration file
+level: critical

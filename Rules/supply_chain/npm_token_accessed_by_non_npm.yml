@@ -1,0 +1,51 @@
+title: npm Auth Token Accessed by Non-npm Process
+id: d1a2b3c4-0319-4000-a000-000000000019
+status: experimental
+description: >
+    Detects .npmrc files (containing npm authentication tokens) being read by processes
+    other than npm itself. The Shai-Hulud 2.0 worm (November 2025) harvested npm tokens
+    to propagate by publishing malicious versions of victim's packages, affecting 25,000+
+    GitHub repositories.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1552/001/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://socket.dev/blog/shai-hulud-npm-worm-2025
+tags:
+    - attack.credential_access
+    - attack.t1552.001
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith: '/.npmrc'
+    filter_npm:
+        Image|endswith:
+            - '/npm'
+            - '/npx'
+            - '/node'
+            - '/corepack'
+            - '/pnpm'
+            - '/yarn'
+    filter_editors:
+        Image|endswith:
+            - '/vim'
+            - '/nvim'
+            - '/nano'
+            - '/code'
+            - '/Code Helper'
+    filter_shells:
+        Image|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+    condition: selection and not filter_npm and not filter_editors and not filter_shells
+falsepositives:
+    - Package managers that read .npmrc for registry configuration (e.g., bun)
+    - CI/CD tools reading npm configuration
+level: high

@@ -1,0 +1,59 @@
+title: Package Manager Spawns Download Tool Followed by Execution
+id: d1a2b3c4-0326-4000-a000-000000000026
+status: experimental
+description: >
+    Detects package manager processes (npm, pip, gem) spawning curl or wget to download
+    content, followed by shell execution. This is a common pattern in supply chain
+    attacks where malicious packages download and execute second-stage payloads during
+    installation, as seen in the Axios compromise and Shai-Hulud 2.0.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1105/
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+    - attack.command_and_control
+    - attack.t1105
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/node'
+            - '/npm'
+            - '/npx'
+            - '/python'
+            - '/python3'
+            - '/pip'
+            - '/pip3'
+            - '/gem'
+            - '/ruby'
+            - '/bundle'
+            - '/yarn'
+            - '/pnpm'
+    selection_download_execute:
+        CommandLine|contains:
+            - 'curl'
+            - 'wget'
+        CommandLine|contains:
+            - '| sh'
+            - '| bash'
+            - '| zsh'
+            - '|sh'
+            - '|bash'
+            - '|zsh'
+            - '> /tmp'
+            - '-o /tmp'
+            - '--output /tmp'
+            - 'chmod +x'
+    condition: selection_parent and selection_download_execute
+falsepositives:
+    - Legitimate package install scripts that download prebuilt binaries
+    - Homebrew-related installations triggered through package managers
+level: high

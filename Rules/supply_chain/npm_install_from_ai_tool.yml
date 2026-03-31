@@ -1,0 +1,47 @@
+title: npm Install Command Spawned by AI Coding Tool
+id: d1a2b3c4-0325-4000-a000-000000000025
+status: experimental
+description: >
+    Detects npm install commands spawned by AI coding tools such as Cursor, Copilot,
+    or Cline. Research shows that 20% of AI-generated code references hallucinated
+    package names. Attackers register these hallucinated names on npm (slopsquatting),
+    creating supply chain risk when AI tools automatically install suggested packages.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1204/002/
+    - https://vulcan.io/blog/ai-hallucinations-package-risk
+    - https://arxiv.org/abs/2406.10279
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.execution
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_install:
+        CommandLine|contains:
+            - 'npm install'
+            - 'npm i '
+            - 'npm add'
+            - 'npx '
+            - 'yarn add'
+            - 'pnpm add'
+            - 'pnpm install'
+    selection_ai_parent:
+        ParentImage|contains:
+            - 'Cursor'
+            - 'copilot'
+            - 'Cline'
+            - 'Code Helper'
+            - 'extensionHost'
+            - 'Windsurf'
+            - 'aider'
+    condition: selection_install and selection_ai_parent
+falsepositives:
+    - Developers intentionally running npm install via AI tool integrated terminals
+    - AI coding assistants installing well-known, verified packages
+level: medium

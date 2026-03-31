@@ -1,0 +1,66 @@
+title: AI Tool Configuration Accessed by Non-AI Process
+id: d1a2b3c4-0323-4000-a000-000000000023
+status: experimental
+description: >
+    Detects access to AI/LLM tool configuration files by processes that are not the
+    corresponding AI tool. The CanisterWorm/NX attack (August 2025) targeted Cursor,
+    Copilot, Cody, Continue, LMStudio, and Ollama configs to steal API keys. These
+    configs often contain API tokens with billing implications.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1552/001/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://socket.dev/blog/canisterworm-nx-llm-targeting-2025
+tags:
+    - attack.credential_access
+    - attack.t1552.001
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_cursor:
+        TargetFilename|contains: '/.cursor/'
+        TargetFilename|endswith:
+            - '/settings.json'
+            - '/config.json'
+            - '/storage.json'
+    selection_ollama:
+        TargetFilename|contains: '/.ollama/'
+        TargetFilename|endswith:
+            - '/config.json'
+            - '/auth'
+    selection_lmstudio:
+        TargetFilename|contains: '/LM Studio/'
+        TargetFilename|endswith:
+            - '/config.json'
+            - '/settings.json'
+    selection_continue:
+        TargetFilename|contains: '/.continue/'
+        TargetFilename|endswith:
+            - '/config.json'
+            - '/config.ts'
+    filter_legitimate:
+        Image|contains:
+            - 'Cursor'
+            - 'Ollama'
+            - 'LM Studio'
+            - 'Continue'
+            - 'Code'
+    filter_editors:
+        Image|endswith:
+            - '/vim'
+            - '/nvim'
+            - '/nano'
+    filter_shells:
+        Image|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+    condition: (selection_cursor or selection_ollama or selection_lmstudio or selection_continue) and not filter_legitimate and not filter_editors and not filter_shells
+falsepositives:
+    - Configuration sync tools (Mackup, dotfile managers)
+    - Text editors opening AI tool config files for manual editing
+level: medium

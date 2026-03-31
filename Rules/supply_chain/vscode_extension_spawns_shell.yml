@@ -1,0 +1,52 @@
+title: VS Code Extension Host Spawns Shell Outside Workspace
+id: d1a2b3c4-0313-4000-a000-000000000013
+status: experimental
+description: >
+    Detects VS Code extension host processes spawning shell interpreters or Node.js
+    processes that operate outside the user's workspace. The GlassWorm worm (Jan-March
+    2026) propagated via malicious VS Code and Open VSX extensions, using invisible
+    Unicode characters for obfuscation and spawning shell commands to deploy payloads.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://www.sentinelone.com/labs/glassworm-vscode-worm-2026/
+tags:
+    - attack.execution
+    - attack.t1059.004
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|contains:
+            - 'extensionHost'
+            - 'Code Helper (Plugin)'
+            - 'code-server'
+    selection_child:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/node'
+            - '/python'
+            - '/python3'
+    filter_workspace_tasks:
+        CommandLine|contains:
+            - 'task '
+            - 'eslint'
+            - 'prettier'
+            - 'tsc '
+            - 'jest '
+            - 'mocha '
+            - '--stdio'
+            - 'language-server'
+    condition: selection_parent and selection_child and not filter_workspace_tasks
+falsepositives:
+    - Legitimate VS Code extensions running build tasks or linters
+    - Language server protocol extensions spawning processes
+    - VS Code integrated terminal
+level: medium

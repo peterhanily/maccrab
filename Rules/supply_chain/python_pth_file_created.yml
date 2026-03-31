@@ -1,0 +1,38 @@
+title: Python .pth File Created in Site-Packages
+id: d1a2b3c4-0306-4000-a000-000000000006
+status: experimental
+description: >
+    Detects creation of .pth files in Python site-packages directories. The TeamPCP /
+    LiteLLM attack (March 2026) planted litellm_init.pth in site-packages/ which executes
+    arbitrary code on every Python startup. While .pth files are a legitimate Python feature,
+    their creation outside of normal pip install flows is highly suspicious.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1546/
+    - https://www.reversinglabs.com/blog/teampcp-litellm-supply-chain-attack-2026
+tags:
+    - attack.persistence
+    - attack.t1546
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/site-packages/'
+        TargetFilename|endswith: '.pth'
+    filter_pip:
+        Image|endswith:
+            - '/pip'
+            - '/pip3'
+        CommandLine|contains:
+            - 'install'
+            - 'uninstall'
+    condition: selection and not filter_pip
+falsepositives:
+    - Legitimate pip package installation that creates .pth files (setuptools, virtualenv)
+    - Development tools installing editable packages (pip install -e)
+level: high

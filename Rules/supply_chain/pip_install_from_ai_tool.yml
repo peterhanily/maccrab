@@ -1,0 +1,48 @@
+title: pip Install Command Spawned by AI Coding Tool
+id: d1a2b3c4-0324-4000-a000-000000000024
+status: experimental
+description: >
+    Detects pip install commands spawned by AI coding tools such as Cursor, Copilot,
+    or Cline. Research shows that 20% of AI-generated code references hallucinated
+    package names. Attackers register these hallucinated names on PyPI (slopsquatting),
+    creating supply chain risk when AI tools automatically install suggested packages.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1204/002/
+    - https://vulcan.io/blog/ai-hallucinations-package-risk
+    - https://arxiv.org/abs/2406.10279
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.execution
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_install:
+        Image|endswith:
+            - '/pip'
+            - '/pip3'
+            - '/python'
+            - '/python3'
+        CommandLine|contains:
+            - 'pip install'
+            - 'pip3 install'
+            - '-m pip install'
+    selection_ai_parent:
+        ParentImage|contains:
+            - 'Cursor'
+            - 'copilot'
+            - 'Cline'
+            - 'Code Helper'
+            - 'extensionHost'
+            - 'Windsurf'
+            - 'aider'
+    condition: selection_install and selection_ai_parent
+falsepositives:
+    - Developers intentionally running pip install via AI tool integrated terminals
+    - AI coding assistants installing well-known, verified packages
+level: medium

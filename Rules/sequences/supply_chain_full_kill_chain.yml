@@ -1,0 +1,77 @@
+title: Full Supply Chain Kill Chain - Install to Persist to Exfiltrate
+id: e1f2a3b4-0023-4000-b000-000000000023
+status: experimental
+description: >
+    Detects the complete supply chain attack kill chain: a package manager installs
+    something, which drops persistence (LaunchAgent/cron/.pth), then harvests
+    credentials and exfiltrates them. Covers npm, pip, and gem attack patterns.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://labs.cloudsecurityalliance.org/research/csa-research-note-teampcp-supply-chain-ai-tooling-20260330-c/
+tags:
+    - attack.initial_access
+    - attack.persistence
+    - attack.credential_access
+    - attack.exfiltration
+    - attack.t1195.001
+    - attack.t1543.001
+    - attack.t1552.001
+
+type: sequence
+window: 300s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: package_install
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/npm'
+                  - '/npx'
+                  - '/pip'
+                  - '/pip3'
+                  - '/gem'
+                  - '/cargo'
+              CommandLine|contains:
+                  - 'install'
+          condition: selection
+
+    - id: persist
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection_la:
+              TargetFilename|contains: '/LaunchAgents/'
+          selection_ld:
+              TargetFilename|contains: '/LaunchDaemons/'
+          selection_cron:
+              TargetFilename|startswith: '/private/var/at/tabs/'
+          selection_pth:
+              TargetFilename|endswith: '.pth'
+              TargetFilename|contains: 'site-packages'
+          selection_profile:
+              TargetFilename|endswith:
+                  - '/.zshrc'
+                  - '/.bashrc'
+                  - '/.bash_profile'
+          condition: selection_la or selection_ld or selection_cron or selection_pth or selection_profile
+      process: package_install.descendant
+
+    - id: exfil
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          condition: selection
+      process: package_install.descendant
+
+trigger: persist and exfil
+level: critical

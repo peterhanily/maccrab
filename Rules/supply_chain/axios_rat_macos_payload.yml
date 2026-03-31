@@ -1,0 +1,32 @@
+title: Axios RAT macOS Payload Created
+id: d1a2b3c4-0303-4000-a000-000000000003
+status: experimental
+description: >
+    Detects creation of the specific RAT binary deployed by the compromised axios@1.14.1 /
+    0.30.4 npm packages (March 2026). The plain-crypto-js dependency dropped a macOS
+    binary disguised as an Apple daemon at /Library/Caches/com.apple.act.mond, which
+    communicated with C2 at sfrclak[.]com:8000 (142.11.206.73).
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1036/005/
+    - https://blog.phylum.io/axios-npm-supply-chain-compromise-2026/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.defense_evasion
+    - attack.t1036.005
+    - attack.persistence
+    - attack.t1543
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_file:
+        TargetFilename:
+            - '/Library/Caches/com.apple.act.mond'
+    condition: selection_file
+falsepositives:
+    - None expected - this is a specific malware IOC
+level: critical

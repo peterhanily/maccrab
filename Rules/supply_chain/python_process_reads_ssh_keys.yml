@@ -1,0 +1,46 @@
+title: Python Process Reads SSH Private Keys
+id: d1a2b3c4-0307-4000-a000-000000000007
+status: experimental
+description: >
+    Detects Python processes accessing SSH private key files. The TeamPCP/LiteLLM
+    attack (March 2026) and CanisterWorm/NX attack (August 2025) both harvested SSH
+    keys as part of credential theft. Python processes should rarely need direct access
+    to SSH private keys.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1552/004/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://www.reversinglabs.com/blog/teampcp-litellm-supply-chain-attack-2026
+tags:
+    - attack.credential_access
+    - attack.t1552.004
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_process:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+            - '/python3.10'
+            - '/python3.11'
+            - '/python3.12'
+            - '/python3.13'
+    selection_file:
+        TargetFilename|contains: '/.ssh/'
+        TargetFilename|endswith:
+            - '/id_rsa'
+            - '/id_ed25519'
+            - '/id_ecdsa'
+            - '/id_dsa'
+            - '/id_rsa.pub'
+            - '/id_ed25519.pub'
+    condition: selection_process and selection_file
+falsepositives:
+    - Paramiko or Fabric SSH libraries used for legitimate automation
+    - Ansible running locally
+    - SSH key management scripts written in Python
+level: high

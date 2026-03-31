@@ -1,0 +1,49 @@
+title: Python Process Reads .env Files Outside Project Directory
+id: d1a2b3c4-0309-4000-a000-000000000009
+status: experimental
+description: >
+    Detects Python processes reading .env files from locations outside typical project
+    directories. The TeamPCP/LiteLLM attack (March 2026) harvested .env files which
+    commonly contain API keys, database passwords, and other secrets. Reading .env
+    files from home directories or system paths is especially suspicious.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1552/001/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://www.reversinglabs.com/blog/teampcp-litellm-supply-chain-attack-2026
+tags:
+    - attack.credential_access
+    - attack.t1552.001
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_process:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+            - '/python3.10'
+            - '/python3.11'
+            - '/python3.12'
+            - '/python3.13'
+    selection_env:
+        TargetFilename|endswith: '/.env'
+    selection_sensitive_paths:
+        TargetFilename|startswith:
+            - '/Users/'
+        TargetFilename|contains:
+            - '/.env'
+    filter_project_dirs:
+        TargetFilename|contains:
+            - '/node_modules/'
+            - '/venv/'
+            - '/.venv/'
+            - '/site-packages/'
+    condition: selection_process and selection_env and selection_sensitive_paths and not filter_project_dirs
+falsepositives:
+    - Python applications using python-dotenv to load local configuration
+    - Django/Flask applications loading environment configuration
+level: medium

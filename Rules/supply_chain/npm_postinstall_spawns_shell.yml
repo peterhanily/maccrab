@@ -1,0 +1,42 @@
+title: NPM Postinstall Script Spawns Shell Process
+id: d1a2b3c4-0301-4000-a000-000000000001
+status: experimental
+description: >
+    Detects npm/node processes spawning shell interpreters during package installation.
+    Supply chain attacks such as the Axios NPM compromise (March 2026) and Shai-Hulud 2.0
+    use postinstall hooks to execute malicious shell commands during npm install.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://blog.phylum.io/axios-npm-supply-chain-compromise-2026/
+tags:
+    - attack.execution
+    - attack.t1059.004
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/node'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'postinstall'
+            - 'preinstall'
+            - 'lifecycle'
+    selection_child:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+    condition: selection_parent and selection_child
+falsepositives:
+    - Legitimate npm packages with postinstall build scripts (node-gyp, esbuild)
+    - Packages compiling native addons during installation
+level: medium

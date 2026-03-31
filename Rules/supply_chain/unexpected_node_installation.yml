@@ -1,0 +1,38 @@
+title: Unexpected Node.js Installation in Home Directory
+id: d1a2b3c4-0315-4000-a000-000000000015
+status: experimental
+description: >
+    Detects Node.js binary installations appearing in the user's home directory. The
+    GlassWorm worm (Jan-March 2026) installed its own Node.js runtime at ~/node-v22*
+    to ensure execution independence from any system-installed Node.js. Legitimate
+    Node.js installations use nvm, fnm, or system paths.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1105/
+    - https://www.sentinelone.com/labs/glassworm-vscode-worm-2026/
+tags:
+    - attack.execution
+    - attack.t1059.007
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.command_and_control
+    - attack.t1105
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|re: '^/Users/[^/]+/node-v[0-9]+'
+    filter_nvm:
+        TargetFilename|contains:
+            - '/.nvm/'
+            - '/.fnm/'
+            - '/.volta/'
+            - '/.nodenv/'
+            - '/.n/'
+    condition: selection and not filter_nvm
+falsepositives:
+    - Developers manually downloading and extracting Node.js tarballs to their home directory
+level: high

@@ -1,0 +1,47 @@
+title: NPM Postinstall Downloads External Binary
+id: d1a2b3c4-0302-4000-a000-000000000002
+status: experimental
+description: >
+    Detects npm postinstall scripts downloading external binaries via curl, wget,
+    or node fetch. The Axios NPM compromise (March 2026) used the plain-crypto-js
+    dependency's postinstall hook to download a RAT binary to the system.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1105/
+    - https://blog.phylum.io/axios-npm-supply-chain-compromise-2026/
+tags:
+    - attack.execution
+    - attack.t1059.004
+    - attack.command_and_control
+    - attack.t1105
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/node'
+            - '/npm'
+            - '/npx'
+    selection_download:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+        CommandLine|contains:
+            - 'http://'
+            - 'https://'
+    filter_registry:
+        CommandLine|contains:
+            - 'registry.npmjs.org'
+            - 'nodejs.org'
+            - 'github.com'
+            - 'githubusercontent.com'
+    condition: selection_parent and selection_download and not filter_registry
+falsepositives:
+    - Packages that download prebuilt binaries (esbuild, sharp, sqlite3)
+    - Node-gyp downloading build headers
+level: high

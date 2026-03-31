@@ -1,0 +1,37 @@
+title: Cloud Instance Metadata Service (IMDS) Query
+id: d1a2b3c4-0310-4000-a000-000000000010
+status: experimental
+description: >
+    Detects any process querying the cloud instance metadata service at 169.254.169.254.
+    The TeamPCP/LiteLLM attack (March 2026) queried IMDS to harvest cloud instance
+    credentials and metadata. On developer macOS machines, IMDS queries are almost
+    never legitimate as they are only meaningful within cloud instances.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1552/005/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://www.reversinglabs.com/blog/teampcp-litellm-supply-chain-attack-2026
+tags:
+    - attack.credential_access
+    - attack.t1552.005
+    - attack.discovery
+    - attack.t1580
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection:
+        DestinationIp: '169.254.169.254'
+    filter_cloud_tools:
+        Image|endswith:
+            - '/aws'
+            - '/gcloud'
+            - '/az'
+            - '/terraform'
+            - '/packer'
+    condition: selection and not filter_cloud_tools
+falsepositives:
+    - Cloud SDKs running locally that attempt IMDS checks before falling back to file-based credentials
+    - Docker containers with metadata emulation
+level: high
