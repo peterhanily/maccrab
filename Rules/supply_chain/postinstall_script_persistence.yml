@@ -36,14 +36,14 @@ detection:
             - '/bundle'
             - '/yarn'
             - '/pnpm'
-    selection_persistence_files:
+    selection_launchd:
         TargetFilename|contains:
             - '/LaunchAgents/'
             - '/LaunchDaemons/'
-            - '/crontab'
-        TargetFilename|endswith:
-            - '.plist'
-    condition: selection_process and selection_persistence_files
+        TargetFilename|endswith: '.plist'
+    selection_cron:
+        TargetFilename|contains: '/crontab'
+    condition: selection_process and (selection_launchd or selection_cron)
 falsepositives:
     - Homebrew cask installations that create LaunchAgents for background services
     - Node.js service managers (pm2) creating LaunchAgents

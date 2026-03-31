@@ -29,18 +29,17 @@ detection:
             - '/python3.11'
             - '/python3.12'
             - '/python3.13'
-    selection_k8s_files:
+    selection_kubeconfig:
+        TargetFilename|endswith: '/.kube/config'
+    selection_serviceaccount:
         TargetFilename|endswith:
-            - '/.kube/config'
             - '/serviceaccount/token'
             - '/serviceaccount/ca.crt'
-        TargetFilename|contains:
-            - '/.kube/config'
     filter_known_tools:
         Image|contains:
             - '/kubectl'
             - '/helm'
-    condition: selection_process and selection_k8s_files and not filter_known_tools
+    condition: selection_process and (selection_kubeconfig or selection_serviceaccount) and not filter_known_tools
 falsepositives:
     - Python Kubernetes client library (kubernetes-client) used for legitimate cluster management
     - Helm plugins written in Python

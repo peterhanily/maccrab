@@ -31,18 +31,15 @@ detection:
             - '/python3.13'
     selection_env:
         TargetFilename|endswith: '/.env'
-    selection_sensitive_paths:
-        TargetFilename|startswith:
-            - '/Users/'
-        TargetFilename|contains:
-            - '/.env'
+    selection_home:
+        TargetFilename|startswith: '/Users/'
     filter_project_dirs:
         TargetFilename|contains:
             - '/node_modules/'
             - '/venv/'
             - '/.venv/'
             - '/site-packages/'
-    condition: selection_process and selection_env and selection_sensitive_paths and not filter_project_dirs
+    condition: selection_process and selection_env and selection_home and not filter_project_dirs
 falsepositives:
     - Python applications using python-dotenv to load local configuration
     - Django/Flask applications loading environment configuration
