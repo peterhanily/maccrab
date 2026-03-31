@@ -30,6 +30,7 @@ struct SeverityChip: View {
                 )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(severity.rawValue) severity")
     }
 }
 
@@ -101,6 +102,7 @@ struct AlertRow: View {
         }
         .padding(.vertical, 6)
         .opacity(alert.suppressed ? 0.5 : 1.0)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -172,6 +174,7 @@ struct SignerBadge: View {
             .background(color.opacity(0.15))
             .foregroundColor(color)
             .clipShape(Capsule())
+            .accessibilityLabel("Signed by \(signerType)")
     }
 }
 

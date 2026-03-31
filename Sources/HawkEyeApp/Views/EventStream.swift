@@ -66,6 +66,7 @@ struct EventStream: View {
                     }
                 }
                 .frame(width: 160)
+                .accessibilityLabel("Filter by event category")
 
                 TextField("Filter...", text: $filterText)
                     .textFieldStyle(.roundedBorder)
@@ -77,6 +78,7 @@ struct EventStream: View {
                 Toggle("Auto-scroll", isOn: $autoScroll)
                     .toggleStyle(.checkbox)
                     .font(.caption)
+                    .accessibilityLabel("Auto-scroll to newest events")
 
                 Button {
                     isPaused.toggle()
@@ -86,6 +88,8 @@ struct EventStream: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .accessibilityLabel(isPaused ? "Resume event stream" : "Pause event stream")
+                .keyboardShortcut(" ", modifiers: [])
             }
             .padding()
 

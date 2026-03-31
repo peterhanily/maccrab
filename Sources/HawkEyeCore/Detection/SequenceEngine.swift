@@ -284,6 +284,20 @@ public actor SequenceEngine {
     /// Avoids recompiling the same regex pattern on every evaluation.
     private var regexCache: [String: NSRegularExpression] = [:]
 
+    /// Reference to a partial match by rule ID and creation time, used for
+    /// O(1) LRU eviction. Entries are appended at the back (newest) and
+    /// removed from the front (oldest), so the array stays naturally sorted
+    /// by creation time without any explicit sorting.
+    private struct PartialMatchRef: Sendable {
+        let ruleId: String
+        let createdAt: Date
+    }
+
+    /// Queue of partial-match references ordered oldest-first (append new,
+    /// remove from front). Used by `evictOldest` to avoid the O(n log n)
+    /// sort that previously collected and sorted ALL partial matches.
+    private var evictionQueue: [PartialMatchRef] = []
+
     private let logger = Logger(subsystem: "com.hawkeye.detection", category: "SequenceEngine")
 
     // MARK: - Initialization
@@ -296,11 +310,11 @@ public actor SequenceEngine {
     ///   - maxPartialMatches: Upper bound on total in-flight partial matches
     ///     across all rules. Oldest are evicted when exceeded. Defaults to 10000.
     ///   - sweepInterval: How often (seconds) to scan for expired partial
-    ///     matches. Defaults to 5 seconds.
+    ///     matches. Defaults to 1 second.
     public init(
         lineage: ProcessLineage,
         maxPartialMatches: Int = 10_000,
-        sweepInterval: TimeInterval = 5.0
+        sweepInterval: TimeInterval = 1.0
     ) {
         self.lineage = lineage
         self.maxPartialMatches = maxPartialMatches
@@ -469,6 +483,7 @@ public actor SequenceEngine {
         if !enabled {
             if let removed = partialMatches.removeValue(forKey: ruleId) {
                 totalPartialCount -= removed.count
+                evictionQueue.removeAll { $0.ruleId == ruleId }
             }
         }
     }
@@ -507,6 +522,13 @@ public actor SequenceEngine {
         // Periodic housekeeping: sweep expired partials and enforce memory cap.
         let now = Date()
         if now.timeIntervalSince(lastSweep) >= sweepInterval {
+            sweepExpired()
+            lastSweep = now
+        }
+
+        // Pre-emptive sweep: trigger early cleanup when at 80% capacity to
+        // reduce the likelihood of hitting the hard cap during event bursts.
+        if totalPartialCount > maxPartialMatches * 8 / 10 {
             sweepExpired()
             lastSweep = now
         }
@@ -692,6 +714,7 @@ public actor SequenceEngine {
                 } else {
                     partialMatches[ruleId, default: []].append(newPartial)
                     totalPartialCount += 1
+                    evictionQueue.append(PartialMatchRef(ruleId: ruleId, createdAt: now))
                 }
             }
         }
@@ -1121,59 +1144,57 @@ public actor SequenceEngine {
             partialMatches[ruleId] = surviving.isEmpty ? nil : surviving
             totalPartialCount -= (beforeCount - surviving.count)
         }
+
+        // Trim eviction queue: remove front entries whose partial matches
+        // have already been expired. We look up the largest window across
+        // all rules as a conservative upper bound -- any ref older than
+        // that is certainly gone.
+        let maxWindow = rules.values.map(\.window).max() ?? 0
+        while let front = evictionQueue.first,
+              now.timeIntervalSince(front.createdAt) > maxWindow {
+            evictionQueue.removeFirst()
+        }
     }
 
     /// Evict the oldest partial matches to bring total count back under the cap.
     ///
-    /// Uses a simple LRU strategy: sort all partials by creation time and
-    /// remove the oldest ones first.
+    /// Uses the `evictionQueue` which is naturally ordered oldest-first
+    /// (entries are appended at creation time). This avoids the previous
+    /// O(n log n) sort of all 10K+ partial matches on every eviction.
+    /// Stale refs (whose partial was already removed by sweepExpired or
+    /// a completed sequence) are simply skipped.
     private func evictOldest(count: Int) {
         guard count > 0 else { return }
 
-        // Collect all partials with their rule ID and index for efficient removal.
-        struct IndexedPartial {
-            let ruleId: String
-            let index: Int
-            let createdAt: Date
-        }
+        var removed = 0
+        while removed < count && !evictionQueue.isEmpty {
+            let ref = evictionQueue.removeFirst()
 
-        var allPartials: [IndexedPartial] = []
-        allPartials.reserveCapacity(totalPartialCount)
+            // Look up the partials array for this rule.
+            guard var partials = partialMatches[ref.ruleId] else {
+                // Rule's partials were already fully cleared (e.g. rule disabled).
+                continue
+            }
 
-        for (ruleId, partials) in partialMatches {
-            for (idx, partial) in partials.enumerated() {
-                allPartials.append(IndexedPartial(
-                    ruleId: ruleId,
-                    index: idx,
-                    createdAt: partial.createdAt
-                ))
+            // Find the actual partial match by creation time. If it was
+            // already removed (expired, completed, or duplicate ref), skip.
+            guard let idx = partials.firstIndex(where: { $0.createdAt == ref.createdAt }) else {
+                continue
+            }
+
+            partials.remove(at: idx)
+            totalPartialCount -= 1
+            removed += 1
+
+            if partials.isEmpty {
+                partialMatches.removeValue(forKey: ref.ruleId)
+            } else {
+                partialMatches[ref.ruleId] = partials
             }
         }
 
-        // Sort oldest first.
-        allPartials.sort { $0.createdAt < $1.createdAt }
-
-        // Collect indices to remove, grouped by rule ID.
-        var toRemove: [String: Set<Int>] = [:]
-        let removeCount = min(count, allPartials.count)
-        for i in 0 ..< removeCount {
-            let entry = allPartials[i]
-            toRemove[entry.ruleId, default: []].insert(entry.index)
-        }
-
-        // Remove in reverse index order to preserve indices.
-        for (ruleId, indices) in toRemove {
-            guard var partials = partialMatches[ruleId] else { continue }
-            for idx in indices.sorted().reversed() {
-                partials.remove(at: idx)
-            }
-            partialMatches[ruleId] = partials.isEmpty ? nil : partials
-        }
-
-        totalPartialCount -= removeCount
-
-        if removeCount > 0 {
-            logger.warning("Evicted \(removeCount) oldest partial matches (cap: \(self.maxPartialMatches))")
+        if removed > 0 {
+            logger.warning("Evicted \(removed) oldest partial matches (cap: \(self.maxPartialMatches))")
         }
     }
 

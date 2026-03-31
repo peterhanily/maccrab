@@ -17,6 +17,7 @@ struct StatusBarMenu: View {
             Image(systemName: appState.isConnected ? "circle.fill" : "circle")
                 .font(.system(size: 6))
                 .foregroundColor(appState.isConnected ? .green : .red)
+                .accessibilityLabel(appState.isConnected ? "Daemon connected" : "Daemon disconnected")
             Text(appState.isConnected ? "HawkEye Active" : "Daemon Not Running")
                 .font(.headline)
         }
@@ -25,8 +26,11 @@ struct StatusBarMenu: View {
 
         // Quick stats section
         Text("Events/sec: \(appState.eventsPerSecond)")
+            .accessibilityLabel("Events per second: \(appState.eventsPerSecond)")
         Text("Rules loaded: \(appState.rulesLoaded)")
+            .accessibilityLabel("Rules loaded: \(appState.rulesLoaded)")
         Text("Alerts today: \(appState.totalAlerts)")
+            .accessibilityLabel("Alerts today: \(appState.totalAlerts)")
 
         Divider()
 
@@ -41,6 +45,7 @@ struct StatusBarMenu: View {
 
             ForEach(appState.recentAlerts.prefix(5)) { alert in
                 AlertMenuItem(alert: alert)
+                    .accessibilityLabel("Alert: \(alert.ruleTitle), severity \(alert.severity)")
             }
         }
 

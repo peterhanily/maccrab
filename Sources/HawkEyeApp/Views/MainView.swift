@@ -47,24 +47,28 @@ struct MainView: View {
                         Label("Alerts", systemImage: "exclamationmark.triangle")
                     }
                     .tag(AppState.Tab.alerts)
+                    .keyboardShortcut("1", modifiers: .command)
 
                 EventStream(appState: appState)
                     .tabItem {
                         Label("Events", systemImage: "list.bullet")
                     }
                     .tag(AppState.Tab.events)
+                    .keyboardShortcut("2", modifiers: .command)
 
                 RuleBrowser(appState: appState)
                     .tabItem {
                         Label("Rules", systemImage: "shield")
                     }
                     .tag(AppState.Tab.rules)
+                    .keyboardShortcut("3", modifiers: .command)
 
                 TCCTimeline(appState: appState)
                     .tabItem {
                         Label("Permissions", systemImage: "lock.shield")
                     }
                     .tag(AppState.Tab.tcc)
+                    .keyboardShortcut("4", modifiers: .command)
             }
         }
         .frame(minWidth: 900, minHeight: 600)

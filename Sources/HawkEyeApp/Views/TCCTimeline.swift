@@ -163,9 +163,15 @@ private struct TCCEventRow: View {
     var body: some View {
         HStack(spacing: 12) {
             // Grant/deny indicator
-            Image(systemName: event.allowed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundColor(event.allowed ? .green : .red)
-                .font(.title3)
+            HStack(spacing: 4) {
+                Image(systemName: event.allowed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundColor(event.allowed ? .green : .red)
+                    .font(.title3)
+                Text(event.allowed ? "(Granted)" : "(Denied)")
+                    .font(.caption2)
+                    .foregroundColor(event.allowed ? .green : .red)
+            }
+            .accessibilityLabel(event.allowed ? "Permission granted" : "Permission denied")
 
             // Service and client info
             VStack(alignment: .leading, spacing: 3) {

@@ -86,6 +86,10 @@ public final class ESCollector: @unchecked Sendable {
         ES_EVENT_TYPE_NOTIFY_UNLINK,
         ES_EVENT_TYPE_NOTIFY_SIGNAL,
         ES_EVENT_TYPE_NOTIFY_KEXTLOAD,
+        ES_EVENT_TYPE_NOTIFY_MMAP,
+        ES_EVENT_TYPE_NOTIFY_MPROTECT,
+        ES_EVENT_TYPE_NOTIFY_SETOWNER,
+        ES_EVENT_TYPE_NOTIFY_SETMODE,
     ]
 
     // MARK: - Noisy Path Muting
@@ -494,6 +498,86 @@ public final class ESCollector: @unchecked Sendable {
                 process: processInfo,
                 file: FileInfo(path: kextId, action: .create),
                 severity: .medium
+            )
+
+        // -----------------------------------------------------------------
+        // MARK: Memory Protection Events
+        // -----------------------------------------------------------------
+
+        case ES_EVENT_TYPE_NOTIFY_MMAP:
+            let mmapEvent = msg.event.mmap
+            let filePath = esFileToPath(mmapEvent.source)
+            // Only emit for executable mappings (W+X is suspicious)
+            let protection = mmapEvent.protection
+            let isExecutable = (protection & PROT_EXEC) != 0
+            let isWritable = (protection & PROT_WRITE) != 0
+
+            // Only alert on W+X mappings (potential code injection)
+            guard isWritable && isExecutable else { return nil }
+
+            let fileInfo = FileInfo(path: filePath, action: .create)
+            return Event(
+                timestamp: timestamp,
+                eventCategory: .process,
+                eventType: .change,
+                eventAction: "mmap_wx",
+                process: processInfo,
+                file: fileInfo,
+                enrichments: ["mmap.protection": String(protection)],
+                severity: .high
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_MPROTECT:
+            let mprotectEvent = msg.event.mprotect
+            let protection = mprotectEvent.protection
+            let isExecutable = (protection & PROT_EXEC) != 0
+            let isWritable = (protection & PROT_WRITE) != 0
+
+            // Only alert on transitions TO W+X
+            guard isWritable && isExecutable else { return nil }
+
+            return Event(
+                timestamp: timestamp,
+                eventCategory: .process,
+                eventType: .change,
+                eventAction: "mprotect_wx",
+                process: processInfo,
+                enrichments: ["mprotect.protection": String(protection)],
+                severity: .high
+            )
+
+        // -----------------------------------------------------------------
+        // MARK: Ownership & Permission Events
+        // -----------------------------------------------------------------
+
+        case ES_EVENT_TYPE_NOTIFY_SETOWNER:
+            let setownerEvent = msg.event.setowner
+            let filePath = esFileToPath(setownerEvent.target)
+            let fileInfo = FileInfo(path: filePath, action: .change)
+            return Event(
+                timestamp: timestamp,
+                eventCategory: .file,
+                eventType: .change,
+                eventAction: "setowner",
+                process: processInfo,
+                file: fileInfo,
+                enrichments: ["file.uid": String(setownerEvent.uid), "file.gid": String(setownerEvent.gid)],
+                severity: .informational
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_SETMODE:
+            let setmodeEvent = msg.event.setmode
+            let filePath = esFileToPath(setmodeEvent.target)
+            let fileInfo = FileInfo(path: filePath, action: .change)
+            return Event(
+                timestamp: timestamp,
+                eventCategory: .file,
+                eventType: .change,
+                eventAction: "setmode",
+                process: processInfo,
+                file: fileInfo,
+                enrichments: ["file.mode": String(setmodeEvent.mode, radix: 8)],
+                severity: .informational
             )
 
         default:

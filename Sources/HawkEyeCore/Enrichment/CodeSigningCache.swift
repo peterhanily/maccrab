@@ -31,13 +31,21 @@ public actor CodeSigningCache {
     /// access it exclusively through the actor to keep the API consistent.
     private let cache: NSCache<NSString, CachedEntry>
 
+    private var cacheHits: Int = 0
+    private var cacheMisses: Int = 0
+
+    public func stats() -> (hits: Int, misses: Int, hitRate: Double) {
+        let total = cacheHits + cacheMisses
+        return (cacheHits, cacheMisses, total > 0 ? Double(cacheHits) / Double(total) : 0)
+    }
+
     // MARK: Initialization
 
     /// Creates a new code-signing cache.
     ///
     /// - Parameter countLimit: Maximum number of entries to retain.
-    ///   Defaults to 4096.
-    public init(countLimit: Int = 4096) {
+    ///   Defaults to 8192.
+    public init(countLimit: Int = 8192) {
         self.cache = NSCache<NSString, CachedEntry>()
         self.cache.countLimit = countLimit
     }
@@ -74,10 +82,12 @@ public actor CodeSigningCache {
     public func evaluate(path: String) -> CodeSignatureInfo {
         // 1. Cache hit — fast path.
         if let cached = lookup(path: path) {
+            cacheHits += 1
             return cached
         }
 
         // 2. Cache miss — perform Security framework evaluation.
+        cacheMisses += 1
         let info = performEvaluation(path: path)
         store(path: path, info: info)
         return info

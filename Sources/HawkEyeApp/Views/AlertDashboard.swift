@@ -65,6 +65,8 @@ struct AlertDashboard: View {
                     SeverityChip(severity: sev, isSelected: selectedSeverity == sev) {
                         selectedSeverity = selectedSeverity == sev ? nil : sev
                     }
+                    .accessibilityLabel("\(sev.rawValue) severity filter")
+                    .accessibilityHint("Double tap to filter alerts by \(sev.rawValue) severity")
                 }
 
                 Toggle("Suppressed", isOn: $showSuppressed)
@@ -74,6 +76,7 @@ struct AlertDashboard: View {
                 TextField("Search...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
+                    .accessibilityLabel("Search alerts")
             }
             .padding()
 

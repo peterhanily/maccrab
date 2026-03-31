@@ -88,6 +88,7 @@ struct RuleBrowser: View {
                                 .foregroundColor(.secondary)
                         }
                         .tag(tactic.name as String?)
+                        .accessibilityLabel("\(tactic.name), \(tactic.ruleCount) rules")
                     }
                 }
             }
@@ -130,6 +131,7 @@ struct RuleBrowser: View {
                     TextField("Search rules...", text: $searchText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 250)
+                        .accessibilityLabel("Search detection rules")
                 }
                 .padding()
 
