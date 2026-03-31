@@ -293,7 +293,7 @@ def determine_condition_type(condition_str: str, sections: dict) -> str:
 # Rule compilation
 # ---------------------------------------------------------------------------
 
-def compile_rule(rule_data: dict, source_file: str) -> dict | None:
+def compile_rule(rule_data: dict, source_file: str):
     """
     Compile a single Sigma YAML rule into the HawkEye JSON predicate format.
 

@@ -7,7 +7,8 @@ import re
 
 import yaml
 
-REQUIRED_FIELDS = ['title', 'id', 'status', 'description', 'logsource', 'detection', 'level']
+REQUIRED_FIELDS_SINGLE = ['title', 'id', 'status', 'description', 'logsource', 'detection', 'level']
+REQUIRED_FIELDS_SEQUENCE = ['title', 'id', 'status', 'description', 'level', 'type', 'steps', 'trigger']
 VALID_LEVELS = ['informational', 'low', 'medium', 'high', 'critical']
 VALID_STATUSES = ['experimental', 'test', 'stable', 'deprecated']
 UUID_PATTERN = re.compile(
@@ -26,8 +27,11 @@ def validate_rule(filepath):
     if not isinstance(rule, dict):
         return ["Not a valid rule (not a YAML mapping)"]
 
+    is_sequence = rule.get('type') == 'sequence'
+    required = REQUIRED_FIELDS_SEQUENCE if is_sequence else REQUIRED_FIELDS_SINGLE
+
     # Check required fields
-    for field in REQUIRED_FIELDS:
+    for field in required:
         if field not in rule:
             errors.append(f"Missing required field: {field}")
 
@@ -43,19 +47,35 @@ def validate_rule(filepath):
     if 'status' in rule and rule['status'] not in VALID_STATUSES:
         errors.append(f"Invalid status: {rule['status']}")
 
-    # Validate logsource has product: macos (for non-sequence rules)
-    if 'logsource' in rule:
-        ls = rule['logsource']
-        if isinstance(ls, dict) and ls.get('product') != 'macos':
-            errors.append(
-                f"logsource.product must be 'macos', got: {ls.get('product')}"
-            )
+    if is_sequence:
+        # Validate sequence rule structure
+        steps = rule.get('steps', [])
+        if not isinstance(steps, list) or len(steps) == 0:
+            errors.append("Sequence rule must have at least one step")
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict):
+                errors.append(f"Step {i} is not a mapping")
+                continue
+            if 'id' not in step:
+                errors.append(f"Step {i} missing 'id'")
+            if 'logsource' not in step:
+                errors.append(f"Step {i} ('{step.get('id', '?')}') missing 'logsource'")
+            if 'detection' not in step:
+                errors.append(f"Step {i} ('{step.get('id', '?')}') missing 'detection'")
+            ls = step.get('logsource', {})
+            if isinstance(ls, dict) and ls.get('product') and ls['product'] != 'macos':
+                errors.append(f"Step {i} logsource.product must be 'macos'")
+    else:
+        # Validate single-event rule structure
+        if 'logsource' in rule:
+            ls = rule['logsource']
+            if isinstance(ls, dict) and ls.get('product') != 'macos':
+                errors.append(
+                    f"logsource.product must be 'macos', got: {ls.get('product')}"
+                )
 
-    # Validate detection has condition
-    if 'detection' in rule and isinstance(rule['detection'], dict):
-        if 'condition' not in rule['detection']:
-            # Sequence rules don't have detection.condition at top level
-            if rule.get('type') != 'sequence':
+        if 'detection' in rule and isinstance(rule['detection'], dict):
+            if 'condition' not in rule['detection']:
                 errors.append("detection block missing 'condition'")
 
     # Validate tags are attack.* format
