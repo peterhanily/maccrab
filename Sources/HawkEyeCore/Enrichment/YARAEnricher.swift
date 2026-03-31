@@ -62,6 +62,21 @@ public actor YARAEnricher {
     /// Number of files that had at least one YARA rule match.
     private var matchCount: Int = 0
 
+    /// Timestamp of the last scan, used for throttling.
+    private var lastScanTime: Date = .distantPast
+
+    /// Minimum interval between consecutive scans (200ms).
+    private let minScanInterval: TimeInterval = 0.2
+
+    /// Number of scans waiting to be processed.
+    private var pendingScanCount: Int = 0
+
+    /// Maximum number of simultaneous YARA scans.
+    private let maxConcurrentScans: Int = 3
+
+    /// Number of currently running YARA scans.
+    private var activeScanCount: Int = 0
+
     /// Logger scoped to the YARA enrichment subsystem.
     private let logger = Logger(subsystem: "com.hawkeye.core", category: "YARAEnricher")
 
@@ -171,6 +186,21 @@ public actor YARAEnricher {
             logger.debug("YARA skip — file too large or unreadable: \(filePath)")
             return event
         }
+
+        // Throttle: minimum 200ms between scans
+        let now = Date()
+        guard now.timeIntervalSince(lastScanTime) >= minScanInterval else {
+            return event  // Skip scan, too soon
+        }
+
+        // Concurrency limit: max 3 simultaneous scans
+        guard activeScanCount < maxConcurrentScans else {
+            return event  // Skip scan, too many active
+        }
+
+        activeScanCount += 1
+        defer { activeScanCount -= 1 }
+        lastScanTime = now
 
         // Run the YARA scan.
         let matchedRules = await runYARAScan(filePath: filePath)

@@ -1,0 +1,51 @@
+title: Database Server Spawns Shell or Scripting Interpreter
+id: d1a2b3c4-0414-4000-a000-000000000414
+status: experimental
+description: Detects database server processes (mysqld, postgres, mongod, redis-server) spawning shell or scripting interpreters. Database servers should not spawn shells during normal operation. This pattern indicates exploitation of a database service via SQL injection, Redis module loading, MongoDB server-side JavaScript execution, or similar database-level code execution vulnerabilities.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1190/
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.initial_access
+    - attack.t1190
+    - attack.execution
+    - attack.t1059
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/mysqld'
+            - '/mariadbd'
+            - '/postgres'
+            - '/mongod'
+            - '/mongos'
+            - '/redis-server'
+            - '/memcached'
+            - '/couchdb'
+            - '/elasticsearch'
+    selection_child:
+        Image|endswith:
+            - '/bash'
+            - '/sh'
+            - '/zsh'
+            - '/dash'
+            - '/python'
+            - '/python3'
+            - '/perl'
+            - '/ruby'
+            - '/node'
+            - '/php'
+            - '/curl'
+            - '/wget'
+            - '/nc'
+            - '/ncat'
+    condition: selection_parent and selection_child
+falsepositives:
+    - MySQL UDF (User Defined Function) libraries that invoke system commands
+    - Database backup scripts launched via scheduler (pg_dump, mysqldump)
+    - PostgreSQL extensions that call external programs
+level: critical

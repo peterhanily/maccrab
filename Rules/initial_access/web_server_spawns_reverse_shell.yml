@@ -1,0 +1,53 @@
+title: Web Server Spawns Reverse Shell or Download Utility
+id: d1a2b3c4-0412-4000-a000-000000000412
+status: experimental
+description: Detects web server processes spawning network utilities such as curl, wget, nc (netcat), ncat, or python with network-related arguments. After exploiting a web application, attackers commonly use these tools to download second-stage payloads or establish reverse shell connections back to their command and control infrastructure.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1190/
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.initial_access
+    - attack.t1190
+    - attack.execution
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/httpd'
+            - '/nginx'
+            - '/apache2'
+            - '/lighttpd'
+            - '/caddy'
+            - '/php-fpm'
+            - '/php'
+            - '/node'
+            - '/java'
+    selection_network_tool:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+            - '/nc'
+            - '/ncat'
+            - '/netcat'
+            - '/openssl'
+    selection_python_reverse:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+        CommandLine|contains:
+            - 'socket'
+            - 'connect'
+            - 'urlopen'
+            - 'urllib'
+            - 'requests'
+            - 'subprocess'
+            - '/dev/tcp'
+    condition: selection_parent and (selection_network_tool or selection_python_reverse)
+falsepositives:
+    - Web applications that legitimately fetch remote resources via curl or wget
+    - Health check scripts executed by the web server
+level: high

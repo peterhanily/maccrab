@@ -84,13 +84,15 @@ struct AlertViewModel: Identifiable {
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
+        f.timeStyle = .medium    // Respects user's 12/24h preference
+        f.dateStyle = .none
         return f
     }()
 
     private static let dateTimeFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.timeStyle = .medium
+        f.dateStyle = .short     // Respects user's date format (MM/dd vs dd.MM etc)
         return f
     }()
 
@@ -141,7 +143,8 @@ struct EventViewModel: Identifiable {
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
+        f.timeStyle = .medium    // Respects user's 12/24h preference
+        f.dateStyle = .none
         return f
     }()
 }
@@ -219,7 +222,8 @@ struct TCCEventViewModel: Identifiable {
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.timeStyle = .medium
+        f.dateStyle = .short     // Respects user's date format (MM/dd vs dd.MM etc)
         return f
     }()
 }

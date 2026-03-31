@@ -1,0 +1,53 @@
+title: Web Server Process Spawns Shell Interpreter
+id: d1a2b3c4-0411-4000-a000-000000000411
+status: experimental
+description: Detects httpd, nginx, apache, or python http.server spawning shell interpreters such as bash, sh, zsh, or python. This is the classic web shell pattern indicating a web application has been compromised and an attacker is executing operating system commands through the web server process.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1190/
+    - https://attack.mitre.org/techniques/T1505/003/
+tags:
+    - attack.initial_access
+    - attack.t1190
+    - attack.persistence
+    - attack.t1505.003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent_native:
+        ParentImage|endswith:
+            - '/httpd'
+            - '/nginx'
+            - '/apache2'
+            - '/lighttpd'
+            - '/caddy'
+            - '/php-fpm'
+    selection_parent_python:
+        ParentImage|endswith:
+            - '/python'
+            - '/python3'
+        ParentCommandLine|contains:
+            - 'http.server'
+            - 'SimpleHTTPServer'
+    selection_shell:
+        Image|endswith:
+            - '/bash'
+            - '/sh'
+            - '/zsh'
+            - '/dash'
+            - '/fish'
+            - '/csh'
+            - '/tcsh'
+            - '/python'
+            - '/python3'
+            - '/perl'
+            - '/ruby'
+            - '/php'
+    condition: (selection_parent_native or selection_parent_python) and selection_shell
+falsepositives:
+    - CGI scripts legitimately executed by the web server
+    - Server-side includes that invoke shell commands
+    - Web-based administration panels that execute system commands
+level: critical

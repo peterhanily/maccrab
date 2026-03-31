@@ -192,31 +192,558 @@ def parse_detection_block(detection: dict):
             continue
         sections[key] = value
 
-    # Parse condition string to determine which sections to include / negate.
-    predicates = []
-    condition_type = determine_condition_type(condition_str, sections)
-
-    # Identify which sections are negated (appear after "not").
-    negated_sections = set()
-    # Simple pattern: "not <section_name>"
-    for match in re.finditer(r'\bnot\s+(\w+)', condition_str):
-        negated_sections.add(match.group(1))
-
-    # Identify which sections are referenced in the condition.
-    referenced = extract_referenced_sections(condition_str, sections)
-
-    for section_name in referenced:
-        is_negated = section_name in negated_sections
-        section_data = sections.get(section_name)
-        if section_data is None:
-            continue
-
-        if isinstance(section_data, dict):
-            predicates.extend(parse_selection_map(section_data, negate=is_negated))
-        elif isinstance(section_data, list):
-            predicates.extend(parse_selection_list(section_data, negate=is_negated))
+    # Parse the condition string and build predicates accordingly.
+    predicates, condition_type = _compile_condition(condition_str, sections)
 
     return predicates, condition_type
+
+
+# ---------------------------------------------------------------------------
+# Condition tokenizer & parser
+# ---------------------------------------------------------------------------
+
+# Token types for the condition lexer.
+_TOK_LPAREN = "LPAREN"
+_TOK_RPAREN = "RPAREN"
+_TOK_AND = "AND"
+_TOK_OR = "OR"
+_TOK_NOT = "NOT"
+_TOK_PIPE = "PIPE"
+_TOK_NUM_OF = "NUM_OF"     # "1 of", "3 of"
+_TOK_ALL_OF = "ALL_OF"     # "all of"
+_TOK_IDENT = "IDENT"       # section name or wildcard like "selection_*"
+_TOK_THEM = "THEM"         # "them"
+_TOK_EOF = "EOF"
+
+
+def _tokenize_condition(condition_str: str) -> list[tuple[str, str]]:
+    """
+    Tokenize a Sigma condition string into a list of (token_type, value) pairs.
+
+    Examples:
+        "(selection1 or selection2) and not filter"
+        "1 of selection_*"
+        "all of them"
+        "selection and not filter | count(field) by Image > 5"
+    """
+    tokens = []
+    s = condition_str.strip()
+    i = 0
+
+    while i < len(s):
+        # Skip whitespace.
+        if s[i].isspace():
+            i += 1
+            continue
+
+        # Pipe — marks the start of an aggregation expression; we stop parsing.
+        if s[i] == '|':
+            tokens.append((_TOK_PIPE, "|"))
+            break
+
+        # Parentheses.
+        if s[i] == '(':
+            tokens.append((_TOK_LPAREN, "("))
+            i += 1
+            continue
+        if s[i] == ')':
+            tokens.append((_TOK_RPAREN, ")"))
+            i += 1
+            continue
+
+        # Read a word token (alphanumeric, underscore, asterisk, dot for wildcards).
+        if s[i].isalnum() or s[i] in ('_', '*'):
+            j = i
+            while j < len(s) and (s[j].isalnum() or s[j] in ('_', '*', '.')):
+                j += 1
+            word = s[i:j]
+            lower_word = word.lower()
+
+            if lower_word == "and":
+                tokens.append((_TOK_AND, "and"))
+            elif lower_word == "or":
+                tokens.append((_TOK_OR, "or"))
+            elif lower_word == "not":
+                tokens.append((_TOK_NOT, "not"))
+            elif lower_word == "them":
+                tokens.append((_TOK_THEM, "them"))
+            elif lower_word == "all":
+                # Peek ahead for "all of".
+                rest = s[j:].lstrip()
+                if re.match(r'of\b', rest, re.IGNORECASE):
+                    tokens.append((_TOK_ALL_OF, "all of"))
+                    # Advance j past the whitespace and "of".
+                    of_start = j + (len(s[j:]) - len(s[j:].lstrip()))
+                    j = of_start + 2
+                else:
+                    tokens.append((_TOK_IDENT, word))
+            elif lower_word.isdigit():
+                # Peek ahead for "<N> of".
+                rest = s[j:].lstrip()
+                if re.match(r'of\b', rest, re.IGNORECASE):
+                    tokens.append((_TOK_NUM_OF, word))
+                    of_start = j + (len(s[j:]) - len(s[j:].lstrip()))
+                    j = of_start + 2
+                else:
+                    tokens.append((_TOK_IDENT, word))
+            else:
+                tokens.append((_TOK_IDENT, word))
+
+            i = j
+            continue
+
+        # Skip any other characters (shouldn't happen in valid conditions).
+        i += 1
+
+    tokens.append((_TOK_EOF, ""))
+    return tokens
+
+
+# ---------------------------------------------------------------------------
+# AST node types
+# ---------------------------------------------------------------------------
+
+class _ASTRef:
+    """Leaf: reference to a detection section (possibly with wildcard)."""
+    __slots__ = ("name",)
+
+    def __init__(self, name: str):
+        self.name = name     # e.g. "selection", "filter_*", "them"
+
+    def __repr__(self):
+        return f"Ref({self.name})"
+
+
+class _ASTNot:
+    """Unary NOT."""
+    __slots__ = ("child",)
+
+    def __init__(self, child):
+        self.child = child
+
+    def __repr__(self):
+        return f"Not({self.child})"
+
+
+class _ASTBinOp:
+    """Binary AND / OR."""
+    __slots__ = ("op", "left", "right")
+
+    def __init__(self, op: str, left, right):
+        self.op = op         # "and" or "or"
+        self.left = left
+        self.right = right
+
+    def __repr__(self):
+        return f"BinOp({self.op}, {self.left}, {self.right})"
+
+
+class _ASTQuantifier:
+    """Quantifier: '1 of selection_*', 'all of them', etc."""
+    __slots__ = ("quantifier", "target")
+
+    def __init__(self, quantifier: str, target: str):
+        self.quantifier = quantifier   # "all" or a numeric string like "1"
+        self.target = target           # "selection_*", "them", etc.
+
+    def __repr__(self):
+        return f"Quant({self.quantifier}, {self.target})"
+
+
+# ---------------------------------------------------------------------------
+# Recursive-descent parser for Sigma conditions
+# ---------------------------------------------------------------------------
+
+class _ConditionParser:
+    """
+    Parse Sigma condition tokens into an AST.
+
+    Grammar (simplified):
+        expr     := or_expr
+        or_expr  := and_expr ("or" and_expr)*
+        and_expr := unary ("and" unary)*
+        unary    := "not" unary | atom
+        atom     := "(" expr ")" | quantifier | IDENT
+        quantifier := ("all of" | NUM_OF) (IDENT | "them")
+    """
+
+    def __init__(self, tokens: list[tuple[str, str]]):
+        self.tokens = tokens
+        self.pos = 0
+
+    def _peek(self) -> tuple[str, str]:
+        return self.tokens[self.pos]
+
+    def _advance(self) -> tuple[str, str]:
+        tok = self.tokens[self.pos]
+        self.pos += 1
+        return tok
+
+    def parse(self):
+        node = self._or_expr()
+        # Ignore anything after a pipe (aggregation expressions).
+        return node
+
+    def _or_expr(self):
+        left = self._and_expr()
+        while self._peek()[0] == _TOK_OR:
+            self._advance()  # consume "or"
+            right = self._and_expr()
+            left = _ASTBinOp("or", left, right)
+        return left
+
+    def _and_expr(self):
+        left = self._unary()
+        while self._peek()[0] == _TOK_AND:
+            self._advance()  # consume "and"
+            right = self._unary()
+            left = _ASTBinOp("and", left, right)
+        return left
+
+    def _unary(self):
+        if self._peek()[0] == _TOK_NOT:
+            self._advance()  # consume "not"
+            child = self._unary()
+            return _ASTNot(child)
+        return self._atom()
+
+    def _atom(self):
+        tok_type, tok_val = self._peek()
+
+        if tok_type == _TOK_LPAREN:
+            self._advance()  # consume "("
+            node = self._or_expr()
+            if self._peek()[0] == _TOK_RPAREN:
+                self._advance()  # consume ")"
+            return node
+
+        if tok_type == _TOK_ALL_OF:
+            self._advance()  # consume "all of"
+            target_type, target_val = self._advance()
+            if target_type == _TOK_THEM:
+                return _ASTQuantifier("all", "them")
+            return _ASTQuantifier("all", target_val)
+
+        if tok_type == _TOK_NUM_OF:
+            num = tok_val
+            self._advance()  # consume "<N> of"
+            target_type, target_val = self._advance()
+            if target_type == _TOK_THEM:
+                return _ASTQuantifier(num, "them")
+            return _ASTQuantifier(num, target_val)
+
+        if tok_type == _TOK_IDENT:
+            self._advance()
+            return _ASTRef(tok_val)
+
+        # Fallback: skip unexpected tokens.
+        self._advance()
+        return _ASTRef("selection")
+
+
+def _parse_condition_ast(condition_str: str):
+    """Parse a Sigma condition string into an AST."""
+    tokens = _tokenize_condition(condition_str)
+    parser = _ConditionParser(tokens)
+    return parser.parse()
+
+
+# ---------------------------------------------------------------------------
+# AST -> predicate list compilation
+# ---------------------------------------------------------------------------
+
+def _resolve_section_names(name: str, sections: dict) -> list[str]:
+    """
+    Resolve a section reference to actual section names.
+
+    Handles wildcards like "selection_*" and the special keyword "them".
+    """
+    if name == "them":
+        return list(sections.keys())
+
+    if "*" in name:
+        prefix = name.replace("*", "")
+        return [n for n in sections if n.startswith(prefix)]
+
+    if name in sections:
+        return [name]
+
+    return []
+
+
+def _section_predicates(section_name: str, sections: dict,
+                        negate: bool = False) -> list[dict]:
+    """Build predicate dicts from a single named section."""
+    section_data = sections.get(section_name)
+    if section_data is None:
+        return []
+    if isinstance(section_data, dict):
+        return parse_selection_map(section_data, negate=negate)
+    if isinstance(section_data, list):
+        return parse_selection_list(section_data, negate=negate)
+    return []
+
+
+def _merge_predicates_by_field(predicate_lists: list[list[dict]]) -> list[dict]:
+    """
+    Merge multiple predicate lists (from OR-ed selection blocks) into a single
+    list by combining values for identical (field, modifier, negate) tuples.
+
+    This is used when OR-ed selection blocks are combined with outer AND logic.
+    The merge unions the value lists so that a match against *any* original
+    block's values satisfies the predicate.
+
+    For example, two blocks:
+        sel1: TargetFilename|contains: ['/1Password/']  AND  TargetFilename|endswith: ['.sqlite']
+        sel2: TargetFilename|contains: ['/Bitwarden/']  AND  TargetFilename|endswith: ['.sqlite', '.db']
+
+    Merge into:
+        TargetFilename|contains: ['/1Password/', '/Bitwarden/']
+        TargetFilename|endswith: ['.sqlite', '.db']
+
+    Note: this is a *conservative over-approximation* when the blocks have
+    different field structures (e.g., sel1 has field A and B, sel2 has only
+    field B). In that case, merged field A predicates would require a match
+    even for events that should only match sel2. To handle this correctly,
+    we only merge when all blocks share the same set of (field, modifier) keys.
+    When they differ, we fall back to emitting all predicates as-is for use
+    with any_of.
+    """
+    if not predicate_lists:
+        return []
+
+    if len(predicate_lists) == 1:
+        return predicate_lists[0]
+
+    # Determine whether all blocks share the same field structure.
+    def _field_signature(preds):
+        return frozenset((p["field"], p["modifier"]) for p in preds)
+
+    signatures = [_field_signature(pl) for pl in predicate_lists]
+    all_same_structure = all(s == signatures[0] for s in signatures)
+
+    if all_same_structure and signatures[0]:
+        # Safe to merge: union values for each (field, modifier) key.
+        merged = {}
+        for preds in predicate_lists:
+            for p in preds:
+                key = (p["field"], p["modifier"], p["negate"])
+                if key not in merged:
+                    merged[key] = {
+                        "field": p["field"],
+                        "modifier": p["modifier"],
+                        "values": list(p["values"]),
+                        "negate": p["negate"],
+                    }
+                else:
+                    # Union values, preserving order, avoiding duplicates.
+                    existing = set(merged[key]["values"])
+                    for v in p["values"]:
+                        if v not in existing:
+                            merged[key]["values"].append(v)
+                            existing.add(v)
+        return list(merged.values())
+
+    # Blocks have different field structures — cannot safely merge for all_of.
+    # Return None to signal the caller to use any_of instead.
+    return None
+
+
+def _collect_and_clauses(node) -> list:
+    """Flatten a chain of AND nodes into a list of clauses."""
+    if isinstance(node, _ASTBinOp) and node.op == "and":
+        return _collect_and_clauses(node.left) + _collect_and_clauses(node.right)
+    return [node]
+
+
+def _collect_or_clauses(node) -> list:
+    """Flatten a chain of OR nodes into a list of clauses."""
+    if isinstance(node, _ASTBinOp) and node.op == "or":
+        return _collect_or_clauses(node.left) + _collect_or_clauses(node.right)
+    return [node]
+
+
+def _is_pure_or_of_refs(node) -> bool:
+    """Check whether a node is a pure OR of simple references (no NOT, no nested AND)."""
+    if isinstance(node, _ASTRef):
+        return True
+    if isinstance(node, _ASTBinOp) and node.op == "or":
+        return _is_pure_or_of_refs(node.left) and _is_pure_or_of_refs(node.right)
+    return False
+
+
+def _compile_condition(condition_str: str, sections: dict) -> tuple[list[dict], str]:
+    """
+    Compile a Sigma condition string into (predicates, condition_type).
+
+    Handles the following patterns (and combinations thereof):
+
+    1. Simple reference:
+       "selection" → all_of with predicates from selection
+
+    2. AND of references with optional NOT:
+       "selection and not filter" → all_of
+       "sel1 and sel2 and not filter1 and not filter2" → all_of
+
+    3. Pure OR of references:
+       "sel1 or sel2 or sel3" → any_of with all predicates
+
+    4. OR-in-parens AND additional clauses:
+       "(sel1 or sel2) and not filter" → all_of, merging OR predicates
+
+    5. AND with nested OR:
+       "sel and (sel2 or sel3)" → all_of, merging OR predicates
+
+    6. Quantifiers:
+       "1 of selection_*" → any_of
+       "all of selection_*" → all_of
+       "all of them" → all_of
+
+    7. Pipe/aggregation:
+       "selection and not filter | count(X) by Y > N" → parsed up to pipe,
+       aggregation is ignored (post-processing)
+    """
+    ast = _parse_condition_ast(condition_str)
+    return _compile_ast(ast, sections)
+
+
+def _compile_ast(node, sections: dict) -> tuple[list[dict], str]:
+    """Recursively compile an AST node into (predicates, condition_type)."""
+
+    # --- Leaf: section reference ---
+    if isinstance(node, _ASTRef):
+        names = _resolve_section_names(node.name, sections)
+        predicates = []
+        for name in names:
+            predicates.extend(_section_predicates(name, sections, negate=False))
+        return predicates, "all_of"
+
+    # --- Quantifier: "1 of X", "all of X" ---
+    if isinstance(node, _ASTQuantifier):
+        names = _resolve_section_names(node.target, sections)
+        predicates = []
+        for name in names:
+            predicates.extend(_section_predicates(name, sections, negate=False))
+
+        if node.quantifier == "all":
+            return predicates, "all_of"
+        else:
+            return predicates, "any_of"
+
+    # --- NOT ---
+    if isinstance(node, _ASTNot):
+        # Compile the child and negate all predicates.
+        child_preds, child_cond = _compile_ast(node.child, sections)
+        negated = []
+        for p in child_preds:
+            negated.append({
+                "field": p["field"],
+                "modifier": p["modifier"],
+                "values": p["values"],
+                "negate": not p["negate"],
+            })
+        return negated, child_cond
+
+    # --- OR ---
+    if isinstance(node, _ASTBinOp) and node.op == "or":
+        # Pure OR of references: any_of across all predicates.
+        or_clauses = _collect_or_clauses(node)
+
+        all_preds = []
+        for clause in or_clauses:
+            clause_preds, _ = _compile_ast(clause, sections)
+            all_preds.extend(clause_preds)
+
+        return all_preds, "any_of"
+
+    # --- AND ---
+    if isinstance(node, _ASTBinOp) and node.op == "and":
+        and_clauses = _collect_and_clauses(node)
+
+        # Classify each clause.
+        or_groups = []       # Clauses that are OR expressions (or OR under NOT)
+        plain_clauses = []   # Simple refs, NOTs, quantifiers
+
+        for clause in and_clauses:
+            # Check if this clause is a pure OR group (possibly inside parens).
+            if isinstance(clause, _ASTBinOp) and clause.op == "or":
+                or_groups.append(clause)
+            else:
+                plain_clauses.append(clause)
+
+        # Compile plain (non-OR) clauses — these are straightforward AND members.
+        plain_preds = []
+        for clause in plain_clauses:
+            clause_preds, _ = _compile_ast(clause, sections)
+            plain_preds.extend(clause_preds)
+
+        # Handle OR groups within the AND.
+        if not or_groups:
+            # Simple AND of refs/NOTs — all_of.
+            return plain_preds, "all_of"
+
+        # We have OR groups combined with AND.  Try to merge the OR predicates.
+        for or_group in or_groups:
+            or_clauses = _collect_or_clauses(or_group)
+
+            # Build a list of predicate-lists, one per OR clause.
+            or_pred_lists = []
+            for oc in or_clauses:
+                oc_preds, _ = _compile_ast(oc, sections)
+                or_pred_lists.append(oc_preds)
+
+            merged = _merge_predicates_by_field(or_pred_lists)
+
+            if merged is not None:
+                # Successfully merged — add to the AND set.
+                plain_preds.extend(merged)
+            else:
+                # Cannot merge (different field structures).
+                # Best effort: if there are no other AND constraints besides
+                # negated filters, we can use any_of for the OR group and
+                # emit the filters alongside.  The filters won't be enforced
+                # as strictly, but it's better than losing the OR entirely.
+                #
+                # Check if all plain clauses are negated (filters).
+                all_plain_negated = all(p["negate"] for p in plain_preds)
+                if all_plain_negated or not plain_preds:
+                    # Use any_of: emit all OR predicates + negated filters.
+                    # Since any_of requires ANY predicate to match, and negated
+                    # predicates match when the field is absent or different,
+                    # this isn't perfect but is the best flat approximation.
+                    #
+                    # Actually, for the common pattern where the only AND
+                    # clauses are "not filter", we can do better: duplicate the
+                    # negated filter predicates into each OR branch so that
+                    # each OR branch becomes a self-contained AND group.
+                    # Then use any_of across the augmented branches.
+                    #
+                    # But since our format is a flat list, we take the pragmatic
+                    # approach: emit all OR predicates as any_of.  The filters
+                    # are added but in any_of mode, they fire independently.
+                    # This is a known limitation logged as a warning.
+                    all_or_preds = []
+                    for pl in or_pred_lists:
+                        all_or_preds.extend(pl)
+                    print(
+                        f"  WARNING: OR group with heterogeneous field structures "
+                        f"combined with AND filters. Filter enforcement may be "
+                        f"incomplete in flat predicate format.",
+                        file=sys.stderr,
+                    )
+                    return all_or_preds + plain_preds, "any_of"
+                else:
+                    # There are non-negated AND clauses alongside the OR group.
+                    # Fall back to all_of with all predicates merged.
+                    all_or_preds = []
+                    for pl in or_pred_lists:
+                        all_or_preds.extend(pl)
+                    return all_or_preds + plain_preds, "all_of"
+
+        return plain_preds, "all_of"
+
+    # Fallback.
+    return [], "all_of"
 
 
 def extract_referenced_sections(condition_str: str, sections: dict) -> list[str]:
@@ -230,6 +757,9 @@ def extract_referenced_sections(condition_str: str, sections: dict) -> list[str]
         "1 of selection_*"
         "all of selection_*"
         "selection"
+
+    NOTE: This function is retained for backward compatibility but is no longer
+    used by the main compilation path (which uses the AST-based parser).
     """
     referenced = []
 
@@ -260,14 +790,8 @@ def determine_condition_type(condition_str: str, sections: dict) -> str:
     """
     Infer the HawkEye condition type from a Sigma condition string.
 
-    Sigma conditions can be quite complex, but we map common patterns:
-        "selection"                       -> all_of (single selection, AND fields)
-        "selection and not filter"        -> all_of
-        "all of selection_*"              -> all_of
-        "selection1 or selection2"        -> any_of
-        "1 of selection_*"               -> any_of
-        "all of them"                     -> all_of
-        "1 of them"                       -> any_of
+    NOTE: This function is retained for backward compatibility but is no longer
+    used by the main compilation path (which uses the AST-based parser).
     """
     cond = condition_str.strip().lower()
 

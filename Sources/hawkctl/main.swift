@@ -346,7 +346,8 @@ struct HawkCtl {
 
     static func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        formatter.dateStyle = .short
+        formatter.timeStyle = .medium
         return formatter.string(from: date)
     }
 }

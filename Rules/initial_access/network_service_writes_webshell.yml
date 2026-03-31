@@ -1,0 +1,59 @@
+title: Network Service Writes Potential Web Shell File
+id: d1a2b3c4-0415-4000-a000-000000000415
+status: experimental
+description: Detects web server processes writing script files (.php, .jsp, .py, .sh, .cgi, .pl) to web-accessible directories. This is a strong indicator that an attacker has exploited a file upload vulnerability or remote code execution flaw to plant a web shell for persistent access to the compromised server.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1190/
+    - https://attack.mitre.org/techniques/T1505/003/
+tags:
+    - attack.initial_access
+    - attack.t1190
+    - attack.persistence
+    - attack.t1505.003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_process:
+        Image|endswith:
+            - '/httpd'
+            - '/nginx'
+            - '/apache2'
+            - '/lighttpd'
+            - '/caddy'
+            - '/php-fpm'
+            - '/php'
+            - '/java'
+            - '/node'
+            - '/tomcat'
+    selection_webshell_ext:
+        TargetFilename|endswith:
+            - '.php'
+            - '.jsp'
+            - '.jspx'
+            - '.py'
+            - '.sh'
+            - '.cgi'
+            - '.pl'
+            - '.asp'
+            - '.aspx'
+            - '.phtml'
+            - '.shtml'
+    selection_web_dir:
+        TargetFilename|contains:
+            - '/Library/WebServer/'
+            - '/var/www/'
+            - '/Sites/'
+            - '/htdocs/'
+            - '/webapps/'
+            - '/www/html/'
+            - '/public_html/'
+            - '/DocumentRoot/'
+    condition: selection_process and selection_webshell_ext and selection_web_dir
+falsepositives:
+    - CMS auto-update mechanisms writing plugin files
+    - Web applications with legitimate file upload features writing to web directories
+    - Development servers with hot-reload writing compiled assets
+level: critical

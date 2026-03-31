@@ -1,0 +1,38 @@
+title: macOS Shadow Hash Plist Access
+id: d1a2b3c4-0403-4000-a000-000000000403
+status: experimental
+description: Detects access to user plist files under /var/db/dslocal/nodes/Default/users/ which contain ShadowHashData (PBKDF2/SALTED-SHA512 password hashes) on macOS. Extracting these hashes enables offline password cracking.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1003/
+    - https://attack.mitre.org/techniques/T1003/008/
+    - https://www.offensive-security.com/metasploit-unleashed/osx-hashdump/
+tags:
+    - attack.credential_access
+    - attack.t1003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith: '/var/db/dslocal/nodes/Default/users/'
+        TargetFilename|endswith: '.plist'
+    filter_opendirectory:
+        Image|endswith:
+            - '/opendirectoryd'
+            - '/DirectoryService'
+            - '/dscl'
+            - '/dsimport'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+        SignerType: 'apple'
+    condition: selection and not filter_opendirectory and not filter_system
+falsepositives:
+    - MDM agents reading user account configuration
+    - Legitimate directory service management tools
+    - Account provisioning scripts during user onboarding
+level: critical

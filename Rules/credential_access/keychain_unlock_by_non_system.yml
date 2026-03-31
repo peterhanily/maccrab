@@ -1,0 +1,33 @@
+title: Keychain Unlock by Non-System Process
+id: d1a2b3c4-0402-4000-a000-000000000402
+status: experimental
+description: Detects the security unlock-keychain command executed from a non-Apple parent process. Attackers use this to programmatically unlock the keychain with a known or brute-forced password so they can subsequently dump stored credentials without user interaction.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1003/
+    - https://attack.mitre.org/techniques/T1555/001/
+tags:
+    - attack.credential_access
+    - attack.t1003
+    - attack.t1555.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/security'
+        CommandLine|contains: 'unlock-keychain'
+    filter_apple_parent:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_system_signed:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_apple_parent and not filter_system_signed
+falsepositives:
+    - CI/CD build agents that unlock the keychain for code signing
+    - Enterprise deployment tools performing automated signing
+    - Xcode build scripts unlocking the login keychain
+level: high

@@ -1,0 +1,43 @@
+title: SUID/SGID Binary Created in Suspicious Directory
+id: d1a2b3c4-0409-4000-a000-000000000409
+status: experimental
+description: Detects file creation events where chmod sets the setuid or setgid bit on a file in /tmp, /var/tmp, /usr/local, or user-writable directories. Attackers drop SUID root binaries as part of privilege escalation exploits to maintain elevated access or as a persistence mechanism after exploitation.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1068/
+    - https://attack.mitre.org/techniques/T1548/001/
+tags:
+    - attack.privilege_escalation
+    - attack.t1068
+    - attack.t1548.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_chmod:
+        Image|endswith: '/chmod'
+        CommandLine|contains:
+            - 'u+s'
+            - 'g+s'
+            - '+s '
+            - '4755'
+            - '4775'
+            - '2755'
+            - '6755'
+            - '4711'
+            - '4777'
+            - '6777'
+    selection_suspicious_path:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/tmp/'
+            - '/usr/local/'
+            - '/Users/'
+            - '/Library/Application Support/'
+    condition: selection_chmod and selection_suspicious_path
+falsepositives:
+    - Homebrew package installations that set suid bits in /usr/local
+    - Enterprise software installers with legitimate setuid requirements
+level: high

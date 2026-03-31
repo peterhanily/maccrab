@@ -1,0 +1,32 @@
+title: securityd Process Memory Access via Mach APIs
+id: d1a2b3c4-0405-4000-a000-000000000405
+status: experimental
+description: Detects processes referencing task_for_pid or mach_vm_read in conjunction with securityd, which indicates an attempt to read the security daemon's process memory. The securityd process holds decrypted keychain items and session keys in memory, making it a high-value target for credential extraction.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1003/
+    - https://github.com/juuso/keychaindump
+tags:
+    - attack.credential_access
+    - attack.t1003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_mach_api:
+        CommandLine|contains:
+            - 'task_for_pid'
+            - 'mach_vm_read'
+            - 'vm_read'
+            - 'keychaindump'
+            - 'chainbreaker'
+    selection_securityd_target:
+        CommandLine|contains:
+            - 'securityd'
+            - 'secd'
+    condition: selection_mach_api and selection_securityd_target
+falsepositives:
+    - Security research tools used in controlled testing environments
+    - Apple diagnostic utilities with proper entitlements
+level: critical
