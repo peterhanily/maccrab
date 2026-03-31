@@ -123,9 +123,3 @@ struct AlertDashboard: View {
     }
 }
 
-// MARK: - Preview
-
-#Preview {
-    AlertDashboard(appState: AppState())
-        .frame(width: 900, height: 600)
-}

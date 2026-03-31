@@ -210,9 +210,3 @@ private struct CategoryBadge: View {
     }
 }
 
-// MARK: - Preview
-
-#Preview {
-    EventStream(appState: AppState())
-        .frame(width: 900, height: 600)
-}

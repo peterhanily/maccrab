@@ -183,9 +183,3 @@ struct RuleBrowser: View {
     }
 }
 
-// MARK: - Preview
-
-#Preview {
-    RuleBrowser(appState: AppState())
-        .frame(width: 900, height: 600)
-}

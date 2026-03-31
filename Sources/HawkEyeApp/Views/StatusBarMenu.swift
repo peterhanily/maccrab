@@ -10,6 +10,7 @@ import SwiftUI
 
 struct StatusBarMenu: View {
     @ObservedObject var appState: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // Connection status
@@ -24,13 +25,10 @@ struct StatusBarMenu: View {
 
         Divider()
 
-        // Quick stats section
-        Text("Events/sec: \(appState.eventsPerSecond)")
-            .accessibilityLabel("Events per second: \(appState.eventsPerSecond)")
-        Text("Rules loaded: \(appState.rulesLoaded)")
-            .accessibilityLabel("Rules loaded: \(appState.rulesLoaded)")
-        Text("Alerts today: \(appState.totalAlerts)")
-            .accessibilityLabel("Alerts today: \(appState.totalAlerts)")
+        // Quick stats
+        Label("\(appState.eventsPerSecond) events/sec", systemImage: "waveform.path.ecg")
+        Label("\(appState.rulesLoaded) rules loaded", systemImage: "shield.checkered")
+        Label("\(appState.totalAlerts) alerts today", systemImage: "exclamationmark.triangle")
 
         Divider()
 
@@ -44,8 +42,26 @@ struct StatusBarMenu: View {
                 .foregroundColor(.secondary)
 
             ForEach(appState.recentAlerts.prefix(5)) { alert in
-                AlertMenuItem(alert: alert)
-                    .accessibilityLabel("Alert: \(alert.ruleTitle), severity \(alert.severity)")
+                Button {
+                    // Open the dashboard and select alerts tab
+                    appState.selectedTab = .alerts
+                    openWindow(id: "dashboard")
+                } label: {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(alert.severityColor)
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(alert.ruleTitle)
+                                .font(.system(.body))
+                                .lineLimit(1)
+                            Text("\(alert.processName) -- \(alert.timeString)")
+                                .font(.system(.caption))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .accessibilityLabel("Alert: \(alert.ruleTitle), severity \(alert.severity)")
             }
         }
 
@@ -53,7 +69,7 @@ struct StatusBarMenu: View {
 
         // Actions
         Button("Open Dashboard...") {
-            openMainWindow()
+            openWindow(id: "dashboard")
         }
         .keyboardShortcut("d")
 
@@ -63,48 +79,22 @@ struct StatusBarMenu: View {
         .keyboardShortcut("r")
 
         Button("Refresh") {
-            Task {
-                await appState.refresh()
-            }
+            Task { await appState.refresh() }
         }
         .keyboardShortcut("f")
 
         Divider()
 
-        SettingsLink {
-            Text("Settings...")
+        if #available(macOS 14.0, *) {
+            SettingsLink {
+                Text("Settings...")
+            }
+            .keyboardShortcut(",")
         }
-        .keyboardShortcut(",")
 
         Button("Quit HawkEye") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
     }
-
-    // MARK: Private
-
-    /// Opens (or brings to front) the main dashboard window.
-    private func openMainWindow() {
-        // On macOS 13+ with WindowGroup, we can use the environment to open
-        // a window. For compatibility, we activate the app which shows the
-        // WindowGroup scene.
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        if let window = NSApplication.shared.windows.first(where: {
-            $0.title == "HawkEye"
-        }) {
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            // If no window exists yet, activating the app will create one
-            // from the WindowGroup scene.
-            NSApplication.shared.activate(ignoringOtherApps: true)
-        }
-    }
-}
-
-// MARK: - Preview
-
-#Preview {
-    StatusBarMenu(appState: AppState())
-        .frame(width: 300)
 }

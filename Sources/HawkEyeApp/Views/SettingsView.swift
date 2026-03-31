@@ -2,7 +2,6 @@
 // HawkEyeApp
 //
 // Application settings view accessible via Cmd+, or the status bar menu.
-// Uses @AppStorage for persistent preferences in UserDefaults.
 
 import SwiftUI
 
@@ -19,124 +18,211 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             generalTab
-                .tabItem {
-                    Label("General", systemImage: "gear")
-                }
+                .tabItem { Label("General", systemImage: "gear") }
 
             notificationsTab
-                .tabItem {
-                    Label("Notifications", systemImage: "bell")
-                }
+                .tabItem { Label("Notifications", systemImage: "bell") }
 
             daemonTab
-                .tabItem {
-                    Label("Daemon", systemImage: "server.rack")
-                }
+                .tabItem { Label("Daemon", systemImage: "server.rack") }
+
+            aboutTab
+                .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .padding()
-        .frame(width: 480, height: 320)
+        .padding(20)
+        .frame(width: 520, height: 380)
     }
 
-    // MARK: General
+    // MARK: - General
 
     private var generalTab: some View {
-        Form {
-            Section("Data Retention") {
-                Stepper(
-                    "Event retention: \(retentionDays) day\(retentionDays == 1 ? "" : "s")",
-                    value: $retentionDays,
-                    in: 1...365,
-                    step: 1
-                )
-                Text("Events and alerts older than this will be pruned from the database.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Section("Polling") {
-                Stepper(
-                    "Refresh interval: \(pollIntervalSeconds) second\(pollIntervalSeconds == 1 ? "" : "s")",
-                    value: $pollIntervalSeconds,
-                    in: 1...60,
-                    step: 1
-                )
-            }
-
-            Section("Startup") {
-                Toggle("Launch HawkEye at login", isOn: $launchAtLogin)
-            }
-        }
-    }
-
-    // MARK: Notifications
-
-    private var notificationsTab: some View {
-        Form {
-            Section("Alert Notifications") {
-                Toggle("Show macOS notifications for alerts", isOn: $alertNotifications)
-
-                Picker("Minimum severity for notifications", selection: $minAlertSeverity) {
-                    Text("Informational").tag("informational")
-                    Text("Low").tag("low")
-                    Text("Medium").tag("medium")
-                    Text("High").tag("high")
-                    Text("Critical only").tag("critical")
-                }
-
-                Text("Alerts below the selected severity will not generate notifications.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    // MARK: Daemon
-
-    private var daemonTab: some View {
-        Form {
-            Section("Daemon Status") {
-                LabeledContent("Status") {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(appState.isConnected ? Color.green : Color.red)
-                            .frame(width: 8, height: 8)
-                        Text(appState.isConnected ? "Running" : "Stopped")
-                            .foregroundColor(appState.isConnected ? .green : .red)
+        VStack(alignment: .leading, spacing: 20) {
+            GroupBox("Data Retention") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Keep events for")
+                        Stepper(
+                            "\(retentionDays) days",
+                            value: $retentionDays,
+                            in: 1...365,
+                            step: 1
+                        )
                     }
-                }
-
-                LabeledContent("Rules loaded") {
-                    Text("\(appState.rulesLoaded)")
-                }
-
-                LabeledContent("Events/sec") {
-                    Text("\(appState.eventsPerSecond)")
-                }
-
-                LabeledContent("Database") {
-                    Text(databasePath)
+                    Text("Events, alerts, and baseline data older than this will be automatically pruned.")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
                 }
+                .padding(8)
             }
 
-            Section("Actions") {
-                Button("Reload Detection Rules") {
-                    appState.reloadDaemonRules()
-                }
-
-                Button("Refresh Connection") {
-                    Task {
-                        await appState.refresh()
+            GroupBox("UI Refresh") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Poll daemon every")
+                        Stepper(
+                            "\(pollIntervalSeconds) seconds",
+                            value: $pollIntervalSeconds,
+                            in: 1...60,
+                            step: 1
+                        )
                     }
+                    Text("How often the app checks the daemon's database for new events and alerts.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
+                .padding(8)
             }
+
+            GroupBox("Startup") {
+                Toggle("Launch HawkEye at login", isOn: $launchAtLogin)
+                    .padding(8)
+            }
+
+            Spacer()
         }
     }
 
-    // MARK: Private
+    // MARK: - Notifications
+
+    private var notificationsTab: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            GroupBox("macOS Notifications") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Show notifications for detection alerts", isOn: $alertNotifications)
+
+                    if alertNotifications {
+                        HStack {
+                            Text("Minimum severity:")
+                            Picker("", selection: $minAlertSeverity) {
+                                Text("Informational").tag("informational")
+                                Text("Low").tag("low")
+                                Text("Medium").tag("medium")
+                                Text("High").tag("high")
+                                Text("Critical only").tag("critical")
+                            }
+                            .labelsHidden()
+                            .frame(width: 160)
+                        }
+
+                        Text("Only alerts at or above this severity will trigger a macOS notification.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(8)
+            }
+
+            Spacer()
+        }
+    }
+
+    // MARK: - Daemon
+
+    private var daemonTab: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            GroupBox("Status") {
+                VStack(spacing: 12) {
+                    HStack {
+                        Label("Daemon", systemImage: "server.rack")
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(appState.isConnected ? Color.green : Color.red)
+                                .frame(width: 10, height: 10)
+                            Text(appState.isConnected ? "Running" : "Stopped")
+                                .fontWeight(.medium)
+                                .foregroundColor(appState.isConnected ? .primary : .red)
+                        }
+                    }
+
+                    Divider()
+
+                    HStack {
+                        Label("Rules loaded", systemImage: "shield.checkered")
+                        Spacer()
+                        Text("\(appState.rulesLoaded)")
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Label("Events/sec", systemImage: "waveform.path.ecg")
+                        Spacer()
+                        Text("\(appState.eventsPerSecond)")
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Label("Database", systemImage: "cylinder")
+                        Spacer()
+                        Text(databasePath)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .padding(8)
+            }
+
+            GroupBox("Actions") {
+                HStack(spacing: 12) {
+                    Button {
+                        appState.reloadDaemonRules()
+                    } label: {
+                        Label("Reload Rules", systemImage: "arrow.clockwise")
+                    }
+
+                    Button {
+                        Task { await appState.refresh() }
+                    } label: {
+                        Label("Refresh Connection", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .padding(8)
+            }
+
+            Spacer()
+        }
+    }
+
+    // MARK: - About
+
+    private var aboutTab: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
+            Image(systemName: "eye.trianglebadge.exclamationmark")
+                .font(.system(size: 48))
+                .foregroundStyle(.blue, .orange)
+
+            Text("HawkEye")
+                .font(.title)
+                .fontWeight(.bold)
+
+            Text("Local-first macOS threat detection engine")
+                .foregroundColor(.secondary)
+
+            Text("v0.3.0")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Divider()
+                .frame(width: 200)
+
+            VStack(spacing: 4) {
+                Text("4 event sources  |  3 detection layers  |  215 rules")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Apache 2.0 (code)  |  DRL 1.1 (rules)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+        }
+    }
+
+    // MARK: - Private
 
     private var databasePath: String {
         let appSupport = FileManager.default.urls(
@@ -148,10 +234,4 @@ struct SettingsView: View {
             .appendingPathComponent("events.db")
             .path
     }
-}
-
-// MARK: - Preview
-
-#Preview {
-    SettingsView(appState: AppState())
 }

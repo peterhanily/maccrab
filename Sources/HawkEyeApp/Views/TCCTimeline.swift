@@ -216,9 +216,3 @@ private struct TCCEventRow: View {
     }
 }
 
-// MARK: - Preview
-
-#Preview {
-    TCCTimeline(appState: AppState())
-        .frame(width: 900, height: 600)
-}

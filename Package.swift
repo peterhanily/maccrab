@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "HawkEyeCore", targets: ["HawkEyeCore"]),
         .executable(name: "hawkeyed", targets: ["hawkeyed"]),
         .executable(name: "hawkctl", targets: ["hawkctl"]),
+        .executable(name: "HawkEyeApp", targets: ["HawkEyeApp"]),
     ],
     dependencies: [],
     targets: [
@@ -30,6 +31,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "hawkctl",
+            dependencies: ["HawkEyeCore"]
+        ),
+        .executableTarget(
+            name: "HawkEyeApp",
             dependencies: ["HawkEyeCore"]
         ),
         .testTarget(

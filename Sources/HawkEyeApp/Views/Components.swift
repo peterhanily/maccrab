@@ -109,15 +109,14 @@ struct AlertRow: View {
 // MARK: - AlertMenuItem
 
 /// A compact alert representation for the status bar dropdown menu.
+/// Clicking opens the main dashboard window.
 struct AlertMenuItem: View {
     let alert: AlertViewModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Button {
-            // In production, this would open the main window and select the alert.
-            if let url = URL(string: "hawkeye://alert/\(alert.id)") {
-                NSWorkspace.shared.open(url)
-            }
+            openWindow(id: "dashboard")
         } label: {
             HStack(spacing: 8) {
                 Circle()
@@ -274,41 +273,3 @@ struct ConnectionStatusBadge: View {
     }
 }
 
-// MARK: - Previews
-
-#Preview("SeverityChip") {
-    HStack {
-        SeverityChip(severity: .critical, isSelected: true) {}
-        SeverityChip(severity: .high, isSelected: false) {}
-        SeverityChip(severity: .medium, isSelected: false) {}
-        SeverityChip(severity: .low, isSelected: false) {}
-    }
-    .padding()
-}
-
-#Preview("AlertRow") {
-    List {
-        AlertRow(alert: MockData.alerts[0], onSuppress: {})
-        AlertRow(alert: MockData.alerts[5], onSuppress: {})
-    }
-    .frame(width: 700, height: 300)
-}
-
-#Preview("SignerBadge") {
-    HStack {
-        SignerBadge(signerType: "apple")
-        SignerBadge(signerType: "appStore")
-        SignerBadge(signerType: "devId")
-        SignerBadge(signerType: "adHoc")
-        SignerBadge(signerType: "unsigned")
-    }
-    .padding()
-}
-
-#Preview("RuleRow") {
-    List {
-        RuleRow(rule: MockData.rules[0])
-        RuleRow(rule: MockData.rules[8])
-    }
-    .frame(width: 700, height: 250)
-}

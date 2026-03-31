@@ -10,11 +10,12 @@ struct HawkEyeDaemon {
     static func main() async {
         logger.info("HawkEye daemon starting...")
 
-        // Verify running as root (required for ES framework)
-        guard getuid() == 0 else {
-            logger.error("hawkeyed must run as root (required for Endpoint Security framework)")
-            fputs("Error: hawkeyed must run as root. Use: sudo hawkeyed\n", stderr)
-            exit(1)
+        // Check if running as root (required for ES framework, optional for other sources)
+        let isRoot = getuid() == 0
+        if !isRoot {
+            print("Note: Running without root. Endpoint Security events unavailable.")
+            print("      Other sources (Unified Log, TCC, Network) will still work.")
+            print("      For full coverage: sudo hawkeyed")
         }
 
         // Paths
@@ -92,7 +93,7 @@ struct HawkEyeDaemon {
         let alertStore: AlertStore
         let enricher: EventEnricher
         let ruleEngine: RuleEngine
-        let collector: ESCollector
+        var collector: ESCollector? = nil
 
         do {
             eventStore = try EventStore()
@@ -126,7 +127,7 @@ struct HawkEyeDaemon {
 
         // Initialize optional outputs (Phase 3)
         var webhookOutput: WebhookOutput? = nil
-        if let webhookURLStr = ProcessInfo.processInfo.environment["HAWKEYE_WEBHOOK_URL"],
+        if let webhookURLStr = Foundation.ProcessInfo.processInfo.environment["HAWKEYE_WEBHOOK_URL"],
            let webhookURL = URL(string: webhookURLStr) {
             webhookOutput = WebhookOutput(url: webhookURL)
             logger.info("Webhook output enabled: \(webhookURLStr)")
@@ -134,8 +135,8 @@ struct HawkEyeDaemon {
         }
 
         var syslogOutput: SyslogOutput? = nil
-        if let syslogHost = ProcessInfo.processInfo.environment["HAWKEYE_SYSLOG_HOST"] {
-            let syslogPort = UInt16(ProcessInfo.processInfo.environment["HAWKEYE_SYSLOG_PORT"] ?? "514") ?? 514
+        if let syslogHost = Foundation.ProcessInfo.processInfo.environment["HAWKEYE_SYSLOG_HOST"] {
+            let syslogPort = UInt16(Foundation.ProcessInfo.processInfo.environment["HAWKEYE_SYSLOG_PORT"] ?? "514") ?? 514
             syslogOutput = SyslogOutput(host: syslogHost, port: syslogPort)
             do {
                 try await syslogOutput!.connect()
@@ -198,24 +199,30 @@ struct HawkEyeDaemon {
             print("Warning: Unified Log collector unavailable")
         }
 
-        // Merge all event sources into a single stream
-        let eventStream = AsyncStream<Event> { continuation in
-            // Source 1: Endpoint Security events
+        // Start ES collector (optional — requires root + ES entitlement)
+        if isRoot {
             do {
-                collector = try ESCollector { event in
-                    continuation.yield(event)
-                }
+                collector = try ESCollector()
                 logger.info("ES collector started successfully")
                 print("Endpoint Security collector active")
             } catch {
-                logger.error("Failed to start ES collector: \(error.localizedDescription)")
-                fputs("Error: Failed to start ES collector: \(error)\n", stderr)
-                fputs("Ensure:\n", stderr)
-                fputs("  1. Running as root (sudo)\n", stderr)
-                fputs("  2. com.apple.developer.endpoint-security.client entitlement is present\n", stderr)
-                fputs("  3. Terminal has Full Disk Access\n", stderr)
-                continuation.finish()
-                return
+                logger.warning("ES collector unavailable: \(error)")
+                print("Warning: Endpoint Security unavailable (\(error))")
+                print("  To enable: sign binary with com.apple.developer.endpoint-security.client entitlement")
+            }
+        } else {
+            print("Endpoint Security: skipped (requires root)")
+        }
+
+        // Merge all event sources into a single stream
+        let eventStream = AsyncStream<Event> { continuation in
+            // Source 1: Endpoint Security events (if available)
+            if let es = collector {
+                Task {
+                    for await event in es.events {
+                        continuation.yield(event)
+                    }
+                }
             }
 
             // Source 2: Unified Log events
@@ -252,13 +259,13 @@ struct HawkEyeDaemon {
         ╚══════════════════════════════════════════╝
 
         Status: Active
-        PID: \(ProcessInfo.processInfo.processIdentifier)
+        PID: \(Foundation.ProcessInfo.processInfo.processIdentifier)
 
         Event Sources:
-          - Endpoint Security (ES) framework
-          - Unified Log (12 subsystems)
-          - TCC permission monitor
-          - Network connection collector
+          - Endpoint Security (ES): \(collector != nil ? "active" : "unavailable")
+          - Unified Log (12 subsystems): \(ulCollector != nil ? "active" : "unavailable")
+          - TCC permission monitor: active
+          - Network connection collector: active
 
         Detection Layers:
           - Single-event Sigma rules
@@ -332,8 +339,8 @@ struct HawkEyeDaemon {
         pruneTimer.setEventHandler {
             Task {
                 let cutoff = Date().addingTimeInterval(-30 * 86400) // 30 days
-                await eventStore.prune(olderThan: cutoff)
-                await alertStore.prune(olderThan: cutoff)
+                try? await eventStore.prune(olderThan: cutoff)
+                try? await alertStore.prune(olderThan: cutoff)
                 logger.info("Pruned events older than 30 days")
             }
         }
@@ -363,7 +370,7 @@ struct HawkEyeDaemon {
             }
 
             // Store event
-            await eventStore.insert(event: enrichedEvent)
+            try? await eventStore.insert(event: enrichedEvent)
 
             // === Detection: 3 layers ===
 
@@ -393,7 +400,7 @@ struct HawkEyeDaemon {
                         id: UUID().uuidString,
                         timestamp: Date(),
                         ruleId: match.ruleId,
-                        ruleTitle: match.ruleTitle,
+                        ruleTitle: match.ruleName,
                         severity: match.severity,
                         eventId: enrichedEvent.id.uuidString,
                         processPath: enrichedEvent.process.executable,
@@ -404,7 +411,7 @@ struct HawkEyeDaemon {
                         suppressed: false
                     )
 
-                    await alertStore.insert(alert: alert)
+                    try? await alertStore.insert(alert: alert)
 
                     // Log alert to stdout
                     let severityIcon: String
@@ -416,7 +423,7 @@ struct HawkEyeDaemon {
                     case .informational: severityIcon = "[INFO]"
                     }
 
-                    print("\(severityIcon) \(match.ruleTitle) | \(enrichedEvent.process.name) (\(enrichedEvent.process.pid)) | \(enrichedEvent.process.executable)")
+                    print("\(severityIcon) \(match.ruleName) | \(enrichedEvent.process.name) (\(enrichedEvent.process.pid)) | \(enrichedEvent.process.executable)")
 
                     // Write JSON alert to log file
                     if let jsonData = try? JSONEncoder().encode(alert),

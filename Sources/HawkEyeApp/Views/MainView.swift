@@ -75,8 +75,3 @@ struct MainView: View {
     }
 }
 
-// MARK: - Preview
-
-#Preview {
-    MainView(appState: AppState())
-}

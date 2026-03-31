@@ -9,20 +9,23 @@ import SwiftUI
 @main
 struct HawkEyeApp: App {
     @StateObject private var appState = AppState()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         // Status bar menu -- always visible in the menu bar.
         MenuBarExtra {
             StatusBarMenu(appState: appState)
         } label: {
-            Image(systemName: appState.statusIcon)
-                .symbolRenderingMode(.palette)
+            // Hawk eye icon: eye with magnifying glass (security monitoring)
+            Label("HawkEye", systemImage: "eye.trianglebadge.exclamationmark")
+                .labelStyle(.iconOnly)
         }
 
         // Main dashboard window (opened from the status bar menu).
-        WindowGroup("HawkEye") {
+        Window("HawkEye Dashboard", id: "dashboard") {
             MainView(appState: appState)
         }
+        .defaultSize(width: 1000, height: 700)
 
         // Settings window (Cmd+,).
         Settings {
