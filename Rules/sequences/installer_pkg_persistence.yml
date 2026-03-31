@@ -1,0 +1,59 @@
+title: Installer Package Drops Persistence
+id: e1f2a3b4-0013-4000-b000-000000000013
+status: experimental
+description: >
+    Detects the macOS Installer process creating LaunchAgent/Daemon
+    persistence items, which may indicate a malicious PKG installer.
+author: HawkEye Community
+date: 2026/03/31
+tags:
+    - attack.execution
+    - attack.persistence
+    - attack.t1543.001
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: installer
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/Installer'
+                  - '/installer'
+                  - '/package_script_service'
+          condition: selection
+
+    - id: persist
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - '/LaunchAgents/'
+                  - '/LaunchDaemons/'
+              TargetFilename|endswith: '.plist'
+          condition: selection
+      process: installer.descendant
+
+    - id: shell
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/sh'
+                  - '/bash'
+                  - '/zsh'
+          condition: selection
+      process: installer.descendant
+
+trigger: persist and shell
+level: high

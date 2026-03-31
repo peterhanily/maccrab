@@ -1,0 +1,31 @@
+title: XPC Service Dynamically Registered
+id: d1a2b3c4-0212-4000-a000-000000000212
+status: experimental
+description: Detects dynamic registration of XPC services via launchctl or creation of XPC service bundles. Adversaries may register malicious XPC services for persistence and inter-process communication abuse.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1543/001/
+tags:
+    - attack.persistence
+    - attack.t1543.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/XPCServices/'
+        TargetFilename|endswith: '.xpc'
+    filter_apple:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_apple and not filter_signed
+falsepositives:
+    - Legitimate application installations with XPC services
+    - Developer tools registering helper services
+level: medium

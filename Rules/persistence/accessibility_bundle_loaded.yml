@@ -1,0 +1,32 @@
+title: Accessibility Bundle Loaded from Unusual Path
+id: d1a2b3c4-0219-4000-a000-000000000219
+status: experimental
+description: Detects accessibility bundle creation from paths outside /System and /Applications. Malicious accessibility bundles can be injected into processes for keystroke monitoring and UI manipulation.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1547/
+    - https://attack.mitre.org/techniques/T1056/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/AccessibilityBundles/'
+        TargetFilename|endswith: '.bundle'
+    filter_system:
+        TargetFilename|startswith:
+            - '/System/'
+            - '/Applications/'
+    filter_apple:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_system and not filter_apple
+falsepositives:
+    - Legitimate assistive technology applications
+    - Accessibility testing tools
+level: high

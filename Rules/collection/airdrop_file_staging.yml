@@ -1,0 +1,31 @@
+title: Files Written to AirDrop Staging Directory
+id: d1a2b3c4-0260-4000-a000-000000000260
+status: experimental
+description: Detects files being written to the AirDrop staging directory by a non-system process. Adversaries may stage data in the AirDrop directory for exfiltration via local wireless transfer.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1011/
+tags:
+    - attack.collection
+    - attack.exfiltration
+    - attack.t1011
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/com.apple.AirDrop/'
+            - '/.TemporaryItems/'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_sharingd:
+        Image|contains: 'sharingd'
+    condition: selection and not filter_system and not filter_sharingd
+falsepositives:
+    - Legitimate AirDrop file transfers
+    - File management utilities
+level: medium

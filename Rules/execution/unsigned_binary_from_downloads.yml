@@ -1,0 +1,26 @@
+title: Unsigned Binary Executed from Downloads
+id: d1a2b3c4-0005-4000-a000-000000000005
+status: stable
+description: Detects execution of an unsigned or ad-hoc signed binary from the user Downloads folder.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.execution
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|contains: '/Downloads/'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and not filter_signed
+falsepositives:
+    - Legitimate developer tools downloaded directly
+level: high

@@ -1,0 +1,39 @@
+title: Shell Spawned by Browser Process
+id: d1a2b3c4-0001-4000-a000-000000000001
+status: stable
+description: Detects a shell interpreter spawned as a child of a browser process, which may indicate exploitation or malicious download execution.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/Safari'
+            - '/Google Chrome'
+            - '/Google Chrome Helper'
+            - '/Firefox'
+            - '/Microsoft Edge'
+            - '/Arc'
+            - '/Brave Browser'
+            - '/Opera'
+    selection_child:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/dash'
+            - '/fish'
+            - '/csh'
+            - '/tcsh'
+    condition: selection_parent and selection_child
+falsepositives:
+    - Browser extensions that legitimately invoke shell scripts
+    - Web development tools
+level: high

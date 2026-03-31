@@ -1,0 +1,29 @@
+title: TCC Database Direct Access
+id: d1a2b3c4-0033-4000-a000-000000000033
+status: stable
+description: Detects direct read or modification of the TCC (Transparency, Consent, Control) database, which controls privacy permissions.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.credential_access
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith: '/TCC.db'
+    filter_apple:
+        SignerType: 'apple'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_apple and not filter_system
+falsepositives:
+    - Legitimate privacy management tools
+    - MDM agents
+level: critical

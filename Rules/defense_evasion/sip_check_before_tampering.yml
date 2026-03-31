@@ -1,0 +1,26 @@
+title: System Integrity Protection Disable Attempt
+id: d1a2b3c4-0110-4000-a000-000000000110
+status: stable
+description: Detects attempts to disable System Integrity Protection (SIP) via csrutil. While csrutil disable only works in Recovery Mode, an attempt in normal boot indicates reconnaissance or a confused attacker. Combined with other indicators this may signal an active attack.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1553/006/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.006
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/csrutil'
+        CommandLine|contains:
+            - 'disable'
+            - 'clear'
+            - 'authenticated-root disable'
+    condition: selection
+falsepositives:
+    - System administrators checking SIP status in scripts that also contain disable instructions
+    - Security audit tools
+level: critical

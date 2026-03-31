@@ -1,0 +1,38 @@
+title: Process Injection via task_for_pid Reference
+id: d1a2b3c4-0109-4000-a000-000000000109
+status: experimental
+description: Detects processes whose command-line arguments reference task_for_pid, which is a Mach API used to obtain a send right to a target process task port. This is a prerequisite for process injection on macOS.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1055/
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1055
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'task_for_pid'
+            - 'processor_set_tasks'
+            - 'mach_vm_write'
+            - 'thread_create_running'
+    filter_xcode:
+        ParentImage|contains:
+            - '/Xcode'
+            - '/lldb'
+            - '/debugserver'
+            - '/DTServiceHub'
+    filter_apple_debug:
+        Image|endswith:
+            - '/lldb'
+            - '/debugserver'
+        SignerType: 'apple'
+    condition: selection and not filter_xcode and not filter_apple_debug
+falsepositives:
+    - Debugging tools and profilers
+    - Security research tools
+level: high

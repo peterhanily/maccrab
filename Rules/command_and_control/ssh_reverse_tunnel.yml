@@ -1,0 +1,27 @@
+title: SSH Reverse Tunnel Established
+id: d1a2b3c4-0244-4000-a000-000000000244
+status: stable
+description: Detects SSH connections with the -R flag to create reverse tunnels. Adversaries use reverse SSH tunnels to expose internal services to external networks, bypassing firewalls and NAT.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1572/
+tags:
+    - attack.command_and_control
+    - attack.t1572
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/ssh'
+        CommandLine|contains: ' -R '
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_system
+falsepositives:
+    - Legitimate remote access for development
+    - System administrators using SSH tunnels
+level: high

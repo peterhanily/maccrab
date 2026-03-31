@@ -1,0 +1,27 @@
+title: System Extension Installed by Non-Apple Process
+id: d1a2b3c4-0210-4000-a000-000000000210
+status: experimental
+description: Detects system extension installation triggered by a non-Apple process. System extensions run in kernel-level or near-kernel contexts and can provide deep system access to adversaries.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1547/006/
+tags:
+    - attack.persistence
+    - attack.t1547.006
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/systemextensionsctl'
+        CommandLine|contains: 'install'
+    filter_apple:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_apple
+falsepositives:
+    - Legitimate security software installing system extensions
+    - Enterprise endpoint protection tools
+level: high

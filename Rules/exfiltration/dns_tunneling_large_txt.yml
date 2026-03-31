@@ -1,0 +1,31 @@
+title: Potential DNS Tunneling via Large TXT Queries
+id: d1a2b3c4-00a1-4000-a000-0000000000a1
+status: experimental
+description: Detects dig or nslookup performing TXT record queries with long domain names, which may indicate DNS tunneling for data exfiltration.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1048/
+tags:
+    - attack.exfiltration
+    - attack.t1048
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/dig'
+            - '/nslookup'
+            - '/host'
+    selection_txt:
+        CommandLine|contains:
+            - ' TXT '
+            - ' txt '
+            - '-type=TXT'
+            - '-type=txt'
+    condition: selection_tool and selection_txt
+falsepositives:
+    - Legitimate DNS debugging
+    - SPF/DKIM/DMARC verification
+level: low

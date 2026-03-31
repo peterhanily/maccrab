@@ -1,0 +1,42 @@
+title: Calendar Database Accessed by Non-Calendar Process
+id: d1a2b3c4-0263-4000-a000-000000000263
+status: experimental
+description: Detects access to the Calendar.app database by processes other than Calendar. Adversaries may access calendar data to gather meeting details, contacts, location information, and schedule intelligence.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1005/
+tags:
+    - attack.collection
+    - attack.t1005
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Calendars/'
+            - '/Calendar/Calendar Cache'
+        TargetFilename|endswith:
+            - 'Calendar Cache'
+            - 'Calendar Cache-shm'
+            - 'Calendar Cache-wal'
+            - '.calendar'
+    filter_calendar:
+        Image|contains:
+            - 'Calendar.app'
+            - '/Calendar'
+            - 'CalendarAgent'
+            - 'calendaragent'
+            - 'remindd'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_spotlight:
+        Image|contains: 'mdworker'
+    condition: selection and not filter_calendar and not filter_system and not filter_spotlight
+falsepositives:
+    - Calendar sync utilities
+    - Meeting management applications
+level: medium

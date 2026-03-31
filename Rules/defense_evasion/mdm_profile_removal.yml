@@ -1,0 +1,31 @@
+title: MDM Profile Removal Attempt
+id: d1a2b3c4-0221-4000-a000-000000000221
+status: stable
+description: Detects attempts to remove MDM (Mobile Device Management) profiles via the profiles command. Adversaries may attempt to remove MDM profiles to escape enterprise security controls and monitoring.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/profiles'
+        CommandLine|contains:
+            - 'remove'
+            - '-R'
+            - 'uninstall'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    condition: selection and not filter_system
+falsepositives:
+    - IT administrators managing profiles
+    - Legitimate profile rotation during enrollment changes
+level: critical

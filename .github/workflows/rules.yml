@@ -1,0 +1,30 @@
+name: Validate Rules
+
+on:
+  push:
+    paths: ['Rules/**']
+  pull_request:
+    paths: ['Rules/**']
+
+jobs:
+  validate:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: pip3 install pyyaml
+
+      - name: Validate YAML syntax
+        run: python3 scripts/validate_rules.py Rules/
+
+      - name: Check for duplicate rule IDs
+        run: python3 scripts/check_duplicate_ids.py Rules/
+
+      - name: Compile rules (dry run)
+        run: |
+          mkdir -p /tmp/compiled_rules
+          python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir /tmp/compiled_rules
+
+      - name: Generate MITRE ATT&CK coverage matrix
+        run: python3 scripts/coverage_matrix.py Rules/

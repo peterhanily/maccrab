@@ -1,0 +1,31 @@
+title: XProtect or MRT Service Disabled
+id: d1a2b3c4-0026-4000-a000-000000000026
+status: stable
+description: Detects attempts to disable macOS built-in malware protection services via launchctl.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_launchctl:
+        Image|endswith: '/launchctl'
+    selection_disable:
+        CommandLine|contains:
+            - 'unload'
+            - 'disable'
+            - 'bootout'
+    selection_target:
+        CommandLine|contains:
+            - 'com.apple.XProtect'
+            - 'com.apple.MRT'
+            - 'com.apple.XprotectFramework'
+    condition: selection_launchctl and selection_disable and selection_target
+falsepositives:
+    - None expected in normal operation
+level: critical

@@ -1,0 +1,41 @@
+title: Base64 Encoding of Files for Exfiltration Staging
+id: d1a2b3c4-0283-4000-a000-000000000283
+status: experimental
+description: Detects base64 encoding of files from sensitive directories, which may indicate data staging for exfiltration. Adversaries encode files to base64 for transfer via channels that may not support binary data.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1560/001/
+tags:
+    - attack.exfiltration
+    - attack.t1560.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/base64'
+    selection_encode:
+        CommandLine|contains:
+            - '/Documents/'
+            - '/Desktop/'
+            - '/Downloads/'
+            - '/.ssh/'
+            - '/Keychains/'
+            - '/Library/Mail/'
+            - '.sqlite'
+            - '.db'
+            - '.kdbx'
+            - '.pem'
+            - '.key'
+            - '.p12'
+    filter_decode:
+        CommandLine|contains:
+            - ' -d'
+            - ' -D'
+            - '--decode'
+    condition: selection and selection_encode and not filter_decode
+falsepositives:
+    - Legitimate data encoding for API transfers
+    - Development and testing workflows
+level: medium

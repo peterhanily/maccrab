@@ -1,0 +1,28 @@
+title: Authorization Database Modified via security Command
+id: d1a2b3c4-0270-4000-a000-000000000270
+status: stable
+description: Detects use of the security command with authorizationdb write to modify the authorization database. Adversaries may modify authorization rules to weaken authentication requirements for privilege escalation.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1548/
+tags:
+    - attack.privilege_escalation
+    - attack.defense_evasion
+    - attack.t1548
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/security'
+        CommandLine|contains: 'authorizationdb'
+    selection_write:
+        CommandLine|contains:
+            - 'write'
+            - 'remove'
+    condition: selection and selection_write
+falsepositives:
+    - Enterprise management tools configuring authorization rules
+    - System provisioning scripts
+level: critical

@@ -1,0 +1,35 @@
+title: Unsigned Binary Masquerading as System Utility
+id: d1a2b3c4-0027-4000-a000-000000000027
+status: experimental
+description: Detects unsigned binaries with names matching common system utilities, suggesting masquerading.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1036/004/
+tags:
+    - attack.defense_evasion
+    - attack.t1036.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_name:
+        Image|endswith:
+            - '/sshd'
+            - '/cron'
+            - '/launchd'
+            - '/mds'
+            - '/mdworker'
+            - '/trustd'
+            - '/securityd'
+    filter_system_path:
+        Image|startswith:
+            - '/usr/'
+            - '/System/'
+            - '/sbin/'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection_name and not filter_system_path and not filter_apple
+falsepositives:
+    - Development builds of system utilities
+level: high

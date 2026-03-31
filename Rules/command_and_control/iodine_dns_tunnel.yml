@@ -1,0 +1,30 @@
+title: DNS Tunneling Tool Detected (iodine/dns2tcp)
+id: d1a2b3c4-0246-4000-a000-000000000246
+status: stable
+description: Detects execution of known DNS tunneling tools such as iodine, iodined, dns2tcp, or dns2tcpc. These tools encapsulate arbitrary data in DNS queries to bypass firewalls and exfiltrate data.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1071/004/
+tags:
+    - attack.command_and_control
+    - attack.exfiltration
+    - attack.t1071.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/iodine'
+            - '/iodined'
+            - '/dns2tcp'
+            - '/dns2tcpc'
+            - '/dns2tcpd'
+            - '/dnscat2'
+            - '/dnscat'
+    condition: selection
+falsepositives:
+    - Security researchers and penetration testers
+    - Network tunneling for legitimate connectivity
+level: critical

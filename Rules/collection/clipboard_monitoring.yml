@@ -1,0 +1,43 @@
+title: Clipboard Access by Non-Terminal Process
+id: d1a2b3c4-0124-4000-a000-000000000124
+status: experimental
+description: Detects pbpaste or pbcopy being executed by a non-terminal parent process. Clipboard monitoring is used by malware to steal copied passwords, cryptocurrency addresses, and other sensitive data.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1115/
+tags:
+    - attack.collection
+    - attack.t1115
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/pbpaste'
+            - '/pbcopy'
+    filter_terminal:
+        ParentImage|endswith:
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+    filter_shell_direct:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+    filter_apple:
+        SignerType: 'apple'
+        ParentImage|startswith: '/System/'
+    condition: selection and not filter_terminal and not filter_shell_direct and not filter_apple
+falsepositives:
+    - Clipboard manager applications
+    - Automation tools (Alfred, Raycast) accessing clipboard
+    - Custom scripts using clipboard for inter-app communication
+level: medium

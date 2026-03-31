@@ -1,0 +1,29 @@
+title: Plist Written to Library by Process from Temp Directory
+id: d1a2b3c4-0211-4000-a000-000000000211
+status: stable
+description: Detects plist file creation in ~/Library directories by a process executing from a temporary directory. This pattern is common in malware that stages persistence from /tmp or /var/folders.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1543/001/
+tags:
+    - attack.persistence
+    - attack.t1543.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target:
+        TargetFilename|contains: '/Library/'
+        TargetFilename|endswith: '.plist'
+    selection_source:
+        Image|contains:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/tmp/'
+            - '/var/folders/'
+    condition: selection_target and selection_source
+falsepositives:
+    - Installer packages writing configuration plists
+    - Legitimate software first-run configuration
+level: high

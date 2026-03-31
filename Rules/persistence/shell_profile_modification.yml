@@ -1,0 +1,44 @@
+title: Shell Profile Modified by Non-Shell Process
+id: d1a2b3c4-0013-4000-a000-000000000013
+status: experimental
+description: Detects modifications to shell profile files (.zshrc, .bashrc, .bash_profile, .zprofile) by non-shell processes, which may indicate persistence via shell initialization.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1546/004/
+tags:
+    - attack.persistence
+    - attack.t1546.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '/.zshrc'
+            - '/.bashrc'
+            - '/.bash_profile'
+            - '/.zprofile'
+            - '/.profile'
+            - '/.zshenv'
+            - '/.zlogin'
+    filter_shells:
+        Image|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+            - '/fish'
+    filter_editors:
+        Image|contains:
+            - 'vim'
+            - 'nano'
+            - 'emacs'
+            - 'Visual Studio Code'
+            - 'Sublime'
+            - 'TextEdit'
+            - 'BBEdit'
+    condition: selection and not filter_shells and not filter_editors
+falsepositives:
+    - Package managers (Homebrew, nvm) modifying shell profiles
+    - IDE configuration
+level: medium

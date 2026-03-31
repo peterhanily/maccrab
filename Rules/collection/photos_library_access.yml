@@ -1,0 +1,40 @@
+title: Photos Library Accessed by Non-Photos Process
+id: d1a2b3c4-0262-4000-a000-000000000262
+status: experimental
+description: Detects access to the Photos library database by a process other than Photos.app. Adversaries may access photo libraries for surveillance, personal data theft, or leverage photos for extortion.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1005/
+tags:
+    - attack.collection
+    - attack.t1005
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Photos Library.photoslibrary/'
+            - '/com.apple.Photos/databases/'
+        TargetFilename|endswith:
+            - 'Photos.sqlite'
+            - 'photos.db'
+            - 'Person.db'
+    filter_photos:
+        Image|contains:
+            - 'Photos.app'
+            - '/Photos'
+            - 'photoanalysisd'
+            - 'photolibraryd'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_spotlight:
+        Image|contains: 'mdworker'
+    condition: selection and not filter_photos and not filter_system and not filter_spotlight
+falsepositives:
+    - Photo editing and management applications
+    - Cloud photo sync services
+level: high

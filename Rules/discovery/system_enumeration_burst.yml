@@ -1,0 +1,38 @@
+title: Rapid System Information Enumeration
+id: d1a2b3c4-0050-4000-a000-000000000050
+status: experimental
+description: Detects execution of multiple system discovery commands, commonly seen in post-exploitation reconnaissance.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/tactics/TA0007/
+tags:
+    - attack.discovery
+    - attack.t1082
+    - attack.t1033
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/whoami'
+            - '/id'
+            - '/uname'
+            - '/sw_vers'
+            - '/system_profiler'
+            - '/ifconfig'
+            - '/networksetup'
+            - '/scutil'
+            - '/dscl'
+            - '/sysctl'
+            - '/launchctl'
+    filter_apple:
+        SignerType: 'apple'
+        ParentImage|startswith: '/System/'
+    condition: selection and not filter_apple
+falsepositives:
+    - System administration scripts
+    - Monitoring tools
+    - Homebrew installation
+level: low

@@ -1,0 +1,35 @@
+title: Sandbox Escape Attempt Detected
+id: d1a2b3c4-0220-4000-a000-000000000220
+status: experimental
+description: Detects command-line patterns associated with macOS sandbox escape attempts, including sandbox-exec abuse and known sandbox profile manipulation techniques.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1497/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1497.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_sandbox_exec:
+        Image|endswith: '/sandbox-exec'
+        CommandLine|contains:
+            - '-n no-sandbox'
+            - '-p (allow default)'
+            - '-p (version'
+    selection_profile_manipulation:
+        CommandLine|contains:
+            - 'sandbox-exec -f'
+            - '/usr/share/sandbox/'
+    selection_escape_patterns:
+        CommandLine|contains:
+            - 'sandbox_check'
+            - 'sandbox_extension_issue'
+            - 'APP_SANDBOX_CONTAINER_ID'
+    condition: selection_sandbox_exec or selection_profile_manipulation or selection_escape_patterns
+falsepositives:
+    - Legitimate sandbox testing during application development
+    - Security researchers testing sandbox profiles
+level: high

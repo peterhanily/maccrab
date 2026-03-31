@@ -1,0 +1,39 @@
+title: Reverse Shell Command Detected
+id: d1a2b3c4-0042-4000-a000-000000000042
+status: stable
+description: Detects command-line patterns associated with reverse shell creation.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.command_and_control
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_bash_reverse:
+        CommandLine|contains:
+            - 'bash -i >& /dev/tcp/'
+            - 'bash -c "bash -i >& /dev/tcp/'
+            - '/bin/sh -i >& /dev/tcp/'
+    selection_nc_reverse:
+        CommandLine|contains:
+            - 'nc -e /bin/'
+            - 'ncat -e /bin/'
+            - 'nc -c /bin/'
+    selection_python_reverse:
+        CommandLine|contains:
+            - 'python -c "import socket,subprocess,os'
+            - 'python3 -c "import socket,subprocess,os'
+            - "python -c 'import socket,subprocess,os"
+            - "python3 -c 'import socket,subprocess,os"
+    selection_php_reverse:
+        CommandLine|contains: "php -r '$sock=fsockopen"
+    condition: selection_bash_reverse or selection_nc_reverse or selection_python_reverse or selection_php_reverse
+falsepositives:
+    - Penetration testing activities
+    - CTF challenges
+level: critical

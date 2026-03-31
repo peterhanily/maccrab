@@ -1,0 +1,41 @@
+title: Terminal.app Profile Loading Shell with Suspicious Arguments
+id: d1a2b3c4-0100-4000-a000-000000000100
+status: experimental
+description: Detects Terminal.app launching a shell with specific arguments via a terminal profile, which can be abused to execute arbitrary commands on launch.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith: '/Terminal'
+    selection_shell:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+    selection_args:
+        CommandLine|contains:
+            - ' -c '
+            - ' -i '
+            - '--login -c'
+            - 'curl '
+            - 'wget '
+            - 'python'
+            - 'osascript'
+            - 'base64'
+    filter_normal:
+        CommandLine|endswith:
+            - '--login'
+            - '-l'
+    condition: selection_parent and selection_shell and selection_args and not filter_normal
+falsepositives:
+    - Custom terminal profiles with legitimate startup commands
+    - Developer automation workflows using Terminal profiles
+level: medium

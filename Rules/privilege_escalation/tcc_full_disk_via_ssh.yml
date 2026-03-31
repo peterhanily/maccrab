@@ -1,0 +1,32 @@
+title: SSH Session Accessing FDA-Protected Paths
+id: d1a2b3c4-0273-4000-a000-000000000273
+status: stable
+description: Detects processes spawned by sshd that access Full Disk Access (FDA) protected paths. SSH sessions inherit the TCC permissions of the remote login service, which may allow bypassing TCC restrictions that would normally block access.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1548/
+tags:
+    - attack.privilege_escalation
+    - attack.t1548
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith: '/sshd'
+    selection_fda_access:
+        CommandLine|contains:
+            - '/Library/Mail/'
+            - '/Library/Messages/'
+            - '/Library/Safari/'
+            - '/Library/Calendars/'
+            - '/Library/Cookies/'
+            - '/Library/Application Support/AddressBook/'
+            - '/TCC/TCC.db'
+            - '/Library/Preferences/com.apple.'
+    condition: selection_parent and selection_fda_access
+falsepositives:
+    - Legitimate remote administration via SSH
+    - Backup scripts running over SSH
+level: high

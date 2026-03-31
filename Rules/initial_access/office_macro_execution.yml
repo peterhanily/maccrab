@@ -1,0 +1,46 @@
+title: Microsoft Office Spawning Macro-Related Processes
+id: d1a2b3c4-0295-4000-a000-000000000295
+status: stable
+description: Detects Microsoft Office applications spawning shell interpreters or other suspicious child processes, which may indicate macro-based payload execution. Office macros remain a common initial access vector on macOS.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1566/001/
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.initial_access
+    - attack.execution
+    - attack.t1566.001
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_office_parent:
+        ParentImage|contains:
+            - 'Microsoft Word'
+            - 'Microsoft Excel'
+            - 'Microsoft PowerPoint'
+            - 'Microsoft Outlook'
+            - 'com.microsoft.Word'
+            - 'com.microsoft.Excel'
+            - 'com.microsoft.PowerPoint'
+            - 'com.microsoft.Outlook'
+    selection_child:
+        Image|endswith:
+            - '/bash'
+            - '/sh'
+            - '/zsh'
+            - '/python'
+            - '/python3'
+            - '/perl'
+            - '/ruby'
+            - '/osascript'
+            - '/curl'
+            - '/wget'
+            - '/powershell'
+    condition: selection_office_parent and selection_child
+falsepositives:
+    - Legitimate Office add-ins with shell integration
+    - Office automation workflows
+level: critical

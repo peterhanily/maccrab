@@ -1,0 +1,38 @@
+title: Tunnel Service Tool Detected (ngrok/cloudflared/bore)
+id: d1a2b3c4-0247-4000-a000-000000000247
+status: stable
+description: Detects execution of tunnel service tools such as ngrok, cloudflared, bore, or similar. Adversaries use these tools to expose internal services to the internet, bypassing firewalls and establishing covert C2 channels.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1572/
+tags:
+    - attack.command_and_control
+    - attack.t1572
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_binary:
+        Image|endswith:
+            - '/ngrok'
+            - '/cloudflared'
+            - '/bore'
+            - '/chisel'
+            - '/frpc'
+            - '/rathole'
+    selection_ngrok_args:
+        CommandLine|contains:
+            - 'ngrok http'
+            - 'ngrok tcp'
+            - 'ngrok tls'
+            - 'ngrok start'
+    selection_cloudflared_args:
+        CommandLine|contains:
+            - 'cloudflared tunnel'
+            - 'cloudflared access'
+    condition: selection_binary or selection_ngrok_args or selection_cloudflared_args
+falsepositives:
+    - Developers testing webhooks or sharing local services
+    - Legitimate Cloudflare Tunnel deployments
+level: high

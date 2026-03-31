@@ -1,0 +1,37 @@
+title: Browser Cookie Database Accessed by Non-Browser
+id: d1a2b3c4-0031-4000-a000-000000000031
+status: experimental
+description: Detects non-browser processes reading browser cookie or credential databases, indicative of credential theft.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1539/
+tags:
+    - attack.credential_access
+    - attack.t1539
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Google/Chrome/Default/Cookies'
+            - '/Google/Chrome/Default/Login Data'
+            - '/Firefox/Profiles/'
+            - '/Safari/Cookies/Cookies.binarycookies'
+            - '/Microsoft Edge/Default/Cookies'
+            - '/Brave-Browser/Default/Cookies'
+    filter_browsers:
+        Image|contains:
+            - 'Google Chrome'
+            - 'Firefox'
+            - 'Safari'
+            - 'Microsoft Edge'
+            - 'Brave Browser'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_browsers and not filter_apple
+falsepositives:
+    - Browser sync utilities
+    - Backup software
+level: high

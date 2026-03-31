@@ -1,0 +1,31 @@
+title: Input Monitoring TCC Permission Granted
+id: d1a2b3c4-0126-4000-a000-000000000126
+status: stable
+description: Detects when Input Monitoring (ListenEvent) TCC permission is granted. This permission allows an application to monitor keyboard and mouse input globally, which can be abused for keylogging.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1056/
+tags:
+    - attack.collection
+    - attack.t1056
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService: 'kTCCServiceListenEvent'
+        TCCAllowed: 'true'
+    filter_known:
+        TCCClient|contains:
+            - 'com.apple.'
+            - 'com.microsoft.'
+            - 'com.logi.'
+            - 'com.karabiner'
+            - 'com.steerMouse'
+    condition: selection and not filter_known
+falsepositives:
+    - Legitimate input remapping tools (Karabiner-Elements, SteerMouse)
+    - Accessibility software
+    - Remote desktop applications
+level: high

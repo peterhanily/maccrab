@@ -1,0 +1,41 @@
+title: Hardware Enumeration via ioreg
+id: d1a2b3c4-0254-4000-a000-000000000254
+status: experimental
+description: Detects use of ioreg to enumerate hardware information. Adversaries may use ioreg to fingerprint the system, detect virtual machines, or enumerate connected devices and peripherals.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1082/
+    - https://attack.mitre.org/techniques/T1497/001/
+tags:
+    - attack.discovery
+    - attack.t1082
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/ioreg'
+    selection_sensitive:
+        CommandLine|contains:
+            - 'IOPlatformSerialNumber'
+            - 'IOPlatformUUID'
+            - 'board-id'
+            - 'IOUSBHostDevice'
+            - 'IOHIDSystem'
+            - 'IODisplayConnect'
+            - 'model'
+            - '-rd1'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and selection_sensitive and not filter_system and not filter_signed
+falsepositives:
+    - Hardware diagnostic tools
+    - System information utilities
+level: medium

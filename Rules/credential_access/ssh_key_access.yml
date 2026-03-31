@@ -1,0 +1,39 @@
+title: SSH Private Key Accessed by Unusual Process
+id: d1a2b3c4-0032-4000-a000-000000000032
+status: experimental
+description: Detects non-SSH processes reading SSH private key files, which may indicate credential theft.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1552/004/
+tags:
+    - attack.credential_access
+    - attack.t1552.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/.ssh/'
+        TargetFilename|endswith:
+            - '/id_rsa'
+            - '/id_ed25519'
+            - '/id_ecdsa'
+            - '/id_dsa'
+    filter_ssh:
+        Image|endswith:
+            - '/ssh'
+            - '/ssh-agent'
+            - '/ssh-add'
+            - '/sshd'
+            - '/scp'
+            - '/sftp'
+            - '/git'
+            - '/ssh-keygen'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_ssh and not filter_apple
+falsepositives:
+    - Key management tools
+    - IDE SSH integrations
+level: high

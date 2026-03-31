@@ -1,0 +1,25 @@
+title: DYLD_INSERT_LIBRARIES Environment Variable Used
+id: d1a2b3c4-0024-4000-a000-000000000024
+status: stable
+description: Detects use of DYLD_INSERT_LIBRARIES in process arguments or environment, a technique for dylib injection on macOS.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1574/006/
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.t1574.006
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'DYLD_INSERT_LIBRARIES'
+            - '__XPC_DYLD_INSERT_LIBRARIES'
+    condition: selection
+falsepositives:
+    - Debugging tools injecting diagnostic libraries
+    - Some legitimate application frameworks
+level: high

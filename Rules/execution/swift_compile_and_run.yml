@@ -1,0 +1,35 @@
+title: Swift Compile and Execute from Temp Directory
+id: d1a2b3c4-0207-4000-a000-000000000207
+status: experimental
+description: Detects swiftc compilation of source files from temporary directories followed by execution. Adversaries may compile and run Swift code on-the-fly to evade detection by avoiding pre-compiled binaries.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.execution
+    - attack.defense_evasion
+    - attack.t1059
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/swiftc'
+    selection_temp:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/tmp/'
+            - '/var/folders/'
+            - '/Downloads/'
+    filter_xcode:
+        ParentImage|contains:
+            - '/Xcode.app/'
+            - '/XCBBuildService'
+            - 'SourceKit'
+    condition: selection and selection_temp and not filter_xcode
+falsepositives:
+    - Swift development and testing workflows
+    - Swift scripting in temporary directories
+level: medium

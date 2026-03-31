@@ -1,0 +1,39 @@
+title: Timestamp Modification via touch Command
+id: d1a2b3c4-0112-4000-a000-000000000112
+status: experimental
+description: Detects the use of the touch command with flags that explicitly set file timestamps to a past date. This technique (timestomping) is used to make malicious files blend in with legitimate system files.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1070/006/
+tags:
+    - attack.defense_evasion
+    - attack.t1070.006
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/touch'
+        CommandLine|contains:
+            - ' -t '
+            - ' -d '
+            - ' --date='
+            - ' -r '
+    filter_build:
+        ParentImage|contains:
+            - '/make'
+            - '/xcodebuild'
+            - '/cmake'
+            - '/ninja'
+            - '/bazel'
+    filter_package:
+        ParentImage|contains:
+            - '/installer'
+            - '/brew'
+            - '/port'
+    condition: selection and not filter_build and not filter_package
+falsepositives:
+    - Build systems and package managers adjusting file timestamps
+    - Backup restoration tools preserving original timestamps
+level: medium

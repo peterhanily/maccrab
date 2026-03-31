@@ -1,0 +1,34 @@
+title: Python HTTP Server Spawned
+id: d1a2b3c4-0120-4000-a000-000000000120
+status: experimental
+description: Detects Python's built-in HTTP server module being used to serve files. Attackers commonly use this for staging payloads, exfiltrating data, or establishing simple C2 channels.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1071/001/
+tags:
+    - attack.command_and_control
+    - attack.t1071.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_python:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+            - '/python2'
+            - '/python3.11'
+            - '/python3.12'
+            - '/python3.13'
+    selection_server:
+        CommandLine|contains:
+            - 'http.server'
+            - 'SimpleHTTPServer'
+            - 'CGIHTTPServer'
+            - 'http.server --bind'
+    condition: selection_python and selection_server
+falsepositives:
+    - Developers using Python HTTP server for local testing
+    - Documentation tooling that serves static files
+level: medium

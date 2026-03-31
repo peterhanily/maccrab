@@ -1,0 +1,36 @@
+title: Connection to Known Tor Network Ports
+id: d1a2b3c4-0119-4000-a000-000000000119
+status: experimental
+description: Detects outbound network connections to ports commonly used by the Tor network (9050, 9051, 9150, 9151). Attackers use Tor to anonymize command-and-control traffic and exfiltrate data.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1090/003/
+tags:
+    - attack.command_and_control
+    - attack.t1090.003
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection_ports:
+        DestinationPort:
+            - 9050
+            - 9051
+            - 9150
+            - 9151
+    selection_localhost:
+        DestinationIp:
+            - '127.0.0.1'
+            - '::1'
+    filter_tor_browser:
+        Image|contains:
+            - '/Tor Browser'
+            - '/tor.real'
+            - '/tor'
+    condition: selection_ports and selection_localhost and not filter_tor_browser
+falsepositives:
+    - Legitimate Tor usage for privacy
+    - OnionShare or SecureDrop clients
+    - Applications explicitly configured to use a local Tor SOCKS proxy
+level: high

@@ -1,0 +1,30 @@
+title: Certificate or PKCS12 Export via security Command
+id: d1a2b3c4-0231-4000-a000-000000000231
+status: stable
+description: Detects export of certificates or PKCS12 identity bundles from the macOS keychain. Adversaries may export certificates and private keys for impersonation or decryption of protected communications.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1552/004/
+tags:
+    - attack.credential_access
+    - attack.t1552.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/security'
+    selection_export:
+        CommandLine|contains:
+            - 'export-smartcard'
+            - 'pkcs12'
+            - 'find-certificate -a -p'
+            - 'export -t certs'
+            - 'export -t identities'
+            - 'export -t pkcs12'
+    condition: selection and selection_export
+falsepositives:
+    - Certificate management and renewal scripts
+    - VPN configuration tools
+level: high

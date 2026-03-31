@@ -1,0 +1,42 @@
+title: SSH Tunnel with Port Forwarding Established
+id: d1a2b3c4-0118-4000-a000-000000000118
+status: experimental
+description: Detects SSH invocations with port forwarding flags (-L, -R, -D), which create tunnels that can be used to proxy command-and-control traffic or pivot through compromised hosts.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1572/
+tags:
+    - attack.command_and_control
+    - attack.t1572
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/ssh'
+    selection_forwarding:
+        CommandLine|contains:
+            - ' -L '
+            - ' -R '
+            - ' -D '
+            - ' -L:'
+            - ' -R:'
+            - ' -D:'
+            - ' -NL '
+            - ' -NR '
+            - ' -ND '
+    filter_known_tools:
+        ParentImage|contains:
+            - '/Visual Studio Code'
+            - '/Code Helper'
+            - '/JetBrains'
+            - '/IntelliJ'
+            - '/PyCharm'
+            - '/WebStorm'
+            - '/GoLand'
+    condition: selection and selection_forwarding and not filter_known_tools
+falsepositives:
+    - Developers using SSH tunnels for database access or remote development
+    - VPN alternatives using SSH tunneling
+level: medium

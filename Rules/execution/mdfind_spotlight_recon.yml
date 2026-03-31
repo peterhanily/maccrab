@@ -1,0 +1,41 @@
+title: mdfind Spotlight Query by Unsigned Process
+id: d1a2b3c4-0209-4000-a000-000000000209
+status: experimental
+description: Detects mdfind (Spotlight query) execution by unsigned processes for file discovery. Adversaries may use mdfind to quickly locate sensitive files, credentials, or documents.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1083/
+tags:
+    - attack.execution
+    - attack.discovery
+    - attack.t1083
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/mdfind'
+    selection_sensitive:
+        CommandLine|contains:
+            - 'kMDItemKind'
+            - 'password'
+            - 'credential'
+            - '.pem'
+            - '.key'
+            - '.p12'
+            - '.pfx'
+            - '.env'
+            - 'wallet'
+            - 'ssh'
+            - 'secret'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and selection_sensitive and not filter_signed
+falsepositives:
+    - Legitimate file search utilities
+    - Backup and indexing tools
+level: medium

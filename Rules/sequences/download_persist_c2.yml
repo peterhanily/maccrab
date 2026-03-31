@@ -1,0 +1,68 @@
+title: Download to Persistence to C2 Attack Chain
+id: e1f2a3b4-0001-4000-b000-000000000001
+status: experimental
+description: >
+    Detects a complete attack chain: file downloaded to Downloads/tmp,
+    executed as unsigned binary, installs persistence via LaunchAgent/Daemon,
+    then makes outbound network connection (C2 callback).
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/tactics/TA0003/
+    - https://attack.mitre.org/tactics/TA0011/
+tags:
+    - attack.execution
+    - attack.persistence
+    - attack.command_and_control
+    - attack.t1543.001
+    - attack.t1071.001
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: execute
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|contains:
+                  - '/Downloads/'
+                  - '/tmp/'
+                  - '/private/tmp/'
+          filter_signed:
+              SignerType:
+                  - 'apple'
+                  - 'appStore'
+                  - 'devId'
+          condition: selection and not filter_signed
+
+    - id: persist
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection_la:
+              TargetFilename|contains: '/LaunchAgents/'
+              TargetFilename|endswith: '.plist'
+          selection_ld:
+              TargetFilename|contains: '/LaunchDaemons/'
+              TargetFilename|endswith: '.plist'
+          condition: selection_la or selection_ld
+      process: execute.descendant
+
+    - id: c2
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          condition: selection
+      process: execute.descendant
+
+trigger: persist and c2
+level: critical

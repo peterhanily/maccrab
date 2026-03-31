@@ -1,0 +1,40 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app  # or latest available
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Run tests
+        run: swift test
+
+      - name: Validate rule format
+        run: python3 scripts/validate_rules.py Rules/  # validates all YAML rules parse correctly
+
+      - name: Count rules
+        run: |
+          echo "Detection rules: $(find Rules -name '*.yml' | wc -l | tr -d ' ')"
+          echo "By category:"
+          find Rules -name '*.yml' -exec dirname {} \; | xargs -I{} basename {} | sort | uniq -c | sort -rn

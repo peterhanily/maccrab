@@ -1,0 +1,23 @@
+title: Kernel Extension Loaded
+id: d1a2b3c4-0017-4000-a000-000000000017
+status: stable
+description: Detects loading of kernel extensions. On modern macOS, kext loading is highly restricted and may indicate tampering.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1547/006/
+tags:
+    - attack.persistence
+    - attack.privilege_escalation
+    - attack.t1547.006
+logsource:
+    category: driver_load
+    product: macos
+detection:
+    selection_all: true
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection_all and not filter_apple
+falsepositives:
+    - Legitimate third-party kernel extensions (VirtualBox, VMware, audio drivers)
+level: high

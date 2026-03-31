@@ -1,0 +1,48 @@
+title: SSH Connection Followed by Persistence on Remote Host Indicators
+id: e1f2a3b4-0014-4000-b000-000000000014
+status: experimental
+description: >
+    Detects outbound SSH followed by the SSH process writing to persistence
+    locations, indicating automated lateral movement with persistence.
+author: HawkEye Community
+date: 2026/03/31
+tags:
+    - attack.lateral_movement
+    - attack.persistence
+    - attack.t1021.004
+
+type: sequence
+window: 30s
+correlation: process.same
+ordered: true
+
+steps:
+    - id: ssh
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith: '/ssh'
+              CommandLine|contains:
+                  - '10.'
+                  - '192.168.'
+          condition: selection
+
+    - id: script_exec
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              CommandLine|contains:
+                  - 'LaunchAgents'
+                  - 'LaunchDaemons'
+                  - 'crontab'
+                  - '.bashrc'
+                  - '.zshrc'
+          condition: selection
+      process: ssh.descendant
+
+trigger: all
+level: high

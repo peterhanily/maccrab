@@ -1,0 +1,41 @@
+title: Mount or Diskutil noexec Flag Manipulation
+id: d1a2b3c4-0227-4000-a000-000000000227
+status: experimental
+description: Detects mount or diskutil commands that manipulate noexec flags on volumes. Adversaries may remount volumes without noexec to enable execution from those volumes.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_mount:
+        Image|endswith: '/mount'
+        CommandLine|contains:
+            - 'noexec'
+            - 'exec'
+    selection_diskutil:
+        Image|endswith: '/diskutil'
+        CommandLine|contains:
+            - 'mount'
+            - 'unmount'
+            - 'mountDisk'
+    selection_hdiutil:
+        Image|endswith: '/hdiutil'
+        CommandLine|contains:
+            - '-noexec'
+            - 'attach'
+            - 'mount'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: (selection_mount or selection_diskutil or selection_hdiutil) and not filter_system
+falsepositives:
+    - Legitimate disk management operations
+    - Backup and recovery tools
+level: medium

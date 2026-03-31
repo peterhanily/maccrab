@@ -1,0 +1,32 @@
+title: Notification Center Widget Plugin Installed
+id: d1a2b3c4-0218-4000-a000-000000000218
+status: experimental
+description: Detects installation of notification center widget plugins by non-system processes. These plugins run in a persistent context and can be abused for code execution on every login.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Widgets/'
+            - '/Widgets/'
+        TargetFilename|endswith: '.wdgt'
+    filter_apple:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_apple and not filter_signed
+falsepositives:
+    - Legitimate widget installations from trusted developers
+level: medium

@@ -1,0 +1,39 @@
+title: MDM Enrollment Status Check via profiles
+id: d1a2b3c4-0255-4000-a000-000000000255
+status: experimental
+description: Detects use of the profiles command to check MDM enrollment status. Adversaries may enumerate MDM enrollment to determine if the host is managed and what security controls are in place before attempting evasion.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1082/
+tags:
+    - attack.discovery
+    - attack.t1082
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/profiles'
+        CommandLine|contains:
+            - 'status'
+            - 'list'
+            - 'show'
+            - '-P'
+            - '-C'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_mdm:
+        ParentImage|contains:
+            - 'mdmclient'
+            - 'jamf'
+            - 'Mosyle'
+            - 'Kandji'
+    condition: selection and not filter_system and not filter_mdm
+falsepositives:
+    - IT administrators checking enrollment status
+    - Compliance verification scripts
+level: medium

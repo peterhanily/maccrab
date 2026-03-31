@@ -1,0 +1,39 @@
+title: Safari History Database Accessed by Non-Safari Process
+id: d1a2b3c4-0237-4000-a000-000000000237
+status: experimental
+description: Detects access to the Safari browsing history database by a process other than Safari. Adversaries may access browser history for reconnaissance or to identify sensitive websites visited by the user.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1217/
+tags:
+    - attack.credential_access
+    - attack.discovery
+    - attack.t1217
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Safari/History.db'
+            - '/Library/Safari/History.db-shm'
+            - '/Library/Safari/History.db-wal'
+            - '/Safari/Databases'
+    filter_safari:
+        Image|contains:
+            - 'Safari.app'
+            - '/Safari'
+            - 'com.apple.Safari'
+            - 'SafariServices'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_spotlight:
+        Image|contains: 'mdworker'
+    condition: selection and not filter_safari and not filter_system and not filter_spotlight
+falsepositives:
+    - Privacy cleaning tools
+    - Parental control software
+level: high

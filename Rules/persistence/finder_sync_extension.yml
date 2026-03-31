@@ -1,0 +1,30 @@
+title: Finder Sync Extension Installed by Unsigned Process
+id: d1a2b3c4-0217-4000-a000-000000000217
+status: experimental
+description: Detects Finder sync extension plugin installation by an unsigned or ad-hoc signed process. Finder sync extensions can execute code whenever Finder displays a directory, providing persistent code execution.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/Library/Application Support/FileProvider/'
+    selection_alt:
+        TargetFilename|contains: '.appex'
+        TargetFilename|contains: 'FinderSync'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: (selection or selection_alt) and not filter_signed
+falsepositives:
+    - Legitimate cloud storage applications (Dropbox, OneDrive)
+    - Source control extensions
+level: medium

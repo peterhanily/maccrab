@@ -1,0 +1,38 @@
+title: Messages.app Database Accessed by Non-Messages Process
+id: d1a2b3c4-0236-4000-a000-000000000236
+status: stable
+description: Detects access to the Messages (iMessage/SMS) database by a process other than Messages.app. The chat database contains sensitive communications and may be targeted for surveillance.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1005/
+tags:
+    - attack.credential_access
+    - attack.collection
+    - attack.t1005
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Messages/chat.db'
+            - '/Library/Messages/chat.db-shm'
+            - '/Library/Messages/chat.db-wal'
+    filter_messages:
+        Image|contains:
+            - 'Messages.app'
+            - '/Messages'
+            - 'com.apple.MobileSMS'
+            - 'imtransferagent'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_spotlight:
+        Image|contains: 'mdworker'
+    condition: selection and not filter_messages and not filter_system and not filter_spotlight
+falsepositives:
+    - Message backup and export utilities
+    - Forensic analysis tools
+level: critical

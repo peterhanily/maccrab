@@ -1,0 +1,37 @@
+title: Process Listing by Unsigned Process
+id: d1a2b3c4-0123-4000-a000-000000000123
+status: experimental
+description: Detects process listing tools (ps, top) being executed by an unsigned or ad-hoc signed process. Malware often enumerates running processes to identify security tools, sandbox environments, or target processes.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1057/
+tags:
+    - attack.discovery
+    - attack.t1057
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/ps'
+            - '/top'
+    selection_signer:
+        SignerType:
+            - 'unsigned'
+            - 'adHoc'
+    filter_terminal:
+        ParentImage|endswith:
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+    condition: selection and selection_signer and not filter_terminal
+falsepositives:
+    - Unsigned developer tools or scripts that check process status
+    - Custom monitoring agents
+level: medium

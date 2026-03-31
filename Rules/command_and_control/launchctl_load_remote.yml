@@ -1,0 +1,35 @@
+title: launchctl Loading from Remote or Temp Path
+id: d1a2b3c4-0243-4000-a000-000000000243
+status: stable
+description: Detects launchctl load/bootstrap commands referencing plists in temporary directories, Downloads, or mounted volumes. This may indicate loading a malicious LaunchAgent/Daemon from an untrusted location.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1543/001/
+tags:
+    - attack.command_and_control
+    - attack.persistence
+    - attack.t1543.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/launchctl'
+        CommandLine|contains:
+            - 'load'
+            - 'bootstrap'
+    selection_path:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/tmp/'
+            - '/var/folders/'
+            - '/Downloads/'
+            - '/Volumes/'
+            - '/Users/Shared/'
+    condition: selection and selection_path
+falsepositives:
+    - Software installers loading temporary LaunchAgents
+    - Enterprise deployment tools
+level: high

@@ -1,0 +1,29 @@
+title: Dock Tile Plugin Installed
+id: d1a2b3c4-0103-4000-a000-000000000103
+status: experimental
+description: Detects installation of a Dock tile plugin bundle. Dock tile plugins are loaded by the Dock process and execute code whenever the Dock is running, providing a stealthy persistence mechanism.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith: '.docktileplugin'
+    selection_paths:
+        TargetFilename|contains:
+            - '/Library/Application Support/'
+            - '/Contents/PlugIns/'
+            - '.app/'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and selection_paths and not filter_apple
+falsepositives:
+    - Legitimate application installations that include Dock tile plugins
+    - Xcode plugin development
+level: high

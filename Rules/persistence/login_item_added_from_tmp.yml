@@ -1,0 +1,26 @@
+title: Login Item Added from Temporary Directory
+id: d1a2b3c4-0014-4000-a000-000000000014
+status: stable
+description: Detects when a process from a temporary location modifies the BTM (Background Task Management) database or legacy login items.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1547/015/
+tags:
+    - attack.persistence
+    - attack.t1547.015
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_btm:
+        TargetFilename|contains: 'backgrounditems.btm'
+    selection_process:
+        Image|startswith:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/folders/'
+    condition: selection_btm and selection_process
+falsepositives:
+    - Installer packages running from temp directories
+level: high

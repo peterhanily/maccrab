@@ -1,0 +1,39 @@
+title: Hidden File Created in User Directory
+id: d1a2b3c4-0023-4000-a000-000000000023
+status: experimental
+description: Detects creation of hidden files (dot-prefix) in user home directories by non-Apple processes. Malware commonly uses hidden files for staging.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1564/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1564.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith: '/Users/'
+        TargetFilename|re: '/Users/[^/]+/\.[^/]+'
+    filter_apple:
+        SignerType: 'apple'
+    filter_common:
+        TargetFilename|contains:
+            - '/.Trash/'
+            - '/.cache/'
+            - '/.config/'
+            - '/.local/'
+            - '/.npm/'
+            - '/.ssh/'
+            - '/.git/'
+            - '/.docker/'
+            - '/.vscode/'
+            - '/.zsh_history'
+            - '/.bash_history'
+            - '/Library/'
+    condition: selection and not filter_apple and not filter_common
+falsepositives:
+    - Development tools creating dotfiles
+    - Application configuration files
+level: low

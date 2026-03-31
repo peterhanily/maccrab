@@ -1,0 +1,35 @@
+title: Manual DNS-over-HTTPS Query to Bypass Local DNS
+id: d1a2b3c4-0240-4000-a000-000000000240
+status: experimental
+description: Detects curl or wget requests to known DNS-over-HTTPS (DoH) endpoints. Adversaries may use DoH to resolve C2 domains while bypassing local DNS monitoring and filtering.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1071/004/
+tags:
+    - attack.command_and_control
+    - attack.t1071.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+    selection_doh:
+        CommandLine|contains:
+            - 'dns.google/resolve'
+            - 'cloudflare-dns.com/dns-query'
+            - 'dns.quad9.net/dns-query'
+            - 'doh.opendns.com/dns-query'
+            - 'dns.nextdns.io'
+            - 'dns.adguard.com/dns-query'
+            - 'dns-query?name='
+            - 'application/dns-json'
+            - 'application/dns-message'
+    condition: selection_tool and selection_doh
+falsepositives:
+    - Privacy-focused DNS clients
+    - Network troubleshooting scripts
+level: medium

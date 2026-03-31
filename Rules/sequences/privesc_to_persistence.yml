@@ -1,0 +1,47 @@
+title: Privilege Escalation Followed by Persistence Installation
+id: e1f2a3b4-0002-4000-b000-000000000002
+status: experimental
+description: >
+    Detects sudo or privilege escalation followed by creation of system-level
+    persistence (LaunchDaemon, authorization plugin, or kext).
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/tactics/TA0004/
+tags:
+    - attack.privilege_escalation
+    - attack.persistence
+    - attack.t1548.003
+    - attack.t1543.004
+
+type: sequence
+window: 60s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: privesc
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith: '/sudo'
+          condition: selection
+
+    - id: persist
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection_daemon:
+              TargetFilename|startswith: '/Library/LaunchDaemons/'
+          selection_authplugin:
+              TargetFilename|startswith: '/Library/Security/SecurityAgentPlugins/'
+          selection_kext:
+              TargetFilename|startswith: '/Library/Extensions/'
+          condition: selection_daemon or selection_authplugin or selection_kext
+      process: privesc.descendant
+
+trigger: all
+level: critical

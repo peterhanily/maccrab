@@ -1,0 +1,50 @@
+title: Xcode Build Spawns Unexpected Network Connection
+id: e1f2a3b4-0015-4000-b000-000000000015
+status: experimental
+description: >
+    Detects Xcode build processes spawning unexpected outbound network connections,
+    which may indicate supply chain compromise (XCSSET, XcodeGhost style attacks).
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.initial_access
+    - attack.command_and_control
+    - attack.t1195.001
+
+type: sequence
+window: 30s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: xcode_build
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              ParentImage|contains: 'Xcode'
+              Image|endswith:
+                  - '/xcodebuild'
+                  - '/clang'
+                  - '/swiftc'
+                  - '/ld'
+          condition: selection
+
+    - id: network
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          filter_apple:
+              DestinationIp|startswith:
+                  - '17.'
+          condition: selection and not filter_apple
+      process: xcode_build.descendant
+
+trigger: all
+level: high

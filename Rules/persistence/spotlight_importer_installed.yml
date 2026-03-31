@@ -1,0 +1,28 @@
+title: Spotlight Importer Plugin Installed
+id: d1a2b3c4-0104-4000-a000-000000000104
+status: experimental
+description: Detects creation of a Spotlight importer plugin (.mdimporter). These plugins are loaded by the mds process when indexing files and can be abused for persistence since they execute automatically.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith: '.mdimporter'
+    filter_system:
+        TargetFilename|startswith:
+            - '/System/Library/'
+            - '/Applications/'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple
+falsepositives:
+    - Developer-signed applications installing Spotlight importers for custom file types
+    - Homebrew packages that include mdimporter plugins
+level: high

@@ -1,0 +1,40 @@
+title: curl or wget Download and Pipe to Shell
+id: d1a2b3c4-0003-4000-a000-000000000003
+status: experimental
+description: Detects curl or wget output being piped to a shell interpreter, a common malware delivery technique.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://attack.mitre.org/techniques/T1105/
+tags:
+    - attack.execution
+    - attack.t1059.004
+    - attack.command_and_control
+    - attack.t1105
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_shell:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+    selection_pipe:
+        CommandLine|contains:
+            - 'curl '
+            - 'wget '
+    selection_execute:
+        CommandLine|contains:
+            - '| sh'
+            - '| bash'
+            - '| zsh'
+            - '|sh'
+            - '|bash'
+            - '|zsh'
+            - 'curl -s'
+    condition: selection_shell and selection_pipe and selection_execute
+falsepositives:
+    - Legitimate install scripts (Homebrew, rustup, nvm)
+level: high

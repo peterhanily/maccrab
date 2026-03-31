@@ -1,0 +1,75 @@
+title: Discovery to Credential Access to Exfiltration
+id: e1f2a3b4-0003-4000-b000-000000000003
+status: experimental
+description: >
+    Detects a reconnaissance chain: system enumeration commands followed by
+    credential access (keychain/browser data) followed by data archiving or
+    network exfiltration.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/tactics/TA0007/
+    - https://attack.mitre.org/tactics/TA0006/
+    - https://attack.mitre.org/tactics/TA0010/
+tags:
+    - attack.discovery
+    - attack.credential_access
+    - attack.exfiltration
+    - attack.t1082
+    - attack.t1555.001
+
+type: sequence
+window: 300s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: discovery
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/whoami'
+                  - '/id'
+                  - '/sw_vers'
+                  - '/uname'
+                  - '/system_profiler'
+                  - '/dscl'
+          condition: selection
+
+    - id: cred_access
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - 'login.keychain-db'
+                  - '/Cookies'
+                  - '/Login Data'
+                  - '/.ssh/id_'
+          condition: selection
+      process: discovery.descendant
+
+    - id: exfil
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_archive:
+              Image|endswith:
+                  - '/zip'
+                  - '/tar'
+                  - '/ditto'
+          selection_network:
+              Image|endswith:
+                  - '/curl'
+                  - '/wget'
+                  - '/scp'
+          condition: selection_archive or selection_network
+      process: discovery.descendant
+
+trigger: cred_access and exfil
+level: critical

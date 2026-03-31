@@ -1,0 +1,24 @@
+title: Authorization Plugin Installed
+id: d1a2b3c4-0016-4000-a000-000000000016
+status: stable
+description: Detects installation of authorization plugins, which can execute code during the login process with elevated privileges.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1547/002/
+tags:
+    - attack.persistence
+    - attack.privilege_escalation
+    - attack.t1547.002
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith: '/Library/Security/SecurityAgentPlugins/'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_apple
+falsepositives:
+    - Enterprise SSO plugins (Kerberos, smart card)
+level: critical

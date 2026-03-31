@@ -1,0 +1,33 @@
+title: Archive of Sensitive User Directories
+id: d1a2b3c4-00a0-4000-a000-0000000000a0
+status: experimental
+description: Detects zip, tar, or ditto archiving of Desktop, Documents, or Downloads directories, which may indicate data staging for exfiltration.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1560/001/
+tags:
+    - attack.exfiltration
+    - attack.collection
+    - attack.t1560.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/zip'
+            - '/tar'
+            - '/ditto'
+            - '/gzip'
+    selection_target:
+        CommandLine|contains:
+            - '/Desktop'
+            - '/Documents'
+            - '/Downloads'
+            - '/Library/Keychains'
+    condition: selection_tool and selection_target
+falsepositives:
+    - Backup scripts
+    - Migration tools
+level: medium

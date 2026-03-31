@@ -1,0 +1,27 @@
+title: User-Level LaunchAgent Created by Non-User Process
+id: d1a2b3c4-0019-4000-a000-000000000019
+status: experimental
+description: Detects creation of user-level LaunchAgent plists by processes running outside the user context, which may indicate malware persistence.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1543/001/
+tags:
+    - attack.persistence
+    - attack.t1543.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|re: '/Users/[^/]+/Library/LaunchAgents/.*\.plist$'
+    filter_installers:
+        Image|endswith:
+            - '/Installer'
+            - '/installer'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_installers and not filter_apple
+falsepositives:
+    - Application installers creating user launch agents
+level: medium

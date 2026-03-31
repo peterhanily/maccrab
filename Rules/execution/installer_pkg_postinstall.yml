@@ -1,0 +1,36 @@
+title: PKG Installer Post-Install Script Execution
+id: d1a2b3c4-0205-4000-a000-000000000205
+status: experimental
+description: Detects execution of post-install scripts from macOS PKG installers. Malicious PKGs may include post-install scripts that execute payloads with root privileges during installation.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://attack.mitre.org/techniques/T1569/001/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/installer'
+            - '/package_script_service'
+    selection_shell:
+        Image|endswith:
+            - '/bash'
+            - '/sh'
+            - '/zsh'
+            - '/python'
+            - '/python3'
+            - '/perl'
+    filter_apple_pkg:
+        ParentCommandLine|contains:
+            - 'com.apple.'
+    condition: selection_parent and selection_shell and not filter_apple_pkg
+falsepositives:
+    - Legitimate third-party PKG installer scripts
+    - Enterprise software deployment
+level: medium

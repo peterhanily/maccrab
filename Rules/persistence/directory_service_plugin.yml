@@ -1,0 +1,29 @@
+title: Directory Service Plugin Installed
+id: d1a2b3c4-0106-4000-a000-000000000106
+status: stable
+description: Detects creation of a directory service plugin in /Library/DirectoryServices/PlugIns/. These plugins hook into the authentication process and can be used to intercept credentials or maintain persistence with elevated privileges.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1556/
+tags:
+    - attack.persistence
+    - attack.credential_access
+    - attack.t1556
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/DirectoryServices/PlugIns/'
+    selection_type:
+        TargetFilename|endswith:
+            - '.dsplug'
+            - '.bundle'
+            - '.plugin'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and selection_type and not filter_apple
+falsepositives:
+    - Enterprise directory integration plugins (e.g., Centrify, JAMF AD binding)
+level: critical

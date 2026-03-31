@@ -1,0 +1,36 @@
+title: Notes.app Database Accessed by Non-Notes Process
+id: d1a2b3c4-0235-4000-a000-000000000235
+status: experimental
+description: Detects access to the Notes.app SQLite database by a process other than Notes. Adversaries may target Notes databases for stored credentials, personal information, and sensitive notes.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1005/
+tags:
+    - attack.credential_access
+    - attack.collection
+    - attack.t1005
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Group Containers/group.com.apple.notes/'
+            - '/NoteStore.sqlite'
+    filter_notes:
+        Image|contains:
+            - 'Notes.app'
+            - '/Notes'
+            - 'com.apple.notes'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_spotlight:
+        Image|contains: 'mdworker'
+    condition: selection and not filter_notes and not filter_system and not filter_spotlight
+falsepositives:
+    - Backup utilities
+    - Notes migration or export tools
+level: high

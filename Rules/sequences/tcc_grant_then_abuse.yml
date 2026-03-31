@@ -1,0 +1,47 @@
+title: TCC Permission Grant Followed by Immediate Sensitive Access
+id: e1f2a3b4-0005-4000-b000-000000000005
+status: experimental
+description: >
+    Detects a TCC permission being granted followed almost immediately by
+    the granted app accessing sensitive resources, suggesting automated
+    permission manipulation.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.collection
+    - attack.t1562.001
+
+type: sequence
+window: 10s
+correlation: none
+ordered: true
+
+steps:
+    - id: grant
+      logsource:
+          category: tcc_event
+          product: macos
+      detection:
+          selection:
+              TCCAllowed: 'true'
+          condition: selection
+
+    - id: access
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - '/Library/Application Support/com.apple.TCC/'
+                  - '/Library/Keychains/'
+                  - '/Desktop/'
+                  - '/Documents/'
+                  - '/Downloads/'
+          condition: selection
+
+trigger: all
+level: high

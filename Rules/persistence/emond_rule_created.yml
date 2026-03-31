@@ -1,0 +1,24 @@
+title: Event Monitor Daemon Rule Created
+id: d1a2b3c4-0107-4000-a000-000000000107
+status: stable
+description: Detects creation of emond rule files in /etc/emond.d/ or related directories. The Event Monitor daemon (emond) can execute commands when specified events occur, providing an uncommon but effective persistence mechanism.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1546/
+tags:
+    - attack.persistence
+    - attack.t1546
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/emond.d/'
+        TargetFilename|endswith: '.plist'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_apple
+falsepositives:
+    - Legitimate system event monitoring configuration by IT administrators
+level: high

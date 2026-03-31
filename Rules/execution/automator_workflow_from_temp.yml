@@ -1,0 +1,35 @@
+title: Automator Workflow Executed from Temporary Directory
+id: d1a2b3c4-0102-4000-a000-000000000102
+status: experimental
+description: Detects Automator executing workflows from temporary or staging directories, which may indicate a malicious workflow delivered as part of an attack chain.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/002/
+tags:
+    - attack.execution
+    - attack.t1059.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/Automator'
+            - '/automator'
+            - '/AutomatorRunner'
+        CommandLine|contains:
+            - '.workflow'
+            - '.action'
+    selection_path:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/folders/'
+            - '/Downloads/'
+            - '/Shared/'
+    condition: selection and selection_path
+falsepositives:
+    - Users manually running downloaded Automator workflows
+    - Software installers that use Automator as part of their process
+level: high

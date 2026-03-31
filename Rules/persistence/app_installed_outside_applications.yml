@@ -1,0 +1,36 @@
+title: Application Bundle Created Outside /Applications
+id: d1a2b3c4-0214-4000-a000-000000000214
+status: experimental
+description: Detects creation of .app bundles in non-standard locations such as /tmp, /Users/Shared, or hidden directories. Malware commonly stages application bundles outside /Applications to avoid detection.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1036/005/
+tags:
+    - attack.persistence
+    - attack.defense_evasion
+    - attack.t1036.005
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '.app/Contents/MacOS/'
+    filter_applications:
+        TargetFilename|startswith:
+            - '/Applications/'
+            - '/System/Applications/'
+    filter_xcode:
+        TargetFilename|contains:
+            - '/DerivedData/'
+            - '/Build/'
+            - '/Xcode.app/'
+    filter_homebrew:
+        TargetFilename|startswith:
+            - '/usr/local/Cellar/'
+            - '/opt/homebrew/Cellar/'
+    condition: selection and not filter_applications and not filter_xcode and not filter_homebrew
+falsepositives:
+    - Development builds placed in non-standard paths
+    - Application translocation
+level: medium

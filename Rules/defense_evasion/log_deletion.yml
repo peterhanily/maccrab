@@ -1,0 +1,42 @@
+title: System Log Files Deleted
+id: d1a2b3c4-0111-4000-a000-000000000111
+status: stable
+description: Detects deletion or truncation of system log files. Attackers commonly remove log files to cover their tracks after an intrusion.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1070/002/
+tags:
+    - attack.defense_evasion
+    - attack.t1070.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_rm:
+        Image|endswith: '/rm'
+        CommandLine|contains:
+            - '/var/log/'
+            - '/Library/Logs/'
+            - '.log'
+            - '/private/var/log/'
+    selection_truncate:
+        CommandLine|contains:
+            - '> /var/log/'
+            - '> /private/var/log/'
+            - 'truncate /var/log/'
+            - 'truncate /private/var/log/'
+    selection_log_erase:
+        Image|endswith: '/log'
+        CommandLine|contains: 'erase'
+    filter_logrotate:
+        ParentImage|contains:
+            - '/newsyslog'
+            - '/logrotate'
+            - '/aslmanager'
+        SignerType: 'apple'
+    condition: (selection_rm or selection_truncate or selection_log_erase) and not filter_logrotate
+falsepositives:
+    - Log rotation scripts and system maintenance
+    - Disk cleanup utilities
+level: high

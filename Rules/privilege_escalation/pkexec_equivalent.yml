@@ -1,0 +1,35 @@
+title: AuthorizationExecuteWithPrivileges Pattern Detected
+id: d1a2b3c4-0272-4000-a000-000000000272
+status: experimental
+description: Detects patterns associated with the deprecated AuthorizationExecuteWithPrivileges API, including the security execute-with-privileges command and common helper tool installation patterns used for privilege escalation.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1548/004/
+tags:
+    - attack.privilege_escalation
+    - attack.t1548.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_security:
+        Image|endswith: '/security'
+        CommandLine|contains: 'execute-with-privileges'
+    selection_helper_tool:
+        Image|endswith: '/AuthorizationExecuteWithPrivileges'
+    selection_smt:
+        Image|endswith: '/SMJobBless'
+    selection_pattern:
+        CommandLine|contains:
+            - 'AuthorizationCreate'
+            - 'AuthorizationExecuteWithPrivileges'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: (selection_security or selection_helper_tool or selection_smt or selection_pattern) and not filter_system
+falsepositives:
+    - Legitimate privileged helper tool installations
+    - Application updaters using authorized elevation
+level: high

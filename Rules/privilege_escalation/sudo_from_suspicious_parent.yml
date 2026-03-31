@@ -1,0 +1,36 @@
+title: sudo Executed from Suspicious Parent Process
+id: d1a2b3c4-0060-4000-a000-000000000060
+status: experimental
+description: Detects sudo invocation from an unexpected parent process that may indicate privilege escalation.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1548/003/
+tags:
+    - attack.privilege_escalation
+    - attack.t1548.003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/sudo'
+    filter_terminals:
+        ParentImage|endswith:
+            - '/Terminal'
+            - '/iTerm2'
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/tmux'
+            - '/screen'
+            - '/login'
+            - '/sshd'
+    filter_apple:
+        ParentImage|startswith: '/System/'
+    condition: selection and not filter_terminals and not filter_apple
+falsepositives:
+    - IDE integrated terminals
+    - Automation scripts
+level: medium

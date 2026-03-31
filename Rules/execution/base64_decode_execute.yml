@@ -1,0 +1,39 @@
+title: Base64 Decode Piped to Shell Execution
+id: d1a2b3c4-0202-4000-a000-000000000202
+status: stable
+description: Detects base64-encoded content being decoded and piped directly to a shell interpreter. This is a common obfuscation technique used to hide malicious commands from static analysis.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://attack.mitre.org/techniques/T1027/
+tags:
+    - attack.execution
+    - attack.defense_evasion
+    - attack.t1059.004
+    - attack.t1027
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_base64_pipe:
+        CommandLine|contains:
+            - 'base64 -d | sh'
+            - 'base64 -d | bash'
+            - 'base64 -d | zsh'
+            - 'base64 --decode | sh'
+            - 'base64 --decode | bash'
+            - 'base64 --decode | zsh'
+            - 'base64 -D | sh'
+            - 'base64 -D | bash'
+            - 'base64 -D | zsh'
+    selection_echo_decode:
+        CommandLine|contains:
+            - "echo * | base64 -d | /bin/"
+            - "echo * | base64 --decode | /bin/"
+            - "printf * | base64 -d | /bin/"
+    condition: selection_base64_pipe or selection_echo_decode
+falsepositives:
+    - CI/CD pipeline scripts decoding configuration
+    - Legitimate build scripts
+level: high

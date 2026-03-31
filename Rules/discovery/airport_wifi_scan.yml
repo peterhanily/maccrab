@@ -1,0 +1,32 @@
+title: Wi-Fi Network Scanning via airport Utility
+id: d1a2b3c4-0121-4000-a000-000000000121
+status: experimental
+description: Detects use of the macOS airport command-line utility to scan for nearby Wi-Fi networks. This can be used for wireless reconnaissance to identify nearby networks, access points, and potential targets.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1016/
+tags:
+    - attack.discovery
+    - attack.t1016
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/airport'
+        CommandLine|contains:
+            - '-s'
+            - '--scan'
+            - 'scan'
+            - '-I'
+            - '--getinfo'
+            - 'sniff'
+    filter_system:
+        ParentImage|startswith: '/System/'
+        SignerType: 'apple'
+    condition: selection and not filter_system
+falsepositives:
+    - Network administrators troubleshooting Wi-Fi connectivity
+    - Wi-Fi diagnostics scripts
+level: low

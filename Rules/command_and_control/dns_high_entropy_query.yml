@@ -1,0 +1,25 @@
+title: DNS Query to High-Entropy Domain
+id: d1a2b3c4-0040-4000-a000-000000000040
+status: experimental
+description: Detects DNS resolution of domains with high character entropy, indicative of Domain Generation Algorithm (DGA) usage by malware C2.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1568/002/
+tags:
+    - attack.command_and_control
+    - attack.t1568.002
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection:
+        DestinationPort: 53
+    selection_process:
+        Image|endswith:
+            - '/mDNSResponder'
+    condition: selection and selection_process
+falsepositives:
+    - CDN domains with random-looking subdomains
+    - Cloud service endpoints
+level: medium

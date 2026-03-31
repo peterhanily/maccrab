@@ -1,0 +1,33 @@
+title: Chrome Login Data Database Copied by Non-Chrome Process
+id: d1a2b3c4-0115-4000-a000-000000000115
+status: stable
+description: Detects access to Chrome's Login Data SQLite database by a process other than Chrome itself. This database contains saved passwords and is a common target for credential-stealing malware.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1555/003/
+tags:
+    - attack.credential_access
+    - attack.t1555.003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/Google/Chrome/'
+        TargetFilename|endswith:
+            - '/Login Data'
+            - '/Login Data-journal'
+            - '/Login Data For Account'
+    filter_chrome:
+        Image|contains:
+            - '/Google Chrome'
+            - '/Chrome Helper'
+    filter_system:
+        Image|startswith: '/System/'
+        SignerType: 'apple'
+    condition: selection and not filter_chrome and not filter_system
+falsepositives:
+    - Browser data migration tools
+    - Legitimate backup utilities backing up Chrome profiles
+level: high

@@ -1,0 +1,41 @@
+title: Calendar Invitation Handler Spawning Processes
+id: d1a2b3c4-0296-4000-a000-000000000296
+status: experimental
+description: Detects the Calendar app or CalendarAgent spawning unexpected child processes after processing ICS files. Malicious calendar invitations with crafted URLs or attachments may trigger code execution.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1566/001/
+tags:
+    - attack.initial_access
+    - attack.t1566.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|contains:
+            - 'Calendar.app'
+            - 'CalendarAgent'
+            - 'calendaragent'
+            - 'com.apple.CalendarAgent'
+    selection_child:
+        Image|endswith:
+            - '/bash'
+            - '/sh'
+            - '/zsh'
+            - '/python'
+            - '/python3'
+            - '/curl'
+            - '/wget'
+            - '/osascript'
+            - '/open'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection_parent and selection_child and not filter_system
+falsepositives:
+    - Calendar plugins with legitimate automation
+    - Calendar-based workflow triggers
+level: high

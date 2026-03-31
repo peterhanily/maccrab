@@ -1,0 +1,32 @@
+title: Network Interface Enumeration by Unsigned Process
+id: d1a2b3c4-0051-4000-a000-000000000051
+status: experimental
+description: Detects network interface and configuration enumeration by unsigned processes.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1016/
+tags:
+    - attack.discovery
+    - attack.t1016
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/ifconfig'
+            - '/networksetup'
+            - '/airport'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    filter_system:
+        ParentImage|startswith: '/System/'
+    condition: selection and not filter_signed and not filter_system
+falsepositives:
+    - System administration scripts
+    - Network monitoring tools
+level: low

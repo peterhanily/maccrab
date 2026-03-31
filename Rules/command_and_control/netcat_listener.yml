@@ -1,0 +1,30 @@
+title: Netcat Listener Established
+id: d1a2b3c4-0241-4000-a000-000000000241
+status: stable
+description: Detects netcat (nc/ncat) started in listening mode. Adversaries commonly use netcat listeners for reverse shells, file transfers, and backdoor access.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1095/
+tags:
+    - attack.command_and_control
+    - attack.execution
+    - attack.t1095
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/nc'
+            - '/ncat'
+            - '/netcat'
+    selection_listen:
+        CommandLine|contains:
+            - ' -l'
+            - ' --listen'
+    condition: selection and selection_listen
+falsepositives:
+    - Network debugging and troubleshooting
+    - Development testing of network services
+level: high

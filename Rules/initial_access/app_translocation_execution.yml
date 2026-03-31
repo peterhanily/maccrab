@@ -1,0 +1,30 @@
+title: Application Executed from App Translocation Path
+id: d1a2b3c4-0129-4000-a000-000000000129
+status: experimental
+description: Detects execution of processes from the macOS App Translocation path (/private/var/folders/.../AppTranslocation/). App Translocation is a Gatekeeper feature that moves quarantined apps to a randomized read-only path. Execution from this path indicates an application was run directly from a DMG or archive without being moved to /Applications, which is common with malicious payloads.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.initial_access
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|contains: '/AppTranslocation/'
+    filter_known_installers:
+        Image|endswith:
+            - '/Install.app/Contents/MacOS/Install'
+            - '/Installer.app/Contents/MacOS/Installer'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_known_installers and not filter_signed
+falsepositives:
+    - Users running legitimate applications directly from mounted DMGs before moving them to Applications
+    - Developer-signed portable applications
+level: medium

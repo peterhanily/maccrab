@@ -1,0 +1,42 @@
+title: Rsync to External Destination from Sensitive Directories
+id: d1a2b3c4-0282-4000-a000-000000000282
+status: experimental
+description: Detects rsync transferring data from sensitive directories to external or remote destinations. Adversaries may use rsync for efficient bulk data exfiltration that blends with normal system activity.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1048/002/
+tags:
+    - attack.exfiltration
+    - attack.t1048.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/rsync'
+    selection_sensitive:
+        CommandLine|contains:
+            - '/Documents/'
+            - '/Desktop/'
+            - '/Downloads/'
+            - '/.ssh/'
+            - '/Keychains/'
+            - '/Library/Mail/'
+            - '/Library/Messages/'
+    selection_remote:
+        CommandLine|contains:
+            - '::'
+            - '@'
+            - 'rsync://'
+    filter_timemachine:
+        ParentImage|contains: 'backupd'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and selection_sensitive and selection_remote and not filter_timemachine and not filter_system
+falsepositives:
+    - Legitimate backup operations to remote servers
+    - File synchronization workflows
+level: high

@@ -1,0 +1,26 @@
+title: Startup Script Created in /etc/rc.d or /etc/rc.local
+id: d1a2b3c4-0213-4000-a000-000000000213
+status: stable
+description: Detects creation of startup scripts in /etc/rc.d/ or /etc/rc.local. Although deprecated on modern macOS, these paths may still be processed on some configurations and can serve as a persistence mechanism.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1037/004/
+tags:
+    - attack.persistence
+    - attack.t1037.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith:
+            - '/etc/rc.d/'
+            - '/etc/rc.local'
+            - '/private/etc/rc.d/'
+            - '/private/etc/rc.local'
+    condition: selection
+falsepositives:
+    - Legacy system administration scripts
+    - Very old configuration management tools
+level: high

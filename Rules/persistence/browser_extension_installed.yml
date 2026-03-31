@@ -1,0 +1,43 @@
+title: Browser Extension Installed by Non-Browser Process
+id: d1a2b3c4-0215-4000-a000-000000000215
+status: experimental
+description: Detects browser extension files being created by a process other than the browser itself. Malicious extensions can be sideloaded to steal credentials, inject content, or monitor browsing.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1176/
+tags:
+    - attack.persistence
+    - attack.t1176
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_chrome:
+        TargetFilename|contains: '/Extensions/'
+        TargetFilename|endswith:
+            - '.crx'
+            - '/manifest.json'
+    selection_safari:
+        TargetFilename|contains: '/Safari/Extensions/'
+        TargetFilename|endswith: '.safariextz'
+    selection_firefox:
+        TargetFilename|contains: '/extensions/'
+        TargetFilename|endswith: '.xpi'
+    filter_browsers:
+        Image|contains:
+            - 'Google Chrome'
+            - 'Safari'
+            - 'Firefox'
+            - 'Chromium'
+            - 'Microsoft Edge'
+            - 'Brave Browser'
+    filter_apple:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: (selection_chrome or selection_safari or selection_firefox) and not filter_browsers and not filter_apple
+falsepositives:
+    - Extension management utilities
+    - Enterprise browser extension deployment
+level: high

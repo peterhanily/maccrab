@@ -1,0 +1,39 @@
+title: PATH Environment Variable Manipulation in Shell Profiles
+id: d1a2b3c4-0229-4000-a000-000000000229
+status: experimental
+description: Detects modification of shell profile files that may manipulate the PATH environment variable. Adversaries may prepend malicious directories to PATH to hijack command execution.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1574/007/
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.t1574.007
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '/.zshrc'
+            - '/.bashrc'
+            - '/.bash_profile'
+            - '/.zshenv'
+            - '/.zprofile'
+            - '/.profile'
+            - '/etc/paths'
+            - '/etc/paths.d/'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_homebrew:
+        Image|startswith:
+            - '/usr/local/Homebrew/'
+            - '/opt/homebrew/'
+    condition: selection and not filter_system and not filter_homebrew
+falsepositives:
+    - User shell configuration changes
+    - Package manager installations modifying PATH
+level: low

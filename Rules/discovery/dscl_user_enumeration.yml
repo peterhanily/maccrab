@@ -1,0 +1,39 @@
+title: User Enumeration via dscl
+id: d1a2b3c4-0122-4000-a000-000000000122
+status: experimental
+description: Detects the use of dscl (Directory Service command line) to enumerate local or directory users, groups, and account details. Commonly used in post-exploitation reconnaissance.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1033/
+tags:
+    - attack.discovery
+    - attack.t1033
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/dscl'
+    selection_enum:
+        CommandLine|contains:
+            - 'list /Users'
+            - 'list /Groups'
+            - 'read /Users/'
+            - 'readall /Users'
+            - '-list /Local/Default/Users'
+            - '-readall /Search/Users'
+            - 'read /Groups/'
+            - 'list /Search/Users'
+            - 'AuthenticationAuthority'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+        SignerType: 'apple'
+    condition: selection and selection_enum and not filter_system
+falsepositives:
+    - System administration scripts
+    - MDM enrollment and compliance checks
+    - Directory service troubleshooting
+level: medium

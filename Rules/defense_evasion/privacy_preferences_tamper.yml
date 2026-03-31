@@ -1,0 +1,30 @@
+title: Direct Write to Privacy Preferences Plist
+id: d1a2b3c4-0224-4000-a000-000000000224
+status: stable
+description: Detects direct modification of privacy preferences plist files outside the normal TCC framework. Adversaries may tamper with these files to grant themselves permissions without user consent.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Application Support/com.apple.TCC/'
+            - '/Library/Preferences/com.apple.security'
+            - 'com.apple.TCC.db'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    condition: selection and not filter_system
+falsepositives:
+    - MDM profile installation modifying privacy settings
+    - System migration tools
+level: critical

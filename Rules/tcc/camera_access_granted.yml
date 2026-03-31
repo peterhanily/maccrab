@@ -1,0 +1,39 @@
+title: Camera TCC Permission Granted to Non-Standard Application
+id: d1a2b3c4-0127-4000-a000-000000000127
+status: experimental
+description: Detects when Camera TCC permission is granted to applications other than well-known video conferencing and communication tools. Unauthorized camera access may indicate spyware or surveillance activity.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1125/
+tags:
+    - attack.collection
+    - attack.t1125
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService: 'kTCCServiceCamera'
+        TCCAllowed: 'true'
+    filter_known_apps:
+        TCCClient|contains:
+            - 'com.apple.FaceTime'
+            - 'com.apple.Photo'
+            - 'us.zoom.xos'
+            - 'com.microsoft.teams'
+            - 'com.tinyspeck.slackmacgap'
+            - 'com.skype.'
+            - 'com.google.Chrome'
+            - 'org.mozilla.firefox'
+            - 'com.apple.Safari'
+            - 'com.webex.'
+            - 'com.discord'
+    filter_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_known_apps and not filter_signed
+falsepositives:
+    - New or niche video conferencing tools
+    - Streaming applications (OBS)
+    - Photo booth or video recording applications
+level: high

@@ -1,0 +1,33 @@
+title: SMB Share Enumeration via smbutil
+id: d1a2b3c4-0251-4000-a000-000000000251
+status: experimental
+description: Detects use of smbutil to enumerate SMB shares on network hosts. Adversaries may use smbutil for network share discovery to identify accessible file shares for lateral movement or data collection.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1135/
+tags:
+    - attack.discovery
+    - attack.t1135
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/smbutil'
+        CommandLine|contains:
+            - 'view'
+            - 'lookup'
+            - 'status'
+            - 'statshares'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_finder:
+        ParentImage|contains: 'Finder.app'
+    condition: selection and not filter_system and not filter_finder
+falsepositives:
+    - Network troubleshooting by administrators
+    - File sharing utilities
+level: medium

@@ -1,0 +1,28 @@
+title: Microphone Access by Unsigned Process
+id: d1a2b3c4-0125-4000-a000-000000000125
+status: stable
+description: Detects microphone TCC access granted to or requested by an unsigned or ad-hoc signed process. Unsigned processes accessing the microphone are highly suspicious and may indicate spyware or surveillance malware.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1123/
+tags:
+    - attack.collection
+    - attack.t1123
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService: 'kTCCServiceMicrophone'
+        TCCAllowed: 'true'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and not filter_signed
+falsepositives:
+    - Locally compiled audio recording or conferencing tools
+    - Developer testing of audio applications
+level: critical

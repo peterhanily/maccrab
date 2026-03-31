@@ -1,0 +1,30 @@
+title: QuickLook Plugin Installed
+id: d1a2b3c4-0105-4000-a000-000000000105
+status: experimental
+description: Detects creation of a QuickLook generator plugin (.qlgenerator). QuickLook plugins are loaded by the QuickLook framework when previewing files and can be abused as a persistence mechanism.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith: '.qlgenerator'
+    filter_system:
+        TargetFilename|startswith:
+            - '/System/Library/QuickLook/'
+            - '/Library/QuickLook/'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_system and not filter_signed
+falsepositives:
+    - Legitimate developer-signed QuickLook plugins for custom file previews
+    - Homebrew cask installations
+level: medium

@@ -1,0 +1,46 @@
+title: SSH to Internal Network from Unsigned Process
+id: d1a2b3c4-00b0-4000-a000-0000000000b0
+status: experimental
+description: Detects SSH connections to internal network addresses initiated by unsigned or ad-hoc signed processes.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1021/004/
+tags:
+    - attack.lateral_movement
+    - attack.t1021.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/ssh'
+    selection_internal:
+        CommandLine|contains:
+            - '10.'
+            - '192.168.'
+            - '172.16.'
+            - '172.17.'
+            - '172.18.'
+            - '172.19.'
+            - '172.20.'
+            - '172.21.'
+            - '172.22.'
+            - '172.23.'
+            - '172.24.'
+            - '172.25.'
+            - '172.26.'
+            - '172.27.'
+            - '172.28.'
+            - '172.29.'
+            - '172.30.'
+            - '172.31.'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and selection_internal and not filter_signed
+falsepositives:
+    - Legitimate SSH from unsigned development tools
+level: medium

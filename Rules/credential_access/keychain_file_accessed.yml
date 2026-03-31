@@ -1,0 +1,31 @@
+title: Keychain Database File Accessed by Non-System Process
+id: d1a2b3c4-0034-4000-a000-000000000034
+status: experimental
+description: Detects direct file access to keychain database files by processes other than the security subsystem.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1555/001/
+tags:
+    - attack.credential_access
+    - attack.t1555.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '/login.keychain-db'
+            - '/System.keychain'
+    filter_apple:
+        SignerType: 'apple'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    condition: selection and not filter_apple and not filter_system
+falsepositives:
+    - Keychain management applications
+    - Backup tools
+level: high

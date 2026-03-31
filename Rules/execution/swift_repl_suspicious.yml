@@ -1,0 +1,43 @@
+title: Swift REPL Execution from Non-Xcode Parent
+id: d1a2b3c4-0101-4000-a000-000000000101
+status: experimental
+description: Detects the Swift REPL being invoked by a process other than Xcode or related developer tools. Attackers may abuse the Swift REPL to execute arbitrary code on macOS without compiling a binary.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.execution
+    - attack.t1059
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/swift'
+            - '/swift-frontend'
+        CommandLine|contains:
+            - 'swift repl'
+            - 'swift -e'
+            - 'swift -'
+    filter_xcode:
+        ParentImage|contains:
+            - '/Xcode'
+            - '/XCBBuildService'
+            - '/xcrun'
+            - '/xcodebuild'
+            - '/SwiftPM'
+            - '/sourcekit-lsp'
+    filter_terminal:
+        ParentImage|endswith:
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+    condition: selection and not filter_xcode and not filter_terminal
+falsepositives:
+    - Swift Playgrounds application
+    - CI/CD build agents invoking Swift directly
+level: medium

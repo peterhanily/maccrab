@@ -1,0 +1,52 @@
+title: Shell Spawn to Reverse Shell Connection
+id: e1f2a3b4-0007-4000-b000-000000000007
+status: stable
+description: >
+    Detects a shell being spawned from a non-terminal parent, followed by
+    an outbound network connection — indicative of reverse shell establishment.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.command_and_control
+    - attack.t1059.004
+
+type: sequence
+window: 10s
+correlation: process.same
+ordered: true
+
+steps:
+    - id: shell
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/sh'
+                  - '/bash'
+                  - '/zsh'
+          filter_terminals:
+              ParentImage|endswith:
+                  - '/Terminal'
+                  - '/iTerm2'
+                  - '/login'
+                  - '/sshd'
+                  - '/tmux'
+          condition: selection and not filter_terminals
+
+    - id: connect
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          condition: selection
+      process: shell.same
+
+trigger: all
+level: critical

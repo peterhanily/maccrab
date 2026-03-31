@@ -1,0 +1,60 @@
+title: AppleScript Downloads and Executes Payload
+id: e1f2a3b4-0010-4000-b000-000000000010
+status: experimental
+description: >
+    Detects osascript spawning a shell that downloads content via curl/wget
+    and then executes something — common macOS social engineering chain.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1059/002/
+tags:
+    - attack.execution
+    - attack.command_and_control
+    - attack.t1059.002
+    - attack.t1105
+
+type: sequence
+window: 30s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: osascript
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith: '/osascript'
+          condition: selection
+
+    - id: download
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/curl'
+                  - '/wget'
+          condition: selection
+      process: osascript.descendant
+
+    - id: execute
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/sh'
+                  - '/bash'
+                  - '/python'
+                  - '/python3'
+          condition: selection
+      process: osascript.descendant
+      after: download
+
+trigger: download and execute
+level: critical

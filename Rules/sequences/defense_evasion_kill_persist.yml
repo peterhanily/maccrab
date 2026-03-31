@@ -1,0 +1,52 @@
+title: Security Tool Killed Then Persistence Installed
+id: e1f2a3b4-0011-4000-b000-000000000011
+status: stable
+description: >
+    Detects killing of a security tool process followed by persistence
+    installation — attacker disabling defenses before establishing foothold.
+author: HawkEye Community
+date: 2026/03/31
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.t1562.001
+    - attack.t1543.001
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: kill_security
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/kill'
+                  - '/killall'
+              CommandLine|contains:
+                  - 'LuLu'
+                  - 'BlockBlock'
+                  - 'OverSight'
+                  - 'Santa'
+                  - 'hawkeyed'
+          condition: selection
+
+    - id: persist
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - '/LaunchAgents/'
+                  - '/LaunchDaemons/'
+              TargetFilename|endswith: '.plist'
+          condition: selection
+      process: kill_security.descendant
+
+trigger: all
+level: critical

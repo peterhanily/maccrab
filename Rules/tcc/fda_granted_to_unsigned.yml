@@ -1,0 +1,27 @@
+title: Full Disk Access Granted to Unsigned Application
+id: d1a2b3c4-0080-4000-a000-000000000080
+status: stable
+description: Detects when Full Disk Access (FDA) TCC permission is granted to an unsigned or ad-hoc signed application.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService: 'kTCCServiceSystemPolicyAllFiles'
+        TCCAllowed: 'true'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and not filter_signed
+falsepositives:
+    - Legitimate developer tools requiring FDA
+level: critical

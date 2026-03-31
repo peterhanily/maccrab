@@ -1,0 +1,50 @@
+title: Dropper Execution with Self-Cleanup
+id: e1f2a3b4-0008-4000-b000-000000000008
+status: experimental
+description: >
+    Detects a binary executing from a temporary location and then deleting
+    itself — classic dropper behavior.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1070/004/
+tags:
+    - attack.defense_evasion
+    - attack.execution
+    - attack.t1070.004
+
+type: sequence
+window: 60s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: execute
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|startswith:
+                  - '/tmp/'
+                  - '/private/tmp/'
+                  - '/var/folders/'
+          condition: selection
+
+    - id: cleanup
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|startswith:
+                  - '/tmp/'
+                  - '/private/tmp/'
+                  - '/var/folders/'
+          filter_action:
+              FileAction: 'delete'
+          condition: selection and filter_action
+      process: execute.descendant
+
+trigger: all
+level: high

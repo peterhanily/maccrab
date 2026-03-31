@@ -1,0 +1,30 @@
+title: Binary Executed from Temporary Directory
+id: d1a2b3c4-0006-4000-a000-000000000006
+status: experimental
+description: Detects execution of binaries from /tmp, /private/tmp, or /var/folders staging areas.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.execution
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|startswith:
+            - '/tmp/'
+            - '/private/tmp/'
+    filter_apple:
+        SignerType: 'apple'
+    filter_xcode:
+        Image|contains:
+            - 'Xcode'
+            - 'DerivedData'
+    condition: selection and not filter_apple and not filter_xcode
+falsepositives:
+    - Build systems using /tmp for compilation
+    - Installer packages
+level: medium

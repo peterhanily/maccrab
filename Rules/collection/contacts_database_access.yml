@@ -1,0 +1,37 @@
+title: Contacts Database Accessed by Non-Contacts Process
+id: d1a2b3c4-0261-4000-a000-000000000261
+status: experimental
+description: Detects access to the AddressBook/Contacts database by processes other than Contacts.app. Adversaries may harvest contact data for social engineering, spamming, or reconnaissance.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1005/
+tags:
+    - attack.collection
+    - attack.t1005
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Application Support/AddressBook/'
+            - '/AddressBook-v22.abcddb'
+            - '/Library/Contacts/'
+    filter_contacts:
+        Image|contains:
+            - 'Contacts.app'
+            - '/Contacts'
+            - 'AddressBookSourceSync'
+            - 'contactsd'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_spotlight:
+        Image|contains: 'mdworker'
+    condition: selection and not filter_contacts and not filter_system and not filter_spotlight
+falsepositives:
+    - Address book sync tools
+    - CRM integration applications
+level: high

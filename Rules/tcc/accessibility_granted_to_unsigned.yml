@@ -1,0 +1,27 @@
+title: Accessibility Permission Granted to Unsigned Application
+id: d1a2b3c4-0081-4000-a000-000000000081
+status: stable
+description: Detects when Accessibility TCC permission is granted to an unsigned application. Accessibility access enables keylogging and UI control.
+author: HawkEye Community
+date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1056/001/
+tags:
+    - attack.credential_access
+    - attack.t1056.001
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService: 'kTCCServiceAccessibility'
+        TCCAllowed: 'true'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and not filter_signed
+falsepositives:
+    - Legitimate assistive technology applications
+level: critical

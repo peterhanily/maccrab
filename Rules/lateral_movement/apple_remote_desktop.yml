@@ -1,0 +1,42 @@
+title: Apple Remote Desktop Management Activation
+id: d1a2b3c4-0290-4000-a000-000000000290
+status: stable
+description: Detects activation or configuration changes to Apple Remote Desktop (ARD) remote management. Adversaries may enable ARD to establish remote access to the compromised host or use it for lateral movement.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1021/
+tags:
+    - attack.lateral_movement
+    - attack.t1021
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_kickstart:
+        Image|endswith: '/kickstart'
+        CommandLine|contains:
+            - '-activate'
+            - '-configure'
+            - '-restart'
+            - '-agent'
+    selection_systemsetup:
+        Image|endswith: '/systemsetup'
+        CommandLine|contains:
+            - '-setremotelogin'
+            - 'remotelogin'
+    selection_defaults:
+        Image|endswith: '/defaults'
+        CommandLine|contains:
+            - 'com.apple.RemoteManagement'
+            - 'com.apple.RemoteDesktop'
+            - 'ARDAgent'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: (selection_kickstart or selection_systemsetup or selection_defaults) and not filter_system
+falsepositives:
+    - IT administrators enabling remote management
+    - Enterprise deployment workflows
+level: high

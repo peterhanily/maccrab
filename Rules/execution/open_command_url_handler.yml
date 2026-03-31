@@ -1,0 +1,34 @@
+title: Open Command URL Handler Abuse
+id: d1a2b3c4-0201-4000-a000-000000000201
+status: experimental
+description: Detects use of the macOS open command with URL schemes to launch applications or execute actions. Adversaries may abuse custom URL handlers to trigger application execution or bypass Gatekeeper.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1204/001/
+tags:
+    - attack.execution
+    - attack.t1204.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/open'
+    selection_url_scheme:
+        CommandLine|contains:
+            - '://'
+            - '--url'
+    filter_http:
+        CommandLine|contains:
+            - 'https://developer.apple.com'
+            - 'https://support.apple.com'
+    filter_parent:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and selection_url_scheme and not filter_http and not filter_parent
+falsepositives:
+    - Legitimate URL handler invocations from scripts
+    - Browser-related open calls
+level: medium

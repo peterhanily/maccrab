@@ -1,0 +1,45 @@
+title: Cloud Service Token Files Accessed
+id: d1a2b3c4-0233-4000-a000-000000000233
+status: experimental
+description: Detects access to cloud service credential and token files for gcloud, Azure CLI, kubectl, and other cloud platforms. Adversaries may steal these tokens for unauthorized cloud access.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1528/
+tags:
+    - attack.credential_access
+    - attack.t1528
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/.config/gcloud/credentials'
+            - '/.config/gcloud/access_tokens'
+            - '/.azure/accessTokens'
+            - '/.azure/msal_token_cache'
+            - '/.kube/config'
+            - '/.docker/config.json'
+            - '/.terraform.d/credentials'
+            - '/.config/gh/hosts.yml'
+            - '/.npmrc'
+            - '/.pypirc'
+    filter_cloud_cli:
+        Image|contains:
+            - '/gcloud'
+            - '/az'
+            - '/kubectl'
+            - '/docker'
+            - '/terraform'
+            - '/gh'
+            - '/npm'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_cloud_cli and not filter_system
+falsepositives:
+    - IDE plugins reading cloud configurations
+    - Legitimate cloud management tools
+level: high
