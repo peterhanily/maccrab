@@ -219,6 +219,11 @@ public actor SyslogOutput {
             msg += " | \(name)"
         }
 
+        // Sanitize the message to strip any credentials that may appear
+        // in process paths or names (defensive; command lines are the
+        // primary vector but future changes could introduce others).
+        msg = CommandSanitizer.sanitize(msg)
+
         return "<\(pri)>1 \(timestamp) \(hostname) hawkeye - - \(structuredData) \(msg)"
     }
 

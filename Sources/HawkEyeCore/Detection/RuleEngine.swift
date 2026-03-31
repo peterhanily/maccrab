@@ -122,11 +122,30 @@ public actor RuleEngine {
     /// All rules keyed by ID for individual lookups.
     private var allRules: [String: CompiledRule] = [:]
 
+    /// Cache of compiled `NSRegularExpression` instances keyed by pattern string.
+    /// Avoids recompiling the same regex pattern on every evaluation.
+    private var regexCache: [String: NSRegularExpression] = [:]
+
     private let logger = Logger(subsystem: "com.hawkeye.detection", category: "RuleEngine")
 
     // MARK: Initialization
 
     public init() {}
+
+    // MARK: Regex caching
+
+    /// Returns a compiled `NSRegularExpression` for the given pattern, using the
+    /// cache to avoid recompilation. Returns `nil` if the pattern is invalid.
+    private func cachedRegex(for pattern: String) -> NSRegularExpression? {
+        if let cached = regexCache[pattern] {
+            return cached
+        }
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        regexCache[pattern] = regex
+        return regex
+    }
 
     // MARK: Rule loading
 
@@ -171,6 +190,16 @@ public actor RuleEngine {
             }
         }
 
+        // Pre-compile all regex patterns so that evaluateModifier never has to
+        // compile on the hot path.
+        for rule in allRules.values {
+            for predicate in rule.predicates where predicate.modifier == .regex {
+                for pattern in predicate.values {
+                    _ = cachedRegex(for: pattern)
+                }
+            }
+        }
+
         logger.info("Loaded \(loaded) rules from \(directory.path)")
         return loaded
     }
@@ -185,6 +214,7 @@ public actor RuleEngine {
 
         ruleIndex.removeAll()
         allRules.removeAll()
+        regexCache.removeAll()
 
         let count = try loadRules(from: directory)
 
@@ -338,7 +368,7 @@ public actor RuleEngine {
 
         case .regex:
             return values.contains { pattern in
-                (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]))
+                cachedRegex(for: pattern)
                     .map { regex in
                         regex.firstMatch(
                             in: fieldValue,

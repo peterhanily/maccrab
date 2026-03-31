@@ -27,7 +27,7 @@ func esStringToSwift(_ token: es_string_token_t) -> String {
         count: token.length
     )
     return String(bytes: bufferPointer, encoding: .utf8)
-        ?? String(cString: data) // fallback: treat as null-terminated C string
+        ?? String(repeating: "\u{FFFD}", count: token.length) // fallback: replacement characters for non-UTF8 data
 }
 
 /// Extract the path string from an `es_file_t` pointer.
@@ -69,10 +69,10 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
     }()
 
     let codeSignature = CodeSignatureInfo(
-        signingId: signingId.isEmpty ? nil : signingId,
-        teamId: teamId.isEmpty ? nil : teamId,
         signerType: signerType,
-        cdHash: nil
+        teamId: teamId.isEmpty ? nil : teamId,
+        signingId: signingId.isEmpty ? nil : signingId,
+        flags: p.codesigning_flags
     )
 
     // Build a minimal ancestor entry from the responsible process if available.
@@ -84,21 +84,27 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
         // we cannot resolve name/path here — enrichment fills those in later.
         ancestors.append(ProcessAncestor(
             pid: ppid,
-            name: nil,
-            path: nil
+            executable: "",
+            name: ""
         ))
     }
 
     return ProcessInfo(
         pid: pid,
         ppid: ppid,
+        rpid: 0,
         name: processName,
-        path: executablePath,
-        args: nil,           // Populated separately for exec events
-        uid: Int(uid),
-        userName: nil,       // Resolved later by enrichment
+        executable: executablePath,
+        commandLine: "",
+        args: [],            // Populated separately for exec events
+        workingDirectory: "",
+        userId: uid,
+        userName: "",        // Resolved later by enrichment
+        groupId: 0,
+        startTime: Date(),
         codeSignature: codeSignature,
-        ancestors: ancestors.isEmpty ? nil : ancestors
+        ancestors: ancestors,
+        isPlatformBinary: p.is_platform_binary
     )
 }
 

@@ -9,6 +9,7 @@
 // catch it even without a specific rule.
 
 import Foundation
+import Darwin
 import os.log
 
 // MARK: - BaselineEngine
@@ -794,6 +795,9 @@ public actor BaselineEngine {
             try? fm.removeItem(atPath: tempPath)
             throw BaselineEngineError.fileWriteFailed(error.localizedDescription)
         }
+
+        // Restrict baseline file permissions: owner-only read/write (rw-------).
+        chmod(persistPath, 0o600)
 
         lastSaved = Date()
 

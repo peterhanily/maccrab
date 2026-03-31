@@ -280,6 +280,10 @@ public actor SequenceEngine {
     /// Reference to the process lineage graph for ancestry checks.
     private let lineage: ProcessLineage
 
+    /// Cache of compiled `NSRegularExpression` instances keyed by pattern string.
+    /// Avoids recompiling the same regex pattern on every evaluation.
+    private var regexCache: [String: NSRegularExpression] = [:]
+
     private let logger = Logger(subsystem: "com.hawkeye.detection", category: "SequenceEngine")
 
     // MARK: - Initialization
@@ -301,6 +305,21 @@ public actor SequenceEngine {
         self.lineage = lineage
         self.maxPartialMatches = maxPartialMatches
         self.sweepInterval = sweepInterval
+    }
+
+    // MARK: - Regex Caching
+
+    /// Returns a compiled `NSRegularExpression` for the given pattern, using the
+    /// cache to avoid recompilation. Returns `nil` if the pattern is invalid.
+    private func cachedRegex(for pattern: String) -> NSRegularExpression? {
+        if let cached = regexCache[pattern] {
+            return cached
+        }
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        regexCache[pattern] = regex
+        return regex
     }
 
     // MARK: - Rule Loading
@@ -354,6 +373,18 @@ public actor SequenceEngine {
                 loaded += 1
             } catch {
                 logger.error("Failed to load sequence rule from \(file.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+
+        // Pre-compile all regex patterns so that evaluateModifier never has to
+        // compile on the hot path.
+        for rule in rules.values {
+            for step in rule.steps {
+                for predicate in step.predicates where predicate.modifier == .regex {
+                    for pattern in predicate.values {
+                        _ = cachedRegex(for: pattern)
+                    }
+                }
             }
         }
 
@@ -738,7 +769,7 @@ public actor SequenceEngine {
             return values.contains { fieldLower.hasSuffix($0.lowercased()) }
         case .regex:
             return values.contains { pattern in
-                (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]))
+                cachedRegex(for: pattern)
                     .map { regex in
                         regex.firstMatch(
                             in: fieldValue,

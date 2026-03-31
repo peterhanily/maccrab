@@ -145,7 +145,7 @@ public actor WebhookOutput {
             "path": event.process.executable,
             "pid": event.process.pid,
             "ppid": event.process.ppid,
-            "command_line": event.process.commandLine,
+            "command_line": CommandSanitizer.sanitize(event.process.commandLine),
         ]
         if let sig = event.process.codeSignature {
             processDict["signer"] = sig.signerType.rawValue

@@ -222,7 +222,7 @@ public final class ESCollector: @unchecked Sendable {
     private func muteSelf() {
         guard let client = self.client else { return }
 
-        let selfPath = ProcessInfo.processInfo.arguments.first ?? CommandLine.arguments.first ?? ""
+        let selfPath = Foundation.ProcessInfo.processInfo.arguments.first ?? CommandLine.arguments.first ?? ""
         guard !selfPath.isEmpty else { return }
 
         let rc = es_mute_path_literal(client, selfPath)
@@ -256,7 +256,7 @@ public final class ESCollector: @unchecked Sendable {
 
         // Source process
         guard let esProcess = msg.process else { return nil }
-        var processInfo = processFromESProcess(esProcess)
+        let processInfo = processFromESProcess(esProcess)
 
         switch msg.event_type {
 
@@ -267,24 +267,40 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_EXEC:
             let execEvent = msg.event.exec
             let args = argsFromExecMessage(message)
-            processInfo.args = args
+            let commandLine = args.joined(separator: " ")
 
             // The target of exec is in execEvent.target — use it if available.
             var targetInfo = processInfo
             if let target = execEvent.target {
                 targetInfo = processFromESProcess(target)
-                targetInfo.args = args
             }
+
+            // Reconstruct ProcessInfo with args and commandLine populated.
+            let enrichedTarget = ProcessInfo(
+                pid: targetInfo.pid,
+                ppid: targetInfo.ppid,
+                rpid: targetInfo.rpid,
+                name: targetInfo.name,
+                executable: targetInfo.executable,
+                commandLine: commandLine,
+                args: args,
+                workingDirectory: targetInfo.workingDirectory,
+                userId: targetInfo.userId,
+                userName: targetInfo.userName,
+                groupId: targetInfo.groupId,
+                startTime: targetInfo.startTime,
+                codeSignature: targetInfo.codeSignature,
+                ancestors: targetInfo.ancestors,
+                architecture: targetInfo.architecture,
+                isPlatformBinary: targetInfo.isPlatformBinary
+            )
 
             return Event(
                 timestamp: timestamp,
                 eventCategory: .process,
                 eventType: .start,
                 eventAction: "exec",
-                process: targetInfo,
-                parent: processInfo,
-                file: nil,
-                network: nil,
+                process: enrichedTarget,
                 severity: .informational
             )
 
@@ -300,9 +316,6 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .start,
                 eventAction: "fork",
                 process: childInfo ?? processInfo,
-                parent: processInfo,
-                file: nil,
-                network: nil,
                 severity: .informational
             )
 
@@ -313,9 +326,6 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .end,
                 eventAction: "exit",
                 process: processInfo,
-                parent: nil,
-                file: nil,
-                network: nil,
                 severity: .informational
             )
 
@@ -344,7 +354,6 @@ public final class ESCollector: @unchecked Sendable {
 
             let fileInfo = FileInfo(
                 path: path,
-                name: (path as NSString).lastPathComponent,
                 action: .create
             )
             return Event(
@@ -353,9 +362,7 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .creation,
                 eventAction: "create",
                 process: processInfo,
-                parent: nil,
                 file: fileInfo,
-                network: nil,
                 severity: .informational
             )
 
@@ -365,7 +372,6 @@ public final class ESCollector: @unchecked Sendable {
             let path = esFileToPath(target)
             let fileInfo = FileInfo(
                 path: path,
-                name: (path as NSString).lastPathComponent,
                 action: .write
             )
             return Event(
@@ -374,9 +380,7 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .change,
                 eventAction: "write",
                 process: processInfo,
-                parent: nil,
                 file: fileInfo,
-                network: nil,
                 severity: .informational
             )
 
@@ -388,7 +392,6 @@ public final class ESCollector: @unchecked Sendable {
             let path = esFileToPath(target)
             let fileInfo = FileInfo(
                 path: path,
-                name: (path as NSString).lastPathComponent,
                 action: .close
             )
             return Event(
@@ -397,9 +400,7 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .change,
                 eventAction: "close_modified",
                 process: processInfo,
-                parent: nil,
                 file: fileInfo,
-                network: nil,
                 severity: .informational
             )
 
@@ -424,7 +425,6 @@ public final class ESCollector: @unchecked Sendable {
 
             let fileInfo = FileInfo(
                 path: destPath,
-                name: (destPath as NSString).lastPathComponent,
                 action: .rename,
                 sourcePath: sourcePath
             )
@@ -434,9 +434,7 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .change,
                 eventAction: "rename",
                 process: processInfo,
-                parent: nil,
                 file: fileInfo,
-                network: nil,
                 severity: .informational
             )
 
@@ -446,7 +444,6 @@ public final class ESCollector: @unchecked Sendable {
             let path = esFileToPath(target)
             let fileInfo = FileInfo(
                 path: path,
-                name: (path as NSString).lastPathComponent,
                 action: .delete
             )
             return Event(
@@ -455,9 +452,7 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .deletion,
                 eventAction: "unlink",
                 process: processInfo,
-                parent: nil,
                 file: fileInfo,
-                network: nil,
                 severity: .informational
             )
 
@@ -467,9 +462,12 @@ public final class ESCollector: @unchecked Sendable {
 
         case ES_EVENT_TYPE_NOTIFY_SIGNAL:
             let signalEvent = msg.event.signal
-            var targetInfo: ProcessInfo?
+            var enrichments: [String: String] = [:]
             if let target = signalEvent.target {
-                targetInfo = processFromESProcess(target)
+                let targetInfo = processFromESProcess(target)
+                enrichments["target.pid"] = String(targetInfo.pid)
+                enrichments["target.executable"] = targetInfo.executable
+                enrichments["target.name"] = targetInfo.name
             }
             return Event(
                 timestamp: timestamp,
@@ -477,11 +475,8 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .info,
                 eventAction: "signal(\(signalEvent.sig))",
                 process: processInfo,
-                parent: nil,
-                file: nil,
-                network: nil,
-                severity: .informational,
-                targetProcess: targetInfo
+                enrichments: enrichments,
+                severity: .informational
             )
 
         // -----------------------------------------------------------------
@@ -497,9 +492,7 @@ public final class ESCollector: @unchecked Sendable {
                 eventType: .start,
                 eventAction: "kextload",
                 process: processInfo,
-                parent: nil,
-                file: FileInfo(path: kextId, name: kextId, action: .create),
-                network: nil,
+                file: FileInfo(path: kextId, action: .create),
                 severity: .medium
             )
 

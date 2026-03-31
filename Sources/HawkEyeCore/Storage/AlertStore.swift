@@ -6,6 +6,7 @@
 // Thread-safe via Swift actor isolation.
 
 import Foundation
+import Darwin
 import SQLite3
 
 // MARK: - AlertStoreError
@@ -63,9 +64,16 @@ public actor AlertStore {
             withIntermediateDirectories: true,
             attributes: nil
         )
+        // Restrict directory permissions: owner-only access (rwx------).
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: hawkeyeDir.path
+        )
 
         self.databasePath = hawkeyeDir.appendingPathComponent("events.db").path
         try openDatabase()
+        // Restrict database file permissions: owner-only read/write (rw-------).
+        chmod(databasePath, 0o600)
         try createSchema()
         try prepareStatements()
     }

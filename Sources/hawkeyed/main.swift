@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import HawkEyeCore
 import os.log
 
@@ -18,35 +19,73 @@ struct HawkEyeDaemon {
 
         // Paths
         let supportDir = NSHomeDirectory() + "/Library/Application Support/HawkEye"
-        let rulesDir: String
         let compiledRulesDir = supportDir + "/compiled_rules"
 
-        // Determine rules directory: check bundled first, then user-specified
-        if let envRules = ProcessInfo.processInfo.environment["HAWKEYE_RULES_DIR"] {
-            rulesDir = envRules
-        } else {
-            // Default: look for Rules/ next to the executable
-            let execDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().path
-            let bundledRules = execDir + "/Rules"
-            if FileManager.default.fileExists(atPath: bundledRules) {
-                rulesDir = bundledRules
-            } else {
-                rulesDir = supportDir + "/rules"
+        // Determine rules directory using a fixed, secure search order.
+        // Environment variables are NOT used because a non-root user could
+        // influence what the root daemon loads.
+        let rulesDir: String
+        let fm = FileManager.default
+
+        /// Validate that a directory is safe to load rules from:
+        /// it must be owned by root (or the current user) and not world-writable.
+        func isSecureDirectory(_ path: String) -> Bool {
+            guard let attrs = try? fm.attributesOfItem(atPath: path) else {
+                return false
             }
+            let ownerUID = (attrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+            let currentUID = getuid()
+            guard ownerUID == 0 || ownerUID == currentUID else {
+                logger.warning("Rules directory \(path) is owned by uid \(ownerUID), expected 0 or \(currentUID). Skipping.")
+                return false
+            }
+            if let posix = (attrs[.posixPermissions] as? NSNumber)?.intValue {
+                // Check world-writable bit (o+w = 0o002)
+                if posix & 0o002 != 0 {
+                    logger.warning("Rules directory \(path) is world-writable (mode \(String(posix, radix: 8))). Skipping.")
+                    return false
+                }
+            }
+            return true
+        }
+
+        // Fixed search order:
+        // 1. /Library/HawkEye/rules/ (system-wide, root-owned)
+        // 2. <executable_dir>/Rules/ (bundled with binary)
+        // 3. ~/Library/Application Support/HawkEye/rules/ (user rules, only if not root)
+        let systemRulesDir = "/Library/HawkEye/rules"
+        let execDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().path
+        let bundledRulesDir = execDir + "/Rules"
+        let userRulesDir = supportDir + "/rules"
+
+        if fm.fileExists(atPath: systemRulesDir) && isSecureDirectory(systemRulesDir) {
+            rulesDir = systemRulesDir
+        } else if fm.fileExists(atPath: bundledRulesDir) && isSecureDirectory(bundledRulesDir) {
+            rulesDir = bundledRulesDir
+        } else if getuid() != 0 && fm.fileExists(atPath: userRulesDir) && isSecureDirectory(userRulesDir) {
+            rulesDir = userRulesDir
+        } else {
+            // Fallback: use the system rules path even if it doesn't exist yet,
+            // so the daemon can start and rules can be added later.
+            rulesDir = systemRulesDir
         }
 
         logger.info("Rules directory: \(rulesDir)")
         logger.info("Support directory: \(supportDir)")
 
-        // Create support directories
-        try? FileManager.default.createDirectory(
+        // Create support directories with restrictive permissions
+        try? fm.createDirectory(
             atPath: supportDir,
             withIntermediateDirectories: true
         )
-        try? FileManager.default.createDirectory(
+        // Restrict support directory: owner-only access (rwx------).
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: supportDir)
+
+        try? fm.createDirectory(
             atPath: compiledRulesDir,
             withIntermediateDirectories: true
         )
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: compiledRulesDir)
 
         // Initialize components
         let eventStore: EventStore
@@ -389,6 +428,8 @@ struct HawkEyeDaemon {
                             handle.closeFile()
                         } else {
                             FileManager.default.createFile(atPath: logPath, contents: (jsonString + "\n").data(using: .utf8))
+                            // Restrict alert log permissions: owner-only read/write (rw-------).
+                            chmod(logPath, 0o600)
                         }
                     }
 
