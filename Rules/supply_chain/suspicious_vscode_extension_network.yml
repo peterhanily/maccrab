@@ -3,9 +3,9 @@ id: d1a2b3c4-0317-4000-a000-000000000017
 status: experimental
 description: >
     Detects VS Code extension host processes making outbound network connections to
-    non-Microsoft, non-GitHub IP addresses. The GlassWorm worm (Jan-March 2026) used
-    Solana blockchain transactions and Google Calendar events as C2 channels, and
-    connected to attacker IPs 217.69.3.218 and 199.247.10.166.
+    non-Microsoft, non-GitHub IP addresses on unusual ports. The GlassWorm worm
+    (Jan-March 2026) used Solana blockchain transactions and Google Calendar events
+    as C2 channels.
 author: HawkEye Community
 date: 2026/03/30
 references:
@@ -21,36 +21,19 @@ logsource:
     category: network_connection
     product: macos
 detection:
-    selection_process:
+    selection:
         Image|contains:
             - 'Code Helper (Plugin)'
             - 'extensionHost'
             - 'code-server'
-    selection_external:
-        DestinationIsPrivate: 'false'
-    filter_microsoft:
-        DestinationIp|startswith:
-            - '13.'
-            - '20.'
-            - '40.'
-            - '52.'
-            - '104.'
-            - '168.'
-    filter_github:
-        DestinationIp|startswith:
-            - '140.82.'
-            - '185.199.'
-            - '192.30.'
-    filter_known_ports:
         DestinationPort:
-            - 443
-            - 80
-    glassworm_iocs:
-        DestinationIp:
-            - '217.69.3.218'
-            - '199.247.10.166'
-    condition: (selection_process and selection_external and not filter_microsoft and not filter_github and not filter_known_ports) or glassworm_iocs
+            - 8080
+            - 8443
+            - 4444
+            - 1337
+            - 9999
+            - 5555
+    condition: selection
 falsepositives:
-    - VS Code extensions that connect to third-party APIs (linters, formatters, AI assistants)
-    - Extensions connecting to self-hosted services
+    - VS Code extensions that connect to local dev servers on unusual ports
 level: medium

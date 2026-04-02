@@ -180,9 +180,7 @@ public actor RuleEngine {
         for file in jsonFiles {
             do {
                 let data = try Data(contentsOf: file)
-                var rule = try decoder.decode(CompiledRule.self, from: data)
-                // Freshly loaded rules default to enabled.
-                rule.enabled = true
+                let rule = try decoder.decode(CompiledRule.self, from: data)
                 allRules[rule.id] = rule
                 ruleIndex[rule.logsource.category, default: []].append(rule)
                 loaded += 1

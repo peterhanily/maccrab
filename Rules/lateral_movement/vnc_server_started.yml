@@ -13,32 +13,20 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection_screensharing:
-        Image|endswith:
-            - '/screensharingd'
-            - '/ScreensharingAgent'
-    selection_vnc_binary:
-        Image|contains:
+    selection:
+        CommandLine|contains:
+            - 'screensharingd'
+            - 'ScreensharingAgent'
             - 'vncserver'
             - 'x11vnc'
             - 'tightvnc'
             - 'RealVNC'
-    selection_launchctl:
-        Image|endswith: '/launchctl'
-        CommandLine|contains:
             - 'com.apple.screensharing'
             - 'com.apple.ScreenSharing'
-    selection_defaults:
-        Image|endswith: '/defaults'
-        CommandLine|contains:
-            - 'com.apple.ScreenSharing'
             - 'VNCAlwaysStartOnConsole'
-    filter_system:
-        ParentImage|startswith:
-            - '/System/'
-            - '/usr/libexec/'
-    condition: (selection_screensharing or selection_vnc_binary or selection_launchctl or selection_defaults) and not filter_system
+    condition: selection
 falsepositives:
+    - System-initiated screen sharing (parent under /System/ or /usr/libexec/)
     - Legitimate screen sharing sessions
     - Remote support tools
 level: high

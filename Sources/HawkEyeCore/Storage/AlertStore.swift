@@ -60,15 +60,14 @@ public actor AlertStore {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        // Directory: root-owned, world-readable (daemon writes, app reads).
-        try FileManager.default.setAttributes(
+        // Best-effort permission setting (may fail if not owner).
+        try? FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: hawkeyeDir.path
         )
 
         self.databasePath = hawkeyeDir.appendingPathComponent("events.db").path
         try openDatabase()
-        // Database: root-owned, world-readable (app needs read access).
         chmod(databasePath, 0o644)
         try createSchema()
         try prepareStatements()
@@ -92,19 +91,27 @@ public actor AlertStore {
 
     // MARK: - Database Setup
 
+    /// Whether this store was opened in read-only mode.
+    private var isReadOnly = false
+
     private func openDatabase() throws {
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        let rc = sqlite3_open_v2(databasePath, &db, flags, nil)
+        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        var rc = sqlite3_open_v2(databasePath, &db, flags, nil)
+        if rc != SQLITE_OK {
+            if let handle = db { sqlite3_close(handle); db = nil }
+            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            rc = sqlite3_open_v2(databasePath, &db, flags, nil)
+            isReadOnly = true
+        }
         guard rc == SQLITE_OK else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             throw AlertStoreError.databaseOpenFailed(msg)
         }
 
-        // Enable WAL journal mode for concurrent reads during writes.
-        try execute("PRAGMA journal_mode = WAL")
-        // Use NORMAL synchronous for a good balance of safety and speed.
-        try execute("PRAGMA synchronous = NORMAL")
-        // Enable foreign keys.
+        if !isReadOnly {
+            try execute("PRAGMA journal_mode = WAL")
+            try execute("PRAGMA synchronous = NORMAL")
+        }
         try execute("PRAGMA foreign_keys = ON")
     }
 
@@ -122,8 +129,7 @@ public actor AlertStore {
                 description TEXT,
                 mitre_tactics TEXT,
                 mitre_techniques TEXT,
-                suppressed INTEGER DEFAULT 0,
-                FOREIGN KEY(event_id) REFERENCES events(id)
+                suppressed INTEGER DEFAULT 0
             )
             """
 

@@ -13,23 +13,15 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection_security:
-        Image|endswith: '/security'
-        CommandLine|contains: 'execute-with-privileges'
-    selection_helper_tool:
-        Image|endswith: '/AuthorizationExecuteWithPrivileges'
-    selection_smt:
-        Image|endswith: '/SMJobBless'
-    selection_pattern:
+    selection:
         CommandLine|contains:
+            - 'execute-with-privileges'
             - 'AuthorizationCreate'
             - 'AuthorizationExecuteWithPrivileges'
-    filter_system:
-        ParentImage|startswith:
-            - '/System/'
-            - '/usr/libexec/'
-    condition: (selection_security or selection_helper_tool or selection_smt or selection_pattern) and not filter_system
+            - 'SMJobBless'
+    condition: selection
 falsepositives:
+    - System processes with parent under /System/ or /usr/libexec/
     - Legitimate privileged helper tool installations
     - Application updaters using authorized elevation
 level: high

@@ -12,7 +12,9 @@ let package = Package(
         .executable(name: "hawkctl", targets: ["hawkctl"]),
         .executable(name: "HawkEyeApp", targets: ["HawkEyeApp"]),
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-testing.git", branch: "release/6.2"),
+    ],
     targets: [
         .target(
             name: "HawkEyeCore",
@@ -39,7 +41,10 @@ let package = Package(
         ),
         .testTarget(
             name: "HawkEyeCoreTests",
-            dependencies: ["HawkEyeCore"]
+            dependencies: [
+                "HawkEyeCore",
+                .product(name: "Testing", package: "swift-testing"),
+            ]
         ),
     ]
 )

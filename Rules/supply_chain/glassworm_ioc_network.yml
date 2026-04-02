@@ -1,0 +1,27 @@
+title: GlassWorm VS Code Worm IOC Network Connection
+id: d1a2b3c4-0317-4000-a000-000000000018
+status: stable
+description: >
+    Detects outbound network connections to known GlassWorm worm C2 infrastructure
+    IP addresses. GlassWorm (Jan-March 2026) spread through VS Code extensions using
+    Solana blockchain transactions and Google Calendar events as C2 channels.
+author: HawkEye Community
+date: 2026/03/30
+references:
+    - https://attack.mitre.org/techniques/T1071/
+    - https://www.sentinelone.com/labs/glassworm-vscode-worm-2026/
+tags:
+    - attack.command_and_control
+    - attack.t1071
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection:
+        DestinationIp:
+            - '217.69.3.218'
+            - '199.247.10.166'
+    condition: selection
+falsepositives:
+    - Unlikely; these are known malicious IPs
+level: critical

@@ -18,8 +18,17 @@ struct HawkEyeDaemon {
             print("      For full coverage: sudo hawkeyed")
         }
 
-        // Paths — use a shared system location so both daemon and app can access
-        let supportDir = "/Library/Application Support/HawkEye"
+        // Paths — root uses system location (shared with app), non-root uses user directory
+        let supportDir: String
+        if isRoot {
+            supportDir = "/Library/Application Support/HawkEye"
+        } else {
+            let userAppSupport = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first!.appendingPathComponent("HawkEye").path
+            supportDir = userAppSupport
+        }
         let compiledRulesDir = supportDir + "/compiled_rules"
 
         // Determine rules directory using a fixed, secure search order.
@@ -96,8 +105,8 @@ struct HawkEyeDaemon {
         var collector: ESCollector? = nil
 
         do {
-            eventStore = try EventStore()
-            alertStore = try AlertStore()
+            eventStore = try EventStore(directory: supportDir)
+            alertStore = try AlertStore(directory: supportDir)
         } catch {
             logger.error("Failed to initialize storage: \(error.localizedDescription)")
             fputs("Error: Failed to initialize database: \(error)\n", stderr)

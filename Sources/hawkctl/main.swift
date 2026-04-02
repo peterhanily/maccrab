@@ -1,6 +1,19 @@
 import Foundation
 import HawkEyeCore
 
+/// Resolve the HawkEye data directory. Uses the system location if readable,
+/// otherwise falls back to the user's Application Support.
+private func hawkeyeDataDir() -> String {
+    let systemDir = "/Library/Application Support/HawkEye"
+    if FileManager.default.isReadableFile(atPath: systemDir + "/events.db") {
+        return systemDir
+    }
+    return FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask
+    ).first!.appendingPathComponent("HawkEye").path
+}
+
 @main
 struct HawkCtl {
     static func main() async {
@@ -223,7 +236,7 @@ struct HawkCtl {
 
     static func tailEvents(limit: Int) async {
         do {
-            let store = try EventStore()
+            let store = try EventStore(directory: hawkeyeDataDir())
             let events = try await store.events(since: Date.distantPast, category: nil, limit: limit)
 
             print("Last \(events.count) events:")
@@ -251,7 +264,7 @@ struct HawkCtl {
 
     static func searchEvents(query: String) async {
         do {
-            let store = try EventStore()
+            let store = try EventStore(directory: hawkeyeDataDir())
             let events = try await store.search(text: query, limit: 50)
 
             print("Search results for '\(query)' (\(events.count) matches):")
@@ -269,9 +282,9 @@ struct HawkCtl {
 
     static func eventStats() async {
         do {
-            let store = try EventStore()
+            let store = try EventStore(directory: hawkeyeDataDir())
             let totalCount = try await store.count()
-            let last24h = try await store.events(since: Date().addingTimeInterval(-86400), limit: Int.max)
+            let last24h = try await store.events(since: Date().addingTimeInterval(-86400), limit: 1_000_000)
             print("Event Statistics:")
             print("══════════════════════════════════════")
             print("  Total events:     \(totalCount)")
@@ -283,7 +296,7 @@ struct HawkCtl {
 
     static func listAlerts(limit: Int) async {
         do {
-            let store = try AlertStore()
+            let store = try AlertStore(directory: hawkeyeDataDir())
             let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
 
             if alerts.isEmpty {

@@ -13,30 +13,21 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection_rm:
-        Image|endswith: '/rm'
+    selection:
         CommandLine|contains:
-            - '/var/log/'
-            - '/Library/Logs/'
-            - '.log'
-            - '/private/var/log/'
-    selection_truncate:
-        CommandLine|contains:
+            - 'rm /var/log/'
+            - 'rm /private/var/log/'
+            - 'rm /Library/Logs/'
+            - 'rm -rf /var/log/'
+            - 'rm -rf /private/var/log/'
+            - 'rm -rf /Library/Logs/'
             - '> /var/log/'
             - '> /private/var/log/'
             - 'truncate /var/log/'
             - 'truncate /private/var/log/'
-    selection_log_erase:
-        Image|endswith: '/log'
-        CommandLine|contains: 'erase'
-    filter_logrotate:
-        ParentImage|contains:
-            - '/newsyslog'
-            - '/logrotate'
-            - '/aslmanager'
-        SignerType: 'apple'
-    condition: (selection_rm or selection_truncate or selection_log_erase) and not filter_logrotate
+            - 'log erase'
+    condition: selection
 falsepositives:
-    - Log rotation scripts and system maintenance
+    - Log rotation scripts and system maintenance (newsyslog, logrotate, aslmanager with Apple signature)
     - Disk cleanup utilities
 level: high
