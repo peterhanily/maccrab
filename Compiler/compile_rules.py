@@ -871,6 +871,7 @@ def compile_rule(rule_data: dict, source_file: str):
         "predicates": predicates,
         "condition": condition_type,
         "falsepositives": falsepositives,
+        "enabled": True,
     }
 
 

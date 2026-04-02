@@ -892,13 +892,13 @@ public actor SequenceEngine {
         case "network.destination.ip", "DestinationIp":
             return event.network?.destinationIp
         case "network.destination.port", "DestinationPort":
-            return event.network?.destinationPort.map { String($0) }
+            return event.network.map { String($0.destinationPort) }
         case "network.destination.hostname", "DestinationHostname":
             return event.network?.destinationHostname
         case "network.source.ip", "SourceIp":
             return event.network?.sourceIp
         case "network.source.port", "SourcePort":
-            return event.network?.sourcePort.map { String($0) }
+            return event.network.map { String($0.sourcePort) }
         case "network.direction":
             return event.network?.direction.rawValue
         case "network.transport":

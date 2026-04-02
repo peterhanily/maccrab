@@ -224,7 +224,7 @@ struct HawkCtl {
     static func tailEvents(limit: Int) async {
         do {
             let store = try EventStore()
-            let events = await store.events(since: Date.distantPast, category: nil, limit: limit)
+            let events = try await store.events(since: Date.distantPast, category: nil, limit: limit)
 
             print("Last \(events.count) events:")
             print(String(repeating: "─", count: 100))
@@ -237,7 +237,7 @@ struct HawkCtl {
                 if let file = event.file {
                     detail = file.path
                 } else if let net = event.network {
-                    detail = "\(net.destinationIp ?? "?"):\(net.destinationPort ?? 0)"
+                    detail = "\(net.destinationIp):\(net.destinationPort)"
                 } else {
                     detail = event.process.executable
                 }
@@ -252,7 +252,7 @@ struct HawkCtl {
     static func searchEvents(query: String) async {
         do {
             let store = try EventStore()
-            let events = await store.search(text: query, limit: 50)
+            let events = try await store.search(text: query, limit: 50)
 
             print("Search results for '\(query)' (\(events.count) matches):")
             print(String(repeating: "─", count: 100))
@@ -270,12 +270,12 @@ struct HawkCtl {
     static func eventStats() async {
         do {
             let store = try EventStore()
-            let stats = await store.statistics()
-            print("Event Statistics (last 24h):")
+            let totalCount = try await store.count()
+            let last24h = try await store.events(since: Date().addingTimeInterval(-86400), limit: Int.max)
+            print("Event Statistics:")
             print("══════════════════════════════════════")
-            for (key, value) in stats.sorted(by: { $0.key < $1.key }) {
-                print("  \(key): \(value)")
-            }
+            print("  Total events:     \(totalCount)")
+            print("  Events (last 24h): \(last24h.count)")
         } catch {
             print("Error reading stats: \(error)")
         }
@@ -284,7 +284,7 @@ struct HawkCtl {
     static func listAlerts(limit: Int) async {
         do {
             let store = try AlertStore()
-            let alerts = await store.alerts(since: Date.distantPast, limit: limit)
+            let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
 
             if alerts.isEmpty {
                 print("No alerts recorded.")
@@ -307,8 +307,8 @@ struct HawkCtl {
 
                 print("\(severityIcon) \(time) \(alert.ruleTitle)")
                 print("   Process: \(alert.processName ?? "?") (\(alert.processPath ?? "?"))")
-                if !alert.mitreTechniques.isEmpty {
-                    print("   MITRE: \(alert.mitreTechniques)")
+                if let techniques = alert.mitreTechniques, !techniques.isEmpty {
+                    print("   MITRE: \(techniques)")
                 }
                 print()
             }

@@ -304,27 +304,31 @@ public actor NetworkCollector {
 
             if kind == SOCKINFO_TCP {
                 let tcpInfo = socketInfo.psi.soi_proto.pri_tcp
-                localPort = ntohs(UInt16(tcpInfo.tcpsi_ini.insi_lport))
-                remotePort = ntohs(UInt16(tcpInfo.tcpsi_ini.insi_fport))
+                localPort = UInt16(bigEndian: UInt16(tcpInfo.tcpsi_ini.insi_lport))
+                remotePort = UInt16(bigEndian: UInt16(tcpInfo.tcpsi_ini.insi_fport))
                 localIp = extractIPAddress(
-                    from: tcpInfo.tcpsi_ini.insi_laddr,
+                    addr4: tcpInfo.tcpsi_ini.insi_laddr.ina_46.i46a_addr4,
+                    addr6: tcpInfo.tcpsi_ini.insi_laddr.ina_6,
                     family: family
                 )
                 remoteIp = extractIPAddress(
-                    from: tcpInfo.tcpsi_ini.insi_faddr,
+                    addr4: tcpInfo.tcpsi_ini.insi_faddr.ina_46.i46a_addr4,
+                    addr6: tcpInfo.tcpsi_ini.insi_faddr.ina_6,
                     family: family
                 )
             } else {
                 // UDP: use soi_proto.pri_in
                 let inInfo = socketInfo.psi.soi_proto.pri_in
-                localPort = ntohs(UInt16(inInfo.insi_lport))
-                remotePort = ntohs(UInt16(inInfo.insi_fport))
+                localPort = UInt16(bigEndian: UInt16(inInfo.insi_lport))
+                remotePort = UInt16(bigEndian: UInt16(inInfo.insi_fport))
                 localIp = extractIPAddress(
-                    from: inInfo.insi_laddr,
+                    addr4: inInfo.insi_laddr.ina_46.i46a_addr4,
+                    addr6: inInfo.insi_laddr.ina_6,
                     family: family
                 )
                 remoteIp = extractIPAddress(
-                    from: inInfo.insi_faddr,
+                    addr4: inInfo.insi_faddr.ina_46.i46a_addr4,
+                    addr6: inInfo.insi_faddr.ina_6,
                     family: family
                 )
             }
@@ -366,16 +370,17 @@ public actor NetworkCollector {
 
     // MARK: - IP Address Extraction
 
-    /// Extracts a human-readable IP address string from an `in_sockaddr`
-    /// union using `inet_ntop`.
+    /// Extracts a human-readable IP address string from the IPv4/IPv6 address
+    /// components using `inet_ntop`.
     ///
     /// - Parameters:
-    ///   - addr: The `in_sockaddr` union from the socket info structure.
+    ///   - addr4: The `in_addr` (IPv4) component from the socket info structure.
+    ///   - addr6: The `in6_addr` (IPv6) component from the socket info structure.
     ///   - family: `AF_INET` or `AF_INET6`.
     /// - Returns: Dotted-decimal (IPv4) or colon-hex (IPv6) string.
-    private func extractIPAddress(from addr: in_sockaddr, family: Int32) -> String {
+    private func extractIPAddress(addr4: in_addr, addr6: in6_addr, family: Int32) -> String {
         if family == AF_INET {
-            var addr4 = addr.ina_46.i46a_addr4
+            var addr4 = addr4
             var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
             guard let result = inet_ntop(
                 AF_INET,
@@ -387,7 +392,7 @@ public actor NetworkCollector {
             }
             return String(cString: result)
         } else {
-            var addr6 = addr.ina_6
+            var addr6 = addr6
             var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
             guard let result = inet_ntop(
                 AF_INET6,

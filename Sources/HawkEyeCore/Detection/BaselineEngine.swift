@@ -412,8 +412,7 @@ public actor BaselineEngine {
         self.detectedNovelEdges = persisted.novelEdges.compactMap { ProcessEdge.fromSerializationKey($0) }
 
         logger.notice(
-            "Loaded baseline: state=\(persisted.state.rawValue, privacy: .public), "
-            + "\(self.edges.count) edges, \(self.anomaliesDetected) anomalies"
+            "Loaded baseline: state=\(persisted.state.rawValue, privacy: .public), \(self.edges.count) edges, \(self.anomaliesDetected) anomalies"
         )
     }
 
@@ -487,8 +486,7 @@ public actor BaselineEngine {
         }
 
         logger.info(
-            "Configuration updated: sensitivity=\(newConfig.sensitivity.rawValue, privacy: .public), "
-            + "enabled=\(newConfig.enabled)"
+            "Configuration updated: sensitivity=\(newConfig.sensitivity.rawValue, privacy: .public), enabled=\(newConfig.enabled)"
         )
     }
 
@@ -522,8 +520,7 @@ public actor BaselineEngine {
         let elapsed = now.timeIntervalSince(learningStarted)
         if elapsed >= config.learningPeriod {
             logger.notice(
-                "Learning period complete (\(Int(elapsed / 86400)) days). "
-                + "Transitioning to active detection with \(self.edges.count) baseline edges."
+                "Learning period complete (\(Int(elapsed / 86400)) days). Transitioning to active detection with \(self.edges.count) baseline edges."
             )
             state = .active
 
@@ -531,8 +528,7 @@ public actor BaselineEngine {
                 try saveSync()
             } catch {
                 logger.error(
-                    "Failed to save baseline on learning->active transition: "
-                    + "\(error.localizedDescription, privacy: .public)"
+                    "Failed to save baseline on learning->active transition: \(error.localizedDescription, privacy: .public)"
                 )
             }
         }

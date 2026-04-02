@@ -18,8 +18,8 @@ struct HawkEyeDaemon {
             print("      For full coverage: sudo hawkeyed")
         }
 
-        // Paths
-        let supportDir = NSHomeDirectory() + "/Library/Application Support/HawkEye"
+        // Paths — use a shared system location so both daemon and app can access
+        let supportDir = "/Library/Application Support/HawkEye"
         let compiledRulesDir = supportDir + "/compiled_rules"
 
         // Determine rules directory using a fixed, secure search order.
@@ -162,7 +162,22 @@ struct HawkEyeDaemon {
         print("Network connection collector active (5s poll)")
 
         // Load compiled rules (single-event)
-        let rulesURL = URL(fileURLWithPath: compiledRulesDir)
+        // Also check for rules next to the binary (development convenience)
+        let binaryDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().path
+        let localCompiledRules = binaryDir + "/compiled_rules"
+        let effectiveRulesDir: String
+        if FileManager.default.fileExists(atPath: localCompiledRules) {
+            let localFiles = (try? FileManager.default.contentsOfDirectory(atPath: localCompiledRules))?.filter { $0.hasSuffix(".json") } ?? []
+            if !localFiles.isEmpty {
+                effectiveRulesDir = localCompiledRules
+                print("Using local compiled rules: \(localCompiledRules) (\(localFiles.count) files)")
+            } else {
+                effectiveRulesDir = compiledRulesDir
+            }
+        } else {
+            effectiveRulesDir = compiledRulesDir
+        }
+        let rulesURL = URL(fileURLWithPath: effectiveRulesDir)
         do {
             let count = try await ruleEngine.loadRules(from: rulesURL)
             logger.info("Loaded \(count) single-event detection rules")
@@ -289,12 +304,13 @@ struct HawkEyeDaemon {
         sigHupSource.setEventHandler {
             Task {
                 do {
+                    print("[SIGHUP] Reloading rules from: \(rulesURL.path)")
                     let singleCount = try await ruleEngine.reloadRules(from: rulesURL)
+                    print("[SIGHUP] Single-event rules: \(singleCount)")
                     let seqCount = try await sequenceEngine.loadRules(from: URL(fileURLWithPath: sequenceRulesDir))
-                    logger.info("Reloaded \(singleCount) single + \(seqCount) sequence rules after SIGHUP")
                     print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules")
                 } catch {
-                    logger.error("Failed to reload rules: \(error.localizedDescription)")
+                    print("[SIGHUP] ERROR: \(error)")
                 }
             }
         }

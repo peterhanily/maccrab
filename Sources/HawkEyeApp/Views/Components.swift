@@ -109,14 +109,12 @@ struct AlertRow: View {
 // MARK: - AlertMenuItem
 
 /// A compact alert representation for the status bar dropdown menu.
-/// Clicking opens the main dashboard window.
 struct AlertMenuItem: View {
     let alert: AlertViewModel
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Button {
-            openWindow(id: "dashboard")
+            NSApplication.shared.activate(ignoringOtherApps: true)
         } label: {
             HStack(spacing: 8) {
                 Circle()

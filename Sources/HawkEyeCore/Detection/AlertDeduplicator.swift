@@ -92,9 +92,9 @@ public actor AlertDeduplicator {
         if elapsed < suppressionWindow {
             // Within the suppression window -- suppress and count.
             entries[key]?.suppressedCount += 1
+            let count = self.entries[key]?.suppressedCount ?? 0
             logger.debug(
-                "Suppressed duplicate alert for \(key, privacy: .public) "
-                + "(count: \(entries[key]?.suppressedCount ?? 0))"
+                "Suppressed duplicate alert for \(key, privacy: .public) (count: \(count))"
             )
             return true
         }
@@ -119,8 +119,7 @@ public actor AlertDeduplicator {
             // Reset window, keep firstSeen.
             if existing.suppressedCount > 0 {
                 logger.info(
-                    "Re-emitting alert for \(key, privacy: .public) after "
-                    + "\(existing.suppressedCount) suppressed duplicates"
+                    "Re-emitting alert for \(key, privacy: .public) after \(existing.suppressedCount) suppressed duplicates"
                 )
             }
             entries[key] = DeduplicationEntry(

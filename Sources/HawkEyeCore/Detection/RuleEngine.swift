@@ -169,6 +169,7 @@ public actor RuleEngine {
         )
 
         let jsonFiles = contents.filter { $0.pathExtension == "json" }
+        logger.info("Found \(contents.count) files in \(directory.path), \(jsonFiles.count) are .json")
         if jsonFiles.isEmpty {
             logger.warning("No .json rule files found in \(directory.path)")
         }
@@ -186,7 +187,9 @@ public actor RuleEngine {
                 ruleIndex[rule.logsource.category, default: []].append(rule)
                 loaded += 1
             } catch {
-                logger.error("Failed to load rule from \(file.lastPathComponent): \(error.localizedDescription)")
+                logger.error("Failed to load rule from \(file.lastPathComponent): \(error)")
+                // Print full decode error for debugging
+                print("  RULE LOAD ERROR: \(file.lastPathComponent): \(error)")
             }
         }
 
@@ -501,7 +504,7 @@ public actor RuleEngine {
             return event.network?.destinationIp
 
         case "network.destination.port", "DestinationPort":
-            return event.network?.destinationPort.map { String($0) }
+            return event.network.map { String($0.destinationPort) }
 
         case "network.destination.hostname", "DestinationHostname":
             return event.network?.destinationHostname
@@ -510,7 +513,7 @@ public actor RuleEngine {
             return event.network?.sourceIp
 
         case "network.source.port", "SourcePort":
-            return event.network?.sourcePort.map { String($0) }
+            return event.network.map { String($0.sourcePort) }
 
         case "network.direction":
             return event.network?.direction.rawValue

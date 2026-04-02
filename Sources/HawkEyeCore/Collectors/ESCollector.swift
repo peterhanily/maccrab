@@ -157,7 +157,6 @@ public final class ESCollector: @unchecked Sendable {
         var newClient: OpaquePointer?   // es_client_t*
 
         let result = es_new_client(&newClient) { _, message in
-            guard let message = message else { return }
             let event = Self.normalise(message: message)
             if let event = event {
                 continuation.yield(event)
@@ -259,7 +258,7 @@ public final class ESCollector: @unchecked Sendable {
         )
 
         // Source process
-        guard let esProcess = msg.process else { return nil }
+        let esProcess = msg.process
         let processInfo = processFromESProcess(esProcess)
 
         switch msg.event_type {
@@ -274,10 +273,7 @@ public final class ESCollector: @unchecked Sendable {
             let commandLine = args.joined(separator: " ")
 
             // The target of exec is in execEvent.target — use it if available.
-            var targetInfo = processInfo
-            if let target = execEvent.target {
-                targetInfo = processFromESProcess(target)
-            }
+            let targetInfo = processFromESProcess(execEvent.target)
 
             // Reconstruct ProcessInfo with args and commandLine populated.
             let enrichedTarget = ProcessInfo(
@@ -310,16 +306,13 @@ public final class ESCollector: @unchecked Sendable {
 
         case ES_EVENT_TYPE_NOTIFY_FORK:
             let forkEvent = msg.event.fork
-            var childInfo: ProcessInfo?
-            if let child = forkEvent.child {
-                childInfo = processFromESProcess(child)
-            }
+            let childInfo = processFromESProcess(forkEvent.child)
             return Event(
                 timestamp: timestamp,
                 eventCategory: .process,
                 eventType: .start,
                 eventAction: "fork",
-                process: childInfo ?? processInfo,
+                process: childInfo,
                 severity: .informational
             )
 
@@ -345,11 +338,7 @@ public final class ESCollector: @unchecked Sendable {
             // + filename tokens.
             let path: String
             if createEvent.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
-                if let existingFile = createEvent.destination.existing_file {
-                    path = esFileToPath(existingFile)
-                } else {
-                    path = ""
-                }
+                path = esFileToPath(createEvent.destination.existing_file)
             } else {
                 let dir = esFileToPath(createEvent.destination.new_path.dir)
                 let filename = esStringToSwift(createEvent.destination.new_path.filename)
@@ -372,8 +361,7 @@ public final class ESCollector: @unchecked Sendable {
 
         case ES_EVENT_TYPE_NOTIFY_WRITE:
             let writeEvent = msg.event.write
-            guard let target = writeEvent.target else { return nil }
-            let path = esFileToPath(target)
+            let path = esFileToPath(writeEvent.target)
             let fileInfo = FileInfo(
                 path: path,
                 action: .write
@@ -392,8 +380,7 @@ public final class ESCollector: @unchecked Sendable {
             let closeEvent = msg.event.close
             // Only emit events for files that were actually modified.
             guard closeEvent.modified else { return nil }
-            guard let target = closeEvent.target else { return nil }
-            let path = esFileToPath(target)
+            let path = esFileToPath(closeEvent.target)
             let fileInfo = FileInfo(
                 path: path,
                 action: .close
@@ -410,17 +397,12 @@ public final class ESCollector: @unchecked Sendable {
 
         case ES_EVENT_TYPE_NOTIFY_RENAME:
             let renameEvent = msg.event.rename
-            guard let source = renameEvent.source else { return nil }
-            let sourcePath = esFileToPath(source)
+            let sourcePath = esFileToPath(renameEvent.source)
 
             // Destination depends on destination_type.
             let destPath: String
             if renameEvent.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
-                if let existingFile = renameEvent.destination.existing_file {
-                    destPath = esFileToPath(existingFile)
-                } else {
-                    destPath = ""
-                }
+                destPath = esFileToPath(renameEvent.destination.existing_file)
             } else {
                 let dir = esFileToPath(renameEvent.destination.new_path.dir)
                 let filename = esStringToSwift(renameEvent.destination.new_path.filename)
@@ -444,8 +426,7 @@ public final class ESCollector: @unchecked Sendable {
 
         case ES_EVENT_TYPE_NOTIFY_UNLINK:
             let unlinkEvent = msg.event.unlink
-            guard let target = unlinkEvent.target else { return nil }
-            let path = esFileToPath(target)
+            let path = esFileToPath(unlinkEvent.target)
             let fileInfo = FileInfo(
                 path: path,
                 action: .delete
@@ -466,13 +447,12 @@ public final class ESCollector: @unchecked Sendable {
 
         case ES_EVENT_TYPE_NOTIFY_SIGNAL:
             let signalEvent = msg.event.signal
-            var enrichments: [String: String] = [:]
-            if let target = signalEvent.target {
-                let targetInfo = processFromESProcess(target)
-                enrichments["target.pid"] = String(targetInfo.pid)
-                enrichments["target.executable"] = targetInfo.executable
-                enrichments["target.name"] = targetInfo.name
-            }
+            let targetInfo = processFromESProcess(signalEvent.target)
+            let enrichments: [String: String] = [
+                "target.pid": String(targetInfo.pid),
+                "target.executable": targetInfo.executable,
+                "target.name": targetInfo.name,
+            ]
             return Event(
                 timestamp: timestamp,
                 eventCategory: .process,
@@ -553,7 +533,7 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_SETOWNER:
             let setownerEvent = msg.event.setowner
             let filePath = esFileToPath(setownerEvent.target)
-            let fileInfo = FileInfo(path: filePath, action: .change)
+            let fileInfo = FileInfo(path: filePath, action: .write)
             return Event(
                 timestamp: timestamp,
                 eventCategory: .file,
@@ -568,7 +548,7 @@ public final class ESCollector: @unchecked Sendable {
         case ES_EVENT_TYPE_NOTIFY_SETMODE:
             let setmodeEvent = msg.event.setmode
             let filePath = esFileToPath(setmodeEvent.target)
-            let fileInfo = FileInfo(path: filePath, action: .change)
+            let fileInfo = FileInfo(path: filePath, action: .write)
             return Event(
                 timestamp: timestamp,
                 eventCategory: .file,

@@ -24,7 +24,7 @@ public actor EventEnricher {
     // MARK: Dependencies
 
     /// Process parent-child DAG.
-    private let lineage: ProcessLineage
+    public let lineage: ProcessLineage
 
     /// Code-signing evaluation cache.
     private let codeSigningCache: CodeSigningCache

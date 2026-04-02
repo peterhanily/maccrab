@@ -82,17 +82,8 @@ final class AppState: ObservableObject {
     private var pollTimer: AnyCancellable?
     private var previousEventCount: Int = 0
 
-    /// Database path for the daemon's SQLite store.
-    private let databasePath: String = {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!
-        return appSupport
-            .appendingPathComponent("HawkEye", isDirectory: true)
-            .appendingPathComponent("events.db")
-            .path
-    }()
+    /// Database path — shared system location readable by both daemon and app.
+    private let databasePath: String = "/Library/Application Support/HawkEye/events.db"
 
     // MARK: Initialization
 
@@ -121,9 +112,19 @@ final class AppState: ObservableObject {
 
     /// Refresh all data from the daemon's data stores.
     func refresh() async {
-        // Check daemon connectivity by testing if the database file exists.
+        // Check daemon connectivity: is hawkeyed process running?
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        task.arguments = ["-x", "hawkeyed"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+        let daemonRunning = task.terminationStatus == 0
+
+        // Also check if DB file exists (daemon may have run previously)
         let dbExists = FileManager.default.fileExists(atPath: databasePath)
-        isConnected = dbExists
+        isConnected = daemonRunning || dbExists
 
         guard isConnected else { return }
 

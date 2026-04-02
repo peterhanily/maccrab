@@ -364,7 +364,7 @@ public actor YARAEnricher {
     ///   - output: Raw stdout from the `yara` process.
     ///   - filePath: The file that was scanned (used to identify match lines).
     /// - Returns: Deduplicated array of matched rule names.
-    private func parseYARAOutput(_ output: String, filePath: String) -> [String] {
+    private nonisolated func parseYARAOutput(_ output: String, filePath: String) -> [String] {
         var rules: [String] = []
         var seen: Set<String> = []
 

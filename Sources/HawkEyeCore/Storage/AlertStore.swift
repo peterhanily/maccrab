@@ -52,28 +52,24 @@ public actor AlertStore {
     /// (shared with the event store). The directory is created if needed.
     ///
     /// - Throws: `AlertStoreError` if the database cannot be opened or initialized.
-    public init() throws {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!
-        let hawkeyeDir = appSupport.appendingPathComponent("HawkEye", isDirectory: true)
+    public init(directory: String = "/Library/Application Support/HawkEye") throws {
+        let hawkeyeDir = URL(fileURLWithPath: directory)
 
         try FileManager.default.createDirectory(
             at: hawkeyeDir,
             withIntermediateDirectories: true,
             attributes: nil
         )
-        // Restrict directory permissions: owner-only access (rwx------).
+        // Directory: root-owned, world-readable (daemon writes, app reads).
         try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
+            [.posixPermissions: 0o755],
             ofItemAtPath: hawkeyeDir.path
         )
 
         self.databasePath = hawkeyeDir.appendingPathComponent("events.db").path
         try openDatabase()
-        // Restrict database file permissions: owner-only read/write (rw-------).
-        chmod(databasePath, 0o600)
+        // Database: root-owned, world-readable (app needs read access).
+        chmod(databasePath, 0o644)
         try createSchema()
         try prepareStatements()
     }

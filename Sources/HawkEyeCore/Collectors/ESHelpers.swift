@@ -8,6 +8,11 @@ import Foundation
 import EndpointSecurity
 import Darwin.POSIX
 
+// MARK: - Codesigning Flag Constants
+
+/// CS_VALID from <sys/codesign.h>, not exposed to Swift.
+private let CS_VALID: UInt32 = 0x00000001
+
 // MARK: - String Conversion
 
 /// Convert an `es_string_token_t` (pointer + length) into a Swift `String`.
@@ -22,12 +27,15 @@ func esStringToSwift(_ token: es_string_token_t) -> String {
     }
     // es_string_token_t is NOT guaranteed to be null-terminated,
     // so we must use the explicit length via a buffer pointer copy.
+    // data is UnsafePointer<CChar> (Int8); rebind to UInt8 for String(bytes:encoding:).
     let bufferPointer = UnsafeBufferPointer(
         start: data,
         count: token.length
     )
-    return String(bytes: bufferPointer, encoding: .utf8)
-        ?? String(repeating: "\u{FFFD}", count: token.length) // fallback: replacement characters for non-UTF8 data
+    return bufferPointer.withMemoryRebound(to: UInt8.self) { uint8Buffer in
+        String(bytes: uint8Buffer, encoding: .utf8)
+            ?? String(repeating: "\u{FFFD}", count: token.length)
+    }
 }
 
 /// Extract the path string from an `es_file_t` pointer.
@@ -113,18 +121,21 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
 /// Extract the full argv array from an exec event.
 ///
 /// The ES framework provides `es_exec_arg_count` / `es_exec_arg` helpers
-/// to walk the argument list. These functions operate on the full
-/// `es_message_t`, not the inner event union member.
+/// to walk the argument list. These functions operate on the
+/// `es_event_exec_t` (not the outer `es_message_t`).
 func argsFromExecMessage(_ message: UnsafePointer<es_message_t>) -> [String] {
-    let argCount = es_exec_arg_count(message)
-    guard argCount > 0 else { return [] }
+    // es_exec_arg_count / es_exec_arg expect a pointer to es_event_exec_t.
+    return withUnsafePointer(to: message.pointee.event.exec) { execEvent in
+        let argCount = es_exec_arg_count(execEvent)
+        guard argCount > 0 else { return [] }
 
-    var args: [String] = []
-    args.reserveCapacity(Int(argCount))
+        var args: [String] = []
+        args.reserveCapacity(Int(argCount))
 
-    for i in 0 ..< argCount {
-        let token = es_exec_arg(message, i)
-        args.append(esStringToSwift(token))
+        for i in 0 ..< argCount {
+            let token = es_exec_arg(execEvent, i)
+            args.append(esStringToSwift(token))
+        }
+        return args
     }
-    return args
 }

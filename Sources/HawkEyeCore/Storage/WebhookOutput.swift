@@ -257,8 +257,7 @@ public actor WebhookOutput {
                         sentCount += 1
                         if attempt > 0 {
                             logger.info(
-                                "Webhook delivery succeeded on attempt \(attempt + 1) "
-                                + "for alert \(label, privacy: .public)"
+                                "Webhook delivery succeeded on attempt \(attempt + 1) for alert \(label, privacy: .public)"
                             )
                         }
                         return
@@ -268,16 +267,14 @@ public actor WebhookOutput {
                         // Server error -- retryable.
                         lastError = WebhookError.serverError(statusCode)
                         logger.warning(
-                            "Webhook returned \(statusCode) for alert \(label, privacy: .public) "
-                            + "(attempt \(attempt + 1)/\(self.retryCount + 1))"
+                            "Webhook returned \(statusCode) for alert \(label, privacy: .public) (attempt \(attempt + 1)/\(self.retryCount + 1))"
                         )
                         continue
                     }
 
                     // Client error (4xx) -- not retryable.
                     logger.error(
-                        "Webhook returned \(statusCode) for alert \(label, privacy: .public); "
-                        + "not retrying"
+                        "Webhook returned \(statusCode) for alert \(label, privacy: .public); not retrying"
                     )
                     failedCount += 1
                     return
@@ -291,9 +288,7 @@ public actor WebhookOutput {
             } catch {
                 lastError = error
                 logger.warning(
-                    "Webhook delivery failed for alert \(label, privacy: .public): "
-                    + "\(error.localizedDescription) "
-                    + "(attempt \(attempt + 1)/\(self.retryCount + 1))"
+                    "Webhook delivery failed for alert \(label, privacy: .public): \(error.localizedDescription) (attempt \(attempt + 1)/\(self.retryCount + 1))"
                 )
                 continue
             }
@@ -302,9 +297,7 @@ public actor WebhookOutput {
         // All retries exhausted.
         failedCount += 1
         logger.error(
-            "Webhook delivery failed permanently for alert \(label, privacy: .public) "
-            + "after \(self.retryCount + 1) attempts: "
-            + "\(lastError?.localizedDescription ?? "unknown error")"
+            "Webhook delivery failed permanently for alert \(label, privacy: .public) after \(self.retryCount + 1) attempts: \(lastError?.localizedDescription ?? "unknown error")"
         )
     }
 
@@ -312,12 +305,12 @@ public actor WebhookOutput {
 
     /// Returns the local hostname.
     private static func hostname() -> String {
-        ProcessInfo.processInfo.hostName
+        Foundation.ProcessInfo.processInfo.hostName
     }
 
     /// Returns the macOS version string (e.g. "14.3.1").
     private static func osVersion() -> String {
-        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let version = Foundation.ProcessInfo.processInfo.operatingSystemVersion
         return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
     }
 }

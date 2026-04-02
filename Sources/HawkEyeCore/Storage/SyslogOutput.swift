@@ -196,7 +196,7 @@ public actor SyslogOutput {
         let syslogSeverity = mapSeverity(alert.severity)
         let pri = facility * 8 + syslogSeverity
         let timestamp = Self.iso8601Formatter.string(from: alert.timestamp)
-        let hostname = sanitizeSDValue(ProcessInfo.processInfo.hostName)
+        let hostname = sanitizeSDValue(Foundation.ProcessInfo.processInfo.hostName)
 
         // Structured data element with alert metadata.
         let ruleIdSD = sanitizeSDValue(alert.ruleId)
