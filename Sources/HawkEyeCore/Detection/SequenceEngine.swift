@@ -857,7 +857,7 @@ public actor SequenceEngine {
             return event.enrichments["parent.commandline"]
 
         // --- Code signature fields ---
-        case "process.code_signature.signer_type":
+        case "process.code_signature.signer_type", "SignerType":
             return event.process.codeSignature?.signerType.rawValue
         case "process.code_signature.team_id":
             return event.process.codeSignature?.teamId
@@ -904,14 +904,18 @@ public actor SequenceEngine {
         case "network.transport":
             return event.network?.transport
 
+        // --- Network computed fields ---
+        case "DestinationIsPrivate":
+            return event.network.map { String($0.destinationIsPrivate) }
+
         // --- TCC fields ---
-        case "tcc.service":
+        case "tcc.service", "TCCService":
             return event.tcc?.service
-        case "tcc.client":
+        case "tcc.client", "TCCClient":
             return event.tcc?.client
         case "tcc.client_path":
             return event.tcc?.clientPath
-        case "tcc.allowed":
+        case "tcc.allowed", "TCCAllowed":
             return event.tcc.map { String($0.allowed) }
         case "tcc.auth_reason":
             return event.tcc?.authReason
