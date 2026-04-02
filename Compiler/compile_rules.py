@@ -1010,6 +1010,128 @@ def find_yaml_files(input_dir: str) -> list[str]:
     return yaml_files
 
 
+def _parse_window(window_str) -> float:
+    """Parse a window duration string like '10s', '2m', '120s' to seconds."""
+    if isinstance(window_str, (int, float)):
+        return float(window_str)
+    s = str(window_str).strip().lower()
+    if s.endswith("s"):
+        return float(s[:-1])
+    if s.endswith("m"):
+        return float(s[:-1]) * 60
+    if s.endswith("h"):
+        return float(s[:-1]) * 3600
+    return float(s)
+
+
+_CORRELATION_MAP = {
+    "process.same": "processSame",
+    "process.lineage": "processLineage",
+    "file.path": "filePath",
+    "network.endpoint": "networkEndpoint",
+    "none": "none",
+}
+
+
+def compile_sequence_rule(rule_data: dict, source_file: str):
+    """
+    Compile a sequence (temporal-causal) rule into SequenceEngine JSON.
+
+    Sequence rules have type: sequence, steps: [...], window, correlation, etc.
+    Returns the compiled dict, or None to skip.
+    """
+    rule_id = rule_data.get("id", str(uuid.uuid4()))
+    title = rule_data.get("title", "Untitled Sequence")
+    description = rule_data.get("description", "")
+    level = rule_data.get("level", "high").lower()
+    tags = rule_data.get("tags", [])
+    valid_levels = {"informational", "low", "medium", "high", "critical"}
+    if level not in valid_levels:
+        level = "high"
+
+    window = _parse_window(rule_data.get("window", "60s"))
+    correlation_raw = rule_data.get("correlation", "none")
+    correlation = _CORRELATION_MAP.get(correlation_raw, "none")
+    ordered = rule_data.get("ordered", True)
+
+    # Parse trigger
+    trigger_raw = rule_data.get("trigger", "all")
+    if trigger_raw == "all":
+        trigger = {"type": "all_steps"}
+    elif isinstance(trigger_raw, int):
+        trigger = {"type": "any_steps", "value": trigger_raw}
+    elif isinstance(trigger_raw, str) and " and " in trigger_raw:
+        # "persist and c2" → steps trigger with specific IDs
+        step_ids = [s.strip() for s in trigger_raw.split(" and ")]
+        trigger = {"type": "steps", "value": step_ids}
+    else:
+        trigger = {"type": "all_steps"}
+
+    # Parse steps
+    yaml_steps = rule_data.get("steps", [])
+    if not yaml_steps:
+        print(f"  WARNING: No steps in sequence rule {source_file}, skipping", file=sys.stderr)
+        return None
+
+    compiled_steps = []
+    prev_step_id = None
+
+    for step_data in yaml_steps:
+        step_id = step_data.get("id", f"step_{len(compiled_steps)}")
+        logsource = step_data.get("logsource", {})
+        logsource_cat = logsource.get("category", "process_creation")
+
+        # Compile step's detection block
+        detection = step_data.get("detection")
+        if not detection:
+            print(f"  WARNING: Step '{step_id}' in {source_file} has no detection, skipping rule", file=sys.stderr)
+            return None
+
+        predicates, condition_type, _ = parse_detection_block(detection)
+
+        # Parse process relation (e.g., "shell.same", "execute.descendant")
+        process_rel = None
+        process_str = step_data.get("process")
+        if process_str and "." in str(process_str):
+            parts = str(process_str).split(".", 1)
+            relative_to = parts[0]
+            relation = parts[1]
+            process_rel = {
+                "relation": relation,
+                "relativeToStep": relative_to,
+            }
+
+        # afterStep: if ordered and there's a previous step, link to it
+        after_step = None
+        if ordered and prev_step_id is not None:
+            after_step = prev_step_id
+
+        compiled_steps.append({
+            "id": step_id,
+            "logsourceCategory": logsource_cat,
+            "predicates": predicates,
+            "condition": condition_type,
+            "afterStep": after_step,
+            "processRelation": process_rel,
+        })
+
+        prev_step_id = step_id
+
+    return {
+        "id": rule_id,
+        "title": title,
+        "description": description,
+        "level": level,
+        "tags": tags,
+        "window": window,
+        "correlationType": correlation,
+        "ordered": ordered,
+        "steps": compiled_steps,
+        "trigger": trigger,
+        "enabled": True,
+    }
+
+
 def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
     """
     Compile all Sigma YAML rules from input_dir and write JSON to output_dir.
@@ -1038,25 +1160,39 @@ def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
             if not isinstance(rule_data, dict):
                 continue
 
-            result = compile_rule(rule_data, rel_path)
+            # Detect sequence rules (type: sequence) vs standard single-event rules.
+            is_sequence = rule_data.get("type", "").lower() == "sequence"
+
+            if is_sequence:
+                result = compile_sequence_rule(rule_data, rel_path)
+            else:
+                result = compile_rule(rule_data, rel_path)
+
             if result is None:
                 skipped += 1
                 continue
 
-            # Determine output filename.
+            # Determine output directory and filename.
             base_name = os.path.splitext(os.path.basename(filepath))[0]
             if len(documents) > 1:
                 out_name = f"{base_name}_{doc_idx}.json"
             else:
                 out_name = f"{base_name}.json"
 
-            out_path = os.path.join(output_dir, out_name)
+            if is_sequence:
+                seq_dir = os.path.join(output_dir, "sequences")
+                os.makedirs(seq_dir, exist_ok=True)
+                out_path = os.path.join(seq_dir, out_name)
+            else:
+                out_path = os.path.join(output_dir, out_name)
+
             with open(out_path, "w", encoding="utf-8") as out_f:
                 json.dump(result, out_f, indent=2, ensure_ascii=False)
                 out_f.write("\n")
 
             compiled += 1
-            print(f"  OK  {rel_path} -> {out_name}")
+            tag = "SEQ" if is_sequence else "OK "
+            print(f"  {tag} {rel_path} -> {out_name}")
 
     return total, compiled, skipped
 

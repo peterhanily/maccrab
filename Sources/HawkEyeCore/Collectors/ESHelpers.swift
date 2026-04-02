@@ -97,6 +97,19 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
         ))
     }
 
+    // Determine architecture from compile-time target.
+    // A proper implementation would inspect the Mach-O header of the executable,
+    // but the ES framework doesn't expose the CPU type directly.
+    let architecture: String? = {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        return nil
+        #endif
+    }()
+
     return ProcessInfo(
         pid: pid,
         ppid: ppid,
@@ -112,6 +125,7 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
         startTime: Date(),
         codeSignature: codeSignature,
         ancestors: ancestors,
+        architecture: architecture,
         isPlatformBinary: p.is_platform_binary
     )
 }

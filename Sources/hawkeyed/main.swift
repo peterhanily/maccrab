@@ -196,8 +196,8 @@ struct HawkEyeDaemon {
             print("Warning: No compiled rules found. Run: python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir '\(compiledRulesDir)'")
         }
 
-        // Load sequence rules
-        let sequenceRulesDir = compiledRulesDir + "/sequences"
+        // Load sequence rules (use same effective dir as single-event rules)
+        let sequenceRulesDir = effectiveRulesDir + "/sequences"
         try? FileManager.default.createDirectory(atPath: sequenceRulesDir, withIntermediateDirectories: true)
         do {
             let seqCount = try await sequenceEngine.loadRules(from: URL(fileURLWithPath: sequenceRulesDir))

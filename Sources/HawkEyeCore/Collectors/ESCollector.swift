@@ -157,6 +157,9 @@ public final class ESCollector: @unchecked Sendable {
         var newClient: OpaquePointer?   // es_client_t*
 
         let result = es_new_client(&newClient) { _, message in
+            // SAFETY: message memory is owned by the kernel and valid only during
+            // this callback. normalise() is synchronous and copies all needed data
+            // (via esStringToSwift) before the callback returns.
             let event = Self.normalise(message: message)
             if let event = event {
                 continuation.yield(event)
@@ -188,7 +191,8 @@ public final class ESCollector: @unchecked Sendable {
         let result = events.withUnsafeBufferPointer { buffer -> es_return_t in
             es_subscribe(client, buffer.baseAddress!, UInt32(buffer.count))
         }
-        guard result == ES_RETURN_SUCCESS else {
+        if result != ES_RETURN_SUCCESS {
+            logger.error("es_subscribe failed with code \(result.rawValue)")
             throw ESCollectorError.subscriptionFailed
         }
     }
