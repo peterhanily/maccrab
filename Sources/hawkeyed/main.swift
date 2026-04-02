@@ -115,6 +115,20 @@ struct HawkEyeDaemon {
 
         enricher = EventEnricher()
         ruleEngine = RuleEngine()
+        let notifier = NotificationOutput(minimumSeverity: .high)
+        let responseEngine = ResponseEngine()
+
+        // Load response action config if it exists
+        let actionConfigPath = supportDir + "/actions.json"
+        if FileManager.default.fileExists(atPath: actionConfigPath) {
+            do {
+                try await responseEngine.loadConfig(from: actionConfigPath)
+                logger.info("Loaded response action config from \(actionConfigPath)")
+                print("Response actions configured from: \(actionConfigPath)")
+            } catch {
+                logger.warning("Failed to load action config: \(error.localizedDescription)")
+            }
+        }
 
         // Initialize sequence engine (Phase 2: temporal-causal detection)
         let sequenceEngine = await SequenceEngine(lineage: enricher.lineage)
@@ -437,6 +451,8 @@ struct HawkEyeDaemon {
                     )
 
                     try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                    await responseEngine.execute(alert: alert, event: enrichedEvent)
 
                     // Log alert to stdout
                     let severityIcon: String

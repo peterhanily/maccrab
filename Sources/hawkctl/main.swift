@@ -58,6 +58,27 @@ struct HawkCtl {
             } else {
                 print("Usage: hawkctl compile <input-rules-dir> <output-compiled-dir>")
             }
+        case "export":
+            let format = args.count >= 3 ? args[2] : "json"
+            let limit = args.count >= 4 ? Int(args[3]) ?? 1000 : 1000
+            await exportAlerts(format: format, limit: limit)
+        case "rule":
+            if args.count >= 3 && args[2] == "create" {
+                let category = args.count >= 4 ? args[3] : "process_creation"
+                createRuleTemplate(category: category)
+            } else {
+                print("Usage: hawkctl rule create [category]")
+                print("  Categories: process_creation, file_event, network_connection, tcc_event")
+            }
+        case "suppress":
+            if args.count >= 4 {
+                await suppressRule(ruleId: args[2], processPath: args[3])
+            } else {
+                print("Usage: hawkctl suppress <rule-id> <process-path>")
+                print("  Adds a process to the allowlist for a specific rule.")
+            }
+        case "watch":
+            await watchAlerts()
         case "version":
             printVersion()
         case "help", "-h", "--help":
@@ -75,29 +96,35 @@ struct HawkCtl {
 
         Usage: hawkctl <command> [options]
 
-        Commands:
+        Monitoring:
           status              Show daemon status and statistics
-          rules list          List all loaded detection rules
-          rules count         Count rules by category
           events tail [N]     Show last N events (default: 20)
           events search <q>   Full-text search over events
           events stats        Show event statistics
           alerts [N]          Show last N alerts (default: 20)
+          watch               Live stream alerts as they happen
+
+        Rules:
+          rules list          List all loaded detection rules
+          rules count         Count rules by category
+          rule create [cat]   Generate a rule YAML template
           compile <in> <out>  Compile Sigma YAML rules to JSON
+
+        Response:
+          suppress <rule> <path>  Allowlist a process for a rule
+          export [format] [N]     Export alerts (json|csv, default: json)
+
+        Other:
           version             Show version information
           help                Show this help message
 
-        Environment:
-          HAWKEYE_DB_PATH     Path to events database
-                              (default: ~/Library/Application Support/HawkEye/events.db)
-
         Examples:
           hawkctl status
-          hawkctl events tail 50
+          hawkctl watch
           hawkctl events search "curl Downloads"
-          hawkctl alerts 10
-          hawkctl rules list
-          hawkctl compile ./Rules ./compiled_rules
+          hawkctl export csv 500
+          hawkctl rule create network_connection
+          hawkctl suppress my-rule-id /usr/bin/safe-process
         """)
     }
 
@@ -334,6 +361,316 @@ struct HawkCtl {
         print("Compiling rules from \(inputDir) to \(outputDir)...")
         print("Note: Use the Python compiler for full Sigma YAML support:")
         print("  python3 Compiler/compile_rules.py --input-dir \(inputDir) --output-dir \(outputDir)")
+    }
+
+    // MARK: - Export
+
+    static func exportAlerts(format: String, limit: Int) async {
+        do {
+            let store = try AlertStore(directory: hawkeyeDataDir())
+            let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
+
+            if alerts.isEmpty {
+                print("No alerts to export.")
+                return
+            }
+
+            switch format.lowercased() {
+            case "csv":
+                print("timestamp,severity,rule_id,rule_title,process_name,process_path,mitre_techniques")
+                let iso = ISO8601DateFormatter()
+                for a in alerts {
+                    let ts = iso.string(from: a.timestamp)
+                    let fields = [ts, a.severity.rawValue, a.ruleId, a.ruleTitle,
+                                  a.processName ?? "", a.processPath ?? "", a.mitreTechniques ?? ""]
+                    let escaped = fields.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
+                    print(escaped.joined(separator: ","))
+                }
+
+            case "json":
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(alerts)
+                print(String(data: data, encoding: .utf8)!)
+
+            default:
+                print("Unknown format: \(format). Use 'json' or 'csv'.")
+            }
+        } catch {
+            print("Error exporting alerts: \(error)")
+        }
+    }
+
+    // MARK: - Rule Creation
+
+    static func createRuleTemplate(category: String) {
+        let id = UUID().uuidString.lowercased()
+        let date = {
+            let f = DateFormatter()
+            f.dateFormat = "yyyy/MM/dd"
+            return f.string(from: Date())
+        }()
+
+        let template: String
+        switch category {
+        case "process_creation":
+            template = """
+            title: <Rule Title — what does it detect?>
+            id: \(id)
+            status: experimental
+            description: >
+                <Describe the threat behavior this rule detects.>
+            author: <Your name>
+            date: \(date)
+            references:
+                - https://attack.mitre.org/techniques/TXXXX/
+            tags:
+                - attack.execution
+                - attack.tXXXX
+            logsource:
+                category: process_creation
+                product: macos
+            detection:
+                selection:
+                    Image|endswith:
+                        - '/suspicious-binary'
+                    CommandLine|contains:
+                        - '--malicious-flag'
+                filter_signed:
+                    SignerType:
+                        - 'apple'
+                        - 'devId'
+                condition: selection and not filter_signed
+            falsepositives:
+                - <Known legitimate use cases>
+            level: high
+            """
+
+        case "file_event":
+            template = """
+            title: <Rule Title>
+            id: \(id)
+            status: experimental
+            description: >
+                <Describe suspicious file activity this rule detects.>
+            author: <Your name>
+            date: \(date)
+            references:
+                - https://attack.mitre.org/techniques/TXXXX/
+            tags:
+                - attack.persistence
+                - attack.tXXXX
+            logsource:
+                category: file_event
+                product: macos
+            detection:
+                selection:
+                    TargetFilename|contains:
+                        - '/Library/LaunchAgents/'
+                    TargetFilename|endswith:
+                        - '.plist'
+                filter_system:
+                    SignerType:
+                        - 'apple'
+                condition: selection and not filter_system
+            falsepositives:
+                - <Known legitimate use cases>
+            level: high
+            """
+
+        case "network_connection":
+            template = """
+            title: <Rule Title>
+            id: \(id)
+            status: experimental
+            description: >
+                <Describe suspicious network behavior this rule detects.>
+            author: <Your name>
+            date: \(date)
+            references:
+                - https://attack.mitre.org/techniques/TXXXX/
+            tags:
+                - attack.command_and_control
+                - attack.tXXXX
+            logsource:
+                category: network_connection
+                product: macos
+            detection:
+                selection:
+                    DestinationPort:
+                        - 4444
+                        - 5555
+                    DestinationIsPrivate: 'false'
+                condition: selection
+            falsepositives:
+                - <Known legitimate use cases>
+            level: high
+            """
+
+        case "tcc_event":
+            template = """
+            title: <Rule Title>
+            id: \(id)
+            status: experimental
+            description: >
+                <Describe suspicious TCC permission access this rule detects.>
+            author: <Your name>
+            date: \(date)
+            references:
+                - https://attack.mitre.org/techniques/TXXXX/
+            tags:
+                - attack.collection
+                - attack.tXXXX
+            logsource:
+                category: tcc_event
+                product: macos
+            detection:
+                selection:
+                    TCCService: 'kTCCServiceCamera'
+                    TCCAllowed: 'true'
+                filter_signed:
+                    SignerType:
+                        - 'apple'
+                        - 'appStore'
+                        - 'devId'
+                condition: selection and not filter_signed
+            falsepositives:
+                - <Known legitimate use cases>
+            level: high
+            """
+
+        case "sequence":
+            template = """
+            title: <Sequence Rule Title>
+            id: \(id)
+            status: experimental
+            description: >
+                <Describe the multi-step attack chain this rule detects.>
+            author: <Your name>
+            date: \(date)
+            references:
+                - https://attack.mitre.org/techniques/TXXXX/
+            tags:
+                - attack.execution
+                - attack.tXXXX
+
+            type: sequence
+            window: 60s
+            correlation: process.lineage
+            ordered: true
+
+            steps:
+                - id: step1
+                  logsource:
+                      category: process_creation
+                      product: macos
+                  detection:
+                      selection:
+                          Image|endswith:
+                              - '/suspicious-tool'
+                      condition: selection
+
+                - id: step2
+                  logsource:
+                      category: network_connection
+                      product: macos
+                  detection:
+                      selection:
+                          DestinationIsPrivate: 'false'
+                      condition: selection
+                  process: step1.descendant
+
+            trigger: all
+            level: critical
+            """
+
+        default:
+            template = "Unknown category: \(category). Use: process_creation, file_event, network_connection, tcc_event, sequence"
+        }
+
+        print(template)
+        print("")
+        print("# Save this to Rules/<tactic>/<rule_name>.yml")
+        print("# Then compile: python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir compiled_rules/")
+    }
+
+    // MARK: - Watch (Live Alert Tail)
+
+    static func watchAlerts() async {
+        print("Watching for new alerts... (Ctrl+C to stop)")
+        print("══════════════════════════════════════════════════════════════")
+
+        var lastSeen = Date()
+        let store: AlertStore
+        do {
+            store = try AlertStore(directory: hawkeyeDataDir())
+        } catch {
+            print("Error opening alert store: \(error)")
+            return
+        }
+
+        while true {
+            do {
+                let alerts = try await store.alerts(since: lastSeen, limit: 100)
+                for alert in alerts {
+                    if alert.timestamp > lastSeen {
+                        let time = formatDate(alert.timestamp)
+                        let icon: String
+                        switch alert.severity {
+                        case .critical: icon = "🔴"
+                        case .high:     icon = "🟠"
+                        case .medium:   icon = "🟡"
+                        case .low:      icon = "🔵"
+                        case .informational: icon = "⚪"
+                        }
+                        print("\(icon) \(time) \(alert.ruleTitle)")
+                        print("   Process: \(alert.processName ?? "?") (\(alert.processPath ?? "?"))")
+                        if let tech = alert.mitreTechniques, !tech.isEmpty {
+                            print("   MITRE: \(tech)")
+                        }
+                        print()
+                        lastSeen = alert.timestamp
+                    }
+                }
+            } catch {
+                // DB may not exist yet; wait silently
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // Poll every 2 seconds
+        }
+    }
+
+    // MARK: - Suppress (Allowlist)
+
+    static func suppressRule(ruleId: String, processPath: String) async {
+        let configDir = hawkeyeDataDir()
+        let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
+
+        // Load existing suppressions
+        var suppressions: [String: [String]] = [:]
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)) {
+            suppressions = (try? JSONDecoder().decode([String: [String]].self, from: data)) ?? [:]
+        }
+
+        // Add suppression
+        var paths = suppressions[ruleId] ?? []
+        if paths.contains(processPath) {
+            print("Process '\(processPath)' is already suppressed for rule '\(ruleId)'.")
+            return
+        }
+        paths.append(processPath)
+        suppressions[ruleId] = paths
+
+        // Save
+        do {
+            let data = try JSONEncoder().encode(suppressions)
+            try data.write(to: URL(fileURLWithPath: suppressFile))
+            print("✔ Suppressed '\(processPath)' for rule '\(ruleId)'")
+            print("  Stored in: \(suppressFile)")
+            print("  Restart daemon (SIGHUP) to apply.")
+        } catch {
+            print("Error saving suppression: \(error)")
+        }
     }
 
     // MARK: - Helpers
