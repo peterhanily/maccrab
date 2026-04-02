@@ -55,11 +55,85 @@ public enum PredicateModifier: String, Codable, Sendable, Hashable {
     case lte
 }
 
-/// How the predicates within a rule are combined.
+/// How the predicates within a rule are combined (legacy flat format).
 public enum RuleCondition: String, Codable, Sendable, Hashable {
     case allOf = "all_of"
     case anyOf = "any_of"
     case oneOfEach = "one_of_each"
+}
+
+/// A recursive boolean condition tree for complex Sigma rules.
+///
+/// Preserves the full boolean structure of Sigma conditions like
+/// `(selection_a and not filter_b) or ioc_c` without flattening.
+/// Leaf nodes reference predicates by index into the rule's predicate array.
+public indirect enum ConditionNode: Sendable, Hashable {
+    case and([ConditionNode])
+    case or([ConditionNode])
+    case not(ConditionNode)
+    /// References a predicate by its index in the `predicates` array.
+    case predicate(Int)
+    /// References a contiguous range of predicates (for multi-field selections).
+    case predicateGroup(range: Range<Int>, mode: RuleCondition)
+}
+
+extension ConditionNode: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case type, operands, index, rangeStart, rangeEnd, mode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+
+        switch type {
+        case "and":
+            let ops = try container.decode([ConditionNode].self, forKey: .operands)
+            self = .and(ops)
+        case "or":
+            let ops = try container.decode([ConditionNode].self, forKey: .operands)
+            self = .or(ops)
+        case "not":
+            let ops = try container.decode([ConditionNode].self, forKey: .operands)
+            guard let first = ops.first else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "NOT node needs one operand"))
+            }
+            self = .not(first)
+        case "predicate":
+            let idx = try container.decode(Int.self, forKey: .index)
+            self = .predicate(idx)
+        case "group":
+            let start = try container.decode(Int.self, forKey: .rangeStart)
+            let end = try container.decode(Int.self, forKey: .rangeEnd)
+            let mode = try container.decodeIfPresent(RuleCondition.self, forKey: .mode) ?? .allOf
+            self = .predicateGroup(range: start..<end, mode: mode)
+        default:
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown condition node type: \(type)"))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .and(let ops):
+            try container.encode("and", forKey: .type)
+            try container.encode(ops, forKey: .operands)
+        case .or(let ops):
+            try container.encode("or", forKey: .type)
+            try container.encode(ops, forKey: .operands)
+        case .not(let op):
+            try container.encode("not", forKey: .type)
+            try container.encode([op], forKey: .operands)
+        case .predicate(let idx):
+            try container.encode("predicate", forKey: .type)
+            try container.encode(idx, forKey: .index)
+        case .predicateGroup(let range, let mode):
+            try container.encode("group", forKey: .type)
+            try container.encode(range.lowerBound, forKey: .rangeStart)
+            try container.encode(range.upperBound, forKey: .rangeEnd)
+            try container.encode(mode, forKey: .mode)
+        }
+    }
 }
 
 /// A fully compiled detection rule loaded from JSON.
@@ -72,8 +146,17 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
     public let logsource: LogSource
     public let predicates: [Predicate]
     public let condition: RuleCondition
+    /// Hierarchical condition tree for complex boolean expressions.
+    /// When present, takes precedence over the flat `condition` field.
+    public let conditionTree: ConditionNode?
     public let falsepositives: [String]
     public var enabled: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, description, level, tags, logsource, predicates
+        case condition, falsepositives, enabled
+        case conditionTree = "condition_tree"
+    }
 
     public init(
         id: String,
@@ -84,6 +167,7 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
         logsource: LogSource,
         predicates: [Predicate],
         condition: RuleCondition,
+        conditionTree: ConditionNode? = nil,
         falsepositives: [String],
         enabled: Bool = true
     ) {
@@ -95,6 +179,7 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
         self.logsource = logsource
         self.predicates = predicates
         self.condition = condition
+        self.conditionTree = conditionTree
         self.falsepositives = falsepositives
         self.enabled = enabled
     }
@@ -303,16 +388,57 @@ public actor RuleEngine {
         let predicates = rule.predicates
         guard !predicates.isEmpty else { return false }
 
+        // Use hierarchical condition tree if available (complex boolean expressions).
+        if let tree = rule.conditionTree {
+            return evaluateConditionNode(tree, predicates: predicates, against: event)
+        }
+
+        // Legacy flat condition evaluation.
         switch rule.condition {
         case .allOf:
             return predicates.allSatisfy { evaluatePredicate($0, against: event) }
         case .anyOf:
             return predicates.contains { evaluatePredicate($0, against: event) }
         case .oneOfEach:
-            // Group predicates by field and require at least one match in each group.
             let groups = Dictionary(grouping: predicates, by: { $0.field })
             return groups.values.allSatisfy { group in
                 group.contains { evaluatePredicate($0, against: event) }
+            }
+        }
+    }
+
+    /// Recursively evaluate a condition tree node.
+    private func evaluateConditionNode(
+        _ node: ConditionNode,
+        predicates: [Predicate],
+        against event: Event
+    ) -> Bool {
+        switch node {
+        case .and(let operands):
+            return operands.allSatisfy { evaluateConditionNode($0, predicates: predicates, against: event) }
+
+        case .or(let operands):
+            return operands.contains { evaluateConditionNode($0, predicates: predicates, against: event) }
+
+        case .not(let operand):
+            return !evaluateConditionNode(operand, predicates: predicates, against: event)
+
+        case .predicate(let index):
+            guard index >= 0 && index < predicates.count else { return false }
+            return evaluatePredicate(predicates[index], against: event)
+
+        case .predicateGroup(let range, let mode):
+            let slice = predicates[range.clamped(to: 0..<predicates.count)]
+            switch mode {
+            case .allOf:
+                return slice.allSatisfy { evaluatePredicate($0, against: event) }
+            case .anyOf:
+                return slice.contains { evaluatePredicate($0, against: event) }
+            case .oneOfEach:
+                let groups = Dictionary(grouping: slice, by: { $0.field })
+                return groups.values.allSatisfy { group in
+                    group.contains { evaluatePredicate($0, against: event) }
+                }
             }
         }
     }
