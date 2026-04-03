@@ -12,6 +12,7 @@ struct RuleBrowser: View {
     @ObservedObject var appState: AppState
     @State private var searchText: String = ""
     @State private var selectedTactic: String? = nil
+    @State private var showRuleWizard: Bool = false
 
     /// Unique tactic groups derived from the loaded rules.
     private var tactics: [TacticGroup] {
@@ -128,12 +129,23 @@ struct RuleBrowser: View {
 
                     Spacer()
 
+                    Button {
+                        showRuleWizard = true
+                    } label: {
+                        Label("Create Rule", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+
                     TextField("Search rules...", text: $searchText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 250)
                         .accessibilityLabel("Search detection rules")
                 }
                 .padding()
+                .sheet(isPresented: $showRuleWizard) {
+                    RuleWizard()
+                }
 
                 Divider()
 
