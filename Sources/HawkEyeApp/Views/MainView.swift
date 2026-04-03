@@ -69,6 +69,13 @@ struct MainView: View {
                     }
                     .tag(AppState.Tab.tcc)
                     .keyboardShortcut("4", modifiers: .command)
+
+                DocsView()
+                    .tabItem {
+                        Label("Docs", systemImage: "book")
+                    }
+                    .tag(AppState.Tab.docs)
+                    .keyboardShortcut("5", modifiers: .command)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
