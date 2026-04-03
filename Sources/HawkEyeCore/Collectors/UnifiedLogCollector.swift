@@ -69,6 +69,8 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         "com.apple.opendirectoryd",
         "com.apple.sandboxd",
         "com.apple.screensharing",
+        "com.apple.mDNSResponder",
+        "com.apple.networkd",
     ]
 
     // MARK: - Properties

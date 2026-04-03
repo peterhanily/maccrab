@@ -170,6 +170,14 @@ struct HawkEyeDaemon {
             }
         }
 
+        // Statistical anomaly detector
+        let statisticalDetector = StatisticalAnomalyDetector(zThreshold: 3.0, minSamples: 50)
+
+        // DNS collector (BPF capture or passive mode)
+        let dnsCollector = DNSCollector()
+        await dnsCollector.start()
+        print("DNS collector active")
+
         // Initialize sequence engine (Phase 2: temporal-causal detection)
         let sequenceEngine = await SequenceEngine(lineage: enricher.lineage)
 
@@ -396,6 +404,74 @@ struct HawkEyeDaemon {
         sigIntSource.setEventHandler { shutdownHandler() }
         sigIntSource.resume()
 
+        // DNS event processing task
+        Task {
+            for await dnsQuery in dnsCollector.events {
+                // Record resolution for IP-to-domain correlation
+                if dnsQuery.isResponse && !dnsQuery.resolvedIPs.isEmpty {
+                    await dnsCollector.recordResolution(domain: dnsQuery.queryName, ips: dnsQuery.resolvedIPs)
+                }
+
+                // Check for DGA domains
+                let (_, isDGA, dgaReason) = EntropyAnalysis.analyzeDomain(dnsQuery.queryName)
+                if isDGA {
+                    let alert = Alert(
+                        ruleId: "hawkeye.dns.dga-detection",
+                        ruleTitle: "Possible DGA Domain Queried",
+                        severity: .high,
+                        eventId: UUID().uuidString,
+                        processPath: nil,
+                        processName: "mDNSResponder",
+                        description: "DNS query for suspected DGA domain: \(dnsQuery.queryName). \(dgaReason ?? "")",
+                        mitreTactics: "attack.command_and_control",
+                        mitreTechniques: "attack.t1568.002",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                }
+
+                // Check for DNS tunneling
+                let (isTunneling, tunnelingReason) = EntropyAnalysis.isDNSTunneling(
+                    queryName: dnsQuery.queryName, queryType: dnsQuery.queryType
+                )
+                if isTunneling {
+                    let alert = Alert(
+                        ruleId: "hawkeye.dns.tunneling-detection",
+                        ruleTitle: "Possible DNS Tunneling Detected",
+                        severity: .high,
+                        eventId: UUID().uuidString,
+                        processPath: nil,
+                        processName: "mDNSResponder",
+                        description: "DNS tunneling indicators: \(dnsQuery.queryName). \(tunnelingReason ?? "")",
+                        mitreTactics: "attack.command_and_control",
+                        mitreTechniques: "attack.t1071.004",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                }
+
+                // Check against threat intel
+                if await threatIntel.isDomainMalicious(dnsQuery.queryName) {
+                    let alert = Alert(
+                        ruleId: "hawkeye.dns.threat-intel-match",
+                        ruleTitle: "DNS Query to Known Malicious Domain",
+                        severity: .critical,
+                        eventId: UUID().uuidString,
+                        processPath: nil,
+                        processName: "mDNSResponder",
+                        description: "DNS query for known-malicious domain: \(dnsQuery.queryName)",
+                        mitreTactics: "attack.command_and_control",
+                        mitreTechniques: "attack.t1071.004",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                }
+            }
+        }
+
         // Stats tracking
         var eventCount: UInt64 = 0
         var alertCount: UInt64 = 0
@@ -446,6 +522,43 @@ struct HawkEyeDaemon {
             // YARA enrichment for file events (Phase 3)
             if enrichedEvent.eventCategory == .file {
                 enrichedEvent = await yaraEnricher.enrich(enrichedEvent)
+            }
+
+            // === Statistical anomaly detection ===
+            let anomalies = await statisticalDetector.processEvent(
+                processPath: enrichedEvent.process.executable,
+                argCount: enrichedEvent.process.args.count,
+                commandLine: enrichedEvent.process.commandLine,
+                category: enrichedEvent.eventCategory.rawValue,
+                timestamp: enrichedEvent.timestamp
+            )
+            for anomaly in anomalies {
+                await behaviorScoring.addIndicator(
+                    named: "statistical_frequency_anomaly",
+                    detail: "\(anomaly.feature) z=\(String(format: "%.1f", anomaly.zScore))",
+                    forProcess: enrichedEvent.process.pid,
+                    path: enrichedEvent.process.executable
+                )
+            }
+
+            // === Entropy analysis on command lines ===
+            if !enrichedEvent.process.commandLine.isEmpty {
+                let (entropy, suspicious, _) = EntropyAnalysis.analyzeCommandLine(enrichedEvent.process.commandLine)
+                if suspicious {
+                    await behaviorScoring.addIndicator(
+                        named: "high_entropy_commandline",
+                        detail: "entropy=\(String(format: "%.2f", entropy))",
+                        forProcess: enrichedEvent.process.pid,
+                        path: enrichedEvent.process.executable
+                    )
+                }
+            }
+
+            // === DNS enrichment: resolve IP → domain from DNS cache ===
+            if let net = enrichedEvent.network, enrichedEvent.network?.destinationHostname == nil {
+                if let domain = await dnsCollector.domainForIP(net.destinationIp) {
+                    enrichedEvent.enrichments["dns.resolved_domain"] = domain
+                }
             }
 
             // === Threat Intel + CT enrichment ===
