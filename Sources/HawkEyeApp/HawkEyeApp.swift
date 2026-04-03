@@ -50,6 +50,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "HawkEye Active", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d"))
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
     }
@@ -59,6 +61,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         for window in NSApplication.shared.windows where window.title.contains("HawkEye") {
             window.makeKeyAndOrderFront(nil)
             return
+        }
+    }
+
+    @objc private func openSettings() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        // Open the Settings window via the standard macOS mechanism
+        if #available(macOS 14.0, *) {
+            NSApplication.shared.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApplication.shared.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
     }
 

@@ -1,17 +1,23 @@
 import Foundation
 import HawkEyeCore
 
-/// Resolve the HawkEye data directory. Uses the system location if readable,
-/// otherwise falls back to the user's Application Support.
+/// Resolve the HawkEye data directory.
+/// Prefers the user directory when a non-root daemon is running (or recently wrote data).
+/// Falls back to system directory only when user DB doesn't exist.
 private func hawkeyeDataDir() -> String {
+    let userDir = FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask
+    ).first!.appendingPathComponent("HawkEye").path
+    // Prefer user dir if it has a DB (means non-root daemon is/was active)
+    if FileManager.default.fileExists(atPath: userDir + "/events.db") {
+        return userDir
+    }
     let systemDir = "/Library/Application Support/HawkEye"
     if FileManager.default.isReadableFile(atPath: systemDir + "/events.db") {
         return systemDir
     }
-    return FileManager.default.urls(
-        for: .applicationSupportDirectory,
-        in: .userDomainMask
-    ).first!.appendingPathComponent("HawkEye").path
+    return userDir
 }
 
 @main

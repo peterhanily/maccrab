@@ -1,43 +1,116 @@
-.PHONY: build test compile-rules install uninstall clean run
+.PHONY: build test compile-rules install uninstall clean run dev restart app stop status
 
 PREFIX ?= /usr/local
 SUPPORT_DIR = /Library/Application\ Support/HawkEye
+BUILD_DIR = .build/debug
+RULES_DIR = $(BUILD_DIR)/compiled_rules
 
-# Build debug binaries
+# ─── Quick development cycle ─────────────────────────────────────────
+
+# One command: build + compile rules + restart daemon + open app
+dev: stop build compile-rules
+	@$(BUILD_DIR)/hawkeyed &
+	@sleep 2
+	@open $(BUILD_DIR)/HawkEyeApp 2>/dev/null || true
+	@echo ""
+	@$(BUILD_DIR)/hawkctl status
+
+# Restart daemon only (no rebuild)
+restart: stop
+	@$(BUILD_DIR)/hawkeyed &
+	@sleep 2
+	@$(BUILD_DIR)/hawkctl status
+
+# Open the GUI app
+app:
+	@open $(BUILD_DIR)/HawkEyeApp 2>/dev/null || $(BUILD_DIR)/HawkEyeApp &
+
+# Stop daemon and app
+stop:
+	@pkill -x hawkeyed 2>/dev/null || true
+	@pkill -x HawkEyeApp 2>/dev/null || true
+	@sleep 1
+
+# Show status
+status:
+	@$(BUILD_DIR)/hawkctl status
+
+# Live alert stream
+watch:
+	@$(BUILD_DIR)/hawkctl watch
+
+# ─── Build ────────────────────────────────────────────────────────────
+
 build:
-	swift build
+	@swift build 2>&1 | tail -1
 
-# Build release binaries
 release:
-	swift build -c release
+	@swift build -c release 2>&1 | tail -1
 
-# Run tests
+compile-rules:
+	@python3 Compiler/compile_rules.py \
+		--input-dir Rules/ \
+		--output-dir $(RULES_DIR) 2>&1 | tail -1
+
+# ─── Test ─────────────────────────────────────────────────────────────
+
 test:
+	@swift test 2>&1 | grep -E "✔|✘|Test run"
+
+test-full:
 	./scripts/test.sh
 
-# Compile detection rules to build directory (for development)
-compile-rules:
-	python3 Compiler/compile_rules.py \
-		--input-dir Rules/ \
-		--output-dir .build/debug/compiled_rules
+test-integration:
+	./scripts/integration-test.sh
 
-# Run daemon locally (non-root, for development)
-run: build compile-rules
-	.build/debug/hawkeyed
+test-stress:
+	./scripts/stress-test.sh 60
 
-# Run daemon with root (full ES support)
-run-root: build compile-rules
-	sudo .build/debug/hawkeyed
+# ─── Install (system-wide, requires sudo) ─────────────────────────────
 
-# Install system-wide (requires sudo)
 install: release
 	sudo ./scripts/install.sh
 
-# Uninstall (requires sudo)
 uninstall:
 	sudo ./scripts/uninstall.sh
 
-# Clean build artifacts
+# ─── Utilities ────────────────────────────────────────────────────────
+
+# Clear all local data (events, alerts)
+clear-data: stop
+	@rm -rf "$(HOME)/Library/Application Support/HawkEye/events.db"* 2>/dev/null || true
+	@echo "Local data cleared"
+
+# Run daemon as root (full ES support) — needs Terminal for password
+run-root: build compile-rules
+	sudo $(BUILD_DIR)/hawkeyed
+
+# Create a new rule from template
+new-rule:
+	@echo "Categories: process_creation, file_event, network_connection, tcc_event, sequence"
+	@read -p "Category: " cat; $(BUILD_DIR)/hawkctl rule create $$cat
+
 clean:
 	swift package clean
-	rm -rf .build/debug/compiled_rules
+	rm -rf $(RULES_DIR)
+
+help:
+	@echo "HawkEye Development Commands:"
+	@echo ""
+	@echo "  make dev          Build + restart daemon + open app (one command)"
+	@echo "  make restart      Restart daemon (no rebuild)"
+	@echo "  make stop         Stop daemon and app"
+	@echo "  make status       Show daemon status"
+	@echo "  make watch        Live stream alerts"
+	@echo "  make app          Open the GUI dashboard"
+	@echo ""
+	@echo "  make build        Build debug binaries"
+	@echo "  make test         Run tests (summary only)"
+	@echo "  make test-full    Run full test suite"
+	@echo "  make compile-rules Compile YAML rules to JSON"
+	@echo "  make clear-data   Delete local events/alerts"
+	@echo "  make new-rule     Create rule from template"
+	@echo ""
+	@echo "  make install      Install system-wide (sudo)"
+	@echo "  make uninstall    Remove system install (sudo)"
+	@echo "  make run-root     Run with Endpoint Security (sudo)"
