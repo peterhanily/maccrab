@@ -82,18 +82,22 @@ final class AppState: ObservableObject {
     private var pollTimer: AnyCancellable?
     private var previousEventCount: Int = 0
 
-    /// Database path — try system location first, fall back to user directory.
+    /// Database path — prefer user directory (active non-root daemon writes here).
+    /// Only falls back to system path if user DB doesn't exist.
     private let databasePath: String = {
-        let systemPath = "/Library/Application Support/HawkEye/events.db"
-        if FileManager.default.isReadableFile(atPath: systemPath) {
-            return systemPath
-        }
         let userPath = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first!
             .appendingPathComponent("HawkEye/events.db")
             .path
+        if FileManager.default.fileExists(atPath: userPath) {
+            return userPath
+        }
+        let systemPath = "/Library/Application Support/HawkEye/events.db"
+        if FileManager.default.isReadableFile(atPath: systemPath) {
+            return systemPath
+        }
         return userPath
     }()
 

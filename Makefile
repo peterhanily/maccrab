@@ -80,10 +80,13 @@ uninstall:
 
 # ─── Utilities ────────────────────────────────────────────────────────
 
-# Clear all local data (events, alerts)
+# Clear all data (events, alerts) — uses sudo for system DB
 clear-data: stop
 	@rm -rf "$(HOME)/Library/Application Support/HawkEye/events.db"* 2>/dev/null || true
-	@echo "Local data cleared"
+	@rm -rf "$(HOME)/Library/Application Support/HawkEye/alerts.jsonl" 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/HawkEye/events.db"* 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/HawkEye/alerts.jsonl" 2>/dev/null || true
+	@echo "All data cleared"
 
 # Run daemon as root (full ES support) — needs Terminal for password
 run-root: build compile-rules
