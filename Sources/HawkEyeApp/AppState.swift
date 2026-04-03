@@ -116,21 +116,28 @@ final class AppState: ObservableObject {
     }
 
     func loadRules() async {
-        // Load compiled rule JSONs
-        let rulesDir = dataDir + "/compiled_rules"
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: rulesDir) else {
-            // Try the build dir for development
-            let buildRulesDir = URL(fileURLWithPath: CommandLine.arguments[0])
+        // Search for compiled rules in multiple locations
+        let candidates = [
+            dataDir + "/compiled_rules",
+            // Development: next to the hawkeyed binary
+            URL(fileURLWithPath: CommandLine.arguments[0])
                 .deletingLastPathComponent()
-                .appendingPathComponent("compiled_rules").path
-            if let buildFiles = try? FileManager.default.contentsOfDirectory(atPath: buildRulesDir) {
-                rules = loadRulesFromDir(buildRulesDir, files: buildFiles)
+                .deletingLastPathComponent() // out of .app bundle
+                .deletingLastPathComponent()
+                .appendingPathComponent("debug/compiled_rules").path,
+            // Direct build dir
+            FileManager.default.currentDirectoryPath + "/.build/debug/compiled_rules",
+        ]
+
+        for dir in candidates {
+            if let files = try? FileManager.default.contentsOfDirectory(atPath: dir),
+               files.contains(where: { $0.hasSuffix(".json") }) {
+                rules = loadRulesFromDir(dir, files: files)
+                rulesLoaded = rules.count
+                return
             }
-            rulesLoaded = rules.count
-            return
         }
-        rules = loadRulesFromDir(rulesDir, files: files)
-        rulesLoaded = rules.count
+        rulesLoaded = 0
     }
 
     func loadTCCEvents() async {

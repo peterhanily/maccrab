@@ -55,6 +55,9 @@ compile-rules:
 	@python3 Compiler/compile_rules.py \
 		--input-dir Rules/ \
 		--output-dir $(RULES_DIR) 2>&1 | tail -1
+	@mkdir -p "$(HOME)/Library/Application Support/HawkEye/compiled_rules/sequences"
+	@cp -f $(RULES_DIR)/*.json "$(HOME)/Library/Application Support/HawkEye/compiled_rules/" 2>/dev/null || true
+	@cp -f $(RULES_DIR)/sequences/*.json "$(HOME)/Library/Application Support/HawkEye/compiled_rules/sequences/" 2>/dev/null || true
 
 # ─── Test ─────────────────────────────────────────────────────────────
 

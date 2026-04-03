@@ -99,7 +99,9 @@ struct TCCTimeline: View {
                     Image(systemName: "lock.shield")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.5))
-                    Text("No TCC events matching current filters")
+                    Text(appState.tccEvents.isEmpty
+                        ? "No permission changes detected yet"
+                        : "No TCC events matching current filters")
                         .font(.headline)
                         .foregroundColor(.secondary)
                     if filterService != nil || filterAllowed != nil || !searchText.isEmpty {
