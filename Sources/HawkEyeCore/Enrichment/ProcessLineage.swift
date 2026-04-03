@@ -24,6 +24,12 @@ struct LineageNode: Sendable {
     /// Base name of the executable.
     let name: String
 
+    /// Full command line.
+    let commandLine: String
+
+    /// Code signer type (if known).
+    let signerType: String?
+
     /// Timestamp when the process was first observed (exec/fork).
     let startTime: Date
 
@@ -88,7 +94,9 @@ public actor ProcessLineage {
         ppid: pid_t,
         path: String,
         name: String,
-        startTime: Date
+        startTime: Date,
+        commandLine: String = "",
+        signerType: String? = nil
     ) {
         // If this pid was previously tracked (pid reuse), clean up old entry.
         if let old = nodes[pid] {
@@ -100,6 +108,8 @@ public actor ProcessLineage {
             ppid: ppid,
             path: path,
             name: name,
+            commandLine: commandLine,
+            signerType: signerType,
             startTime: startTime,
             exitTime: nil
         )
@@ -228,6 +238,26 @@ public actor ProcessLineage {
             // and will be pruned on their own schedule).
             childrenIndex.removeValue(forKey: pid)
         }
+    }
+
+    /// Get the command line for a specific process (if tracked).
+    public func commandLine(of pid: pid_t) -> String? {
+        nodes[pid]?.commandLine.isEmpty == false ? nodes[pid]?.commandLine : nil
+    }
+
+    /// Get the signer type for a specific process (if tracked).
+    public func signerType(of pid: pid_t) -> String? {
+        nodes[pid]?.signerType
+    }
+
+    /// Get info about the parent of a process.
+    public func parentInfo(of pid: pid_t) -> (commandLine: String?, signerType: String?, path: String?)? {
+        guard let node = nodes[pid], let parent = nodes[node.ppid] else { return nil }
+        return (
+            parent.commandLine.isEmpty ? nil : parent.commandLine,
+            parent.signerType,
+            parent.path
+        )
     }
 
     // MARK: Diagnostics

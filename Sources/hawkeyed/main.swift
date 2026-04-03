@@ -152,6 +152,12 @@ struct HawkEyeDaemon {
         // Behavioral scoring engine
         let behaviorScoring = BehaviorScoring(alertThreshold: 10.0, criticalThreshold: 20.0)
 
+        // Certificate Transparency monitor
+        let ctMonitor = CertTransparency()
+
+        // Incident grouper — clusters related alerts into attack timelines
+        let incidentGrouper = IncidentGrouper(correlationWindow: 300, staleWindow: 600)
+
         // Load response action config if it exists
         let actionConfigPath = supportDir + "/actions.json"
         if FileManager.default.fileExists(atPath: actionConfigPath) {
@@ -442,7 +448,29 @@ struct HawkEyeDaemon {
                 enrichedEvent = await yaraEnricher.enrich(enrichedEvent)
             }
 
-            // === Threat Intel enrichment ===
+            // === Threat Intel + CT enrichment ===
+            if let net = enrichedEvent.network {
+                // Certificate Transparency check on destination domains
+                if let host = net.destinationHostname {
+                    if let ctResult = await ctMonitor.checkDomain(host), ctResult.isSuspicious {
+                        await behaviorScoring.addIndicator(
+                            BehaviorScoring.Indicator(name: "suspicious_certificate", weight: 4.0, detail: ctResult.reason ?? host),
+                            forProcess: enrichedEvent.process.pid,
+                            path: enrichedEvent.process.executable
+                        )
+                    }
+                    // Typosquatting check
+                    let (isTypo, typoReason) = await ctMonitor.isTyposquat(host)
+                    if isTypo {
+                        await behaviorScoring.addIndicator(
+                            BehaviorScoring.Indicator(name: "typosquat_domain", weight: 6.0, detail: typoReason ?? host),
+                            forProcess: enrichedEvent.process.pid,
+                            path: enrichedEvent.process.executable
+                        )
+                    }
+                }
+            }
+
             // Check process hash, network IPs, and domains against known-bad IOCs
             if let net = enrichedEvent.network {
                 if await threatIntel.isIPMalicious(net.destinationIp) {
@@ -560,6 +588,18 @@ struct HawkEyeDaemon {
                     try? await alertStore.insert(alert: alert)
                     await notifier.notify(alert: alert)
                     await responseEngine.execute(alert: alert, event: enrichedEvent)
+
+                    // Group into incident
+                    let tactics = match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }
+                    await incidentGrouper.processAlert(
+                        alertId: alert.id,
+                        timestamp: alert.timestamp,
+                        ruleTitle: match.ruleName,
+                        severity: match.severity,
+                        processPath: enrichedEvent.process.executable,
+                        parentPath: enrichedEvent.process.ancestors.first?.executable,
+                        tactics: tactics
+                    )
 
                     // Log alert to stdout
                     let severityIcon: String

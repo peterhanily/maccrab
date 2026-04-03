@@ -130,6 +130,16 @@ public actor EventEnricher {
             ruleMatches: event.ruleMatches
         )
 
+        // Populate parent enrichment fields from lineage
+        if let parentInfo = await lineage.parentInfo(of: proc.pid) {
+            if let pcl = parentInfo.commandLine {
+                enrichedEvent.enrichments["parent.commandline"] = pcl
+            }
+            if let pst = parentInfo.signerType {
+                enrichedEvent.enrichments["ParentSignerType"] = pst
+            }
+        }
+
         // Mark that enrichment has been applied.
         enrichedEvent.enrichments["enriched"] = "true"
 
@@ -156,7 +166,9 @@ public actor EventEnricher {
                 ppid: proc.ppid,
                 path: proc.executable,
                 name: proc.name,
-                startTime: proc.startTime
+                startTime: proc.startTime,
+                commandLine: proc.commandLine,
+                signerType: proc.codeSignature?.signerType.rawValue
             )
 
         case (.process, "exit"):
@@ -173,7 +185,9 @@ public actor EventEnricher {
                     ppid: proc.ppid,
                     path: proc.executable,
                     name: proc.name,
-                    startTime: proc.startTime
+                    startTime: proc.startTime,
+                    commandLine: proc.commandLine,
+                    signerType: proc.codeSignature?.signerType.rawValue
                 )
             }
         }
