@@ -240,8 +240,9 @@ public actor BaselineEngine {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!.appendingPathComponent("HawkEye")
-        self.persistPath = appSupport.appendingPathComponent("baseline.json").path
+        ).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let hawkeyeDir = appSupport.appendingPathComponent("HawkEye")
+        self.persistPath = hawkeyeDir.appendingPathComponent("baseline.json").path
     }
 
     // MARK: - Public API

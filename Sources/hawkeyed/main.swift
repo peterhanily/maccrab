@@ -492,17 +492,30 @@ struct HawkEyeDaemon {
 
                     print("\(severityIcon) \(match.ruleName) | \(enrichedEvent.process.name) (\(enrichedEvent.process.pid)) | \(enrichedEvent.process.executable)")
 
-                    // Write JSON alert to log file
+                    // Write JSON alert to log file (with rotation at 50MB)
                     if let jsonData = try? JSONEncoder().encode(alert),
                        let jsonString = String(data: jsonData, encoding: .utf8) {
                         let logPath = supportDir + "/alerts.jsonl"
+                        // Rotate if over 50MB
+                        if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
+                           let size = attrs[.size] as? UInt64, size > 50_000_000 {
+                            let rotatedPath = logPath + ".\(Int(Date().timeIntervalSince1970))"
+                            try? FileManager.default.moveItem(atPath: logPath, toPath: rotatedPath)
+                            // Keep only last 5 rotated files
+                            let dir = (logPath as NSString).deletingLastPathComponent
+                            if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
+                                let rotated = files.filter { $0.hasPrefix("alerts.jsonl.") }.sorted().reversed()
+                                for old in rotated.dropFirst(5) {
+                                    try? FileManager.default.removeItem(atPath: dir + "/" + old)
+                                }
+                            }
+                        }
                         if let handle = FileHandle(forWritingAtPath: logPath) {
                             handle.seekToEndOfFile()
                             handle.write((jsonString + "\n").data(using: .utf8)!)
                             handle.closeFile()
                         } else {
                             FileManager.default.createFile(atPath: logPath, contents: (jsonString + "\n").data(using: .utf8))
-                            // Restrict alert log permissions: owner-only read/write (rw-------).
                             chmod(logPath, 0o600)
                         }
                     }

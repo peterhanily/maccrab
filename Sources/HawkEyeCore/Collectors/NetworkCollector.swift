@@ -79,8 +79,8 @@ public actor NetworkCollector {
     /// Creates a new `NetworkCollector`.
     ///
     /// - Parameter pollInterval: Seconds between socket enumeration sweeps.
-    ///   Defaults to 5 seconds.
-    public init(pollInterval: TimeInterval = 5.0) {
+    ///   Defaults to 2 seconds for better visibility of short-lived connections.
+    public init(pollInterval: TimeInterval = 2.0) {
         self.pollInterval = pollInterval
 
         var capturedContinuation: AsyncStream<Event>.Continuation!

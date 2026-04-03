@@ -221,12 +221,19 @@ public actor RuleEngine {
 
     /// Returns a compiled `NSRegularExpression` for the given pattern, using the
     /// cache to avoid recompilation. Returns `nil` if the pattern is invalid.
+    /// Maximum cached regex patterns. Evict oldest when exceeded.
+    private static let maxRegexCacheSize = 2048
+
     private func cachedRegex(for pattern: String) -> NSRegularExpression? {
         if let cached = regexCache[pattern] {
             return cached
         }
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return nil
+        }
+        // Evict if cache is full (simple FIFO — remove arbitrary entry)
+        if regexCache.count >= Self.maxRegexCacheSize {
+            regexCache.removeValue(forKey: regexCache.keys.first!)
         }
         regexCache[pattern] = regex
         return regex

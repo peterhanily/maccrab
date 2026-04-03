@@ -46,7 +46,7 @@ public actor AlertDeduplicator {
     /// Upper bound on the number of tracked keys. When exceeded, ``sweep()``
     /// removes expired entries. If still over the limit, the oldest entries
     /// are evicted.
-    private var maxEntries: Int = 50_000
+    private var maxEntries: Int = 10_000
 
     private let logger = Logger(
         subsystem: "com.hawkeye.detection",

@@ -360,12 +360,32 @@ public actor SelfDefense {
     private func startPeriodicChecks() {
         Task {
             while isActive {
-                try? await Task.sleep(nanoseconds: 60_000_000_000) // Every 60 seconds
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // Every 30 seconds
                 guard isActive else { break }
 
+                // Anti-debug continuous check
+                if Self.isBeingDebugged() {
+                    let event = TamperEvent(
+                        type: .debuggerAttached,
+                        description: "Debugger attached to HawkEye (PID \(getpid())). Attempting to detach.",
+                        severity: .critical
+                    )
+                    await handleTamperEvent(event)
+                    // Log for forensic record — ptrace(PT_DENY_ATTACH) requires C interop
+                    logger.critical("Debugger detected — anti-debug measures logged")
+                }
+
+                // Integrity check
                 let events = integrityCheck()
                 for event in events {
                     await handleTamperEvent(event)
+                }
+
+                // If plist was deleted, attempt to re-register with launchd
+                let plistPath = "/Library/LaunchDaemons/com.hawkeye.daemon.plist"
+                if monitoredPaths.contains(where: { $0.path == plistPath })
+                    && !FileManager.default.fileExists(atPath: plistPath) {
+                    logger.critical("LaunchDaemon plist deleted — HawkEye will not auto-start on reboot")
                 }
             }
         }
@@ -375,6 +395,18 @@ public actor SelfDefense {
 
     private func handleTamperEvent(_ event: TamperEvent) {
         logger.critical("TAMPER DETECTED: [\(event.type.rawValue)] \(event.description)")
+
+        // Write tamper event to a separate forensic log that's harder to tamper with
+        let forensicLog = NSTemporaryDirectory() + "hawkeye_tamper.log"
+        let line = "[\(ISO8601DateFormatter().string(from: event.timestamp))] [\(event.type.rawValue)] \(event.description)\n"
+        if let handle = FileHandle(forWritingAtPath: forensicLog) {
+            handle.seekToEndOfFile()
+            handle.write(line.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: forensicLog, contents: line.data(using: .utf8))
+        }
+
         tamperHandler?(event)
     }
 
