@@ -774,13 +774,14 @@ struct HawkEyeDaemon {
                                 }
                             }
                         }
-                        if let handle = FileHandle(forWritingAtPath: logPath) {
-                            handle.seekToEndOfFile()
-                            handle.write((jsonString + "\n").data(using: .utf8)!)
-                            handle.closeFile()
-                        } else {
-                            FileManager.default.createFile(atPath: logPath, contents: (jsonString + "\n").data(using: .utf8))
-                            chmod(logPath, 0o600)
+                        // Atomic append — use O_APPEND to avoid seek+write race
+                        let lineData = (jsonString + "\n").data(using: .utf8)!
+                        let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+                        if fd >= 0 {
+                            lineData.withUnsafeBytes { ptr in
+                                _ = write(fd, ptr.baseAddress!, ptr.count)
+                            }
+                            close(fd)
                         }
                     }
 

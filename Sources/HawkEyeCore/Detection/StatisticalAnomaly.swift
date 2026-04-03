@@ -51,7 +51,10 @@ public actor StatisticalAnomalyDetector {
 
         func zScore(_ value: Double) -> Double {
             let sd = stddev
-            guard sd > 0 else { return 0 }
+            if sd <= 0 {
+                // No variance yet — if value differs from mean, it's anomalous
+                return abs(value - mean) > 0.001 ? 10.0 : 0.0
+            }
             return abs(value - mean) / sd
         }
     }

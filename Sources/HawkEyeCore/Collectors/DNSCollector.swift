@@ -375,8 +375,11 @@ public actor DNSCollector {
         var pos = offset
         var bytesConsumed = 0
         var jumped = false
+        var jumpCount = 0  // Detect pointer cycles
 
         while pos < data.count {
+            jumpCount += jumped ? 1 : 0
+            guard jumpCount < 20 else { return nil } // Pointer cycle protection
             let len = Int(data[pos])
 
             if len == 0 {
@@ -394,10 +397,14 @@ public actor DNSCollector {
                 continue
             }
 
-            // Regular label
+            // Regular label (RFC 1035: max 63 chars per label)
+            guard len <= 63 else { return nil }
             guard pos + 1 + len <= data.count else { return nil }
-            let label = String(data: data[(pos + 1)..<(pos + 1 + len)], encoding: .utf8) ?? ""
+            guard let label = String(data: data[(pos + 1)..<(pos + 1 + len)], encoding: .utf8),
+                  !label.isEmpty else { return nil }
             labels.append(label)
+            // Guard total name length (RFC 1035: max 253 chars)
+            if labels.joined(separator: ".").count > 253 { return nil }
             pos += 1 + len
         }
 

@@ -177,6 +177,11 @@ public actor BehaviorScoring {
         // Apply time decay to existing score
         applyDecay(for: key)
 
+        // If score decayed below threshold, allow re-alerting
+        if processScores[key]!.rawScore < alertThreshold * 0.5 {
+            alerted.remove(key)
+        }
+
         // Add the new indicator
         processScores[key]!.rawScore += indicator.weight
         processScores[key]!.lastUpdate = Date()
@@ -189,7 +194,7 @@ public actor BehaviorScoring {
 
         let score = processScores[key]!
 
-        // Check threshold
+        // Check threshold (re-alert allowed after decay below 50% of threshold)
         if score.rawScore >= alertThreshold && !alerted.contains(key) {
             alerted.insert(key)
 

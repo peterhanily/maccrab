@@ -196,6 +196,9 @@ public actor IncidentGrouper {
     private func addToIncident(id: String, alert: IncidentAlert) {
         guard var incident = incidents[id] else { return }
 
+        // Deduplicate: don't add the same alert twice
+        if incident.alerts.contains(where: { $0.alertId == alert.alertId }) { return }
+
         incident.alerts.append(alert)
         incident.lastSeen = alert.timestamp
         incident.processTree.insert(alert.processPath)

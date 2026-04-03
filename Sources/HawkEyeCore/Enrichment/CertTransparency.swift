@@ -159,9 +159,14 @@ public actor CertTransparency {
     /// Query crt.sh for certificate info about a domain.
     /// crt.sh is a free Certificate Transparency log search engine.
     private nonisolated func queryCrtSh(domain: String) async -> CTResult? {
-        // Use the JSON API: https://crt.sh/?q=domain&output=json
-        let urlString = "https://crt.sh/?q=\(domain)&output=json&exclude=expired"
-        guard let url = URL(string: urlString) else { return nil }
+        // Use the JSON API with proper URL encoding
+        var components = URLComponents(string: "https://crt.sh/")!
+        components.queryItems = [
+            URLQueryItem(name: "q", value: domain),
+            URLQueryItem(name: "output", value: "json"),
+            URLQueryItem(name: "exclude", value: "expired"),
+        ]
+        guard let url = components.url else { return nil }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
