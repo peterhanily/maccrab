@@ -63,7 +63,7 @@ enum EventCategory: String, CaseIterable, Hashable {
 // MARK: - AlertViewModel
 
 /// Presentation model for a single detection alert.
-struct AlertViewModel: Identifiable {
+struct AlertViewModel: Identifiable, Hashable {
     let id: String
     let timestamp: Date
     let ruleTitle: String
@@ -118,6 +118,10 @@ struct EventViewModel: Identifiable {
         Self.timeFormatter.string(from: timestamp)
     }
 
+    var dateTimeString: String {
+        Self.dateTimeFormatter.string(from: timestamp)
+    }
+
     var actionColor: Color {
         switch action {
         case "exec", "fork":
@@ -143,8 +147,15 @@ struct EventViewModel: Identifiable {
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.timeStyle = .medium    // Respects user's 12/24h preference
+        f.timeStyle = .medium
         f.dateStyle = .none
+        return f
+    }()
+
+    private static let dateTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeStyle = .medium
+        f.dateStyle = .short
         return f
     }()
 }

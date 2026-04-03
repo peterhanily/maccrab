@@ -1,134 +1,70 @@
 // AppState.swift
 // HawkEyeApp
 //
-// Observable state object that serves as the single source of truth for the
-// HawkEye status bar application. Reads from the daemon's SQLite database
-// and alerts.jsonl file. Polls periodically and exposes published properties
-// consumed by SwiftUI views.
+// Central state object for the HawkEye dashboard app.
+// Reads real data from the daemon's SQLite database.
 
-import SwiftUI
+import Foundation
 import Combine
+import HawkEyeCore
 
 // MARK: - AppState
 
-/// Central observable state for the HawkEye menu bar application.
-///
-/// `AppState` periodically polls the daemon's data stores (SQLite + JSONL)
-/// and publishes aggregate statistics and recent alerts. All mutations happen
-/// on the main actor so SwiftUI views can bind directly to published properties.
 @MainActor
 final class AppState: ObservableObject {
 
-    // MARK: Published properties
+    // MARK: Published state
 
-    /// Whether the app can reach the daemon's database.
     @Published var isConnected: Bool = false
-
-    /// Most recent alerts, used for the status bar dropdown and dashboard.
-    @Published var recentAlerts: [AlertViewModel] = []
-
-    /// Approximate events per second observed during the last polling interval.
     @Published var eventsPerSecond: Int = 0
-
-    /// Total number of unsuppressed alerts today.
-    @Published var totalAlerts: Int = 0
-
-    /// Number of detection rules currently loaded by the daemon.
     @Published var rulesLoaded: Int = 0
-
-    /// Currently selected tab in the main window.
-    @Published var selectedTab: Tab = .alerts
-
-    /// All alerts (larger set for the dashboard view).
+    @Published var totalAlerts: Int = 0
+    @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
-
-    /// Live event stream data.
     @Published var events: [EventViewModel] = []
-
-    /// All loaded rules.
     @Published var rules: [RuleViewModel] = []
-
-    /// TCC permission events.
     @Published var tccEvents: [TCCEventViewModel] = []
 
-    // MARK: Tabs
+    enum Tab: String, CaseIterable { case alerts, events, rules, tcc, settings }
+    @Published var selectedTab: Tab = .alerts
 
-    enum Tab: Hashable {
-        case alerts
-        case events
-        case rules
-        case tcc
-    }
-
-    // MARK: Derived properties
-
-    /// SF Symbol name for the status bar icon. Changes based on alert state.
-    ///
-    /// - `exclamationmark.shield.fill`: At least one critical/high unsuppressed alert in last hour
-    /// - `shield.lefthalf.filled`: Connected and monitoring, no urgent alerts
-    /// - `shield.slash`: Not connected to daemon
-    var statusIcon: String {
-        guard isConnected else {
-            return "shield.slash"
-        }
-        let hasUrgent = recentAlerts.contains { alert in
-            !alert.suppressed && (alert.severity == .critical || alert.severity == .high)
-        }
-        return hasUrgent ? "exclamationmark.shield.fill" : "shield.lefthalf.filled"
-    }
-
-    // MARK: Polling
+    // MARK: Private
 
     private var pollTimer: AnyCancellable?
     private var previousEventCount: Int = 0
 
-    /// Database path — prefer user directory (active non-root daemon writes here).
-    /// Only falls back to system path if user DB doesn't exist.
-    private let databasePath: String = {
-        let userPath = FileManager.default.urls(
+    /// Resolve the HawkEye data directory.
+    private let dataDir: String = {
+        let userDir = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!
-            .appendingPathComponent("HawkEye/events.db")
-            .path
-        if FileManager.default.fileExists(atPath: userPath) {
-            return userPath
+        ).first!.appendingPathComponent("HawkEye").path
+        if FileManager.default.fileExists(atPath: userDir + "/events.db") {
+            return userDir
         }
-        let systemPath = "/Library/Application Support/HawkEye/events.db"
-        if FileManager.default.isReadableFile(atPath: systemPath) {
-            return systemPath
+        let systemDir = "/Library/Application Support/HawkEye"
+        if FileManager.default.isReadableFile(atPath: systemDir + "/events.db") {
+            return systemDir
         }
-        return userPath
+        return userDir
     }()
 
     // MARK: Initialization
 
     init() {
-        // Seed with mock data for development. In production, the initial
-        // refresh() call below will overwrite with real data.
-        loadMockData()
-
-        // Start periodic polling every 5 seconds.
         pollTimer = Timer.publish(every: 5.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
-                Task { @MainActor in
-                    await self.refresh()
-                }
+                Task { @MainActor in await self.refresh() }
             }
-
-        // Perform an initial refresh.
-        Task {
-            await refresh()
-        }
+        Task { await refresh() }
     }
 
     // MARK: Public interface
 
-    /// Refresh all data from the daemon's data stores.
     func refresh() async {
-        // Check daemon connectivity: is hawkeyed process running?
+        // Check daemon connectivity
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         task.arguments = ["-x", "hawkeyed"]
@@ -137,94 +73,191 @@ final class AppState: ObservableObject {
         try? task.run()
         task.waitUntilExit()
         let daemonRunning = task.terminationStatus == 0
-
-        // Also check if DB file exists (daemon may have run previously)
-        let dbExists = FileManager.default.fileExists(atPath: databasePath)
+        let dbExists = FileManager.default.fileExists(atPath: dataDir + "/events.db")
         isConnected = daemonRunning || dbExists
 
-        guard isConnected else { return }
+        guard isConnected else {
+            eventsPerSecond = 0
+            return
+        }
 
-        // In production these would make real SQLite queries via a reader
-        // connection. For now, we keep the mock data populated during init.
-        // The structure is ready for integration:
-        //
-        // await loadAlerts(limit: 500)
-        // await loadEvents(limit: 1000, filter: nil)
-        // await loadRules()
-        // await loadTCCEvents()
+        await loadAlerts()
+        await loadEvents()
+        await loadRules()
+        await loadTCCEvents()
+        await updateStats()
     }
 
-    /// Load alerts from the database.
-    ///
-    /// - Parameter limit: Maximum number of alerts to fetch.
     func loadAlerts(limit: Int = 500) async {
-        // TODO: Integration point -- read from AlertStore via a read-only
-        // SQLite connection. For development, mock data is used.
-        dashboardAlerts = MockData.alerts
-        recentAlerts = Array(MockData.alerts.prefix(5))
-        totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
+        do {
+            let store = try AlertStore(directory: dataDir)
+            let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
+            dashboardAlerts = alerts.map { alertToViewModel($0) }
+            recentAlerts = Array(dashboardAlerts.prefix(5))
+            totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
+        } catch {
+            // DB may not exist yet
+        }
     }
 
-    /// Load events from the database.
-    ///
-    /// - Parameters:
-    ///   - limit: Maximum number of events to fetch.
-    ///   - filter: Optional FTS search string.
-    func loadEvents(limit: Int = 1000, filter: String? = nil) async {
-        // TODO: Integration point -- read from EventStore.
-        events = MockData.events
+    func loadEvents(limit: Int = 500, filter: String? = nil) async {
+        do {
+            let store = try EventStore(directory: dataDir)
+            let raw: [Event]
+            if let query = filter, !query.isEmpty {
+                raw = try await store.search(text: query, limit: limit)
+            } else {
+                raw = try await store.events(since: Date.distantPast, limit: limit)
+            }
+            events = raw.map { eventToViewModel($0) }
+        } catch {
+            // DB may not exist yet
+        }
     }
 
-    /// Load detection rules.
     func loadRules() async {
-        // TODO: Integration point -- read compiled rule JSONs from the rules
-        // directory or query the daemon's rule engine via XPC/socket.
-        rules = MockData.rules
+        // Load compiled rule JSONs
+        let rulesDir = dataDir + "/compiled_rules"
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: rulesDir) else {
+            // Try the build dir for development
+            let buildRulesDir = URL(fileURLWithPath: CommandLine.arguments[0])
+                .deletingLastPathComponent()
+                .appendingPathComponent("compiled_rules").path
+            if let buildFiles = try? FileManager.default.contentsOfDirectory(atPath: buildRulesDir) {
+                rules = loadRulesFromDir(buildRulesDir, files: buildFiles)
+            }
+            rulesLoaded = rules.count
+            return
+        }
+        rules = loadRulesFromDir(rulesDir, files: files)
         rulesLoaded = rules.count
     }
 
-    /// Load TCC permission events.
     func loadTCCEvents() async {
-        // TODO: Integration point -- query events where event_category = 'tcc'.
-        tccEvents = MockData.tccEvents
+        do {
+            let store = try EventStore(directory: dataDir)
+            let tccRaw = try await store.events(since: Date.distantPast, category: .tcc, limit: 200)
+            tccEvents = tccRaw.compactMap { event -> TCCEventViewModel? in
+                guard let tcc = event.tcc else { return nil }
+                return TCCEventViewModel(
+                    id: event.id.uuidString,
+                    timestamp: event.timestamp,
+                    serviceName: tcc.service,
+                    clientName: tcc.client,
+                    clientPath: tcc.clientPath,
+                    allowed: tcc.allowed,
+                    authReason: tcc.authReason
+                )
+            }
+        } catch {
+            // DB may not exist yet
+        }
     }
 
-    /// Suppress (silence) an alert by its identifier.
-    ///
-    /// - Parameter alertId: The unique identifier of the alert to suppress.
     func suppressAlert(_ alertId: String) async {
-        // TODO: Integration point -- call AlertStore.suppress(alertId:).
-        if let index = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
-            dashboardAlerts[index].suppressed = true
+        do {
+            let store = try AlertStore(directory: dataDir)
+            try await store.suppress(alertId: alertId)
+            await loadAlerts()
+        } catch {
+            // Mark locally
+            if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
+                dashboardAlerts[idx].suppressed = true
+            }
         }
-        if let index = recentAlerts.firstIndex(where: { $0.id == alertId }) {
-            recentAlerts[index].suppressed = true
-        }
-        totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
     }
 
-    /// Send SIGHUP to the hawkeyed daemon to trigger a rule reload.
     func reloadDaemonRules() {
-        // Find the daemon PID and send SIGHUP.
-        // In production this would use a proper IPC mechanism (XPC, Unix socket).
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         task.arguments = ["-HUP", "hawkeyed"]
         try? task.run()
     }
 
-    // MARK: Private
+    // MARK: Private — Data Mapping
 
-    /// Populate state with mock data for development.
-    private func loadMockData() {
-        recentAlerts = Array(MockData.alerts.prefix(5))
-        dashboardAlerts = MockData.alerts
-        events = MockData.events
-        rules = MockData.rules
-        tccEvents = MockData.tccEvents
-        totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
-        rulesLoaded = rules.count
-        eventsPerSecond = 42
-        isConnected = true
+    private func alertToViewModel(_ a: Alert) -> AlertViewModel {
+        AlertViewModel(
+            id: a.id,
+            timestamp: a.timestamp,
+            ruleTitle: a.ruleTitle,
+            severity: mapSeverity(a.severity),
+            processName: a.processName ?? "unknown",
+            processPath: a.processPath ?? "",
+            description: a.description ?? "",
+            mitreTechniques: a.mitreTechniques ?? "",
+            suppressed: a.suppressed
+        )
+    }
+
+    private func eventToViewModel(_ e: Event) -> EventViewModel {
+        let detail: String
+        if let file = e.file {
+            detail = file.path
+        } else if let net = e.network {
+            detail = "\(net.destinationIp):\(net.destinationPort)"
+        } else if let tcc = e.tcc {
+            detail = "\(tcc.service) → \(tcc.client)"
+        } else {
+            detail = e.process.executable
+        }
+
+        return EventViewModel(
+            id: e.id,
+            timestamp: e.timestamp,
+            action: e.eventAction,
+            category: mapCategory(e.eventCategory),
+            processName: e.process.name,
+            pid: e.process.pid,
+            detail: detail,
+            signerType: e.process.codeSignature?.signerType.rawValue ?? ""
+        )
+    }
+
+    private func mapSeverity(_ s: HawkEyeCore.Severity) -> Severity {
+        switch s {
+        case .informational: return .informational
+        case .low: return .low
+        case .medium: return .medium
+        case .high: return .high
+        case .critical: return .critical
+        }
+    }
+
+    private func mapCategory(_ c: HawkEyeCore.EventCategory) -> EventCategory {
+        switch c {
+        case .process: return .process
+        case .file: return .file
+        case .network: return .network
+        case .authentication: return .authentication
+        case .tcc: return .tcc
+        case .registry: return .registry
+        }
+    }
+
+    private func loadRulesFromDir(_ dir: String, files: [String]) -> [RuleViewModel] {
+        let decoder = JSONDecoder()
+        return files.compactMap { file -> RuleViewModel? in
+            guard file.hasSuffix(".json") else { return nil }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: dir + "/" + file)),
+                  let rule = try? decoder.decode(CompiledRule.self, from: data) else { return nil }
+            return RuleViewModel(
+                id: rule.id,
+                title: rule.title,
+                level: rule.level.rawValue,
+                tags: rule.tags,
+                description: rule.description,
+                enabled: rule.enabled
+            )
+        }
+    }
+
+    private func updateStats() async {
+        do {
+            let store = try EventStore(directory: dataDir)
+            let currentCount = try await store.count()
+            eventsPerSecond = max(0, (currentCount - previousEventCount) / 5)
+            previousEventCount = currentCount
+        } catch {}
     }
 }

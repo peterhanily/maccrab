@@ -117,10 +117,10 @@ struct EventStream: View {
             } else {
                 Table(filteredEvents, selection: $selectedEventID) {
                     TableColumn("Time") { event in
-                        Text(event.timeString)
-                            .font(.system(.body, design: .monospaced))
+                        Text(event.dateTimeString)
+                            .font(.system(.caption, design: .monospaced))
                     }
-                    .width(min: 60, ideal: 80, max: 100)
+                    .width(min: 120, ideal: 150, max: 180)
 
                     TableColumn("Action") { event in
                         Text(event.action)
