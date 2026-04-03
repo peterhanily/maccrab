@@ -144,6 +144,14 @@ struct HawkEyeDaemon {
         }
         print("Self-defense active (binary integrity, file monitoring, anti-debug)")
 
+        // Threat intelligence feed
+        let threatIntel = ThreatIntelFeed(cacheDir: supportDir + "/threat_intel")
+        await threatIntel.start()
+        print("Threat intel feed active (abuse.ch Feodo, URLhaus, MalwareBazaar)")
+
+        // Behavioral scoring engine
+        let behaviorScoring = BehaviorScoring(alertThreshold: 10.0, criticalThreshold: 20.0)
+
         // Load response action config if it exists
         let actionConfigPath = supportDir + "/actions.json"
         if FileManager.default.fileExists(atPath: actionConfigPath) {
@@ -434,6 +442,56 @@ struct HawkEyeDaemon {
                 enrichedEvent = await yaraEnricher.enrich(enrichedEvent)
             }
 
+            // === Threat Intel enrichment ===
+            // Check process hash, network IPs, and domains against known-bad IOCs
+            if let net = enrichedEvent.network {
+                if await threatIntel.isIPMalicious(net.destinationIp) {
+                    await behaviorScoring.addIndicator(
+                        named: "known_malicious_ip",
+                        detail: net.destinationIp,
+                        forProcess: enrichedEvent.process.pid,
+                        path: enrichedEvent.process.executable
+                    )
+                }
+                if let host = net.destinationHostname, await threatIntel.isDomainMalicious(host) {
+                    await behaviorScoring.addIndicator(
+                        named: "known_malicious_domain",
+                        detail: host,
+                        forProcess: enrichedEvent.process.pid,
+                        path: enrichedEvent.process.executable
+                    )
+                }
+            }
+
+            // === Behavioral scoring: process-level indicators ===
+            let proc = enrichedEvent.process
+            if proc.codeSignature == nil || proc.codeSignature?.signerType == .unsigned {
+                await behaviorScoring.addIndicator(
+                    named: "unsigned_binary", detail: proc.executable,
+                    forProcess: proc.pid, path: proc.executable
+                )
+            }
+            if proc.executable.contains("/tmp/") || proc.executable.contains("/private/tmp/") {
+                await behaviorScoring.addIndicator(
+                    named: "executed_from_tmp", detail: proc.executable,
+                    forProcess: proc.pid, path: proc.executable
+                )
+            }
+            if let file = enrichedEvent.file {
+                if file.path.contains("/LaunchAgents/") {
+                    await behaviorScoring.addIndicator(
+                        named: "writes_launch_agent", detail: file.path,
+                        forProcess: proc.pid, path: proc.executable
+                    )
+                }
+                if file.path.contains("/LaunchDaemons/") {
+                    await behaviorScoring.addIndicator(
+                        named: "writes_launch_daemon", detail: file.path,
+                        forProcess: proc.pid, path: proc.executable
+                    )
+                }
+            }
+
             // Store event
             try? await eventStore.insert(event: enrichedEvent)
 
@@ -451,9 +509,32 @@ struct HawkEyeDaemon {
                 matches.append(baselineMatch)
             }
 
+            // Layer 4: Behavioral scoring — escalate score on rule matches
+            for match in matches {
+                if let scoringResult = await behaviorScoring.addRuleMatch(
+                    severity: match.severity,
+                    ruleTitle: match.ruleName,
+                    forProcess: enrichedEvent.process.pid,
+                    path: enrichedEvent.process.executable
+                ) {
+                    // Behavioral threshold crossed — generate composite alert
+                    let indicatorSummary = scoringResult.indicators.prefix(5)
+                        .map { "\($0.name)(\($0.weight))" }.joined(separator: ", ")
+                    let behaviorMatch = RuleMatch(
+                        ruleId: "hawkeye.behavior.composite",
+                        ruleName: "Behavioral Score Threshold: \(enrichedEvent.process.name)",
+                        severity: scoringResult.severity,
+                        description: "Process accumulated suspicious behavior score of \(String(format: "%.1f", scoringResult.totalScore)). Top indicators: \(indicatorSummary)",
+                        mitreTechniques: [],
+                        tags: ["attack.execution", "attack.defense_evasion"]
+                    )
+                    matches.append(behaviorMatch)
+                }
+            }
+
             if !matches.isEmpty {
                 for match in matches {
-                    // Deduplication check (Phase 3)
+                    // Deduplication check
                     if await deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: enrichedEvent.process.executable) {
                         continue
                     }
