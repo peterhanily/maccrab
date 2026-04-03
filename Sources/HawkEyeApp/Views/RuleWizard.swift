@@ -59,9 +59,20 @@ struct RuleWizard: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
 
-            Text(step.title)
-                .font(.title3).fontWeight(.semibold)
-                .padding(.bottom, 8)
+            HStack {
+                Text(step.title)
+                    .font(.title3).fontWeight(.semibold)
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 8)
 
             Divider()
 
