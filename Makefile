@@ -8,10 +8,10 @@ RULES_DIR = $(BUILD_DIR)/compiled_rules
 # ─── Quick development cycle ─────────────────────────────────────────
 
 # One command: build + compile rules + restart daemon + open app
-dev: stop build compile-rules
+dev: stop build compile-rules bundle-app
 	@$(BUILD_DIR)/hawkeyed &
 	@sleep 2
-	@open $(BUILD_DIR)/HawkEyeApp 2>/dev/null || true
+	@open $(BUILD_DIR)/HawkEye.app 2>/dev/null || true
 	@echo ""
 	@$(BUILD_DIR)/hawkctl status
 
@@ -21,9 +21,13 @@ restart: stop
 	@sleep 2
 	@$(BUILD_DIR)/hawkctl status
 
+# Create .app bundle from bare executable
+bundle-app:
+	@./scripts/bundle-app.sh
+
 # Open the GUI app
-app:
-	@open $(BUILD_DIR)/HawkEyeApp 2>/dev/null || $(BUILD_DIR)/HawkEyeApp &
+app: bundle-app
+	@open $(BUILD_DIR)/HawkEye.app 2>/dev/null
 
 # Stop daemon and app
 stop:
