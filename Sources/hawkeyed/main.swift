@@ -118,6 +118,32 @@ struct HawkEyeDaemon {
         let notifier = NotificationOutput(minimumSeverity: .high)
         let responseEngine = ResponseEngine()
 
+        // Self-defense: tamper detection
+        let selfDefense = SelfDefense(dataDir: supportDir, rulesDir: compiledRulesDir)
+        await selfDefense.start { event in
+            logger.critical("SELF-DEFENSE: [\(event.type.rawValue)] \(event.description)")
+            print("[TAMPER] \(event.type.rawValue): \(event.description)")
+
+            // Create an alert for tamper events
+            let alert = Alert(
+                ruleId: "hawkeye.self-defense.\(event.type.rawValue)",
+                ruleTitle: "HawkEye Tamper Detection: \(event.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
+                severity: event.severity,
+                eventId: UUID().uuidString,
+                processPath: event.path,
+                processName: "hawkeyed",
+                description: event.description,
+                mitreTactics: "attack.defense_evasion",
+                mitreTechniques: "attack.t1562.001",
+                suppressed: false
+            )
+            Task {
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+            }
+        }
+        print("Self-defense active (binary integrity, file monitoring, anti-debug)")
+
         // Load response action config if it exists
         let actionConfigPath = supportDir + "/actions.json"
         if FileManager.default.fileExists(atPath: actionConfigPath) {

@@ -386,20 +386,23 @@ private struct DetectionStep: View {
                 .font(.callout).foregroundColor(.secondary)
 
             ForEach($rule.conditions) { $cond in
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     Picker("Field", selection: $cond.field) {
                         Text("Select field...").tag("")
                         ForEach(fieldSuggestions, id: \.self) { Text($0).tag($0) }
                     }
-                    .frame(width: 180)
+                    .frame(width: 200)
+                    .controlSize(.large)
 
                     Picker("Modifier", selection: $cond.modifier) {
                         ForEach(modifiers, id: \.self) { Text($0).tag($0) }
                     }
-                    .frame(width: 120)
+                    .frame(width: 140)
+                    .controlSize(.large)
 
                     TextField("Value (comma-separate multiple)", text: $cond.value)
                         .textFieldStyle(.roundedBorder)
+                        .controlSize(.large)
 
                     Button {
                         rule.conditions.removeAll { $0.id == cond.id }
@@ -450,15 +453,17 @@ private struct FiltersStep: View {
                 .font(.callout).foregroundColor(.secondary)
 
             ForEach($rule.filters) { $filter in
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     TextField("Field", text: $filter.field)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 150)
+                        .controlSize(.large)
+                        .frame(width: 180)
                     TextField("Values (comma-separated)", text: Binding(
                         get: { filter.values.joined(separator: ", ") },
                         set: { filter.values = $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
                     ))
                     .textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
 
                     Button {
                         rule.filters.removeAll { $0.id == filter.id }
@@ -599,9 +604,10 @@ private struct LabeledField<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption).foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label).font(.caption).fontWeight(.medium).foregroundColor(.secondary)
             content()
+                .controlSize(.large)
         }
     }
 }

@@ -32,6 +32,9 @@ final class AppState: ObservableObject {
 
     private var pollTimer: AnyCancellable?
     private var previousEventCount: Int = 0
+    private var rulesLoaded_cached = false
+    private var lastAlertTimestamp: Date = .distantPast
+    private var lastEventTimestamp: Date = .distantPast
 
     /// Resolve the HawkEye data directory.
     private let dataDir: String = {
@@ -64,15 +67,17 @@ final class AppState: ObservableObject {
     // MARK: Public interface
 
     func refresh() async {
-        // Check daemon connectivity
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        task.arguments = ["-x", "hawkeyed"]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        try? task.run()
-        task.waitUntilExit()
-        let daemonRunning = task.terminationStatus == 0
+        // Check daemon connectivity (lightweight check)
+        let daemonRunning = FileManager.default.fileExists(atPath: "/proc/\(getpid())") || {
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            t.arguments = ["-x", "hawkeyed"]
+            t.standardOutput = FileHandle.nullDevice
+            t.standardError = FileHandle.nullDevice
+            try? t.run()
+            t.waitUntilExit()
+            return t.terminationStatus == 0
+        }()
         let dbExists = FileManager.default.fileExists(atPath: dataDir + "/events.db")
         isConnected = daemonRunning || dbExists
 
@@ -81,11 +86,17 @@ final class AppState: ObservableObject {
             return
         }
 
-        await loadAlerts()
-        await loadEvents()
-        await loadRules()
-        await loadTCCEvents()
+        // Incremental: only fetch new data since last poll
+        await loadAlertsIncremental()
+        await loadEventsIncremental()
         await updateStats()
+
+        // Rules rarely change — only load once
+        if !rulesLoaded_cached {
+            await loadRules()
+            await loadTCCEvents()
+            rulesLoaded_cached = true
+        }
     }
 
     func loadAlerts(limit: Int = 500) async {
@@ -179,6 +190,41 @@ final class AppState: ObservableObject {
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         task.arguments = ["-HUP", "hawkeyed"]
         try? task.run()
+    }
+
+    // MARK: Incremental Loading
+
+    private func loadAlertsIncremental() async {
+        do {
+            let store = try AlertStore(directory: dataDir)
+            let newAlerts = try await store.alerts(since: lastAlertTimestamp, limit: 100)
+            let newViewModels = newAlerts
+                .filter { $0.timestamp > lastAlertTimestamp }
+                .map { alertToViewModel($0) }
+            if !newViewModels.isEmpty {
+                dashboardAlerts.insert(contentsOf: newViewModels, at: 0)
+                // Cap at 500
+                if dashboardAlerts.count > 500 { dashboardAlerts = Array(dashboardAlerts.prefix(500)) }
+                recentAlerts = Array(dashboardAlerts.prefix(5))
+                totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
+                lastAlertTimestamp = newViewModels.first?.timestamp ?? lastAlertTimestamp
+            }
+        } catch {}
+    }
+
+    private func loadEventsIncremental() async {
+        do {
+            let store = try EventStore(directory: dataDir)
+            let newEvents = try await store.events(since: lastEventTimestamp, limit: 200)
+            let newViewModels = newEvents
+                .filter { $0.timestamp > lastEventTimestamp }
+                .map { eventToViewModel($0) }
+            if !newViewModels.isEmpty {
+                events.insert(contentsOf: newViewModels, at: 0)
+                if events.count > 500 { events = Array(events.prefix(500)) }
+                lastEventTimestamp = newViewModels.first?.timestamp ?? lastEventTimestamp
+            }
+        } catch {}
     }
 
     // MARK: Private — Data Mapping
