@@ -173,6 +173,24 @@ struct HawkEyeDaemon {
         // Statistical anomaly detector
         let statisticalDetector = StatisticalAnomalyDetector(zThreshold: 3.0, minSamples: 50)
 
+        // Fleet telemetry (optional — configure via HAWKEYE_FLEET_URL env var)
+        let fleetClient = FleetClient()
+        if let fleet = fleetClient {
+            await fleet.start { aggregation in
+                // Feed fleet IOCs into local threat intel
+                for ioc in aggregation.iocs where ioc.hostCount >= 2 {
+                    if ioc.type == "ip" {
+                        await threatIntel.addCustomIOCs(ips: [ioc.value])
+                    } else if ioc.type == "domain" {
+                        await threatIntel.addCustomIOCs(domains: [ioc.value])
+                    } else if ioc.type == "hash" {
+                        await threatIntel.addCustomIOCs(hashes: [ioc.value])
+                    }
+                }
+            }
+            print("Fleet client active: \(ProcessInfo.processInfo.environment["HAWKEYE_FLEET_URL"] ?? "")")
+        }
+
         // DNS collector (BPF capture or passive mode)
         let dnsCollector = DNSCollector()
         await dnsCollector.start()
@@ -701,6 +719,18 @@ struct HawkEyeDaemon {
                     try? await alertStore.insert(alert: alert)
                     await notifier.notify(alert: alert)
                     await responseEngine.execute(alert: alert, event: enrichedEvent)
+
+                    // Buffer for fleet telemetry
+                    if let fleet = fleetClient {
+                        await fleet.bufferAlert(FleetAlertSummary(
+                            ruleId: alert.ruleId,
+                            ruleTitle: alert.ruleTitle,
+                            severity: alert.severity.rawValue,
+                            processPath: alert.processPath ?? "",
+                            mitreTechniques: alert.mitreTechniques ?? "",
+                            timestamp: alert.timestamp
+                        ))
+                    }
 
                     // Group into incident
                     let tactics = match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }
