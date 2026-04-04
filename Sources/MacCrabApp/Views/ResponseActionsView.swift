@@ -16,8 +16,9 @@ struct ResponseActionsView: View {
     @State private var showAddSheet = false
 
     private var configPath: String {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MacCrab").path
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            .map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
         return dir + "/actions.json"
     }
 

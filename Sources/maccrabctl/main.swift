@@ -401,7 +401,7 @@ struct MacCrabCtl {
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 encoder.dateEncodingStrategy = .iso8601
                 let data = try encoder.encode(alerts)
-                print(String(data: data, encoding: .utf8)!)
+                print(String(data: data, encoding: .utf8) ?? "{}")
 
             default:
                 print("Unknown format: \(format). Use 'json' or 'csv'.")

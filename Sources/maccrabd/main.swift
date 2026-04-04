@@ -26,7 +26,8 @@ struct MacCrabDaemon {
             let userAppSupport = FileManager.default.urls(
                 for: .applicationSupportDirectory,
                 in: .userDomainMask
-            ).first!.appendingPathComponent("MacCrab").path
+            ).first.map { $0.appendingPathComponent("MacCrab").path }
+                ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
             supportDir = userAppSupport
         }
         let compiledRulesDir = supportDir + "/compiled_rules"
@@ -260,7 +261,7 @@ struct MacCrabDaemon {
             let syslogPort = UInt16(Foundation.ProcessInfo.processInfo.environment["MACCRAB_SYSLOG_PORT"] ?? "514") ?? 514
             syslogOutput = SyslogOutput(host: syslogHost, port: syslogPort)
             do {
-                try await syslogOutput!.connect()
+                try await syslogOutput?.connect()
                 logger.info("Syslog output enabled: \(syslogHost):\(syslogPort)")
                 print("Syslog output: \(syslogHost):\(syslogPort)")
             } catch {
@@ -640,8 +641,8 @@ struct MacCrabDaemon {
         pruneTimer.setEventHandler {
             Task {
                 let cutoff = Date().addingTimeInterval(-30 * 86400) // 30 days
-                try? await eventStore.prune(olderThan: cutoff)
-                try? await alertStore.prune(olderThan: cutoff)
+                _ = try? await eventStore.prune(olderThan: cutoff)
+                _ = try? await alertStore.prune(olderThan: cutoff)
                 logger.info("Pruned events older than 30 days")
             }
         }
@@ -766,9 +767,6 @@ struct MacCrabDaemon {
                         }
 
                         // === Project Boundary: check writes outside project dir ===
-                        if let sessionPid = await aiTracker.session(forPid: aiProc.pid)?.aiPid ?? nil {
-                            // Noop — use the session lookup below
-                        }
                         // Check via the child-to-session mapping
                         let sessions = await aiTracker.activeSessions()
                         for session in sessions where session.childPids.contains(aiProc.pid) || session.aiPid == aiProc.pid {

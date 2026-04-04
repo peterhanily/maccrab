@@ -232,8 +232,8 @@ public actor RuleEngine {
             return nil
         }
         // Evict if cache is full (simple FIFO — remove arbitrary entry)
-        if regexCache.count >= Self.maxRegexCacheSize {
-            regexCache.removeValue(forKey: regexCache.keys.first!)
+        if regexCache.count >= Self.maxRegexCacheSize, let firstKey = regexCache.keys.first {
+            regexCache.removeValue(forKey: firstKey)
         }
         regexCache[pattern] = regex
         return regex

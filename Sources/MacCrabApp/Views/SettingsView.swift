@@ -230,7 +230,7 @@ struct SettingsView: View {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
         return appSupport
             .appendingPathComponent("MacCrab", isDirectory: true)
             .appendingPathComponent("events.db")

@@ -74,7 +74,8 @@ public actor ResponseEngine {
             let appSupport = FileManager.default.urls(
                 for: .applicationSupportDirectory,
                 in: .userDomainMask
-            ).first!.appendingPathComponent("MacCrab/quarantine").path
+            ).first.map { $0.appendingPathComponent("MacCrab/quarantine").path }
+                ?? NSHomeDirectory() + "/Library/Application Support/MacCrab/quarantine"
             self.quarantineDir = appSupport
         }
         try? FileManager.default.createDirectory(

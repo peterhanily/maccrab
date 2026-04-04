@@ -41,7 +41,8 @@ final class AppState: ObservableObject {
         let userDir = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!.appendingPathComponent("MacCrab").path
+        ).first.map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
         if FileManager.default.fileExists(atPath: userDir + "/events.db") {
             return userDir
         }
