@@ -52,7 +52,97 @@ public actor EventStore {
 
     private var insertStmt: OpaquePointer?
 
+    /// Whether this store was opened in read-only mode (fallback for non-owner access).
+    private var isReadOnly = false
+
     // MARK: Initialization
+
+    /// Opens a SQLite database before actor isolation begins.
+    /// Returns (db handle, isReadOnly) so init can assign to stored properties.
+    private static func openDatabase(at path: String) throws -> (OpaquePointer, Bool, OpaquePointer?) {
+        var db: OpaquePointer?
+        var isReadOnly = false
+        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        var rc = sqlite3_open_v2(path, &db, flags, nil)
+        if rc != SQLITE_OK {
+            if let handle = db { sqlite3_close(handle) }
+            db = nil
+            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            rc = sqlite3_open_v2(path, &db, flags, nil)
+            isReadOnly = true
+        }
+        guard rc == SQLITE_OK, let handle = db else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            if let db { sqlite3_close(db) }
+            throw EventStoreError.databaseOpenFailed(msg)
+        }
+
+        if !isReadOnly {
+            Self.exec(handle, "PRAGMA journal_mode = WAL")
+            Self.exec(handle, "PRAGMA synchronous = NORMAL")
+        }
+        Self.exec(handle, "PRAGMA foreign_keys = ON")
+
+        // Create schema
+        let schemaSQLs = [
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY, timestamp REAL NOT NULL,
+                event_category TEXT NOT NULL, event_type TEXT NOT NULL,
+                event_action TEXT NOT NULL, severity TEXT NOT NULL,
+                process_pid INTEGER, process_name TEXT, process_path TEXT,
+                process_commandline TEXT, process_ppid INTEGER,
+                process_signer TEXT, process_team_id TEXT, process_signing_id TEXT,
+                file_path TEXT, file_action TEXT,
+                network_dest_ip TEXT, network_dest_port INTEGER,
+                tcc_service TEXT, tcc_client TEXT, raw_json TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_events_category ON events(event_category)",
+            "CREATE INDEX IF NOT EXISTS idx_events_process_path ON events(process_path)",
+            "CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)",
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+                process_name, process_path, process_commandline,
+                file_path, network_dest_ip, tcc_service, tcc_client,
+                content=events, content_rowid=rowid
+            )
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS events_ai AFTER INSERT ON events BEGIN
+                INSERT INTO events_fts(rowid, process_name, process_path, process_commandline,
+                    file_path, network_dest_ip, tcc_service, tcc_client)
+                VALUES (new.rowid, new.process_name, new.process_path, new.process_commandline,
+                    new.file_path, new.network_dest_ip, new.tcc_service, new.tcc_client);
+            END
+            """,
+        ]
+        for sql in schemaSQLs { Self.exec(handle, sql) }
+
+        // Prepare insert statement
+        let insertSQL = """
+            INSERT OR REPLACE INTO events (
+                id, timestamp, event_category, event_type, event_action, severity,
+                process_pid, process_name, process_path, process_commandline,
+                process_ppid, process_signer, process_team_id, process_signing_id,
+                file_path, file_action, network_dest_ip, network_dest_port,
+                tcc_service, tcc_client, raw_json
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+            """
+        var insertStmt: OpaquePointer?
+        if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(handle))
+            throw EventStoreError.prepareFailed(msg)
+        }
+
+        return (handle, isReadOnly, insertStmt)
+    }
+
+    /// Execute a SQL statement on a raw handle (used during init before actor is live).
+    private static func exec(_ db: OpaquePointer, _ sql: String) {
+        sqlite3_exec(db, sql, nil, nil, nil)
+    }
 
     /// Creates an `EventStore` backed by a SQLite database at the default location.
     ///
@@ -68,17 +158,17 @@ public actor EventStore {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        // Best-effort permission setting (may fail if not owner).
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: maccrabDir.path
         )
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
-        try openDatabase()
+        let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
+        self.db = handle
+        self.isReadOnly = ro
+        self.insertStmt = stmt
         chmod(databasePath, 0o644)
-        try createSchema()
-        try prepareStatements()
     }
 
     /// Creates an `EventStore` at a custom path (useful for testing).
@@ -87,46 +177,15 @@ public actor EventStore {
     /// - Throws: `EventStoreError` if the database cannot be opened or initialized.
     public init(path: String) throws {
         self.databasePath = path
-        try openDatabase()
-        try createSchema()
-        try prepareStatements()
+        let (handle, ro, stmt) = try Self.openDatabase(at: path)
+        self.db = handle
+        self.isReadOnly = ro
+        self.insertStmt = stmt
     }
 
     deinit {
         if let insertStmt { sqlite3_finalize(insertStmt) }
         if let db { sqlite3_close(db) }
-    }
-
-    // MARK: - Database Setup
-
-    /// Whether this store was opened in read-only mode (fallback for non-owner access).
-    private var isReadOnly = false
-
-    private func openDatabase() throws {
-        // Try read-write first; fall back to read-only if we lack write permission
-        // (e.g., maccrabctl reading a root-owned database).
-        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        var rc = sqlite3_open_v2(databasePath, &db, flags, nil)
-        if rc != SQLITE_OK {
-            // Close the failed handle before retrying.
-            if let handle = db { sqlite3_close(handle); db = nil }
-            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-            rc = sqlite3_open_v2(databasePath, &db, flags, nil)
-            isReadOnly = true
-        }
-        guard rc == SQLITE_OK else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-            throw EventStoreError.databaseOpenFailed(msg)
-        }
-
-        if !isReadOnly {
-            // Enable WAL journal mode for concurrent reads during writes.
-            try execute("PRAGMA journal_mode = WAL")
-            // Use NORMAL synchronous for a good balance of safety and speed.
-            try execute("PRAGMA synchronous = NORMAL")
-        }
-        // Enable foreign keys.
-        try execute("PRAGMA foreign_keys = ON")
     }
 
     private func createSchema() throws {
@@ -488,7 +547,7 @@ public actor EventStore {
     /// making it safe even though the C string pointer is only valid inside
     /// the `withCString` closure.
     private func bindText(_ stmt: OpaquePointer, index: Int32, value: String) {
-        value.withCString { cstr in
+        _ = value.withCString { cstr in
             sqlite3_bind_text(stmt, index, cstr, -1,
                               unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         }

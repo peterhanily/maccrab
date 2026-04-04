@@ -37,20 +37,37 @@ final class AppState: ObservableObject {
     private var lastEventTimestamp: Date = .distantPast
 
     /// Resolve the MacCrab data directory.
+    /// Prefers the system dir (root daemon) when its DB exists and is newer
+    /// than the user dir DB, which may contain stale data from a previous
+    /// non-root run.
     private let dataDir: String = {
-        let userDir = FileManager.default.urls(
+        let fm = FileManager.default
+        let userDir = fm.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first.map { $0.appendingPathComponent("MacCrab").path }
             ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        if FileManager.default.fileExists(atPath: userDir + "/events.db") {
+        let systemDir = "/Library/Application Support/MacCrab"
+
+        let userDB = userDir + "/events.db"
+        let systemDB = systemDir + "/events.db"
+        let userExists = fm.fileExists(atPath: userDB)
+        let systemReadable = fm.isReadableFile(atPath: systemDB)
+
+        // If both exist, prefer whichever was modified more recently.
+        if userExists && systemReadable {
+            let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
+            let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
+            if let s = sysMod, let u = userMod, s >= u {
+                return systemDir
+            }
             return userDir
         }
-        let systemDir = "/Library/Application Support/MacCrab"
-        if FileManager.default.isReadableFile(atPath: systemDir + "/events.db") {
-            return systemDir
-        }
-        return userDir
+        if systemReadable { return systemDir }
+        if userExists { return userDir }
+        // Neither exists yet — default to system dir so we pick it up when
+        // the root daemon creates it.
+        return systemDir
     }()
 
     // MARK: Initialization

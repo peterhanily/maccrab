@@ -16,10 +16,22 @@ struct ResponseActionsView: View {
     @State private var showAddSheet = false
 
     private var configPath: String {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let fm = FileManager.default
+        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             .map { $0.appendingPathComponent("MacCrab").path }
             ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        return dir + "/actions.json"
+        let systemDir = "/Library/Application Support/MacCrab"
+
+        let userConfig = userDir + "/actions.json"
+        let systemConfig = systemDir + "/actions.json"
+
+        // Prefer system dir config if it exists and is readable (root daemon).
+        // Note: for writes, the app may not have permission to write to the
+        // system dir, but load() will still read from the correct location.
+        if fm.isReadableFile(atPath: systemConfig) {
+            return systemConfig
+        }
+        return userConfig
     }
 
     var body: some View {

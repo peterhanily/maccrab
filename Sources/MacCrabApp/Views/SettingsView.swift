@@ -227,13 +227,29 @@ struct SettingsView: View {
     // MARK: - Private
 
     private var databasePath: String {
-        let appSupport = FileManager.default.urls(
+        let fm = FileManager.default
+        let userDir = fm.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        return appSupport
-            .appendingPathComponent("MacCrab", isDirectory: true)
-            .appendingPathComponent("events.db")
-            .path
+        ).first.map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+
+        let userDB = userDir + "/events.db"
+        let systemDB = systemDir + "/events.db"
+        let userExists = fm.fileExists(atPath: userDB)
+        let systemReadable = fm.isReadableFile(atPath: systemDB)
+
+        if userExists && systemReadable {
+            let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
+            let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
+            if let s = sysMod, let u = userMod, s >= u {
+                return systemDB
+            }
+            return userDB
+        }
+        if systemReadable { return systemDB }
+        if userExists { return userDB }
+        return systemDB
     }
 }

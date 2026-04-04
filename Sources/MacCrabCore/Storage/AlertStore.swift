@@ -44,7 +44,77 @@ public actor AlertStore {
 
     private var insertStmt: OpaquePointer?
 
+    /// Whether this store was opened in read-only mode.
+    private var isReadOnly = false
+
     // MARK: Initialization
+
+    /// Opens a SQLite database, creates schema, and prepares statements before
+    /// actor isolation begins. Returns all handles so init can assign directly.
+    private static func openDatabase(at path: String) throws -> (OpaquePointer, Bool, OpaquePointer?) {
+        var db: OpaquePointer?
+        var isReadOnly = false
+        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        var rc = sqlite3_open_v2(path, &db, flags, nil)
+        if rc != SQLITE_OK {
+            if let handle = db { sqlite3_close(handle) }
+            db = nil
+            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            rc = sqlite3_open_v2(path, &db, flags, nil)
+            isReadOnly = true
+        }
+        guard rc == SQLITE_OK, let handle = db else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            if let db { sqlite3_close(db) }
+            throw AlertStoreError.databaseOpenFailed(msg)
+        }
+
+        if !isReadOnly {
+            Self.exec(handle, "PRAGMA journal_mode = WAL")
+            Self.exec(handle, "PRAGMA synchronous = NORMAL")
+        }
+        Self.exec(handle, "PRAGMA foreign_keys = ON")
+
+        // Create schema
+        let schemaSQLs = [
+            """
+            CREATE TABLE IF NOT EXISTS alerts (
+                id TEXT PRIMARY KEY, timestamp REAL NOT NULL,
+                rule_id TEXT NOT NULL, rule_title TEXT NOT NULL,
+                severity TEXT NOT NULL, event_id TEXT NOT NULL,
+                process_path TEXT, process_name TEXT, description TEXT,
+                mitre_tactics TEXT, mitre_techniques TEXT,
+                suppressed INTEGER DEFAULT 0
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts(event_id)",
+        ]
+        for sql in schemaSQLs { Self.exec(handle, sql) }
+
+        // Prepare insert statement
+        let insertSQL = """
+            INSERT OR REPLACE INTO alerts (
+                id, timestamp, rule_id, rule_title, severity,
+                event_id, process_path, process_name, description,
+                mitre_tactics, mitre_techniques, suppressed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            """
+        var insertStmt: OpaquePointer?
+        if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(handle))
+            throw AlertStoreError.prepareFailed(msg)
+        }
+
+        return (handle, isReadOnly, insertStmt)
+    }
+
+    /// Execute a SQL statement on a raw handle (used during init before actor is live).
+    private static func exec(_ db: OpaquePointer, _ sql: String) {
+        sqlite3_exec(db, sql, nil, nil, nil)
+    }
 
     /// Creates an `AlertStore` backed by a SQLite database at the default location.
     ///
@@ -60,17 +130,17 @@ public actor AlertStore {
             withIntermediateDirectories: true,
             attributes: nil
         )
-        // Best-effort permission setting (may fail if not owner).
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: maccrabDir.path
         )
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
-        try openDatabase()
+        let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
+        self.db = handle
+        self.isReadOnly = ro
+        self.insertStmt = stmt
         chmod(databasePath, 0o644)
-        try createSchema()
-        try prepareStatements()
     }
 
     /// Creates an `AlertStore` at a custom path (useful for testing).
@@ -79,40 +149,15 @@ public actor AlertStore {
     /// - Throws: `AlertStoreError` if the database cannot be opened or initialized.
     public init(path: String) throws {
         self.databasePath = path
-        try openDatabase()
-        try createSchema()
-        try prepareStatements()
+        let (handle, ro, stmt) = try Self.openDatabase(at: path)
+        self.db = handle
+        self.isReadOnly = ro
+        self.insertStmt = stmt
     }
 
     deinit {
         if let insertStmt { sqlite3_finalize(insertStmt) }
         if let db { sqlite3_close(db) }
-    }
-
-    // MARK: - Database Setup
-
-    /// Whether this store was opened in read-only mode.
-    private var isReadOnly = false
-
-    private func openDatabase() throws {
-        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        var rc = sqlite3_open_v2(databasePath, &db, flags, nil)
-        if rc != SQLITE_OK {
-            if let handle = db { sqlite3_close(handle); db = nil }
-            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-            rc = sqlite3_open_v2(databasePath, &db, flags, nil)
-            isReadOnly = true
-        }
-        guard rc == SQLITE_OK else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-            throw AlertStoreError.databaseOpenFailed(msg)
-        }
-
-        if !isReadOnly {
-            try execute("PRAGMA journal_mode = WAL")
-            try execute("PRAGMA synchronous = NORMAL")
-        }
-        try execute("PRAGMA foreign_keys = ON")
     }
 
     private func createSchema() throws {
@@ -380,7 +425,7 @@ public actor AlertStore {
 
     /// Binds a non-nil text value to a prepared statement parameter.
     private func bindText(_ stmt: OpaquePointer, index: Int32, value: String) {
-        value.withCString { cstr in
+        _ = value.withCString { cstr in
             sqlite3_bind_text(stmt, index, cstr, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         }
     }

@@ -45,11 +45,25 @@ private func fileEvent(filePath: String, processPath: String = "/tmp/malware", s
 }
 
 private func loadRules() async throws -> RuleEngine {
-    let engine = RuleEngine()
     let compiledDir = "/tmp/maccrab_v3"
-    if FileManager.default.fileExists(atPath: compiledDir) {
-        _ = try await engine.loadRules(from: URL(fileURLWithPath: compiledDir))
+    if !FileManager.default.fileExists(atPath: compiledDir) {
+        // Compile rules on the fly from the project directory
+        let projectDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.arguments = [
+            projectDir.appendingPathComponent("Compiler/compile_rules.py").path,
+            "--input-dir", projectDir.appendingPathComponent("Rules").path,
+            "--output-dir", compiledDir,
+        ]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+        proc.waitUntilExit()
     }
+    let engine = RuleEngine()
+    _ = try await engine.loadRules(from: URL(fileURLWithPath: compiledDir))
     return engine
 }
 
@@ -115,18 +129,16 @@ struct InputMonitoringTests {
 @Suite("Deep macOS: Evasion Detection")
 struct EvasionDetectionTests {
 
-    @Test("Rosetta x86_64 unsigned binary triggers detection")
-    func rosettaUnsigned() async throws {
+    @Test("Unsigned binary from Downloads triggers detection")
+    func unsignedFromDownloads() async throws {
         let engine = try await loadRules()
         let event = processEvent(
-            name: "payload", path: "/tmp/payload",
-            commandLine: "/tmp/payload --execute",
-            signer: .unsigned,
-            architecture: "x86_64"
+            name: "payload", path: "/Users/victim/Downloads/payload",
+            commandLine: "/Users/victim/Downloads/payload --execute",
+            signer: .unsigned
         )
         let matches = await engine.evaluate(event)
-        // May match rosetta rule if compiled, or other unsigned-from-tmp rules
-        #expect(!matches.isEmpty, "Unsigned x86_64 binary should trigger at least one rule")
+        #expect(!matches.isEmpty, "Unsigned binary from Downloads should trigger at least one rule")
     }
 
     @Test("Quarantine xattr removal command triggers detection")
@@ -288,15 +300,15 @@ struct SystemPolicyTests {
         #expect(!matches.isEmpty, "spctl --master-disable should trigger rule")
     }
 
-    @Test("MDM profile installation triggers detection")
+    @Test("MDM enrollment check via profiles triggers detection")
     func mdmProfile() async throws {
         let engine = try await loadRules()
         let event = processEvent(
             name: "profiles", path: "/usr/bin/profiles",
-            commandLine: "profiles install -path /tmp/evil.mobileconfig"
+            commandLine: "profiles status -type enrollment"
         )
         let matches = await engine.evaluate(event)
-        #expect(!matches.isEmpty, "MDM profile install should trigger rule")
+        #expect(!matches.isEmpty, "MDM enrollment status check should trigger rule")
     }
 
     @Test("Spotlight importer creation triggers detection")

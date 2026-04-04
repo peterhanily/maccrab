@@ -2,25 +2,33 @@ import Foundation
 import MacCrabCore
 
 /// Resolve the MacCrab data directory.
-/// Prefers the user directory when a non-root daemon is running (or recently wrote data).
-/// Falls back to system directory only when user DB doesn't exist.
+/// Prefers the system dir (root daemon) when its DB is newer, since the
+/// user dir may contain stale data from a previous non-root run.
 private func maccrabDataDir() -> String {
-    guard let appSupport = FileManager.default.urls(
+    let fm = FileManager.default
+    let userDir = fm.urls(
         for: .applicationSupportDirectory,
         in: .userDomainMask
-    ).first else {
-        return "/Library/Application Support/MacCrab"
-    }
-    let userDir = appSupport.appendingPathComponent("MacCrab").path
-    // Prefer user dir if it has a DB (means non-root daemon is/was active)
-    if FileManager.default.fileExists(atPath: userDir + "/events.db") {
+    ).first.map { $0.appendingPathComponent("MacCrab").path }
+        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+    let systemDir = "/Library/Application Support/MacCrab"
+
+    let userDB = userDir + "/events.db"
+    let systemDB = systemDir + "/events.db"
+    let userExists = fm.fileExists(atPath: userDB)
+    let systemReadable = fm.isReadableFile(atPath: systemDB)
+
+    if userExists && systemReadable {
+        let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
+        let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
+        if let s = sysMod, let u = userMod, s >= u {
+            return systemDir
+        }
         return userDir
     }
-    let systemDir = "/Library/Application Support/MacCrab"
-    if FileManager.default.isReadableFile(atPath: systemDir + "/events.db") {
-        return systemDir
-    }
-    return userDir
+    if systemReadable { return systemDir }
+    if userExists { return userDir }
+    return systemDir
 }
 
 @main
@@ -144,7 +152,7 @@ struct MacCrabCtl {
     }
 
     static func showStatus() async {
-        let supportDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let supportDir = maccrabDataDir()
         let dbPath = supportDir + "/events.db"
         let alertsPath = supportDir + "/alerts.jsonl"
 
@@ -190,7 +198,7 @@ struct MacCrabCtl {
     }
 
     static func listRules() async {
-        let supportDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let supportDir = maccrabDataDir()
         let compiledDir = supportDir + "/compiled_rules"
 
         guard FileManager.default.fileExists(atPath: compiledDir) else {
@@ -235,7 +243,7 @@ struct MacCrabCtl {
     }
 
     static func countRules() async {
-        let supportDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let supportDir = maccrabDataDir()
         let compiledDir = supportDir + "/compiled_rules"
 
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: compiledDir) else {

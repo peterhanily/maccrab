@@ -8,6 +8,9 @@ let logger = Logger(subsystem: "com.maccrab.daemon", category: "main")
 @main
 struct MacCrabDaemon {
     static func main() async {
+        // Disable stdout buffering so output appears immediately in log files
+        setbuf(stdout, nil)
+
         logger.info("MacCrab daemon starting...")
 
         // Check if running as root (required for ES framework, optional for other sources)
@@ -89,8 +92,10 @@ struct MacCrabDaemon {
             atPath: supportDir,
             withIntermediateDirectories: true
         )
-        // Restrict support directory: owner-only access (rwx------).
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: supportDir)
+        // Allow non-root GUI app to read the DB: rwxr-xr-x.
+        // The DB file itself is 0o644 so the app can read it; the directory
+        // needs at least r-x for traversal.
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: supportDir)
 
         try? fm.createDirectory(
             atPath: compiledRulesDir,
