@@ -124,3 +124,7 @@ help:
 	@echo "  make install      Install system-wide (sudo)"
 	@echo "  make uninstall    Remove system install (sudo)"
 	@echo "  make run-root     Run with Endpoint Security (sudo)"
+
+# Run detection test suite (triggers all detection categories safely)
+test-detection:
+	./scripts/detection-test.sh
