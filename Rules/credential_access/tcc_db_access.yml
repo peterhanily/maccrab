@@ -22,6 +22,7 @@ detection:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
+            - '/usr/sbin/'
     condition: selection and not filter_apple and not filter_system
 falsepositives:
     - Legitimate privacy management tools

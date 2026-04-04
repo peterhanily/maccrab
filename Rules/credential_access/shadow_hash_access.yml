@@ -24,6 +24,8 @@ detection:
             - '/DirectoryService'
             - '/dscl'
             - '/dsimport'
+            - '/accountsd'
+            - '/authd'
     filter_system:
         Image|startswith:
             - '/System/'

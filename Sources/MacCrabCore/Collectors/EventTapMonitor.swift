@@ -84,6 +84,70 @@ public actor EventTapMonitor {
         continuation?.finish()
     }
 
+    // MARK: - System Process Allowlist
+
+    /// Processes that legitimately use CGEventTaps for system functionality.
+    /// These are Apple-signed system components that monitor input for
+    /// accessibility, window management, and system UI purposes.
+    private static let allowlistedProcessNames: Set<String> = [
+        // Accessibility
+        "universalaccessd",
+        "AXVisualSupportAgent",
+        "AssistiveControl",
+        "VoiceOver",
+        "SwitchBoard",
+        "AssistiveTouchBarAgent",
+
+        // Window management / display
+        "WindowServer",
+        "Dock",
+        "SystemUIServer",
+        "loginwindow",
+        "ControlCenter",
+        "NotificationCenter",
+        "Spotlight",
+
+        // Input handling
+        "TextInputMenuAgent",
+        "TextInputSwitcher",
+        "PressAndHold",
+        "imklaunchagent",
+
+        // System security / auth
+        "SecurityAgent",
+        "authd",
+        "screencaptureui",
+        "ScreenSharingAgent",
+
+        // Remote access
+        "ARDAgent",
+        "screensharingd",
+    ]
+
+    /// Path prefixes known to be Apple system directories.
+    private static let allowlistedPathPrefixes: [String] = [
+        "/System/",
+        "/usr/libexec/",
+        "/usr/sbin/",
+        "/System/Library/",
+        "/System/Library/CoreServices/",
+        "/System/Library/Frameworks/",
+        "/System/Library/PrivateFrameworks/",
+    ]
+
+    /// Returns true if the process is a known-safe system component.
+    private nonisolated static func isAllowlistedSystemProcess(name: String, path: String) -> Bool {
+        if allowlistedProcessNames.contains(name) {
+            return true
+        }
+        for prefix in allowlistedPathPrefixes {
+            if path.hasPrefix(prefix) {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Scanning
 
     private func scan() {
@@ -109,8 +173,8 @@ public actor EventTapMonitor {
             let path = Self.processPath(for: pid)
             let name = (path as NSString).lastPathComponent
 
-            // Skip known Apple system taps
-            if path.hasPrefix("/System/") || path.hasPrefix("/usr/libexec/") {
+            // Skip known Apple system processes that legitimately use event taps
+            if Self.isAllowlistedSystemProcess(name: name, path: path) {
                 continue
             }
 

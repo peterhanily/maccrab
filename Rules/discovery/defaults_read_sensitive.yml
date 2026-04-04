@@ -33,7 +33,10 @@ detection:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection and selection_sensitive and not filter_system
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and selection_sensitive and not filter_system and not filter_apple_signed
 falsepositives:
     - System administration and configuration scripts
     - Preference management tools

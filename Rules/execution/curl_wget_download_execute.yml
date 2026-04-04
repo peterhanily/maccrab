@@ -34,7 +34,14 @@ detection:
             - '|bash'
             - '|zsh'
             - 'curl -s'
-    condition: selection_shell and selection_pipe and selection_execute
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection_shell and selection_pipe and selection_execute and not filter_system and not filter_apple_signed
 falsepositives:
     - Legitimate install scripts (Homebrew, rustup, nvm)
 level: high

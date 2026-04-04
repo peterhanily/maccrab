@@ -247,6 +247,14 @@ struct MacCrabDaemon {
         // Initialize alert deduplicator (Phase 3)
         let deduplicator = AlertDeduplicator()
 
+        // Load per-rule process suppressions (from maccrabctl suppress)
+        let suppressionManager = SuppressionManager(dataDir: supportDir)
+        await suppressionManager.load()
+        let suppressionStats = await suppressionManager.stats()
+        if suppressionStats.ruleCount > 0 {
+            print("Suppressions loaded: \(suppressionStats.pathCount) paths across \(suppressionStats.ruleCount) rules")
+        }
+
         // Initialize optional outputs (Phase 3)
         var webhookOutput: WebhookOutput? = nil
         if let webhookURLStr = Foundation.ProcessInfo.processInfo.environment["MACCRAB_WEBHOOK_URL"],
@@ -431,6 +439,9 @@ struct MacCrabDaemon {
                     print("[SIGHUP] Single-event rules: \(singleCount)")
                     let seqCount = try await sequenceEngine.loadRules(from: URL(fileURLWithPath: sequenceRulesDir))
                     print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules")
+                    await suppressionManager.load()
+                    let stats = await suppressionManager.stats()
+                    print("[SIGHUP] Suppressions: \(stats.pathCount) paths across \(stats.ruleCount) rules")
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }
@@ -464,6 +475,7 @@ struct MacCrabDaemon {
                     try? await eventStore.insert(event: enriched)
                     let matches = await ruleEngine.evaluate(enriched)
                     for match in matches {
+                        if await suppressionManager.isSuppressed(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
                         if await deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
                         await deduplicator.recordAlert(ruleId: match.ruleId, processPath: enriched.process.executable)
                         let alert = Alert(
@@ -997,7 +1009,10 @@ struct MacCrabDaemon {
 
             if !matches.isEmpty {
                 for match in matches {
-                    // Deduplication check
+                    // Suppression + deduplication checks
+                    if await suppressionManager.isSuppressed(ruleId: match.ruleId, processPath: enrichedEvent.process.executable) {
+                        continue
+                    }
                     if await deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: enrichedEvent.process.executable) {
                         continue
                     }

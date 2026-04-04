@@ -30,7 +30,12 @@ detection:
             - 'Brave Browser'
     filter_apple:
         SignerType: 'apple'
-    condition: selection and not filter_browsers and not filter_apple
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    condition: selection and not filter_browsers and not filter_apple and not filter_system
 falsepositives:
     - Browser sync utilities
     - Backup software

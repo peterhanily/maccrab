@@ -7,13 +7,17 @@ RULES_DIR = $(BUILD_DIR)/compiled_rules
 
 # ─── Quick development cycle ─────────────────────────────────────────
 
-# One command: build + compile rules + restart daemon + open app
-dev: stop build compile-rules bundle-app
-	@$(BUILD_DIR)/maccrabd &
-	@sleep 2
-	@open $(BUILD_DIR)/MacCrab.app 2>/dev/null || true
-	@echo ""
-	@$(BUILD_DIR)/maccrabctl status
+# One command: build + codesign + compile rules + restart daemon
+dev:
+	@./scripts/dev.sh
+
+# Dev without sudo (no ES, limited sources)
+dev-no-es:
+	@./scripts/dev.sh --no-es
+
+# Build + sign only (no start)
+dev-build:
+	@./scripts/dev.sh --build
 
 # Restart daemon only (no rebuild)
 restart: stop

@@ -34,8 +34,17 @@ detection:
             - '/newsyslog'
             - '/logrotate'
             - '/aslmanager'
+            - '/logd'
+            - '/syslogd'
         SignerType: 'apple'
-    condition: (selection_rm or selection_truncate or selection_log_erase) and not filter_logrotate
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: (selection_rm or selection_truncate or selection_log_erase) and not filter_logrotate and not filter_system and not filter_apple_signed
 falsepositives:
     - Log rotation scripts and system maintenance
     - Disk cleanup utilities

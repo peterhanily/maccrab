@@ -23,7 +23,14 @@ detection:
             - 'export -t certs'
             - 'export -t identities'
             - 'export -t pkcs12'
-    condition: selection and selection_export
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and selection_export and not filter_system and not filter_apple_signed
 falsepositives:
     - Certificate management and renewal scripts
     - VPN configuration tools

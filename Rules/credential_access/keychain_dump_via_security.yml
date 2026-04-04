@@ -22,7 +22,14 @@ detection:
             - 'find-internet-password'
             - 'export -t'
             - 'find-certificate'
-    condition: selection and selection_dump
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and selection_dump and not filter_system and not filter_apple_signed
 falsepositives:
     - Legitimate keychain management scripts
     - Backup tools accessing keychain

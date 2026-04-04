@@ -25,7 +25,14 @@ detection:
         CommandLine|contains:
             - 'securityd'
             - 'secd'
-    condition: selection_mach_api and selection_securityd_target
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection_mach_api and selection_securityd_target and not filter_system and not filter_apple_signed
 falsepositives:
     - Security research tools used in controlled testing environments
     - Apple diagnostic utilities with proper entitlements
