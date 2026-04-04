@@ -32,7 +32,22 @@ from typing import Optional
 API_KEY = os.environ.get("HAWKEYE_FLEET_KEY", "")
 DB_PATH = os.environ.get("HAWKEYE_FLEET_DB", "fleet.db")
 
-app = FastAPI(title="HawkEye Fleet Collector", version="0.1.0")
+app = FastAPI(title="HawkEye Fleet Collector", version="0.4.0")
+
+# Request size limit middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+class MaxBodySizeMiddleware(BaseHTTPMiddleware):
+    MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+
+    async def dispatch(self, request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > self.MAX_SIZE:
+            return Response("Request too large", status_code=413)
+        return await call_next(request)
+
+app.add_middleware(MaxBodySizeMiddleware)
 
 # ---------------------------------------------------------------------------
 # Database

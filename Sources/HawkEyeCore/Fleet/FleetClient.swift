@@ -125,7 +125,7 @@ public actor FleetClient {
         let telemetry = FleetTelemetry(
             hostId: hostId,
             timestamp: Date(),
-            version: "0.3.0",
+            version: "0.4.0",
             alerts: pendingAlerts,
             iocSightings: pendingIOCs,
             behaviorScores: [] // Populated by caller if needed

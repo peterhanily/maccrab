@@ -379,7 +379,7 @@ struct HawkEyeDaemon {
         ╔══════════════════════════════════════════╗
         ║         HawkEye Detection Engine         ║
         ║       Local-First macOS Security         ║
-        ║              v0.3.0 (Phase 3)            ║
+        ║                  v0.4.0                   ║
         ╚══════════════════════════════════════════╝
 
         Status: Active

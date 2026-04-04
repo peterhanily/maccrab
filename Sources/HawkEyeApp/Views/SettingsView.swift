@@ -202,7 +202,7 @@ struct SettingsView: View {
             Text("Local-first macOS threat detection engine")
                 .foregroundColor(.secondary)
 
-            Text("v0.3.0")
+            Text("v0.4.0")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -210,7 +210,7 @@ struct SettingsView: View {
                 .frame(width: 200)
 
             VStack(spacing: 4) {
-                Text("4 event sources  |  3 detection layers  |  215 rules")
+                Text("7 event sources  |  8 detection layers  |  227 rules")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Text("Apache 2.0 (code)  |  DRL 1.1 (rules)")

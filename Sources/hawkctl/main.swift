@@ -5,10 +5,13 @@ import HawkEyeCore
 /// Prefers the user directory when a non-root daemon is running (or recently wrote data).
 /// Falls back to system directory only when user DB doesn't exist.
 private func hawkeyeDataDir() -> String {
-    let userDir = FileManager.default.urls(
+    guard let appSupport = FileManager.default.urls(
         for: .applicationSupportDirectory,
         in: .userDomainMask
-    ).first!.appendingPathComponent("HawkEye").path
+    ).first else {
+        return "/Library/Application Support/HawkEye"
+    }
+    let userDir = appSupport.appendingPathComponent("HawkEye").path
     // Prefer user dir if it has a DB (means non-root daemon is/was active)
     if FileManager.default.fileExists(atPath: userDir + "/events.db") {
         return userDir
@@ -135,7 +138,7 @@ struct HawkCtl {
     }
 
     static func printVersion() {
-        print("HawkEye Detection Engine v0.1.0")
+        print("HawkEye Detection Engine v0.4.0")
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
         print("https://github.com/hawkeye-detection/hawkeye")
     }

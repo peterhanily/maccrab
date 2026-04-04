@@ -423,7 +423,7 @@ public actor SystemPolicyMonitor {
         return paths
     }
 
-    private nonisolated func runCommand(_ path: String, args: [String]) -> String {
+    private nonisolated func runCommand(_ path: String, args: [String], timeout: TimeInterval = 10) -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = args
@@ -432,6 +432,11 @@ public actor SystemPolicyMonitor {
         process.standardError = pipe
         do {
             try process.run()
+            // Timeout: kill process if it hangs
+            let deadline = DispatchTime.now() + timeout
+            DispatchQueue.global().asyncAfter(deadline: deadline) {
+                if process.isRunning { process.terminate() }
+            }
             process.waitUntilExit()
             return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         } catch {
