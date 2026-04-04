@@ -61,6 +61,7 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 Task { @MainActor in await self.refresh() }
             }
+        loadSuppressPatterns()
         Task { await refresh() }
     }
 
@@ -172,16 +173,65 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Suppression rules: (ruleTitle, processName) patterns to auto-hide.
+    @Published var suppressionPatterns: [(ruleTitle: String, processName: String)] = []
+
     func suppressAlert(_ alertId: String) async {
         do {
             let store = try AlertStore(directory: dataDir)
             try await store.suppress(alertId: alertId)
             await loadAlerts()
         } catch {
-            // Mark locally
             if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
                 dashboardAlerts[idx].suppressed = true
             }
+        }
+    }
+
+    /// Suppress ALL alerts matching this rule + process pattern, now and in the future.
+    func suppressPattern(ruleTitle: String, processName: String) async {
+        suppressionPatterns.append((ruleTitle, processName))
+        saveSuppressPatterns()
+
+        // Suppress all matching alerts in DB
+        do {
+            let store = try AlertStore(directory: dataDir)
+            for alert in dashboardAlerts where alert.ruleTitle == ruleTitle && alert.processName == processName && !alert.suppressed {
+                try await store.suppress(alertId: alert.id)
+            }
+        } catch {}
+
+        // Remove from display
+        dashboardAlerts.removeAll { $0.ruleTitle == ruleTitle && $0.processName == processName }
+        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed }.prefix(5))
+        totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
+    }
+
+    /// Remove a suppression pattern.
+    func unsuppressPattern(ruleTitle: String, processName: String) {
+        suppressionPatterns.removeAll { $0.ruleTitle == ruleTitle && $0.processName == processName }
+        saveSuppressPatterns()
+    }
+
+    /// Check if an alert matches a suppression pattern.
+    func isPatternSuppressed(_ alert: AlertViewModel) -> Bool {
+        suppressionPatterns.contains { $0.ruleTitle == alert.ruleTitle && $0.processName == alert.processName }
+    }
+
+    private func saveSuppressPatterns() {
+        let data = suppressionPatterns.map { ["ruleTitle": $0.ruleTitle, "processName": $0.processName] }
+        if let json = try? JSONSerialization.data(withJSONObject: data) {
+            try? json.write(to: URL(fileURLWithPath: dataDir + "/ui_suppressions.json"))
+        }
+    }
+
+    func loadSuppressPatterns() {
+        let path = dataDir + "/ui_suppressions.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else { return }
+        suppressionPatterns = arr.compactMap { dict in
+            guard let r = dict["ruleTitle"], let p = dict["processName"] else { return nil }
+            return (r, p)
         }
     }
 

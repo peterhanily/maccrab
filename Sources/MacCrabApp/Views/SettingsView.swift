@@ -26,6 +26,9 @@ struct SettingsView: View {
             daemonTab
                 .tabItem { Label("Daemon", systemImage: "server.rack") }
 
+            ResponseActionsView()
+                .tabItem { Label("Response Actions", systemImage: "bolt.shield") }
+
             aboutTab
                 .tabItem { Label("About", systemImage: "info.circle") }
         }

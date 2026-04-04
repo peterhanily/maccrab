@@ -14,8 +14,9 @@ struct AlertDashboard: View {
 
     private var filteredAlerts: [AlertViewModel] {
         var results = appState.dashboardAlerts
+        // Always hide pattern-suppressed alerts (unless showing suppressed)
         if !showSuppressed {
-            results = results.filter { !$0.suppressed }
+            results = results.filter { !$0.suppressed && !appState.isPatternSuppressed($0) }
         }
         if let severity = selectedSeverity {
             results = results.filter { $0.severity == severity }
@@ -102,9 +103,12 @@ struct AlertDashboard: View {
 
                     // Detail panel
                     if let alert = selectedAlert {
-                        AlertDetailView(alert: alert) {
+                        AlertDetailView(alert: alert, onSuppress: {
                             Task { await appState.suppressAlert(alert.id) }
-                        }
+                        }, onSuppressPattern: {
+                            Task { await appState.suppressPattern(ruleTitle: alert.ruleTitle, processName: alert.processName) }
+                            selectedAlert = nil
+                        })
                         .frame(minWidth: 300, idealWidth: 350)
                     } else {
                         VStack {
@@ -129,6 +133,7 @@ struct AlertDashboard: View {
 struct AlertDetailView: View {
     let alert: AlertViewModel
     let onSuppress: () -> Void
+    var onSuppressPattern: (() -> Void)? = nil
 
     var body: some View {
         ScrollView {
@@ -200,8 +205,14 @@ struct AlertDetailView: View {
                         HStack(spacing: 10) {
                             if !alert.suppressed {
                                 Button { onSuppress() } label: {
-                                    Label("Suppress Alert", systemImage: "eye.slash")
+                                    Label("Suppress This", systemImage: "eye.slash")
                                 }.controlSize(.large)
+
+                                Button { onSuppressPattern?() } label: {
+                                    Label("Suppress All Like This", systemImage: "eye.slash.circle")
+                                }
+                                .controlSize(.large)
+                                .help("Suppress all alerts matching '\(alert.ruleTitle)' from '\(alert.processName)'")
                             } else {
                                 Label("Suppressed", systemImage: "eye.slash.fill").foregroundColor(.secondary)
                             }
