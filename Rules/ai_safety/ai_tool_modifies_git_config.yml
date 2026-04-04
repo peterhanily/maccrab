@@ -1,0 +1,28 @@
+title: AI Coding Tool Modifies Global Git Configuration
+id: d1a2b3c4-2005-4000-a000-000000002005
+status: experimental
+description: >
+    Detects when a process modifies the global git configuration rather
+    than the project-local config. AI tools should only modify project
+    settings, not system-wide git configuration.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1543/
+tags:
+    - attack.persistence
+    - attack.t1543
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/git'
+        CommandLine|contains:
+            - 'config --global'
+            - 'config --system'
+    condition: selection
+falsepositives:
+    - Initial git setup
+    - AI tools setting user.name or user.email
+level: medium

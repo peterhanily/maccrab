@@ -129,6 +129,21 @@ public actor BehaviorScoring {
         "screen_recording_unsigned":    3.5,
         "full_disk_access_unsigned":    5.0,
 
+        // AI Tool Monitoring
+        "ai_tool_detected":             0.5,
+        "ai_tool_spawns_shell":         2.0,
+        "ai_tool_runs_sudo":            6.0,
+        "ai_tool_credential_access":    8.0,
+        "ai_tool_boundary_violation":   5.0,
+        "ai_tool_installs_unknown_pkg": 4.0,
+        "ai_tool_persistence_write":    7.0,
+        "ai_tool_downloads_and_exec":   6.0,
+        "prompt_injection_low":         2.0,
+        "prompt_injection_medium":      4.0,
+        "prompt_injection_high":        7.0,
+        "prompt_injection_critical":    9.0,
+        "prompt_injection_compound":   10.0,
+
         // Deep macOS internals
         "library_injection":            5.0,
         "event_tap_keylogger":          7.0,

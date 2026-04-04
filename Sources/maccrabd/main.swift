@@ -170,6 +170,12 @@ struct MacCrabDaemon {
             }
         }
 
+        // AI Guard: tool registry + process tracker
+        let aiRegistry = AIToolRegistry()
+        let lineageRef = await enricher.lineage
+        let aiTracker = AIProcessTracker(lineage: lineageRef, registry: aiRegistry)
+        print("AI Guard active (monitoring Claude Code, Codex, OpenClaw, Cursor)")
+
         // Statistical anomaly detector
         let statisticalDetector = StatisticalAnomalyDetector(zThreshold: 3.0, minSamples: 50)
 
@@ -656,6 +662,74 @@ struct MacCrabDaemon {
             // YARA enrichment for file events (Phase 3)
             if enrichedEvent.eventCategory == .file {
                 enrichedEvent = await yaraEnricher.enrich(enrichedEvent)
+            }
+
+            // === AI Tool Detection ===
+            let aiProc = enrichedEvent.process
+            if let aiType = aiRegistry.isAITool(executablePath: aiProc.executable) {
+                await aiTracker.registerAIProcess(pid: aiProc.pid, type: aiType, projectDir: aiProc.workingDirectory)
+                enrichedEvent.enrichments["ai_tool"] = aiType.rawValue
+                enrichedEvent.enrichments["ai_tool_name"] = aiType.displayName
+            } else {
+                let (isChild, aiType, projectDir) = await aiTracker.isAIChild(pid: aiProc.pid, ancestors: aiProc.ancestors)
+                if isChild {
+                    enrichedEvent.enrichments["ai_tool"] = aiType?.rawValue ?? "unknown"
+                    enrichedEvent.enrichments["ai_tool_child"] = "true"
+                    if let dir = projectDir { enrichedEvent.enrichments["ai_project_dir"] = dir }
+
+                    // AI child spawning a shell — track it
+                    let shellNames = ["/bash", "/zsh", "/sh", "/dash", "/fish"]
+                    if shellNames.contains(where: { aiProc.executable.hasSuffix($0) }) {
+                        await behaviorScoring.addIndicator(
+                            named: "ai_tool_spawns_shell",
+                            detail: "\(aiType?.displayName ?? "AI tool") spawned \(aiProc.name)",
+                            forProcess: aiProc.pid, path: aiProc.executable
+                        )
+                    }
+
+                    // AI child running sudo
+                    if aiProc.executable.hasSuffix("/sudo") || aiProc.commandLine.hasPrefix("sudo ") {
+                        await behaviorScoring.addIndicator(
+                            named: "ai_tool_runs_sudo",
+                            detail: "\(aiType?.displayName ?? "AI tool") child running sudo: \(aiProc.commandLine.prefix(100))",
+                            forProcess: aiProc.pid, path: aiProc.executable
+                        )
+                    }
+
+                    // AI child installing packages
+                    let pkgCmds = ["npm install", "npm i ", "pip install", "pip3 install", "cargo add", "brew install"]
+                    if pkgCmds.contains(where: { aiProc.commandLine.lowercased().contains($0) }) {
+                        await behaviorScoring.addIndicator(
+                            named: "ai_tool_installs_unknown_pkg",
+                            detail: aiProc.commandLine.prefix(200).description,
+                            forProcess: aiProc.pid, path: aiProc.executable
+                        )
+                    }
+
+                    // AI child downloading and executing
+                    let dlExec = ["curl", "wget"]
+                    let execPipe = ["| sh", "| bash", "| zsh", "-o /tmp", "-O /tmp"]
+                    if dlExec.contains(where: { aiProc.commandLine.contains($0) })
+                        && execPipe.contains(where: { aiProc.commandLine.contains($0) }) {
+                        await behaviorScoring.addIndicator(
+                            named: "ai_tool_downloads_and_exec",
+                            detail: aiProc.commandLine.prefix(200).description,
+                            forProcess: aiProc.pid, path: aiProc.executable
+                        )
+                    }
+
+                    // AI child writing to persistence locations
+                    if let file = enrichedEvent.file {
+                        let persistPaths = ["/LaunchAgents/", "/LaunchDaemons/", "/StartupItems/", ".zshrc", ".bashrc", ".bash_profile"]
+                        if persistPaths.contains(where: { file.path.contains($0) }) {
+                            await behaviorScoring.addIndicator(
+                                named: "ai_tool_persistence_write",
+                                detail: "AI tool writing to \(file.path)",
+                                forProcess: aiProc.pid, path: aiProc.executable
+                            )
+                        }
+                    }
+                }
             }
 
             // === Quarantine provenance enrichment for file events ===

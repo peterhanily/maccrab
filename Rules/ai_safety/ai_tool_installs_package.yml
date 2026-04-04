@@ -1,0 +1,35 @@
+title: AI Coding Tool Installs Package
+id: d1a2b3c4-2003-4000-a000-000000002003
+status: experimental
+description: >
+    Detects when an AI coding tool installs packages via npm, pip, or other
+    package managers. Monitors for supply chain attacks and slopsquatting
+    where AI hallucinate package names that attackers have registered.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_npm:
+        CommandLine|contains:
+            - 'npm install'
+            - 'npm i '
+            - 'npm add'
+    selection_pip:
+        CommandLine|contains:
+            - 'pip install'
+            - 'pip3 install'
+    selection_cargo:
+        CommandLine|contains: 'cargo add'
+    selection_brew:
+        CommandLine|contains: 'brew install'
+    condition: selection_npm or selection_pip or selection_cargo or selection_brew
+falsepositives:
+    - Legitimate package installation during development
+level: medium

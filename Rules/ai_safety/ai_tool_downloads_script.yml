@@ -1,0 +1,32 @@
+title: AI Coding Tool Downloads and Executes Script
+id: d1a2b3c4-2004-4000-a000-000000002004
+status: stable
+description: >
+    Detects when a process spawned by an AI tool downloads content and
+    pipes it to a shell for execution. This is a high-risk pattern that
+    could indicate prompt injection causing the AI to fetch malicious code.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_download:
+        CommandLine|contains:
+            - 'curl'
+            - 'wget'
+    selection_pipe_exec:
+        CommandLine|contains:
+            - '| sh'
+            - '| bash'
+            - '| zsh'
+            - '| python'
+    condition: selection_download and selection_pipe_exec
+falsepositives:
+    - Legitimate installation scripts (Homebrew, rustup, nvm)
+level: critical

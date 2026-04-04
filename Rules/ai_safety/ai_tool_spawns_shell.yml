@@ -1,0 +1,33 @@
+title: AI Coding Tool Spawns Shell Process
+id: d1a2b3c4-2001-4000-a000-000000002001
+status: stable
+description: >
+    Detects when an AI coding tool (Claude Code, Codex, OpenClaw, Cursor)
+    spawns a shell process. While normal for executing commands, this should
+    be monitored for suspicious command lines.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_shell:
+        Image|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+    selection_ai_parent:
+        ParentImage|contains:
+            - 'claude'
+            - 'codex'
+            - 'openclaw'
+            - 'Cursor'
+    condition: selection_shell and selection_ai_parent
+falsepositives:
+    - Normal AI tool operation executing build/test commands
+level: low
