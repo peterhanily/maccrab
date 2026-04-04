@@ -231,13 +231,27 @@ struct AlertDetailView: View {
                         Divider()
 
                         Text("Configurable Actions").font(.caption).foregroundColor(.secondary)
-                        Text("Configure response actions in ~/Library/Application Support/MacCrab/actions.json")
+                        Text("Go to Settings → Response Actions to configure")
                             .font(.caption2).foregroundColor(.secondary)
-                        HStack(spacing: 16) {
-                            ActionBadge(icon: "xmark.circle", label: "Kill Process", color: .red)
-                            ActionBadge(icon: "archivebox", label: "Quarantine", color: .orange)
-                            ActionBadge(icon: "terminal", label: "Run Script", color: .blue)
-                            ActionBadge(icon: "bell", label: "Notify", color: .green)
+                        HStack(spacing: 12) {
+                            Button {
+                                if #available(macOS 14.0, *) {
+                                    NSApplication.shared.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                                } else {
+                                    NSApplication.shared.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                                }
+                            } label: {
+                                Label("Configure Response Actions", systemImage: "bolt.shield")
+                            }.controlSize(.large)
+
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(alert.id, forType: .string)
+                            } label: {
+                                Label("Copy Alert ID", systemImage: "doc.on.clipboard")
+                            }
+                            .controlSize(.small)
+                            .help("Copy alert ID for use in actions.json")
                         }
                     }.padding(4)
                 }
@@ -248,21 +262,6 @@ struct AlertDetailView: View {
     }
 }
 
-private struct ActionBadge: View {
-    let icon: String
-    let label: String
-    let color: Color
-    var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: icon).font(.title3).foregroundColor(color)
-            Text(label).font(.caption2).foregroundColor(.secondary)
-        }
-        .frame(width: 70)
-        .padding(6)
-        .background(color.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-}
 
 struct DetailRow: View {
     let label: String
