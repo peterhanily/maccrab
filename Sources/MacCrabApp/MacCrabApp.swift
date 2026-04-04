@@ -42,12 +42,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "shield.checkered",
-                                   accessibilityDescription: "MacCrab")
+            button.title = "🦀"
+            button.font = NSFont.systemFont(ofSize: 14)
         }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "MacCrab Active", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🦀 MacCrab Active", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))

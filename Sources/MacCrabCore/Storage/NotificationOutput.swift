@@ -72,7 +72,7 @@ public actor NotificationOutput {
         case .informational: severityEmoji = "⚪"
         }
 
-        let title = "\(severityEmoji) MacCrab: \(alert.ruleTitle)"
+        let title = "\(severityEmoji) \u{1F980} MacCrab: \(alert.ruleTitle)"
         let body: String
         if let processName = alert.processName, let techniques = alert.mitreTechniques, !techniques.isEmpty {
             body = "Process: \(processName) — \(techniques)"

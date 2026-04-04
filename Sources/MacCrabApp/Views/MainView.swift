@@ -15,9 +15,8 @@ struct MainView: View {
         VStack(spacing: 0) {
             // Top bar with connection status
             HStack {
-                Image(systemName: "shield.lefthalf.filled")
+                Text("🦀")
                     .font(.title2)
-                    .foregroundColor(.accentColor)
                 Text("MacCrab")
                     .font(.title2)
                     .fontWeight(.bold)

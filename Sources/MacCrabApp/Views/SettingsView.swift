@@ -191,9 +191,8 @@ struct SettingsView: View {
         VStack(spacing: 16) {
             Spacer()
 
-            Image(systemName: "shield.checkered")
-                .font(.system(size: 48))
-                .foregroundStyle(.blue, .orange)
+            Text("🦀")
+                .font(.system(size: 64))
 
             Text("MacCrab")
                 .font(.title)
