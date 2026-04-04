@@ -50,37 +50,46 @@ public enum EntropyAnalysis {
     /// Check if a domain name looks like a DGA (Domain Generation Algorithm) output.
     /// DGA domains have high entropy and unusual character distributions.
     public static func analyzeDomain(_ domain: String) -> (entropy: Double, isDGA: Bool, reason: String?) {
-        // Strip TLD for analysis
+        // Split domain into labels
         let parts = domain.split(separator: ".")
         guard parts.count >= 2 else { return (0, false, nil) }
 
-        // Analyze the second-level domain (SLD)
+        // Analyze the registrable domain (SLD) AND any subdomains
+        // For "abc123.evil.com", SLD is "evil" but we also check subdomains
         let sld = String(parts[parts.count - 2])
-        let entropy = shannonEntropy(sld)
-
+        // Check all non-TLD labels for DGA indicators
+        let allLabels = parts.dropLast() // Remove TLD
         // DGA indicators
         var reasons: [String] = []
 
-        // High entropy SLD
-        if entropy > 4.0 && sld.count > 8 {
-            reasons.append("high entropy SLD (\(String(format: "%.2f", entropy)))")
-        }
+        // Check each non-TLD label for DGA characteristics
+        for label in allLabels {
+            let labelStr = String(label)
+            let entropy = shannonEntropy(labelStr)
 
-        // Unusual consonant-to-vowel ratio
-        let vowels = Set("aeiou")
-        let vowelCount = sld.lowercased().filter { vowels.contains($0) }.count
-        let consonantCount = sld.lowercased().filter { $0.isLetter && !vowels.contains($0) }.count
-        if consonantCount > 0 {
-            let ratio = Double(vowelCount) / Double(consonantCount)
-            if ratio < 0.15 && sld.count > 6 {
-                reasons.append("low vowel ratio (\(String(format: "%.2f", ratio)))")
+            // High entropy label
+            if entropy > 4.0 && labelStr.count > 8 {
+                reasons.append("high entropy label '\(labelStr.prefix(20))' (\(String(format: "%.2f", entropy)))")
+            }
+
+            // Unusual consonant-to-vowel ratio
+            let vowels = Set("aeiou")
+            let vowelCount = labelStr.lowercased().filter { vowels.contains($0) }.count
+            let consonantCount = labelStr.lowercased().filter { $0.isLetter && !vowels.contains($0) }.count
+            if consonantCount > 0 {
+                let ratio = Double(vowelCount) / Double(consonantCount)
+                if ratio < 0.15 && labelStr.count > 6 {
+                    reasons.append("low vowel ratio in '\(labelStr.prefix(20))' (\(String(format: "%.2f", ratio)))")
+                }
+            }
+
+            // Excessive length with numbers mixed in
+            if labelStr.count > 15 && labelStr.contains(where: { $0.isNumber }) && labelStr.contains(where: { $0.isLetter }) {
+                reasons.append("long mixed alphanumeric label (\(labelStr.count) chars)")
             }
         }
 
-        // Excessive length with numbers mixed in
-        if sld.count > 15 && sld.contains(where: { $0.isNumber }) && sld.contains(where: { $0.isLetter }) {
-            reasons.append("long mixed alphanumeric SLD (\(sld.count) chars)")
-        }
+        let entropy = shannonEntropy(sld)
 
         // Long subdomain chains (common in DNS tunneling)
         if parts.count > 4 {

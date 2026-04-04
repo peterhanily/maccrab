@@ -1,0 +1,30 @@
+title: Unsigned x86_64 Binary Executed Under Rosetta 2
+id: d1a2b3c4-1004-4000-a000-000000001004
+status: experimental
+description: >
+    Detects execution of unsigned x86_64 binaries on Apple Silicon via Rosetta 2
+    translation. Attackers may use x86 binaries to evade ARM-native detection
+    tools or because their tooling hasn't been ported to ARM.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1036/
+tags:
+    - attack.defense_evasion
+    - attack.t1036
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        process.architecture: 'x86_64'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and not filter_signed
+falsepositives:
+    - Legacy x86-only applications that haven't been updated for ARM
+    - Some Homebrew packages compiled for x86_64
+level: medium

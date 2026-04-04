@@ -1,0 +1,28 @@
+title: System Integrity Protection Disabled
+id: d1a2b3c4-1005-4000-a000-000000001005
+status: stable
+description: >
+    Detects that macOS System Integrity Protection (SIP) has been disabled.
+    SIP protects system files, kernel extensions, and code signing enforcement.
+    Disabling SIP requires booting into Recovery Mode, indicating either
+    physical access compromise or a sophisticated persistence mechanism.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'csrutil disable'
+            - 'csrutil clear'
+            - 'csrutil authenticated-root disable'
+    condition: selection
+falsepositives:
+    - System administrators explicitly disabling SIP for development
+level: critical

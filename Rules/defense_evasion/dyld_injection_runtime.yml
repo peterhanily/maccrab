@@ -1,0 +1,35 @@
+title: DYLD_INSERT_LIBRARIES Runtime Injection
+id: d1a2b3c4-1002-4000-a000-000000001002
+status: stable
+description: >
+    Detects processes launched with DYLD_INSERT_LIBRARIES environment variable,
+    which causes the dynamic linker to load arbitrary shared libraries into
+    the process before its own code runs. This is the macOS equivalent of
+    LD_PRELOAD and is commonly used for library injection attacks.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1574/006/
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.t1574.006
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'DYLD_INSERT_LIBRARIES'
+            - 'DYLD_FRAMEWORK_PATH'
+            - 'DYLD_LIBRARY_PATH'
+    filter_developer:
+        ParentImage|endswith:
+            - '/Xcode'
+            - '/lldb'
+            - '/instruments'
+    condition: selection and not filter_developer
+falsepositives:
+    - Developer debugging tools
+    - Some legitimate application frameworks
+level: high

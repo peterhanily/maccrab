@@ -1,0 +1,33 @@
+title: Quarantine Extended Attribute Removed from Downloaded File
+id: d1a2b3c4-1006-4000-a000-000000001006
+status: stable
+description: >
+    Detects removal of the com.apple.quarantine extended attribute from files.
+    This attribute is set on all downloaded files and triggers Gatekeeper
+    assessment before first execution. Removing it bypasses Gatekeeper
+    protection entirely.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1553/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'xattr -d com.apple.quarantine'
+            - 'xattr -c'
+            - 'xattr -cr'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_system
+falsepositives:
+    - Developers clearing quarantine on their own builds
+    - Enterprise software deployment scripts
+level: high

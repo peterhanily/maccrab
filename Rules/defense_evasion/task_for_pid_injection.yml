@@ -1,0 +1,40 @@
+title: Mach Port task_for_pid Process Injection
+id: d1a2b3c4-1003-4000-a000-000000001003
+status: stable
+description: >
+    Detects use of task_for_pid() or process_set_exception_ports() which
+    grants full control over another process's memory and execution. This
+    is the fundamental mechanism for process injection on macOS.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1055/
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1055
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'task_for_pid'
+            - 'mach_port_insert_right'
+            - 'mach_port_allocate'
+            - 'thread_create_running'
+            - 'process_set_exception_ports'
+    filter_debuggers:
+        Image|endswith:
+            - '/lldb'
+            - '/debugserver'
+            - '/DTServiceHub'
+            - '/Xcode'
+    filter_signed:
+        SignerType:
+            - 'apple'
+    condition: selection and not filter_debuggers and not filter_signed
+falsepositives:
+    - Legitimate debugging tools
+    - Application crash reporters
+level: critical

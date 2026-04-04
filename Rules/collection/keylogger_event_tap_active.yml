@@ -1,0 +1,33 @@
+title: Active CGEventTap Monitoring Keyboard Input
+id: d1a2b3c4-1001-4000-a000-000000001001
+status: stable
+description: >
+    Detects processes that create Core Graphics event taps monitoring keyboard
+    events (kCGEventKeyDown). This is the primary mechanism for keylogging on
+    macOS. Legitimate uses are rare and limited to accessibility tools.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1056/001/
+    - https://developer.apple.com/documentation/coregraphics/cgeventtap
+tags:
+    - attack.collection
+    - attack.t1056.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'CGEventTapCreate'
+            - 'CGEventTapCreateForPSN'
+            - 'tap_create'
+    filter_accessibility:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_accessibility
+falsepositives:
+    - Legitimate accessibility applications (screen readers, input method editors)
+    - Karabiner-Elements keyboard customization tool
+level: critical

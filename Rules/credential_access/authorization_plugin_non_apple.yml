@@ -1,0 +1,30 @@
+title: Non-Apple Authorization Plugin Installed
+id: d1a2b3c4-1007-4000-a000-000000001007
+status: stable
+description: >
+    Detects creation of authorization plugin bundles in SecurityAgentPlugins
+    directory. These plugins execute during the macOS login process with
+    root privileges and can intercept user credentials.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1556/003/
+tags:
+    - attack.credential_access
+    - attack.persistence
+    - attack.t1556.003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/Library/Security/SecurityAgentPlugins/'
+        TargetFilename|endswith: '.bundle'
+    filter_apple:
+        SignerType:
+            - 'apple'
+    condition: selection and not filter_apple
+falsepositives:
+    - Enterprise SSO plugins (Kerberos, smart card)
+    - Corporate VPN authentication plugins
+level: critical

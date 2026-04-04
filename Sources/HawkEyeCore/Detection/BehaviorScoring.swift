@@ -129,6 +129,19 @@ public actor BehaviorScoring {
         "screen_recording_unsigned":    3.5,
         "full_disk_access_unsigned":    5.0,
 
+        // Deep macOS internals
+        "library_injection":            5.0,
+        "event_tap_keylogger":          7.0,
+        "task_for_pid_injection":       6.0,
+        "rosetta_unsigned":             3.0,
+        "sip_disabled":                 9.0,
+        "non_apple_auth_plugin":        8.0,
+        "rogue_xpc_service":            5.0,
+        "gatekeeper_override":          3.0,
+        "xprotect_outdated":            2.0,
+        "suspicious_certificate":       4.0,
+        "typosquat_domain":             6.0,
+
         // Threat intel matches
         "known_malicious_hash":         10.0,
         "known_malicious_ip":           8.0,

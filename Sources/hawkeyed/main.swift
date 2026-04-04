@@ -196,6 +196,16 @@ struct HawkEyeDaemon {
         await dnsCollector.start()
         print("DNS collector active")
 
+        // Event tap monitor (keylogger detection)
+        let eventTapMonitor = EventTapMonitor(pollInterval: 30)
+        await eventTapMonitor.start()
+        print("Event tap monitor active (keylogger detection)")
+
+        // System policy monitor (SIP, auth plugins, quarantine, XProtect)
+        let systemPolicyMonitor = SystemPolicyMonitor(pollInterval: 300)
+        await systemPolicyMonitor.start()
+        print("System policy monitor active (SIP, plugins, quarantine, XProtect)")
+
         // Initialize sequence engine (Phase 2: temporal-causal detection)
         let sequenceEngine = await SequenceEngine(lineage: enricher.lineage)
 
@@ -422,6 +432,75 @@ struct HawkEyeDaemon {
         sigIntSource.setEventHandler { shutdownHandler() }
         sigIntSource.resume()
 
+        // Event tap monitoring task (keylogger detection)
+        Task {
+            for await tapInfo in eventTapMonitor.events {
+                let alert = Alert(
+                    ruleId: "hawkeye.deep.event-tap-keylogger",
+                    ruleTitle: "Suspicious Event Tap: \(tapInfo.processName) Monitoring Keyboard",
+                    severity: tapInfo.isActive ? .critical : .high,
+                    eventId: UUID().uuidString,
+                    processPath: tapInfo.processPath,
+                    processName: tapInfo.processName,
+                    description: "Process \(tapInfo.processName) (PID \(tapInfo.tappingPID)) has an active CGEventTap monitoring keyboard events. Mask: 0x\(String(tapInfo.eventMask, radix: 16)). Mode: \(tapInfo.isActive ? "ACTIVE (can modify input)" : "passive (listen-only)"). This is a strong indicator of keylogging.",
+                    mitreTactics: "attack.collection",
+                    mitreTechniques: "attack.t1056.001",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+                await behaviorScoring.addIndicator(
+                    named: "event_tap_keylogger",
+                    detail: "PID \(tapInfo.tappingPID) taps keyboard",
+                    forProcess: tapInfo.tappingPID,
+                    path: tapInfo.processPath
+                )
+                print("[CRIT] Event tap keylogger: \(tapInfo.processName) (PID \(tapInfo.tappingPID))")
+            }
+        }
+
+        // System policy monitoring task
+        Task {
+            for await policyEvent in systemPolicyMonitor.events {
+                let alert = Alert(
+                    ruleId: "hawkeye.deep.\(policyEvent.type.rawValue)",
+                    ruleTitle: "System Policy: \(policyEvent.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
+                    severity: policyEvent.severity,
+                    eventId: UUID().uuidString,
+                    processPath: policyEvent.path,
+                    processName: nil,
+                    description: policyEvent.description,
+                    mitreTactics: policyEvent.mitreTactic,
+                    mitreTechniques: policyEvent.mitreTechnique,
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+
+                // Behavioral scoring for relevant events
+                let indicatorName: String? = switch policyEvent.type {
+                case .sipDisabled: "sip_disabled"
+                case .authPluginFound: "non_apple_auth_plugin"
+                case .xprotectOutdated: "xprotect_outdated"
+                case .quarantineStripped: "removes_quarantine"
+                case .gatekeeperOverride: "gatekeeper_override"
+                default: nil
+                }
+                if let name = indicatorName {
+                    // Use PID 0 for system-level events
+                    await behaviorScoring.addIndicator(
+                        named: name,
+                        detail: policyEvent.description,
+                        forProcess: 0,
+                        path: policyEvent.path ?? "system"
+                    )
+                }
+
+                let severityIcon = policyEvent.severity == .critical ? "[CRIT]" : "[HIGH]"
+                print("\(severityIcon) System policy: \(policyEvent.type.rawValue) — \(policyEvent.description.prefix(100))")
+            }
+        }
+
         // DNS event processing task
         Task {
             for await dnsQuery in dnsCollector.events {
@@ -540,6 +619,18 @@ struct HawkEyeDaemon {
             // YARA enrichment for file events (Phase 3)
             if enrichedEvent.eventCategory == .file {
                 enrichedEvent = await yaraEnricher.enrich(enrichedEvent)
+            }
+
+            // === DYLD injection detection ===
+            let cmdline = enrichedEvent.process.commandLine.lowercased()
+            let args = enrichedEvent.process.args.joined(separator: " ").lowercased()
+            if cmdline.contains("dyld_insert_libraries") || args.contains("dyld_insert_libraries") {
+                await behaviorScoring.addIndicator(
+                    named: "library_injection",
+                    detail: "DYLD_INSERT_LIBRARIES in command/env",
+                    forProcess: enrichedEvent.process.pid,
+                    path: enrichedEvent.process.executable
+                )
             }
 
             // === Statistical anomaly detection ===
