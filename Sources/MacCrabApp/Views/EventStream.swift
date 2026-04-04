@@ -115,7 +115,7 @@ struct EventStream: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                HSplitView {
+                HStack(spacing: 0) {
                     Table(filteredEvents, selection: $selectedEventID) {
                         TableColumn("Time") { event in
                             Text(event.dateTimeString)
@@ -151,23 +151,17 @@ struct EventStream: View {
                         }
                         .width(min: 60, ideal: 80, max: 100)
                     }
-                    .frame(minWidth: 500)
 
-                    // Event detail panel
+                    // Event detail panel — only when selected
                     if let selectedID = selectedEventID,
                        let event = filteredEvents.first(where: { $0.id == selectedID }) {
+                        Divider()
                         EventDetailPanel(event: event)
-                            .frame(minWidth: 280, idealWidth: 320)
-                    } else {
-                        VStack {
-                            Spacer()
-                            Text("Select an event to see details")
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .frame(minWidth: 280)
+                            .frame(width: 350)
+                            .transition(.move(edge: .trailing))
                     }
                 }
+                .animation(.easeInOut(duration: 0.2), value: selectedEventID)
             }
 
             // Status bar

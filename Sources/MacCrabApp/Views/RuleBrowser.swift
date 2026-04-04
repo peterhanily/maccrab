@@ -163,31 +163,23 @@ struct RuleBrowser: View {
                     }
                     .frame(maxWidth: .infinity)
                 } else {
-                    HSplitView {
+                    HStack(spacing: 0) {
                         List(displayedRules, selection: $selectedRule) { rule in
                             RuleRow(rule: rule)
                                 .tag(rule)
                                 .contentShape(Rectangle())
                                 .onTapGesture { selectedRule = rule }
                         }
-                        .frame(minWidth: 400)
 
+                        // Rule detail — only when selected
                         if let rule = selectedRule {
+                            Divider()
                             RuleDetailPanel(rule: rule)
-                                .frame(minWidth: 300, idealWidth: 350)
-                        } else {
-                            VStack {
-                                Spacer()
-                                Image(systemName: "shield")
-                                    .font(.system(size: 36))
-                                    .foregroundColor(.secondary.opacity(0.3))
-                                Text("Select a rule to see details")
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                            }
-                            .frame(minWidth: 300)
+                                .frame(width: 420)
+                                .transition(.move(edge: .trailing))
                         }
                     }
+                    .animation(.easeInOut(duration: 0.2), value: selectedRule)
                 }
             }
         }

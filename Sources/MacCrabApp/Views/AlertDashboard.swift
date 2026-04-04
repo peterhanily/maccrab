@@ -89,7 +89,7 @@ struct AlertDashboard: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                HSplitView {
+                HStack(spacing: 0) {
                     // Alert list
                     List(filteredAlerts, selection: $selectedAlert) { alert in
                         AlertRow(alert: alert) {
@@ -99,27 +99,21 @@ struct AlertDashboard: View {
                         .contentShape(Rectangle())
                         .onTapGesture { selectedAlert = alert }
                     }
-                    .frame(minWidth: 400)
 
-                    // Detail panel
+                    // Detail panel — only shown when selected
                     if let alert = selectedAlert {
+                        Divider()
                         AlertDetailView(alert: alert, onSuppress: {
                             Task { await appState.suppressAlert(alert.id) }
                         }, onSuppressPattern: {
                             Task { await appState.suppressPattern(ruleTitle: alert.ruleTitle, processName: alert.processName) }
                             selectedAlert = nil
                         })
-                        .frame(minWidth: 300, idealWidth: 350)
-                    } else {
-                        VStack {
-                            Spacer()
-                            Text("Select an alert to see details")
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .frame(minWidth: 300)
+                        .frame(width: 400)
+                        .transition(.move(edge: .trailing))
                     }
                 }
+                .animation(.easeInOut(duration: 0.2), value: selectedAlert)
             }
         }
         .task {
