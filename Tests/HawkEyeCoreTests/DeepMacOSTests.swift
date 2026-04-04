@@ -271,3 +271,103 @@ struct BehaviorScoringIndicatorTests {
         #expect(sipWeight >= 9.0, "SIP disabled should have weight >= 9.0")
     }
 }
+
+// MARK: - Phase 3+4: Persistence, Policy, Forensic
+
+@Suite("Deep macOS: System Policy & Persistence")
+struct SystemPolicyTests {
+
+    @Test("Gatekeeper override via spctl triggers detection")
+    func gatekeeperOverride() async throws {
+        let engine = try await loadRules()
+        let event = processEvent(
+            name: "spctl", path: "/usr/sbin/spctl",
+            commandLine: "spctl --master-disable"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(!matches.isEmpty, "spctl --master-disable should trigger rule")
+    }
+
+    @Test("MDM profile installation triggers detection")
+    func mdmProfile() async throws {
+        let engine = try await loadRules()
+        let event = processEvent(
+            name: "profiles", path: "/usr/bin/profiles",
+            commandLine: "profiles install -path /tmp/evil.mobileconfig"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(!matches.isEmpty, "MDM profile install should trigger rule")
+    }
+
+    @Test("Spotlight importer creation triggers detection")
+    func spotlightImporter() async throws {
+        let engine = try await loadRules()
+        let event = fileEvent(
+            filePath: "/Users/victim/Library/Spotlight/evil.mdimporter",
+            processPath: "/tmp/installer",
+            signer: .unsigned
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("spotlight") || $0.ruleName.lowercased().contains("importer") },
+                "Unsigned Spotlight importer should trigger rule, got: \(matches.map(\.ruleName))")
+    }
+
+    @Test("launchctl bootstrap non-Apple service triggers detection")
+    func xpcService() async throws {
+        let engine = try await loadRules()
+        let event = processEvent(
+            name: "launchctl", path: "/bin/launchctl",
+            commandLine: "launchctl bootstrap gui/501 /tmp/com.evil.agent.plist"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(!matches.isEmpty, "launchctl bootstrap of non-Apple service should trigger rule")
+    }
+
+    @Test("tmutil snapshot outside backupd triggers detection")
+    func apfsSnapshot() async throws {
+        let engine = try await loadRules()
+        let event = processEvent(
+            name: "tmutil", path: "/usr/bin/tmutil",
+            commandLine: "tmutil snapshot",
+            parentPath: "/bin/bash"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("snapshot") },
+                "Manual tmutil snapshot should trigger rule, got: \(matches.map(\.ruleName))")
+    }
+}
+
+// MARK: - FSEvents Collector
+
+@Suite("Deep macOS: FSEvents Collector")
+struct FSEventsTests {
+
+    @Test("FSEventsCollector initializes without crashing")
+    func init_() async {
+        let collector = FSEventsCollector()
+        // Just verify it can be created — actual file monitoring needs a run loop
+        await collector.stop()
+    }
+}
+
+// MARK: - Quarantine Enricher
+
+@Suite("Deep macOS: Quarantine Enrichment")
+struct QuarantineTests {
+
+    @Test("QuarantineEnricher returns nil for non-downloaded files")
+    func noQuarantine() async {
+        let enricher = QuarantineEnricher()
+        let info = await enricher.lookup(filePath: "/usr/bin/ls")
+        #expect(info == nil, "/usr/bin/ls should have no quarantine record")
+    }
+
+    @Test("Quarantine enrichment populates enrichments dict")
+    func enrichmentDict() async {
+        let enricher = QuarantineEnricher()
+        var enrichments: [String: String] = [:]
+        await enricher.enrich(&enrichments, forFile: "/nonexistent/file")
+        // No quarantine record — enrichments should be unchanged
+        #expect(enrichments["quarantine.download_url"] == nil)
+    }
+}

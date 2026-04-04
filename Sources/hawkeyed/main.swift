@@ -204,7 +204,17 @@ struct HawkEyeDaemon {
         // System policy monitor (SIP, auth plugins, quarantine, XProtect)
         let systemPolicyMonitor = SystemPolicyMonitor(pollInterval: 300)
         await systemPolicyMonitor.start()
-        print("System policy monitor active (SIP, plugins, quarantine, XProtect)")
+        print("System policy monitor active (SIP, plugins, quarantine, XProtect, XPC, MDM)")
+
+        // FSEvents fallback file monitor (works without root)
+        let fsEventsCollector = FSEventsCollector()
+        if !isRoot {
+            await fsEventsCollector.start()
+            print("FSEvents file monitor active (non-root fallback for ES)")
+        }
+
+        // Quarantine provenance enricher
+        let quarantineEnricher = QuarantineEnricher()
 
         // Initialize sequence engine (Phase 2: temporal-causal detection)
         let sequenceEngine = await SequenceEngine(lineage: enricher.lineage)
@@ -432,6 +442,33 @@ struct HawkEyeDaemon {
         sigIntSource.setEventHandler { shutdownHandler() }
         sigIntSource.resume()
 
+        // FSEvents file monitor task (non-root fallback)
+        if !isRoot {
+            Task {
+                for await event in fsEventsCollector.events {
+                    // Route FSEvents through the enrichment + detection pipeline
+                    let enriched = await enricher.enrich(event)
+                    try? await eventStore.insert(event: enriched)
+                    let matches = await ruleEngine.evaluate(enriched)
+                    for match in matches {
+                        if await deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
+                        await deduplicator.recordAlert(ruleId: match.ruleId, processPath: enriched.process.executable)
+                        let alert = Alert(
+                            ruleId: match.ruleId, ruleTitle: match.ruleName, severity: match.severity,
+                            eventId: enriched.id.uuidString, processPath: enriched.process.executable,
+                            processName: enriched.process.name, description: match.description,
+                            mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
+                            mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","),
+                            suppressed: false
+                        )
+                        try? await alertStore.insert(alert: alert)
+                        await notifier.notify(alert: alert)
+                        print("[FS] \(match.ruleName) | \(enriched.file?.path ?? "?")")
+                    }
+                }
+            }
+        }
+
         // Event tap monitoring task (keylogger detection)
         Task {
             for await tapInfo in eventTapMonitor.events {
@@ -619,6 +656,11 @@ struct HawkEyeDaemon {
             // YARA enrichment for file events (Phase 3)
             if enrichedEvent.eventCategory == .file {
                 enrichedEvent = await yaraEnricher.enrich(enrichedEvent)
+            }
+
+            // === Quarantine provenance enrichment for file events ===
+            if let filePath = enrichedEvent.file?.path {
+                await quarantineEnricher.enrich(&enrichedEvent.enrichments, forFile: filePath)
             }
 
             // === DYLD injection detection ===

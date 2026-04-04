@@ -1,0 +1,30 @@
+title: Suspicious MDM Configuration Profile Installed
+id: d1a2b3c4-1009-4000-a000-000000001009
+status: experimental
+description: >
+    Detects installation of MDM configuration profiles that modify security
+    settings. Rogue profiles can disable Gatekeeper, allow unsigned code,
+    or install root certificates for MITM attacks.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/profiles'
+        CommandLine|contains:
+            - 'install'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_system
+falsepositives:
+    - Legitimate enterprise MDM enrollment
+level: high

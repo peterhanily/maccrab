@@ -1,0 +1,31 @@
+title: Unsigned Spotlight mdimporter Plugin Installed
+id: d1a2b3c4-1012-4000-a000-000000001012
+status: stable
+description: >
+    Detects creation of Spotlight metadata importer plugins outside the
+    system directory. These plugins are loaded by mds (metadata server)
+    automatically and can execute arbitrary code during file indexing.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/Spotlight/'
+        TargetFilename|endswith: '.mdimporter'
+    filter_system:
+        TargetFilename|startswith: '/System/'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'devId'
+    condition: selection and not filter_system and not filter_signed
+falsepositives:
+    - Third-party applications that include Spotlight importers
+level: high

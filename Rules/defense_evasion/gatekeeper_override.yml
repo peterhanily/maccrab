@@ -1,0 +1,32 @@
+title: Gatekeeper Assessment Overridden by User
+id: d1a2b3c4-1008-4000-a000-000000001008
+status: experimental
+description: >
+    Detects when a user bypasses Gatekeeper by right-clicking and selecting
+    Open on an unnotarized application, or when spctl is used to disable
+    Gatekeeper assessment.
+author: HawkEye Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1553/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_spctl:
+        Image|endswith: '/spctl'
+        CommandLine|contains:
+            - '--master-disable'
+            - '--disable'
+            - '--add'
+    selection_xattr:
+        Image|endswith: '/xattr'
+        CommandLine|contains: '-d com.apple.quarantine'
+    condition: selection_spctl or selection_xattr
+falsepositives:
+    - Enterprise deployment scripts
+    - Developers testing unsigned builds
+level: high

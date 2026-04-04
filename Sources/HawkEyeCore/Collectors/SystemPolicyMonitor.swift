@@ -50,6 +50,9 @@ public actor SystemPolicyMonitor {
         case quarantineStripped = "quarantine_stripped"
         case btmNewItem = "btm_new_persistence"
         case gatekeeperOverride = "gatekeeper_override"
+        case rogueXPCService = "rogue_xpc_service"
+        case rogueMDMProfile = "rogue_mdm_profile"
+        case unexpectedSnapshot = "unexpected_apfs_snapshot"
     }
 
     // MARK: - Initialization
@@ -99,6 +102,9 @@ public actor SystemPolicyMonitor {
         checkPluginDirectories()
         checkXProtectVersion()
         scanDownloadsForMissingQuarantine()
+        checkXPCServices()
+        checkMDMProfiles()
+        checkAPFSSnapshots()
     }
 
     // MARK: - SIP Status
@@ -288,6 +294,107 @@ public actor SystemPolicyMonitor {
                     mitreTactic: "attack.defense_evasion",
                     mitreTechnique: "attack.t1553.001"
                 ))
+            }
+        }
+    }
+
+    // MARK: - XPC Service Enumeration
+
+    private var knownXPCServices: Set<String> = []
+
+    private func checkXPCServices() {
+        let output = runCommand("/bin/launchctl", args: ["list"])
+        let lines = output.split(separator: "\n")
+
+        for line in lines.dropFirst() { // Skip header
+            let parts = line.split(separator: "\t", maxSplits: 2)
+            guard parts.count >= 3 else { continue }
+            let label = String(parts[2])
+
+            // Skip known Apple services
+            if label.hasPrefix("com.apple.") || label.hasPrefix("Apple") { continue }
+            if label.hasPrefix("[") { continue } // System services
+
+            if !knownXPCServices.contains(label) {
+                knownXPCServices.insert(label)
+
+                // Check if this is a new, possibly rogue service
+                // Only alert on services that look suspicious
+                if label.count < 5 || label.contains("..") || !label.contains(".") {
+                    emit(SystemPolicyEvent(
+                        type: .rogueXPCService,
+                        description: "Suspicious XPC service registered: \(label). Non-standard naming suggests potential persistence mechanism.",
+                        path: nil,
+                        severity: .medium,
+                        mitreTactic: "attack.persistence",
+                        mitreTechnique: "attack.t1543"
+                    ))
+                }
+            }
+        }
+    }
+
+    // MARK: - MDM Profile Detection
+
+    private func checkMDMProfiles() {
+        let output = runCommand("/usr/bin/profiles", args: ["list", "-output", "stdout-xml"])
+        if output.isEmpty { return }
+
+        // Look for configuration profiles
+        let profileDir = "/var/db/ConfigurationProfiles"
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: profileDir) else { return }
+
+        for item in items where item.hasSuffix(".mobileconfig") || item.hasSuffix(".plist") {
+            let fullPath = profileDir + "/" + item
+
+            // Read profile to check if it modifies security settings
+            if let data = try? String(contentsOfFile: fullPath, encoding: .utf8) {
+                let suspicious = [
+                    "allowSigned", "DisableGatekeeper", "allowAllApps",
+                    "PayloadRemovalDisallowed", "com.apple.ManagedClient",
+                ]
+                for keyword in suspicious where data.contains(keyword) {
+                    emit(SystemPolicyEvent(
+                        type: .rogueMDMProfile,
+                        description: "MDM profile modifies security policy (\(keyword)): \(item)",
+                        path: fullPath,
+                        severity: .high,
+                        mitreTactic: "attack.defense_evasion",
+                        mitreTechnique: "attack.t1562.001"
+                    ))
+                    break
+                }
+            }
+        }
+    }
+
+    // MARK: - APFS Snapshot Monitoring
+
+    private var knownSnapshots: Set<String> = []
+
+    private func checkAPFSSnapshots() {
+        let output = runCommand("/usr/bin/tmutil", args: ["listlocalsnapshots", "/"])
+        let lines = output.split(separator: "\n").map(String.init)
+
+        for line in lines {
+            let snapshot = line.trimmingCharacters(in: .whitespaces)
+            guard !snapshot.isEmpty, !snapshot.hasPrefix("Snapshots for") else { continue }
+
+            if !knownSnapshots.contains(snapshot) {
+                let wasEmpty = knownSnapshots.isEmpty
+                knownSnapshots.insert(snapshot)
+
+                // Only alert on new snapshots after initial baseline
+                if !wasEmpty {
+                    emit(SystemPolicyEvent(
+                        type: .unexpectedSnapshot,
+                        description: "New APFS snapshot created: \(snapshot). Unexpected snapshots may be used to hide data or stage attacks.",
+                        path: nil,
+                        severity: .low,
+                        mitreTactic: "attack.defense_evasion",
+                        mitreTechnique: "attack.t1564"
+                    ))
+                }
             }
         }
     }
