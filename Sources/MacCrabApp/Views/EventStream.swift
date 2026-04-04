@@ -115,40 +115,58 @@ struct EventStream: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                Table(filteredEvents, selection: $selectedEventID) {
-                    TableColumn("Time") { event in
-                        Text(event.dateTimeString)
-                            .font(.system(.caption, design: .monospaced))
-                    }
-                    .width(min: 120, ideal: 150, max: 180)
+                HSplitView {
+                    Table(filteredEvents, selection: $selectedEventID) {
+                        TableColumn("Time") { event in
+                            Text(event.dateTimeString)
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                        .width(min: 120, ideal: 150, max: 180)
 
-                    TableColumn("Action") { event in
-                        Text(event.action)
-                            .fontWeight(.medium)
-                            .foregroundColor(event.actionColor)
-                    }
-                    .width(min: 60, ideal: 80, max: 100)
+                        TableColumn("Action") { event in
+                            Text(event.action)
+                                .fontWeight(.medium)
+                                .foregroundColor(event.actionColor)
+                        }
+                        .width(min: 60, ideal: 80, max: 100)
 
-                    TableColumn("Category") { event in
-                        CategoryBadge(category: event.category)
-                    }
-                    .width(min: 70, ideal: 90, max: 110)
+                        TableColumn("Category") { event in
+                            CategoryBadge(category: event.category)
+                        }
+                        .width(min: 70, ideal: 90, max: 110)
 
-                    TableColumn("Process") { event in
-                        Text("\(event.processName) (\(event.pid))")
-                    }
-                    .width(min: 120, ideal: 160, max: 220)
+                        TableColumn("Process") { event in
+                            Text("\(event.processName) (\(event.pid))")
+                        }
+                        .width(min: 120, ideal: 160, max: 220)
 
-                    TableColumn("Detail") { event in
-                        Text(event.detail)
-                            .lineLimit(1)
-                            .help(event.detail)
-                    }
+                        TableColumn("Detail") { event in
+                            Text(event.detail)
+                                .lineLimit(1)
+                                .help(event.detail)
+                        }
 
-                    TableColumn("Signer") { event in
-                        SignerBadge(signerType: event.signerType)
+                        TableColumn("Signer") { event in
+                            SignerBadge(signerType: event.signerType)
+                        }
+                        .width(min: 60, ideal: 80, max: 100)
                     }
-                    .width(min: 60, ideal: 80, max: 100)
+                    .frame(minWidth: 500)
+
+                    // Event detail panel
+                    if let selectedID = selectedEventID,
+                       let event = filteredEvents.first(where: { $0.id == selectedID }) {
+                        EventDetailPanel(event: event)
+                            .frame(minWidth: 280, idealWidth: 320)
+                    } else {
+                        VStack {
+                            Spacer()
+                            Text("Select an event to see details")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .frame(minWidth: 280)
+                    }
                 }
             }
 
@@ -207,6 +225,86 @@ private struct CategoryBadge: View {
             .background(color.opacity(0.15))
             .foregroundColor(color)
             .clipShape(Capsule())
+    }
+}
+
+// MARK: - Event Detail Panel
+
+private struct EventDetailPanel: View {
+    let event: EventViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text(event.action)
+                        .font(.headline)
+                        .foregroundColor(event.actionColor)
+                    CategoryBadge(category: event.category)
+                    Spacer()
+                }
+
+                Text(event.dateTimeString)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                GroupBox("Process") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        EventDetailRow(label: "Name", value: event.processName)
+                        EventDetailRow(label: "PID", value: String(event.pid))
+                        if !event.signerType.isEmpty {
+                            EventDetailRow(label: "Signer", value: event.signerType)
+                        }
+                    }.padding(4)
+                }
+
+                GroupBox("Detail") {
+                    Text(event.detail)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(4)
+                }
+
+                GroupBox("Event Metadata") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        EventDetailRow(label: "ID", value: event.id.uuidString)
+                        EventDetailRow(label: "Category", value: event.category.rawValue)
+                        EventDetailRow(label: "Action", value: event.action)
+                    }.padding(4)
+                }
+
+                // Copy button
+                Button {
+                    NSPasteboard.general.clearContents()
+                    let text = """
+                    Event: \(event.action) (\(event.category.rawValue))
+                    Time: \(event.dateTimeString)
+                    Process: \(event.processName) (PID \(event.pid))
+                    Signer: \(event.signerType)
+                    Detail: \(event.detail)
+                    ID: \(event.id.uuidString)
+                    """
+                    NSPasteboard.general.setString(text, forType: .string)
+                } label: {
+                    Label("Copy Event Details", systemImage: "doc.on.doc")
+                }
+                .controlSize(.large)
+
+                Spacer()
+            }.padding()
+        }.background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct EventDetailRow: View {
+    let label: String
+    let value: String
+    var body: some View {
+        HStack(alignment: .top) {
+            Text(label).font(.caption).foregroundColor(.secondary).frame(width: 60, alignment: .trailing)
+            Text(value).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+        }
     }
 }
 

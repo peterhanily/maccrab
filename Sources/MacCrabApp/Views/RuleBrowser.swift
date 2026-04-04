@@ -13,6 +13,7 @@ struct RuleBrowser: View {
     @State private var searchText: String = ""
     @State private var selectedTactic: String? = nil
     @State private var showRuleWizard: Bool = false
+    @State private var selectedRule: RuleViewModel? = nil
 
     /// Unique tactic groups derived from the loaded rules.
     private var tactics: [TacticGroup] {
@@ -162,8 +163,30 @@ struct RuleBrowser: View {
                     }
                     .frame(maxWidth: .infinity)
                 } else {
-                    List(displayedRules) { rule in
-                        RuleRow(rule: rule)
+                    HSplitView {
+                        List(displayedRules, selection: $selectedRule) { rule in
+                            RuleRow(rule: rule)
+                                .tag(rule)
+                                .contentShape(Rectangle())
+                                .onTapGesture { selectedRule = rule }
+                        }
+                        .frame(minWidth: 400)
+
+                        if let rule = selectedRule {
+                            RuleDetailPanel(rule: rule)
+                                .frame(minWidth: 300, idealWidth: 350)
+                        } else {
+                            VStack {
+                                Spacer()
+                                Image(systemName: "shield")
+                                    .font(.system(size: 36))
+                                    .foregroundColor(.secondary.opacity(0.3))
+                                Text("Select a rule to see details")
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                            }
+                            .frame(minWidth: 300)
+                        }
                     }
                 }
             }
@@ -192,6 +215,231 @@ struct RuleBrowser: View {
         case "impact":               return "bolt.slash"
         default:                     return "questionmark.circle"
         }
+    }
+}
+
+// MARK: - Rule Detail Panel
+
+import MacCrabCore
+import AppKit
+
+private struct RuleDetailPanel: View {
+    let rule: RuleViewModel
+    @State private var isEditing = false
+    @State private var editedJSON = ""
+    @State private var saveStatus: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                // Header
+                HStack {
+                    Text(rule.title).font(.title3).fontWeight(.bold)
+                    Spacer()
+                    SeverityLabel(level: rule.level)
+                }
+
+                // Status
+                HStack {
+                    Label(rule.enabled ? "Enabled" : "Disabled", systemImage: rule.enabled ? "checkmark.circle" : "xmark.circle")
+                        .foregroundColor(rule.enabled ? .green : .red)
+                        .font(.caption)
+                    Spacer()
+                }
+
+                // Description
+                if !rule.description.isEmpty {
+                    GroupBox("Description") {
+                        Text(rule.description).font(.body).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(4)
+                    }
+                }
+
+                // MITRE ATT&CK
+                if !rule.techniqueIds.isEmpty {
+                    GroupBox("MITRE ATT&CK") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: "shield.fill").foregroundColor(.purple).font(.caption)
+                                Text("Tactic: \(rule.tacticName)").font(.subheadline)
+                            }
+                            ForEach(rule.techniqueIds, id: \.self) { tech in
+                                HStack {
+                                    Image(systemName: "chevron.right").font(.caption2).foregroundColor(.secondary)
+                                    Text(tech).font(.system(.body, design: .monospaced))
+                                    Spacer()
+                                    Link("MITRE", destination: URL(string: "https://attack.mitre.org/techniques/\(tech.replacingOccurrences(of: ".", with: "/"))/")!)
+                                        .font(.caption)
+                                }
+                            }
+                        }.padding(4)
+                    }
+                }
+
+                // Tags
+                if !rule.tags.isEmpty {
+                    GroupBox("Tags") {
+                        FlowLayout(spacing: 4) {
+                            ForEach(rule.tags, id: \.self) { tag in
+                                Text(tag)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Color.accentColor.opacity(0.1))
+                                    .clipShape(Capsule())
+                            }
+                        }.padding(4)
+                    }
+                }
+
+                // Metadata
+                GroupBox("Metadata") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        RuleDetailRow(label: "Rule ID", value: rule.id)
+                        RuleDetailRow(label: "Severity", value: rule.level.capitalized)
+                        RuleDetailRow(label: "Status", value: rule.enabled ? "Enabled" : "Disabled")
+                    }.padding(4)
+                }
+
+                // Response Actions config
+                GroupBox("Response Actions") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Configure in actions.json:").font(.caption).foregroundColor(.secondary)
+                        Text("""
+                        {
+                          "rules": {
+                            "\(rule.id)": [
+                              {"action": "notify", "minimumSeverity": "high"},
+                              {"action": "kill", "minimumSeverity": "critical"}
+                            ]
+                          }
+                        }
+                        """)
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(6)
+                        .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .textSelection(.enabled)
+                    }.padding(4)
+                }
+
+                // Actions
+                HStack(spacing: 10) {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        let text = "Rule: \(rule.title)\nID: \(rule.id)\nSeverity: \(rule.level)\nTactic: \(rule.tacticName)\nTechniques: \(rule.techniqueIds.joined(separator: ", "))\nDescription: \(rule.description)"
+                        NSPasteboard.general.setString(text, forType: .string)
+                    } label: {
+                        Label("Copy Details", systemImage: "doc.on.doc")
+                    }.controlSize(.large)
+
+                    Button {
+                        // Open the compiled JSON file for this rule
+                        let possiblePaths = [
+                            NSHomeDirectory() + "/Library/Application Support/MacCrab/compiled_rules/",
+                            FileManager.default.currentDirectoryPath + "/.build/debug/compiled_rules/",
+                        ]
+                        for dir in possiblePaths {
+                            if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
+                                for file in files where file.hasSuffix(".json") {
+                                    let path = dir + file
+                                    if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                                       json["id"] as? String == rule.id {
+                                        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                                        return
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Open JSON", systemImage: "doc.text")
+                    }.controlSize(.large)
+
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(rule.id, forType: .string)
+                    } label: {
+                        Label("Copy ID", systemImage: "number")
+                    }.controlSize(.large)
+                }
+
+                if let status = saveStatus {
+                    Text(status).font(.caption).foregroundColor(.green)
+                }
+
+                Spacer()
+            }.padding()
+        }.background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct SeverityLabel: View {
+    let level: String
+    var color: Color {
+        switch level.lowercased() {
+        case "critical": return .red
+        case "high": return .orange
+        case "medium": return .yellow
+        case "low": return .blue
+        default: return .secondary
+        }
+    }
+    var body: some View {
+        Text(level.capitalized)
+            .font(.caption).fontWeight(.bold)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(color.opacity(0.15))
+            .foregroundColor(color)
+            .clipShape(Capsule())
+    }
+}
+
+private struct RuleDetailRow: View {
+    let label: String
+    let value: String
+    var body: some View {
+        HStack(alignment: .top) {
+            Text(label).font(.caption).foregroundColor(.secondary).frame(width: 60, alignment: .trailing)
+            Text(value).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+        }
+    }
+}
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = layout(proposal: proposal, subviews: subviews)
+        return result.size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = layout(proposal: proposal, subviews: subviews)
+        for (index, position) in result.positions.enumerated() {
+            subviews[index].place(at: CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y), proposal: .unspecified)
+        }
+    }
+
+    private func layout(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, positions: [CGPoint]) {
+        let maxWidth = proposal.width ?? .infinity
+        var positions: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth && x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            positions.append(CGPoint(x: x, y: y))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+        }
+
+        return (CGSize(width: maxWidth, height: y + rowHeight), positions)
     }
 }
 

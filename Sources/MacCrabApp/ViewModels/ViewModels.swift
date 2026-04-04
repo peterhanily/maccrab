@@ -163,7 +163,7 @@ struct EventViewModel: Identifiable {
 // MARK: - RuleViewModel
 
 /// Presentation model for a compiled detection rule.
-struct RuleViewModel: Identifiable {
+struct RuleViewModel: Identifiable, Hashable {
     let id: String
     let title: String
     let level: String

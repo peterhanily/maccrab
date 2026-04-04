@@ -132,101 +132,130 @@ struct AlertDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Header
+            VStack(alignment: .leading, spacing: 14) {
+                // Severity + Time header
                 HStack {
-                    Circle()
-                        .fill(alert.severityColor)
-                        .frame(width: 12, height: 12)
-                    Text(alert.severity.label)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(alert.severityColor)
+                    HStack(spacing: 6) {
+                        Circle().fill(alert.severityColor).frame(width: 10, height: 10)
+                        Text(alert.severity.label).font(.caption).fontWeight(.bold).foregroundColor(alert.severityColor)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(alert.severityColor.opacity(0.1))
+                    .clipShape(Capsule())
                     Spacer()
-                    Text(alert.dateTimeString)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Text(alert.dateTimeString).font(.caption).foregroundColor(.secondary)
                 }
 
-                Text(alert.ruleTitle)
-                    .font(.title3)
-                    .fontWeight(.bold)
+                Text(alert.ruleTitle).font(.title3).fontWeight(.bold)
 
                 // Description
                 if !alert.description.isEmpty {
                     GroupBox("Description") {
-                        Text(alert.description)
-                            .font(.body)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(4)
+                        Text(alert.description).font(.body).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(4)
                     }
                 }
 
-                // Process info
-                GroupBox("Process") {
-                    VStack(alignment: .leading, spacing: 8) {
+                // Process details
+                GroupBox("Process Details") {
+                    VStack(alignment: .leading, spacing: 6) {
                         DetailRow(label: "Name", value: alert.processName)
                         DetailRow(label: "Path", value: alert.processPath)
-                    }
-                    .padding(4)
+                        if !alert.processPath.isEmpty {
+                            DetailRow(label: "Directory", value: (alert.processPath as NSString).deletingLastPathComponent)
+                        }
+                    }.padding(4)
                 }
 
                 // MITRE ATT&CK
                 if !alert.mitreTechniques.isEmpty {
                     GroupBox("MITRE ATT&CK") {
-                        VStack(alignment: .leading, spacing: 4) {
-                            let techniques = alert.mitreTechniques.split(separator: ",").map(String.init)
+                        VStack(alignment: .leading, spacing: 6) {
+                            let techniques = alert.mitreTechniques.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
                             ForEach(techniques, id: \.self) { tech in
                                 HStack {
-                                    Image(systemName: "shield.fill")
-                                        .foregroundColor(.orange)
+                                    Image(systemName: "shield.fill").foregroundColor(.orange).font(.caption)
+                                    Text(tech).font(.system(.body, design: .monospaced))
+                                    Spacer()
+                                    Link("View", destination: URL(string: "https://attack.mitre.org/techniques/\(tech.replacingOccurrences(of: "attack.", with: "").uppercased().replacingOccurrences(of: ".", with: "/"))/")!)
                                         .font(.caption)
-                                    Text(tech.trimmingCharacters(in: .whitespaces))
-                                        .font(.system(.body, design: .monospaced))
                                 }
                             }
-                        }
-                        .padding(4)
+                        }.padding(4)
                     }
                 }
 
-                // Actions
-                GroupBox("Actions") {
-                    HStack(spacing: 12) {
-                        if !alert.suppressed {
-                            Button {
-                                onSuppress()
-                            } label: {
-                                Label("Suppress", systemImage: "eye.slash")
+                // Alert metadata
+                GroupBox("Metadata") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        DetailRow(label: "Alert ID", value: alert.id)
+                        DetailRow(label: "Severity", value: alert.severity.label)
+                        DetailRow(label: "Status", value: alert.suppressed ? "Suppressed" : "Active")
+                    }.padding(4)
+                }
+
+                // Response Actions
+                GroupBox("Response Actions") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            if !alert.suppressed {
+                                Button { onSuppress() } label: {
+                                    Label("Suppress Alert", systemImage: "eye.slash")
+                                }.controlSize(.large)
+                            } else {
+                                Label("Suppressed", systemImage: "eye.slash.fill").foregroundColor(.secondary)
                             }
-                        } else {
-                            Label("Suppressed", systemImage: "eye.slash.fill")
-                                .foregroundColor(.secondary)
+
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                let text = """
+                                Rule: \(alert.ruleTitle)
+                                Alert ID: \(alert.id)
+                                Severity: \(alert.severity.label)
+                                Time: \(alert.dateTimeString)
+                                Process: \(alert.processName) (\(alert.processPath))
+                                MITRE: \(alert.mitreTechniques)
+                                Description: \(alert.description)
+                                """
+                                NSPasteboard.general.setString(text, forType: .string)
+                            } label: {
+                                Label("Copy Details", systemImage: "doc.on.doc")
+                            }.controlSize(.large)
                         }
 
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            let text = """
-                            Rule: \(alert.ruleTitle)
-                            Severity: \(alert.severity.label)
-                            Time: \(alert.dateTimeString)
-                            Process: \(alert.processName) (\(alert.processPath))
-                            MITRE: \(alert.mitreTechniques)
-                            Description: \(alert.description)
-                            """
-                            NSPasteboard.general.setString(text, forType: .string)
-                        } label: {
-                            Label("Copy", systemImage: "doc.on.doc")
+                        Divider()
+
+                        Text("Configurable Actions").font(.caption).foregroundColor(.secondary)
+                        Text("Configure response actions in ~/Library/Application Support/MacCrab/actions.json")
+                            .font(.caption2).foregroundColor(.secondary)
+                        HStack(spacing: 16) {
+                            ActionBadge(icon: "xmark.circle", label: "Kill Process", color: .red)
+                            ActionBadge(icon: "archivebox", label: "Quarantine", color: .orange)
+                            ActionBadge(icon: "terminal", label: "Run Script", color: .blue)
+                            ActionBadge(icon: "bell", label: "Notify", color: .green)
                         }
-                    }
-                    .padding(4)
+                    }.padding(4)
                 }
 
                 Spacer()
-            }
-            .padding()
+            }.padding()
+        }.background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+private struct ActionBadge: View {
+    let icon: String
+    let label: String
+    let color: Color
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon).font(.title3).foregroundColor(color)
+            Text(label).font(.caption2).foregroundColor(.secondary)
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .frame(width: 70)
+        .padding(6)
+        .background(color.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
