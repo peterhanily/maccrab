@@ -2,7 +2,7 @@ title: sudo Executed from Suspicious Parent Process
 id: d1a2b3c4-0060-4000-a000-000000000060
 status: experimental
 description: Detects sudo invocation from an unexpected parent process that may indicate privilege escalation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1548/003/

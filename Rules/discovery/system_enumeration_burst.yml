@@ -2,7 +2,7 @@ title: Rapid System Information Enumeration
 id: d1a2b3c4-0050-4000-a000-000000000050
 status: experimental
 description: Detects execution of multiple system discovery commands, commonly seen in post-exploitation reconnaissance.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/tactics/TA0007/

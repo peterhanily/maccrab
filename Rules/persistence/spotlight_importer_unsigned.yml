@@ -5,7 +5,7 @@ description: >
     Detects creation of Spotlight metadata importer plugins outside the
     system directory. These plugins are loaded by mds (metadata server)
     automatically and can execute arbitrary code during file indexing.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1547/

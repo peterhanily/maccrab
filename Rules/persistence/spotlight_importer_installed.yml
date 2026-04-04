@@ -2,7 +2,7 @@ title: Spotlight Importer Plugin Installed
 id: d1a2b3c4-0104-4000-a000-000000000104
 status: experimental
 description: Detects creation of a Spotlight importer plugin (.mdimporter). These plugins are loaded by the mds process when indexing files and can be abused for persistence since they execute automatically.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1547/

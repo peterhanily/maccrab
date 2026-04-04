@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check for duplicate rule IDs across all HawkEye rules."""
+"""Check for duplicate rule IDs across all MacCrab rules."""
 
 import sys
 import os

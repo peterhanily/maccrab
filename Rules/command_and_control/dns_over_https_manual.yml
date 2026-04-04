@@ -2,7 +2,7 @@ title: Manual DNS-over-HTTPS Query to Bypass Local DNS
 id: d1a2b3c4-0240-4000-a000-000000000240
 status: experimental
 description: Detects curl or wget requests to known DNS-over-HTTPS (DoH) endpoints. Adversaries may use DoH to resolve C2 domains while bypassing local DNS monitoring and filtering.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1071/004/

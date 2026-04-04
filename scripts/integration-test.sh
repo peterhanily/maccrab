@@ -1,7 +1,7 @@
 #!/bin/bash
-# HawkEye Live Integration Test
+# MacCrab Live Integration Test
 # Starts the daemon, triggers detectable actions, checks for alerts.
-# Run from the hawkeye project directory.
+# Run from the maccrab project directory.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,21 +25,21 @@ info() { echo -e "${BLUE}▸${NC} $*"; }
 cd "$PROJECT_DIR"
 
 # --- Setup ---
-info "Building HawkEye..."
+info "Building MacCrab..."
 swift build 2>&1 | tail -1
 
 info "Compiling rules..."
 python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir .build/debug/compiled_rules 2>/dev/null | tail -1
 
 # Clear old events from the user store
-USER_SUPPORT_DIR="$HOME/Library/Application Support/HawkEye"
+USER_SUPPORT_DIR="$HOME/Library/Application Support/MacCrab"
 rm -f "$USER_SUPPORT_DIR/events.db" "$USER_SUPPORT_DIR/events.db-shm" "$USER_SUPPORT_DIR/events.db-wal" 2>/dev/null
 
 info "Starting daemon (non-root mode)..."
 # Use a FIFO to capture daemon output while running in background
-LOG_FILE=/tmp/hawkeye_integration_test.log
+LOG_FILE=/tmp/maccrab_integration_test.log
 > "$LOG_FILE"
-.build/debug/hawkeyed >> "$LOG_FILE" 2>&1 &
+.build/debug/maccrabd >> "$LOG_FILE" 2>&1 &
 DAEMON_PID=$!
 
 # Wait for daemon to initialize and produce output
@@ -90,7 +90,7 @@ echo ""
 info "Checking results..."
 
 # Check event count
-EVENT_COUNT=$(.build/debug/hawkctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "0")
+EVENT_COUNT=$(.build/debug/maccrabctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "0")
 if [ "${EVENT_COUNT:-0}" -gt 0 ]; then
     pass "Events recorded: $EVENT_COUNT"
 else
@@ -98,7 +98,7 @@ else
 fi
 
 # Check if alerts were generated
-ALERT_OUTPUT=$(.build/debug/hawkctl alerts 20 2>/dev/null || echo "")
+ALERT_OUTPUT=$(.build/debug/maccrabctl alerts 20 2>/dev/null || echo "")
 ALERT_COUNT=$(echo "$ALERT_OUTPUT" | grep -c "^[🔴🟡🟠🟢⚪]" 2>/dev/null || echo "0")
 if [ "${ALERT_COUNT:-0}" -gt 0 ]; then
     pass "Alerts generated: $ALERT_COUNT"
@@ -107,33 +107,33 @@ else
     skip "No alerts generated (expected in non-root mode with limited collectors)"
 fi
 
-# Check hawkctl status works
-STATUS=$(.build/debug/hawkctl status 2>/dev/null)
+# Check maccrabctl status works
+STATUS=$(.build/debug/maccrabctl status 2>/dev/null)
 if echo "$STATUS" | grep -q "running\|Active"; then
-    pass "hawkctl status reports daemon running"
+    pass "maccrabctl status reports daemon running"
 else
     # Daemon might have stopped — check if it reported correctly
     if echo "$STATUS" | grep -q "Database"; then
-        pass "hawkctl status reports database info"
+        pass "maccrabctl status reports database info"
     else
-        fail "hawkctl status failed"
+        fail "maccrabctl status failed"
     fi
 fi
 
 # Check event search works
-SEARCH_RESULT=$(.build/debug/hawkctl events search "curl" 2>/dev/null || echo "error")
+SEARCH_RESULT=$(.build/debug/maccrabctl events search "curl" 2>/dev/null || echo "error")
 if echo "$SEARCH_RESULT" | grep -q "matches\|results"; then
-    pass "hawkctl event search works"
+    pass "maccrabctl event search works"
 else
-    skip "hawkctl event search returned no results (curl may not have been captured)"
+    skip "maccrabctl event search returned no results (curl may not have been captured)"
 fi
 
-# Check hawkctl events tail works
-TAIL_RESULT=$(.build/debug/hawkctl events tail 5 2>/dev/null || echo "error")
+# Check maccrabctl events tail works
+TAIL_RESULT=$(.build/debug/maccrabctl events tail 5 2>/dev/null || echo "error")
 if echo "$TAIL_RESULT" | grep -q "events\|connect"; then
-    pass "hawkctl events tail works"
+    pass "maccrabctl events tail works"
 else
-    skip "hawkctl events tail returned no events"
+    skip "maccrabctl events tail returned no events"
 fi
 
 # --- Cleanup ---
@@ -151,7 +151,7 @@ echo -e "  ${YELLOW}Skipped:${NC} $SKIP"
 echo "════════════════════════════════════════"
 
 if [ "$FAIL" -gt 0 ]; then
-    echo -e "\n${RED}Some tests failed.${NC} Check /tmp/hawkeye_integration_test.log"
+    echo -e "\n${RED}Some tests failed.${NC} Check /tmp/maccrab_integration_test.log"
     exit 1
 else
     echo -e "\n${GREEN}All tests passed!${NC}"

@@ -2,7 +2,7 @@ title: PATH Environment Variable Manipulation in Shell Profiles
 id: d1a2b3c4-0229-4000-a000-000000000229
 status: experimental
 description: Detects modification of shell profile files that may manipulate the PATH environment variable. Adversaries may prepend malicious directories to PATH to hijack command execution.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1574/007/

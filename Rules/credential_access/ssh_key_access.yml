@@ -2,7 +2,7 @@ title: SSH Private Key Accessed by Unusual Process
 id: d1a2b3c4-0032-4000-a000-000000000032
 status: experimental
 description: Detects non-SSH processes reading SSH private key files, which may indicate credential theft.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1552/004/

@@ -6,7 +6,7 @@ description: >
     tokens. The TeamPCP/LiteLLM attack (March 2026) specifically targeted ~/.kube/config
     to harvest cluster access credentials. Python processes rarely need direct access
     to kubeconfig files outside of known Kubernetes management tools.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1552/001/

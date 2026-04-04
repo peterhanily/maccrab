@@ -4,7 +4,7 @@ status: stable
 description: >
     Detects killing of a security tool process followed by persistence
     installation — attacker disabling defenses before establishing foothold.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 tags:
     - attack.defense_evasion
@@ -32,7 +32,7 @@ steps:
                   - 'BlockBlock'
                   - 'OverSight'
                   - 'Santa'
-                  - 'hawkeyed'
+                  - 'maccrabd'
           condition: selection
 
     - id: persist

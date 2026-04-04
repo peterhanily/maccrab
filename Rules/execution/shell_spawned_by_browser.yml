@@ -2,7 +2,7 @@ title: Shell Spawned by Browser Process
 id: d1a2b3c4-0001-4000-a000-000000000001
 status: stable
 description: Detects a shell interpreter spawned as a child of a browser process, which may indicate exploitation or malicious download execution.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/004/

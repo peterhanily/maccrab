@@ -5,7 +5,7 @@ description: >
     Detects npm postinstall scripts downloading external binaries via curl, wget,
     or node fetch. The Axios NPM compromise (March 2026) used the plain-crypto-js
     dependency's postinstall hook to download a RAT binary to the system.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

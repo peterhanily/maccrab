@@ -6,7 +6,7 @@ description: >
     GlassWorm worm (Jan-March 2026) installed its own Node.js runtime at ~/node-v22*
     to ensure execution independence from any system-installed Node.js. Legitimate
     Node.js installations use nvm, fnm, or system paths.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

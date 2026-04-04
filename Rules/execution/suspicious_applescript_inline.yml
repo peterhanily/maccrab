@@ -2,7 +2,7 @@ title: Suspicious Inline AppleScript Execution
 id: d1a2b3c4-0009-4000-a000-000000000009
 status: experimental
 description: Detects osascript with inline script execution (-e flag) containing suspicious patterns like do shell script, HTTP requests, or system events manipulation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/002/

@@ -2,7 +2,7 @@ title: User-Level LaunchAgent Created by Non-User Process
 id: d1a2b3c4-0019-4000-a000-000000000019
 status: experimental
 description: Detects creation of user-level LaunchAgent plists by processes running outside the user context, which may indicate malware persistence.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1543/001/

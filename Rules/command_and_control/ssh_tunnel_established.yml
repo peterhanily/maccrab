@@ -2,7 +2,7 @@ title: SSH Tunnel with Port Forwarding Established
 id: d1a2b3c4-0118-4000-a000-000000000118
 status: experimental
 description: Detects SSH invocations with port forwarding flags (-L, -R, -D), which create tunnels that can be used to proxy command-and-control traffic or pivot through compromised hosts.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1572/

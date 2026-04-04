@@ -2,7 +2,7 @@ title: Base64 Encoding of Files for Exfiltration Staging
 id: d1a2b3c4-0283-4000-a000-000000000283
 status: experimental
 description: Detects base64 encoding of files from sensitive directories, which may indicate data staging for exfiltration. Adversaries encode files to base64 for transfer via channels that may not support binary data.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1560/001/

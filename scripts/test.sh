@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run HawkEye tests using Swift Testing framework.
+# Run MacCrab tests using Swift Testing framework.
 # Requires CommandLineTools with the Testing framework installed.
 set -euo pipefail
 

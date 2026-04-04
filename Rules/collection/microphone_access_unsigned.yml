@@ -2,7 +2,7 @@ title: Microphone Access by Unsigned Process
 id: d1a2b3c4-0125-4000-a000-000000000125
 status: stable
 description: Detects microphone TCC access granted to or requested by an unsigned or ad-hoc signed process. Unsigned processes accessing the microphone are highly suspicious and may indicate spyware or surveillance malware.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1123/

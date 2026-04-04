@@ -2,7 +2,7 @@ title: VNC Server Started or Screen Sharing Activated
 id: d1a2b3c4-0291-4000-a000-000000000291
 status: stable
 description: Detects VNC server startup or screen sharing daemon activation. Adversaries may start VNC/screen sharing services to gain remote graphical access to the compromised system.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1021/005/

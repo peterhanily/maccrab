@@ -2,7 +2,7 @@ title: Keychain Unlock by Non-System Process
 id: d1a2b3c4-0402-4000-a000-000000000402
 status: experimental
 description: Detects the security unlock-keychain command executed from a non-Apple parent process. Attackers use this to programmatically unlock the keychain with a known or brute-forced password so they can subsequently dump stored credentials without user interaction.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1003/

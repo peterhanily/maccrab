@@ -6,7 +6,7 @@ description: >
     directories or by unexpected parent processes. The Shai-Hulud 2.0 worm (November
     2025) used stolen npm tokens to automatically publish malicious versions of victim's
     packages, propagating the worm to new installations.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

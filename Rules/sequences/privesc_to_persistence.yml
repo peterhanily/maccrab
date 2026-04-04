@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects sudo or privilege escalation followed by creation of system-level
     persistence (LaunchDaemon, authorization plugin, or kext).
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/tactics/TA0004/

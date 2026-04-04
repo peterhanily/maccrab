@@ -6,7 +6,7 @@ description: >
     site-packages/, bin/, or standard installation paths. Malicious PyPI packages may
     use setup.py or pyproject.toml hooks to write files to arbitrary system locations
     during installation, as seen in the TeamPCP/LiteLLM attack.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

@@ -2,7 +2,7 @@ title: Accessibility Bundle Loaded from Unusual Path
 id: d1a2b3c4-0219-4000-a000-000000000219
 status: experimental
 description: Detects accessibility bundle creation from paths outside /System and /Applications. Malicious accessibility bundles can be injected into processes for keystroke monitoring and UI manipulation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1547/

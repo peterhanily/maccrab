@@ -2,7 +2,7 @@ title: Code Signature Removed from Binary
 id: d1a2b3c4-0225-4000-a000-000000000225
 status: stable
 description: Detects use of codesign with --remove-signature flag to strip code signatures from binaries. Adversaries may remove signatures to modify signed binaries or evade signature-based detection.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1553/002/

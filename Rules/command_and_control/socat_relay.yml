@@ -2,7 +2,7 @@ title: Socat TCP Relay or Command Execution
 id: d1a2b3c4-0242-4000-a000-000000000242
 status: stable
 description: Detects socat usage with TCP connections or EXEC arguments. Socat is a versatile networking tool that can create bidirectional data streams, commonly abused for relay connections and remote shell access.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1095/

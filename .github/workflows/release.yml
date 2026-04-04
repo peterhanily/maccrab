@@ -30,17 +30,17 @@ jobs:
 
       - name: Package
         run: |
-          mkdir -p dist/hawkeye
-          cp .build/release/hawkeyed dist/hawkeye/ 2>/dev/null || true
-          cp .build/release/hawkctl dist/hawkeye/ 2>/dev/null || true
-          cp -r compiled_rules dist/hawkeye/
-          cp -r Rules dist/hawkeye/
-          cp -r Compiler dist/hawkeye/
-          cp README.md LICENSE CONTRIBUTING.md dist/hawkeye/
-          cd dist && tar czf hawkeye-${{ github.ref_name }}-macos-arm64.tar.gz hawkeye/
+          mkdir -p dist/maccrab
+          cp .build/release/maccrabd dist/maccrab/ 2>/dev/null || true
+          cp .build/release/maccrabctl dist/maccrab/ 2>/dev/null || true
+          cp -r compiled_rules dist/maccrab/
+          cp -r Rules dist/maccrab/
+          cp -r Compiler dist/maccrab/
+          cp README.md LICENSE CONTRIBUTING.md dist/maccrab/
+          cd dist && tar czf maccrab-${{ github.ref_name }}-macos-arm64.tar.gz maccrab/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/hawkeye-*.tar.gz
+          files: dist/maccrab-*.tar.gz
           generate_release_notes: true

@@ -6,7 +6,7 @@ description: >
     0.30.4 npm packages (March 2026). The plain-crypto-js dependency dropped a macOS
     binary disguised as an Apple daemon at /Library/Caches/com.apple.act.mond, which
     communicated with C2 at sfrclak[.]com:8000 (142.11.206.73).
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

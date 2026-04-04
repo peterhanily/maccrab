@@ -4,7 +4,7 @@ status: stable
 description: >
     Detects a shell being spawned from a non-terminal parent, followed by
     an outbound network connection — indicative of reverse shell establishment.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/004/

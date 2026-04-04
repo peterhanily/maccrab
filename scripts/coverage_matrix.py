@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate MITRE ATT&CK coverage matrix from HawkEye rules."""
+"""Generate MITRE ATT&CK coverage matrix from MacCrab rules."""
 
 import sys
 import os

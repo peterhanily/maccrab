@@ -2,7 +2,7 @@ title: Contacts Database Accessed by Non-Contacts Process
 id: d1a2b3c4-0261-4000-a000-000000000261
 status: experimental
 description: Detects access to the AddressBook/Contacts database by processes other than Contacts.app. Adversaries may harvest contact data for social engineering, spamming, or reconnaissance.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1005/

@@ -6,7 +6,7 @@ description: >
     directories. The TeamPCP/LiteLLM attack (March 2026) harvested .env files which
     commonly contain API keys, database passwords, and other secrets. Reading .env
     files from home directories or system paths is especially suspicious.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1552/001/

@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects Xcode build processes spawning unexpected outbound network connections,
     which may indicate supply chain compromise (XCSSET, XcodeGhost style attacks).
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1195/001/

@@ -2,7 +2,7 @@ title: Chrome Login Data Database Copied by Non-Chrome Process
 id: d1a2b3c4-0115-4000-a000-000000000115
 status: stable
 description: Detects access to Chrome's Login Data SQLite database by a process other than Chrome itself. This database contains saved passwords and is a common target for credential-stealing malware.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1555/003/

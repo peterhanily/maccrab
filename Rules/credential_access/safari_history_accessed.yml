@@ -2,7 +2,7 @@ title: Safari History Database Accessed by Non-Safari Process
 id: d1a2b3c4-0237-4000-a000-000000000237
 status: experimental
 description: Detects access to the Safari browsing history database by a process other than Safari. Adversaries may access browser history for reconnaissance or to identify sensitive websites visited by the user.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1217/

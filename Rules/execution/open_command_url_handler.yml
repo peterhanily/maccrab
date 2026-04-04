@@ -2,7 +2,7 @@ title: Open Command URL Handler Abuse
 id: d1a2b3c4-0201-4000-a000-000000000201
 status: experimental
 description: Detects use of the macOS open command with URL schemes to launch applications or execute actions. Adversaries may abuse custom URL handlers to trigger application execution or bypass Gatekeeper.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1204/001/

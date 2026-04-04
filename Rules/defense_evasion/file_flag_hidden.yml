@@ -2,7 +2,7 @@ title: File Hidden via chflags Command
 id: d1a2b3c4-0223-4000-a000-000000000223
 status: experimental
 description: Detects use of chflags to set the hidden flag on files or directories. Adversaries may hide malicious files using macOS file flags, which are more persistent than dot-prefix hiding.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1564/001/

@@ -6,7 +6,7 @@ description: >
     as LaunchAgents, LaunchDaemons, or cron jobs. Supply chain attacks commonly use
     package install hooks to establish persistence. Legitimate packages should not
     create system-level persistence during installation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

@@ -6,7 +6,7 @@ description: >
     This attribute is set on all downloaded files and triggers Gatekeeper
     assessment before first execution. Removing it bypasses Gatekeeper
     protection entirely.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1553/001/

@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects a disk image being mounted followed by execution of an unsigned
     binary, a common malware delivery method via trojanized DMGs.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 tags:
     - attack.initial_access

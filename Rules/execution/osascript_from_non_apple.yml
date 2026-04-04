@@ -2,7 +2,7 @@ title: osascript Spawned by Non-Apple Parent
 id: d1a2b3c4-0002-4000-a000-000000000002
 status: experimental
 description: Detects osascript (AppleScript/JXA) execution from a non-Apple parent process, commonly used for social engineering and payload delivery.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/002/

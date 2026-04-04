@@ -1,5 +1,5 @@
 #!/bin/bash
-# HawkEye Stress / Sustained Operation Test
+# MacCrab Stress / Sustained Operation Test
 # Monitors daemon health over time while generating activity.
 set -euo pipefail
 
@@ -11,19 +11,19 @@ DURATION=${1:-60}  # seconds, default 60
 INTERVAL=5         # check interval
 
 echo "╔══════════════════════════════════════════╗"
-echo "║     HawkEye Stress Test ($DURATION seconds)       ║"
+echo "║     MacCrab Stress Test ($DURATION seconds)       ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
 # Check if daemon is running
-if ! pgrep -x hawkeyed > /dev/null; then
+if ! pgrep -x maccrabd > /dev/null; then
     echo "Starting daemon..."
-    .build/debug/hawkeyed >> /tmp/hawkeye_stress.log 2>&1 &
+    .build/debug/maccrabd >> /tmp/maccrab_stress.log 2>&1 &
     DAEMON_PID=$!
     STARTED_DAEMON=1
     sleep 3
 else
-    DAEMON_PID=$(pgrep -x hawkeyed | head -1)
+    DAEMON_PID=$(pgrep -x maccrabd | head -1)
     STARTED_DAEMON=0
 fi
 
@@ -32,7 +32,7 @@ echo ""
 
 # Baseline measurements
 START_RSS=$(ps -o rss= -p $DAEMON_PID 2>/dev/null | tr -d ' ')
-START_EVENTS=$(.build/debug/hawkctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "0")
+START_EVENTS=$(.build/debug/maccrabctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "0")
 START_TIME=$(date +%s)
 
 echo "Baseline: RSS=${START_RSS}KB, Events=$START_EVENTS"
@@ -50,7 +50,7 @@ while [ $ELAPSED -lt $DURATION ]; do
     curl -s --connect-timeout 1 https://example.com > /dev/null 2>&1 &
 
     # File operations (benign)
-    touch /tmp/hawkeye_test_$$_$(date +%s) 2>/dev/null
+    touch /tmp/maccrab_test_$$_$(date +%s) 2>/dev/null
     ls /tmp > /dev/null 2>/dev/null
 
     # Process spawns
@@ -68,8 +68,8 @@ while [ $ELAPSED -lt $DURATION ]; do
         break
     fi
 
-    EVENTS=$(.build/debug/hawkctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "?")
-    ALERTS=$(.build/debug/hawkctl alerts 1000 2>/dev/null | grep -c "^[🔴🟡🟠🟢⚪]" 2>/dev/null || echo "?")
+    EVENTS=$(.build/debug/maccrabctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "?")
+    ALERTS=$(.build/debug/maccrabctl alerts 1000 2>/dev/null | grep -c "^[🔴🟡🟠🟢⚪]" 2>/dev/null || echo "?")
     CPU=$(ps -o %cpu= -p $DAEMON_PID 2>/dev/null | tr -d ' ' || echo "?")
 
     printf "%-8s %-10s %-10s %-8s %-6s\n" "${ELAPSED}s" "$RSS" "$EVENTS" "$ALERTS" "$CPU"
@@ -80,7 +80,7 @@ echo ""
 
 # Final measurements
 END_RSS=$(ps -o rss= -p $DAEMON_PID 2>/dev/null | tr -d ' ' || echo "DEAD")
-END_EVENTS=$(.build/debug/hawkctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "0")
+END_EVENTS=$(.build/debug/maccrabctl events stats 2>/dev/null | grep "Total events" | grep -o "[0-9]*" || echo "0")
 
 if [ "$END_RSS" != "DEAD" ]; then
     RSS_DELTA=$(( ${END_RSS:-0} - ${START_RSS:-0} ))
@@ -103,7 +103,7 @@ else
 fi
 
 # Cleanup
-rm -f /tmp/hawkeye_test_$$_* 2>/dev/null
+rm -f /tmp/maccrab_test_$$_* 2>/dev/null
 if [ "$STARTED_DAEMON" = "1" ]; then
     kill $DAEMON_PID 2>/dev/null
     wait $DAEMON_PID 2>/dev/null || true

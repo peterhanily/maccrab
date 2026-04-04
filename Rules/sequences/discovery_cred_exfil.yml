@@ -5,7 +5,7 @@ description: >
     Detects a reconnaissance chain: system enumeration commands followed by
     credential access (keychain/browser data) followed by data archiving or
     network exfiltration.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/tactics/TA0007/

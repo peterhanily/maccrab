@@ -5,7 +5,7 @@ description: >
     Detects npm/node processes spawning shell interpreters during package installation.
     Supply chain attacks such as the Axios NPM compromise (March 2026) and Shai-Hulud 2.0
     use postinstall hooks to execute malicious shell commands during npm install.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

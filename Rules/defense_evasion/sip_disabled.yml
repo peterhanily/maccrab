@@ -6,7 +6,7 @@ description: >
     SIP protects system files, kernel extensions, and code signing enforcement.
     Disabling SIP requires booting into Recovery Mode, indicating either
     physical access compromise or a sophisticated persistence mechanism.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1562/001/

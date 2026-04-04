@@ -1,11 +1,11 @@
 #!/bin/bash
-# HawkEye Uninstall Script
+# MacCrab Uninstall Script
 # Must be run with sudo.
 set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
-SUPPORT_DIR="/Library/Application Support/HawkEye"
-PLIST_NAME="com.hawkeye.daemon"
+SUPPORT_DIR="/Library/Application Support/MacCrab"
+PLIST_NAME="com.maccrab.daemon"
 PLIST_DIR="/Library/LaunchDaemons"
 
 RED='\033[0;31m'
@@ -28,18 +28,18 @@ if launchctl list "$PLIST_NAME" &>/dev/null; then
 fi
 
 # Kill any remaining process
-pkill -x hawkeyed 2>/dev/null || true
+pkill -x maccrabd 2>/dev/null || true
 
 # Remove files
 info "Removing binaries..."
-rm -f "$PREFIX/bin/hawkeyed" "$PREFIX/bin/hawkctl"
+rm -f "$PREFIX/bin/maccrabd" "$PREFIX/bin/maccrabctl"
 
 info "Removing launchd plist..."
 rm -f "$PLIST_DIR/$PLIST_NAME.plist"
 
 # Ask about data
 echo ""
-read -p "Remove HawkEye data (events.db, rules, logs)? [y/N] " -n 1 -r
+read -p "Remove MacCrab data (events.db, rules, logs)? [y/N] " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     info "Removing data directory..."
@@ -49,4 +49,4 @@ else
 fi
 
 echo ""
-info "HawkEye uninstalled."
+info "MacCrab uninstalled."

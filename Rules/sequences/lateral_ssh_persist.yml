@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects outbound SSH followed by the SSH process writing to persistence
     locations, indicating automated lateral movement with persistence.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 tags:
     - attack.lateral_movement

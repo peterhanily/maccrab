@@ -2,7 +2,7 @@ title: SCP Outbound Copy from Sensitive Directories
 id: d1a2b3c4-0281-4000-a000-000000000281
 status: stable
 description: Detects scp copying files from sensitive directories (Documents, Desktop, keychain paths, SSH keys) to a remote destination. This may indicate data exfiltration via secure copy.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1048/002/

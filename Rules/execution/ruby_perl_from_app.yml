@@ -2,7 +2,7 @@ title: Ruby or Perl Spawned by Application Bundle
 id: d1a2b3c4-0200-4000-a000-000000000200
 status: experimental
 description: Detects Ruby or Perl interpreter execution spawned by a macOS application bundle. Malware may embed scripts in .app bundles to execute payloads while appearing as a legitimate application.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1059/006/

@@ -2,7 +2,7 @@ title: Connection to Known Tor Network Ports
 id: d1a2b3c4-0119-4000-a000-000000000119
 status: experimental
 description: Detects outbound network connections to ports commonly used by the Tor network (9050, 9051, 9150, 9151). Attackers use Tor to anonymize command-and-control traffic and exfiltrate data.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1090/003/

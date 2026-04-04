@@ -2,7 +2,7 @@ title: TCC Bypass via Process Injection into Protected App Bundle
 id: d1a2b3c4-0410-4000-a000-000000000410
 status: experimental
 description: Detects a non-Apple-signed process spawning from within a TCC-protected application bundle path. Attackers inject code into TCC-entitled applications (Safari, Terminal, Finder) to inherit their privacy permissions without triggering user consent prompts. This enables access to camera, microphone, screen recording, and full disk access.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1068/

@@ -6,7 +6,7 @@ description: >
     LiteLLM attack (March 2026) planted litellm_init.pth in site-packages/ which executes
     arbitrary code on every Python startup. While .pth files are a legitimate Python feature,
     their creation outside of normal pip install flows is highly suspicious.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

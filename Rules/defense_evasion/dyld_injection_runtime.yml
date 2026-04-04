@@ -6,7 +6,7 @@ description: >
     which causes the dynamic linker to load arbitrary shared libraries into
     the process before its own code runs. This is the macOS equivalent of
     LD_PRELOAD and is commonly used for library injection attacks.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1574/006/

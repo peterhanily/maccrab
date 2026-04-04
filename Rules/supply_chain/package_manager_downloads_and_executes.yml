@@ -6,7 +6,7 @@ description: >
     content, followed by shell execution. This is a common pattern in supply chain
     attacks where malicious packages download and execute second-stage payloads during
     installation, as seen in the Axios compromise and Shai-Hulud 2.0.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

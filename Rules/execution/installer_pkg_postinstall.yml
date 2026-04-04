@@ -2,7 +2,7 @@ title: PKG Installer Post-Install Script Execution
 id: d1a2b3c4-0205-4000-a000-000000000205
 status: experimental
 description: Detects execution of post-install scripts from macOS PKG installers. Malicious PKGs may include post-install scripts that execute payloads with root privileges during installation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1059/004/

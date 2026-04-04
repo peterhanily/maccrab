@@ -2,7 +2,7 @@ title: Unsigned Binary Masquerading as System Utility
 id: d1a2b3c4-0027-4000-a000-000000000027
 status: experimental
 description: Detects unsigned binaries with names matching common system utilities, suggesting masquerading.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1036/004/

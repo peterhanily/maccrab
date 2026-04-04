@@ -2,7 +2,7 @@ title: Browser Extension Installed by Non-Browser Process
 id: d1a2b3c4-0215-4000-a000-000000000215
 status: experimental
 description: Detects browser extension files being created by a process other than the browser itself. Malicious extensions can be sideloaded to steal credentials, inject content, or monitor browsing.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1176/

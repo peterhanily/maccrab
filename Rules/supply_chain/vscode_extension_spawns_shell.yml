@@ -6,7 +6,7 @@ description: >
     processes that operate outside the user's workspace. The GlassWorm worm (Jan-March
     2026) propagated via malicious VS Code and Open VSX extensions, using invisible
     Unicode characters for obfuscation and spawning shell commands to deploy payloads.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

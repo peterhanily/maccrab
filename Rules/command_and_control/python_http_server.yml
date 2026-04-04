@@ -2,7 +2,7 @@ title: Python HTTP Server Spawned
 id: d1a2b3c4-0120-4000-a000-000000000120
 status: experimental
 description: Detects Python's built-in HTTP server module being used to serve files. Attackers commonly use this for staging payloads, exfiltrating data, or establishing simple C2 channels.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1071/001/

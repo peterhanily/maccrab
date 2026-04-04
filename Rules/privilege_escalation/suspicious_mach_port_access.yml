@@ -2,7 +2,7 @@ title: Suspicious Mach Port Exploitation Primitives in Command Line
 id: d1a2b3c4-0408-4000-a000-000000000408
 status: experimental
 description: Detects processes with command lines referencing Mach port manipulation APIs or exploitation primitives such as mach_port, task_for_pid, thread_create_running, or mach_vm_write. These are core building blocks for macOS kernel and userland exploits that achieve privilege escalation through Mach IPC abuse.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1068/

@@ -2,7 +2,7 @@ title: Voice Memo Files Accessed by Unusual Process
 id: d1a2b3c4-0264-4000-a000-000000000264
 status: experimental
 description: Detects access to Voice Memos recordings by processes other than the Voice Memos app. Adversaries may access stored voice recordings for intelligence gathering or surveillance.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1123/

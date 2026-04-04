@@ -2,7 +2,7 @@ title: System Log Files Deleted
 id: d1a2b3c4-0111-4000-a000-000000000111
 status: stable
 description: Detects deletion or truncation of system log files. Attackers commonly remove log files to cover their tracks after an intrusion.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1070/002/

@@ -2,7 +2,7 @@ title: mdfind Spotlight Query by Unsigned Process
 id: d1a2b3c4-0209-4000-a000-000000000209
 status: experimental
 description: Detects mdfind (Spotlight query) execution by unsigned processes for file discovery. Adversaries may use mdfind to quickly locate sensitive files, credentials, or documents.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1083/

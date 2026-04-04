@@ -2,7 +2,7 @@ title: sshd Spawns Unusual Child Process
 id: d1a2b3c4-0413-4000-a000-000000000413
 status: experimental
 description: Detects sshd spawning processes other than the standard login chain (user shell, login, sshd-session). An SSH server spawning unexpected child processes such as curl, python, perl, or nc may indicate exploitation of the SSH service itself, abuse of authorized_keys command restrictions, or post-authentication malicious activity from a compromised account.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1190/

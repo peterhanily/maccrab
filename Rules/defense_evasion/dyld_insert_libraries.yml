@@ -2,7 +2,7 @@ title: DYLD_INSERT_LIBRARIES Environment Variable Used
 id: d1a2b3c4-0024-4000-a000-000000000024
 status: stable
 description: Detects use of DYLD_INSERT_LIBRARIES in process arguments or environment, a technique for dylib injection on macOS.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1574/006/

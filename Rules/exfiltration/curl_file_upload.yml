@@ -2,7 +2,7 @@ title: File Upload via curl Form or Upload Flag
 id: d1a2b3c4-0280-4000-a000-000000000280
 status: stable
 description: Detects curl invocation with -F (form upload) or --upload-file flags. Adversaries may use curl to exfiltrate files to attacker-controlled servers via HTTP file upload or PUT requests.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1048/002/

@@ -2,7 +2,7 @@ title: Screen Recording Permission Granted
 id: d1a2b3c4-0082-4000-a000-000000000082
 status: experimental
 description: Detects when Screen Recording permission is granted to a non-Apple application. Screen recording is commonly requested by spyware.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1113/

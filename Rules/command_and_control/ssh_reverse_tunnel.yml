@@ -2,7 +2,7 @@ title: SSH Reverse Tunnel Established
 id: d1a2b3c4-0244-4000-a000-000000000244
 status: stable
 description: Detects SSH connections with the -R flag to create reverse tunnels. Adversaries use reverse SSH tunnels to expose internal services to external networks, bypassing firewalls and NAT.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1572/

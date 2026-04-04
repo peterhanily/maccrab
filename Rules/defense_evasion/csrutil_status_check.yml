@@ -2,7 +2,7 @@ title: SIP Status Queried via csrutil
 id: d1a2b3c4-0025-4000-a000-000000000025
 status: experimental
 description: Detects csrutil status being checked, which may indicate reconnaissance for SIP bypass or tamper attempts.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1518/001/

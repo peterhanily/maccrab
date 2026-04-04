@@ -2,7 +2,7 @@ title: Browser Cookie Database Accessed by Non-Browser
 id: d1a2b3c4-0031-4000-a000-000000000031
 status: experimental
 description: Detects non-browser processes reading browser cookie or credential databases, indicative of credential theft.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1539/

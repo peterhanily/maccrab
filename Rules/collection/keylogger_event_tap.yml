@@ -2,7 +2,7 @@ title: CGEventTap Created by Non-Apple Process
 id: d1a2b3c4-0091-4000-a000-000000000091
 status: experimental
 description: Detects creation of keyboard event taps, which can be used for keylogging. Uses process execution patterns associated with event tap creation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1056/001/

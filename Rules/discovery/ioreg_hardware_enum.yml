@@ -2,7 +2,7 @@ title: Hardware Enumeration via ioreg
 id: d1a2b3c4-0254-4000-a000-000000000254
 status: experimental
 description: Detects use of ioreg to enumerate hardware information. Adversaries may use ioreg to fingerprint the system, detect virtual machines, or enumerate connected devices and peripherals.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1082/

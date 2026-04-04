@@ -2,7 +2,7 @@ title: Full Disk Access Granted to Unsigned Application
 id: d1a2b3c4-0080-4000-a000-000000000080
 status: stable
 description: Detects when Full Disk Access (FDA) TCC permission is granted to an unsigned or ad-hoc signed application.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1562/001/

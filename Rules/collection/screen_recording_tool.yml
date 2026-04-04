@@ -2,7 +2,7 @@ title: Video Screen Recording via screencapture
 id: d1a2b3c4-0265-4000-a000-000000000265
 status: experimental
 description: Detects use of the screencapture utility with the -v flag for video recording. Adversaries may record the screen to capture credentials being entered, sensitive documents being viewed, or other user activity.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1113/

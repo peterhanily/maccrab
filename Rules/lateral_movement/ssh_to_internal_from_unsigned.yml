@@ -2,7 +2,7 @@ title: SSH to Internal Network from Unsigned Process
 id: d1a2b3c4-00b0-4000-a000-0000000000b0
 status: experimental
 description: Detects SSH connections to internal network addresses initiated by unsigned or ad-hoc signed processes.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1021/004/

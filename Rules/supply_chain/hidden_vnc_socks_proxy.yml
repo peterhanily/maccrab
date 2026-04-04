@@ -6,7 +6,7 @@ description: >
     GlassWorm worm (Jan-March 2026) deployed hidden SOCKS proxies and VNC servers
     on compromised machines to enable remote access and lateral movement. These services
     running outside of legitimate remote management tools indicate compromise.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1219/

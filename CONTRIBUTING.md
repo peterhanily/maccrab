@@ -1,6 +1,6 @@
-# Contributing to HawkEye
+# Contributing to MacCrab
 
-Thank you for your interest in contributing to HawkEye. This guide covers how to submit detection rules and code changes.
+Thank you for your interest in contributing to MacCrab. This guide covers how to submit detection rules and code changes.
 
 ---
 
@@ -16,7 +16,7 @@ Thank you for your interest in contributing to HawkEye. This guide covers how to
 
 ## Detection Rules
 
-Rule contributions are one of the most valuable ways to improve HawkEye. New rules expand detection coverage and help the entire community.
+Rule contributions are one of the most valuable ways to improve MacCrab. New rules expand detection coverage and help the entire community.
 
 ### Submitting a Rule
 
@@ -29,7 +29,7 @@ Rule contributions are one of the most valuable ways to improve HawkEye. New rul
 4. **Compile and test** the rule to verify it parses correctly:
    ```bash
    python3 Compiler/compile_rules.py --input-dir Rules/ \
-       --output-dir /tmp/hawkeye_test_rules/
+       --output-dir /tmp/maccrab_test_rules/
    ```
    Confirm your rule appears in the compiler output with `OK` status.
 
@@ -43,7 +43,7 @@ Before submitting, verify that your rule meets all of the following criteria:
 - [ ] **ID**: Unique UUID v4 (`python3 -c "import uuid; print(uuid.uuid4())"`)
 - [ ] **Status**: Set to `experimental` for new rules (maintainers will promote to `stable` after review)
 - [ ] **Description**: Explains what is detected and why it is suspicious or malicious
-- [ ] **Author**: Your name or handle, or `HawkEye Community` if you prefer anonymity
+- [ ] **Author**: Your name or handle, or `MacCrab Community` if you prefer anonymity
 - [ ] **Date**: Creation date in `YYYY/MM/DD` format
 - [ ] **References**: At least one reference URL (MITRE ATT&CK technique page, blog post, or threat report)
 - [ ] **Tags**: Includes MITRE ATT&CK tactic tag (e.g., `attack.execution`) and technique tag (e.g., `attack.t1059.004`)
@@ -71,8 +71,8 @@ For temporal sequence rules (`type: sequence`), also verify:
 ### Setup
 
 ```bash
-git clone https://github.com/peterhanily/hawkeye-detection.git
-cd hawkeye-detection
+git clone https://github.com/peterhanily/maccrab-detection.git
+cd maccrab-detection
 swift build
 swift test
 ```
@@ -95,7 +95,7 @@ swift test
 ### What We Look For in Code PRs
 
 - **Correctness**: Does the code do what it claims? Are edge cases handled?
-- **Concurrency safety**: HawkEye uses Swift's structured concurrency model. New types that hold mutable state should be `actor`s or use `Sendable`-conforming value types. Avoid locks and dispatch queues in new code.
+- **Concurrency safety**: MacCrab uses Swift's structured concurrency model. New types that hold mutable state should be `actor`s or use `Sendable`-conforming value types. Avoid locks and dispatch queues in new code.
 - **Performance**: The detection pipeline processes thousands of events per second. Avoid unnecessary allocations, string copies, and blocking I/O in the hot path.
 - **API design**: Public APIs should be minimal, well-named, and documented with doc comments.
 - **Test coverage**: New detection logic and enrichment features should have unit tests.
@@ -104,7 +104,7 @@ swift test
 
 ## Code Style
 
-HawkEye follows standard Swift conventions with a few project-specific guidelines:
+MacCrab follows standard Swift conventions with a few project-specific guidelines:
 
 ### General
 
@@ -153,10 +153,10 @@ HawkEye follows standard Swift conventions with a few project-specific guideline
 swift test
 
 # Run a specific test class
-swift test --filter HawkEyeCoreTests.RuleEngineTests
+swift test --filter MacCrabCoreTests.RuleEngineTests
 
 # Run a specific test method
-swift test --filter HawkEyeCoreTests.RuleEngineTests/testEvaluateContainsModifier
+swift test --filter MacCrabCoreTests.RuleEngineTests/testEvaluateContainsModifier
 ```
 
 ### Test Expectations
@@ -169,13 +169,13 @@ swift test --filter HawkEyeCoreTests.RuleEngineTests/testEvaluateContainsModifie
 
 ### Test Data
 
-Place test fixtures (sample rules, event JSON, etc.) in `Tests/HawkEyeCoreTests/Fixtures/`. Do not use real system events or paths that contain usernames or sensitive information.
+Place test fixtures (sample rules, event JSON, etc.) in `Tests/MacCrabCoreTests/Fixtures/`. Do not use real system events or paths that contain usernames or sensitive information.
 
 ---
 
 ## License Agreement
 
-By contributing to HawkEye, you agree that:
+By contributing to MacCrab, you agree that:
 
 - **Code contributions** (anything outside the `Rules/` directory) are licensed under the [Apache License 2.0](LICENSE)
 - **Detection rule contributions** (anything inside the `Rules/` directory) are licensed under the [Detection Rule License 1.1 (DRL 1.1)](https://github.com/SigmaHQ/Detection-Rule-License)

@@ -2,7 +2,7 @@ title: SMB Share Enumeration via smbutil
 id: d1a2b3c4-0251-4000-a000-000000000251
 status: experimental
 description: Detects use of smbutil to enumerate SMB shares on network hosts. Adversaries may use smbutil for network share discovery to identify accessible file shares for lateral movement or data collection.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1135/

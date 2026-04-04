@@ -2,7 +2,7 @@ title: XPC Service Dynamically Registered
 id: d1a2b3c4-0212-4000-a000-000000000212
 status: experimental
 description: Detects dynamic registration of XPC services via launchctl or creation of XPC service bundles. Adversaries may register malicious XPC services for persistence and inter-process communication abuse.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1543/001/

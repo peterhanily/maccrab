@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects registration of XPC services with non-standard naming that may
     indicate persistence via rogue launch services.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1543/

@@ -2,7 +2,7 @@ title: Python Socket Server or HTTP Server Creation
 id: d1a2b3c4-0245-4000-a000-000000000245
 status: experimental
 description: Detects Python code creating socket servers or HTTP servers. Adversaries may use Python to quickly stand up command-and-control listeners or data exfiltration endpoints.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1071/001/

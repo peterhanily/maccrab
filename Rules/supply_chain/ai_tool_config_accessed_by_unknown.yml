@@ -6,7 +6,7 @@ description: >
     corresponding AI tool. The CanisterWorm/NX attack (August 2025) targeted Cursor,
     Copilot, Cody, Continue, LMStudio, and Ollama configs to steal API keys. These
     configs often contain API tokens with billing implications.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1552/001/

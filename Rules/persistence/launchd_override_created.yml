@@ -2,7 +2,7 @@ title: LaunchDaemon Override Database Modified
 id: d1a2b3c4-0216-4000-a000-000000000216
 status: stable
 description: Detects modification of the launchd override database. Adversaries can modify overrides to enable disabled LaunchDaemons or alter their configuration for persistence.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1543/004/

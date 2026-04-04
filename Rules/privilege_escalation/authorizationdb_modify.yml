@@ -2,7 +2,7 @@ title: Authorization Database Modified via security Command
 id: d1a2b3c4-0270-4000-a000-000000000270
 status: stable
 description: Detects use of the security command with authorizationdb write to modify the authorization database. Adversaries may modify authorization rules to weaken authentication requirements for privilege escalation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1548/

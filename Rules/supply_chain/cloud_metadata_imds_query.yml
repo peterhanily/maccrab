@@ -6,7 +6,7 @@ description: >
     The TeamPCP/LiteLLM attack (March 2026) queried IMDS to harvest cloud instance
     credentials and metadata. On developer macOS machines, IMDS queries are almost
     never legitimate as they are only meaningful within cloud instances.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1552/005/

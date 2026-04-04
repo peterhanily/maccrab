@@ -6,7 +6,7 @@ description: >
     or Cline. Research shows that 20% of AI-generated code references hallucinated
     package names. Attackers register these hallucinated names on PyPI (slopsquatting),
     creating supply chain risk when AI tools automatically install suggested packages.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

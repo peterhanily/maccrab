@@ -2,7 +2,7 @@ title: Clipboard Access by Non-Terminal Process
 id: d1a2b3c4-0124-4000-a000-000000000124
 status: experimental
 description: Detects pbpaste or pbcopy being executed by a non-terminal parent process. Clipboard monitoring is used by malware to steal copied passwords, cryptocurrency addresses, and other sensitive data.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1115/

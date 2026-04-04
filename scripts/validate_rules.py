@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate HawkEye Sigma-format detection rules."""
+"""Validate MacCrab Sigma-format detection rules."""
 
 import sys
 import os

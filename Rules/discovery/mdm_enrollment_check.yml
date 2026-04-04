@@ -2,7 +2,7 @@ title: MDM Enrollment Status Check via profiles
 id: d1a2b3c4-0255-4000-a000-000000000255
 status: experimental
 description: Detects use of the profiles command to check MDM enrollment status. Adversaries may enumerate MDM enrollment to determine if the host is managed and what security controls are in place before attempting evasion.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1082/

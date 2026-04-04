@@ -2,7 +2,7 @@ title: Notification Center Widget Plugin Installed
 id: d1a2b3c4-0218-4000-a000-000000000218
 status: experimental
 description: Detects installation of notification center widget plugins by non-system processes. These plugins run in a persistent context and can be abused for code execution on every login.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1547/

@@ -2,22 +2,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "HawkEye",
+    name: "MacCrab",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .library(name: "HawkEyeCore", targets: ["HawkEyeCore"]),
-        .executable(name: "hawkeyed", targets: ["hawkeyed"]),
-        .executable(name: "hawkctl", targets: ["hawkctl"]),
-        .executable(name: "HawkEyeApp", targets: ["HawkEyeApp"]),
+        .library(name: "MacCrabCore", targets: ["MacCrabCore"]),
+        .executable(name: "maccrabd", targets: ["maccrabd"]),
+        .executable(name: "maccrabctl", targets: ["maccrabctl"]),
+        .executable(name: "MacCrabApp", targets: ["MacCrabApp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-testing.git", branch: "release/6.2"),
     ],
     targets: [
         .target(
-            name: "HawkEyeCore",
+            name: "MacCrabCore",
             dependencies: [],
             linkerSettings: [
                 .linkedLibrary("EndpointSecurity"),
@@ -28,29 +28,29 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "hawkeyed",
-            dependencies: ["HawkEyeCore"]
+            name: "maccrabd",
+            dependencies: ["MacCrabCore"]
         ),
         .executableTarget(
-            name: "hawkctl",
-            dependencies: ["HawkEyeCore"]
+            name: "maccrabctl",
+            dependencies: ["MacCrabCore"]
         ),
         .executableTarget(
-            name: "HawkEyeApp",
-            dependencies: ["HawkEyeCore"]
+            name: "MacCrabApp",
+            dependencies: ["MacCrabCore"]
         ),
         .testTarget(
-            name: "HawkEyeCoreTests",
+            name: "MacCrabCoreTests",
             dependencies: [
-                "HawkEyeCore",
+                "MacCrabCore",
                 .product(name: "Testing", package: "swift-testing"),
             ]
         ),
     ]
 )
 
-// Note: HawkEyeApp (SwiftUI status bar app) is built as a separate
+// Note: MacCrabApp (SwiftUI status bar app) is built as a separate
 // Xcode project since it requires an app bundle, Info.plist, entitlements,
 // and code signing that Swift Package Manager doesn't handle well.
-// See Sources/HawkEyeApp/ for the app source.
-// Build with: xcodebuild -project HawkEye.xcodeproj -scheme HawkEyeApp
+// See Sources/MacCrabApp/ for the app source.
+// Build with: xcodebuild -project MacCrab.xcodeproj -scheme MacCrabApp

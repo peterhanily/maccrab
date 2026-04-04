@@ -2,7 +2,7 @@ title: Plist Conversion via plutil for Inspection
 id: d1a2b3c4-0228-4000-a000-000000000228
 status: experimental
 description: Detects use of plutil to convert plist files between formats, which may indicate reconnaissance or tampering of configuration files. Adversaries convert binary plists to XML for inspection and modification.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1562/001/

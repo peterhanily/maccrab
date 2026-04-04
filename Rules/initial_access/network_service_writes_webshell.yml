@@ -2,7 +2,7 @@ title: Network Service Writes Potential Web Shell File
 id: d1a2b3c4-0415-4000-a000-000000000415
 status: experimental
 description: Detects web server processes writing script files (.php, .jsp, .py, .sh, .cgi, .pl) to web-accessible directories. This is a strong indicator that an attacker has exploited a file upload vulnerability or remote code execution flaw to plant a web shell for persistent access to the compromised server.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1190/

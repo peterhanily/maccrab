@@ -2,7 +2,7 @@ title: Quarantine Attribute Check Followed by Execution
 id: d1a2b3c4-0204-4000-a000-000000000204
 status: experimental
 description: Detects xattr used to inspect or remove quarantine attributes, which may indicate an attempt to bypass Gatekeeper before executing a downloaded file.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1553/001/

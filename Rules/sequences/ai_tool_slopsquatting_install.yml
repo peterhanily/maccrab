@@ -6,7 +6,7 @@ description: >
     package manager install command, where the installed package then spawns
     a shell or accesses credential files. Covers the slopsquatting attack
     vector where AI hallucinated packages are registered by attackers.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://thinkpol.ca/2026/03/28/slopsquatting-the-supply-chain-attack-vibe-coding-made/

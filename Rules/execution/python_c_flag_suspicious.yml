@@ -2,7 +2,7 @@ title: Python One-Liner with Suspicious Imports
 id: d1a2b3c4-0203-4000-a000-000000000203
 status: stable
 description: Detects python invocation with -c flag importing modules commonly associated with reverse shells, payload execution, or system manipulation (socket, subprocess, os, pty, base64).
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1059/006/

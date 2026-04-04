@@ -2,7 +2,7 @@ title: LaunchDaemon Created
 id: d1a2b3c4-0011-4000-a000-000000000011
 status: stable
 description: Detects creation of LaunchDaemon plist files, which run as root and persist across reboots.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1543/004/

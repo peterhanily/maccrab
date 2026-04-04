@@ -2,7 +2,7 @@ title: macOS Application Firewall Disabled
 id: d1a2b3c4-0114-4000-a000-000000000114
 status: stable
 description: Detects the macOS application firewall being disabled via the socketfilterfw command-line utility. Disabling the firewall allows unrestricted inbound network connections.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1562/004/

@@ -2,7 +2,7 @@ title: Microsoft Office Spawning Macro-Related Processes
 id: d1a2b3c4-0295-4000-a000-000000000295
 status: stable
 description: Detects Microsoft Office applications spawning shell interpreters or other suspicious child processes, which may indicate macro-based payload execution. Office macros remain a common initial access vector on macOS.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1566/001/

@@ -2,7 +2,7 @@ title: Calendar Database Accessed by Non-Calendar Process
 id: d1a2b3c4-0263-4000-a000-000000000263
 status: experimental
 description: Detects access to the Calendar.app database by processes other than Calendar. Adversaries may access calendar data to gather meeting details, contacts, location information, and schedule intelligence.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1005/

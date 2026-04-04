@@ -6,7 +6,7 @@ description: >
     not signed by Apple. The Axios NPM supply chain attack (March 2026) placed a RAT
     at /Library/Caches/com.apple.act.mond. Legitimate Apple cache files are always
     written by Apple-signed processes.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1036/005/

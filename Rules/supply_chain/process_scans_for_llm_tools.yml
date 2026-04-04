@@ -6,7 +6,7 @@ description: >
     CanisterWorm/NX attack (August 2025) was the first supply chain attack to specifically
     scan for installed LLM tools on developer machines, targeting configurations for
     Cursor, Copilot, Cody, Continue, LMStudio, and Ollama to steal API keys and tokens.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1552/001/

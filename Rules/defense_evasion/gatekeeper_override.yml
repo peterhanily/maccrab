@@ -5,7 +5,7 @@ description: >
     Detects when a user bypasses Gatekeeper by right-clicking and selecting
     Open on an unnotarized application, or when spctl is used to disable
     Gatekeeper assessment.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1553/001/

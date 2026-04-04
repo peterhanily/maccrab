@@ -2,7 +2,7 @@ title: DNS Query to High-Entropy Domain
 id: d1a2b3c4-0040-4000-a000-000000000040
 status: experimental
 description: Detects DNS resolution of domains with high character entropy, indicative of Domain Generation Algorithm (DGA) usage by malware C2.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1568/002/

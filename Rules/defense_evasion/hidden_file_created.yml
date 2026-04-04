@@ -2,7 +2,7 @@ title: Hidden File Created in User Directory
 id: d1a2b3c4-0023-4000-a000-000000000023
 status: experimental
 description: Detects creation of hidden files (dot-prefix) in user home directories by non-Apple processes. Malware commonly uses hidden files for staging.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1564/001/

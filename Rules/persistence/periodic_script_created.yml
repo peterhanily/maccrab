@@ -2,7 +2,7 @@ title: Periodic Script Created
 id: d1a2b3c4-0015-4000-a000-000000000015
 status: stable
 description: Detects creation of periodic scripts in /etc/periodic/ or /usr/local/etc/periodic/, which execute on daily/weekly/monthly schedules.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1053/003/

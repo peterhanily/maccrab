@@ -2,7 +2,7 @@ title: Files Written to AirDrop Staging Directory
 id: d1a2b3c4-0260-4000-a000-000000000260
 status: experimental
 description: Detects files being written to the AirDrop staging directory by a non-system process. Adversaries may stage data in the AirDrop directory for exfiltration via local wireless transfer.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1011/

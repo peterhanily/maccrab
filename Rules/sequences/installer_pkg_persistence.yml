@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects the macOS Installer process creating LaunchAgent/Daemon
     persistence items, which may indicate a malicious PKG installer.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 tags:
     - attack.execution

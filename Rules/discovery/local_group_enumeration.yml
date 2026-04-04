@@ -2,7 +2,7 @@ title: Local Group Enumeration via dscl or dseditgroup
 id: d1a2b3c4-0250-4000-a000-000000000250
 status: experimental
 description: Detects use of dscl or dseditgroup to enumerate local groups and group memberships. Adversaries may enumerate groups to identify privileged accounts and potential escalation paths.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1069/001/

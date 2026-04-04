@@ -5,7 +5,7 @@ description: >
     Detects a TCC permission being granted followed almost immediately by
     the granted app accessing sensitive resources, suggesting automated
     permission manipulation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1562/001/

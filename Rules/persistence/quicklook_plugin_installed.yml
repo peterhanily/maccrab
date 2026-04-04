@@ -2,7 +2,7 @@ title: QuickLook Plugin Installed
 id: d1a2b3c4-0105-4000-a000-000000000105
 status: experimental
 description: Detects creation of a QuickLook generator plugin (.qlgenerator). QuickLook plugins are loaded by the QuickLook framework when previewing files and can be abused as a persistence mechanism.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1547/

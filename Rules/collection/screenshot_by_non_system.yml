@@ -2,7 +2,7 @@ title: Screenshot Capture by Non-System Process
 id: d1a2b3c4-0090-4000-a000-000000000090
 status: experimental
 description: Detects screencapture utility invocation by non-Apple parent processes.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1113/

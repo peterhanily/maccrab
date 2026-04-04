@@ -2,7 +2,7 @@ title: Apple Remote Desktop Management Activation
 id: d1a2b3c4-0290-4000-a000-000000000290
 status: stable
 description: Detects activation or configuration changes to Apple Remote Desktop (ARD) remote management. Adversaries may enable ARD to establish remote access to the compromised host or use it for lateral movement.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1021/

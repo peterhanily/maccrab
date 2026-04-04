@@ -2,7 +2,7 @@ title: System Integrity Protection Disable Attempt
 id: d1a2b3c4-0110-4000-a000-000000000110
 status: stable
 description: Detects attempts to disable System Integrity Protection (SIP) via csrutil. While csrutil disable only works in Recovery Mode, an attempt in normal boot indicates reconnaissance or a confused attacker. Combined with other indicators this may signal an active attack.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1553/006/

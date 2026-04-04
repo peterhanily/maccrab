@@ -1,7 +1,7 @@
 .PHONY: build test compile-rules install uninstall clean run dev restart app stop status
 
 PREFIX ?= /usr/local
-SUPPORT_DIR = /Library/Application\ Support/HawkEye
+SUPPORT_DIR = /Library/Application\ Support/MacCrab
 BUILD_DIR = .build/debug
 RULES_DIR = $(BUILD_DIR)/compiled_rules
 
@@ -9,17 +9,17 @@ RULES_DIR = $(BUILD_DIR)/compiled_rules
 
 # One command: build + compile rules + restart daemon + open app
 dev: stop build compile-rules bundle-app
-	@$(BUILD_DIR)/hawkeyed &
+	@$(BUILD_DIR)/maccrabd &
 	@sleep 2
-	@open $(BUILD_DIR)/HawkEye.app 2>/dev/null || true
+	@open $(BUILD_DIR)/MacCrab.app 2>/dev/null || true
 	@echo ""
-	@$(BUILD_DIR)/hawkctl status
+	@$(BUILD_DIR)/maccrabctl status
 
 # Restart daemon only (no rebuild)
 restart: stop
-	@$(BUILD_DIR)/hawkeyed &
+	@$(BUILD_DIR)/maccrabd &
 	@sleep 2
-	@$(BUILD_DIR)/hawkctl status
+	@$(BUILD_DIR)/maccrabctl status
 
 # Create .app bundle from bare executable
 bundle-app:
@@ -27,21 +27,21 @@ bundle-app:
 
 # Open the GUI app
 app: bundle-app
-	@open $(BUILD_DIR)/HawkEye.app 2>/dev/null
+	@open $(BUILD_DIR)/MacCrab.app 2>/dev/null
 
 # Stop daemon and app
 stop:
-	@pkill -x hawkeyed 2>/dev/null || true
-	@pkill -x HawkEyeApp 2>/dev/null || true
+	@pkill -x maccrabd 2>/dev/null || true
+	@pkill -x MacCrabApp 2>/dev/null || true
 	@sleep 1
 
 # Show status
 status:
-	@$(BUILD_DIR)/hawkctl status
+	@$(BUILD_DIR)/maccrabctl status
 
 # Live alert stream
 watch:
-	@$(BUILD_DIR)/hawkctl watch
+	@$(BUILD_DIR)/maccrabctl watch
 
 # ─── Build ────────────────────────────────────────────────────────────
 
@@ -55,9 +55,9 @@ compile-rules:
 	@python3 Compiler/compile_rules.py \
 		--input-dir Rules/ \
 		--output-dir $(RULES_DIR) 2>&1 | tail -1
-	@mkdir -p "$(HOME)/Library/Application Support/HawkEye/compiled_rules/sequences"
-	@cp -f $(RULES_DIR)/*.json "$(HOME)/Library/Application Support/HawkEye/compiled_rules/" 2>/dev/null || true
-	@cp -f $(RULES_DIR)/sequences/*.json "$(HOME)/Library/Application Support/HawkEye/compiled_rules/sequences/" 2>/dev/null || true
+	@mkdir -p "$(HOME)/Library/Application Support/MacCrab/compiled_rules/sequences"
+	@cp -f $(RULES_DIR)/*.json "$(HOME)/Library/Application Support/MacCrab/compiled_rules/" 2>/dev/null || true
+	@cp -f $(RULES_DIR)/sequences/*.json "$(HOME)/Library/Application Support/MacCrab/compiled_rules/sequences/" 2>/dev/null || true
 
 # ─── Test ─────────────────────────────────────────────────────────────
 
@@ -85,27 +85,27 @@ uninstall:
 
 # Clear all data (events, alerts) — uses sudo for system DB
 clear-data: stop
-	@rm -rf "$(HOME)/Library/Application Support/HawkEye/events.db"* 2>/dev/null || true
-	@rm -rf "$(HOME)/Library/Application Support/HawkEye/alerts.jsonl" 2>/dev/null || true
-	@sudo rm -rf "/Library/Application Support/HawkEye/events.db"* 2>/dev/null || true
-	@sudo rm -rf "/Library/Application Support/HawkEye/alerts.jsonl" 2>/dev/null || true
+	@rm -rf "$(HOME)/Library/Application Support/MacCrab/events.db"* 2>/dev/null || true
+	@rm -rf "$(HOME)/Library/Application Support/MacCrab/alerts.jsonl" 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/MacCrab/events.db"* 2>/dev/null || true
+	@sudo rm -rf "/Library/Application Support/MacCrab/alerts.jsonl" 2>/dev/null || true
 	@echo "All data cleared"
 
 # Run daemon as root (full ES support) — needs Terminal for password
 run-root: build compile-rules
-	sudo $(BUILD_DIR)/hawkeyed
+	sudo $(BUILD_DIR)/maccrabd
 
 # Create a new rule from template
 new-rule:
 	@echo "Categories: process_creation, file_event, network_connection, tcc_event, sequence"
-	@read -p "Category: " cat; $(BUILD_DIR)/hawkctl rule create $$cat
+	@read -p "Category: " cat; $(BUILD_DIR)/maccrabctl rule create $$cat
 
 clean:
 	swift package clean
 	rm -rf $(RULES_DIR)
 
 help:
-	@echo "HawkEye Development Commands:"
+	@echo "MacCrab Development Commands:"
 	@echo ""
 	@echo "  make dev          Build + restart daemon + open app (one command)"
 	@echo "  make restart      Restart daemon (no rebuild)"

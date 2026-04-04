@@ -2,7 +2,7 @@ title: Authorization Plugin Installed
 id: d1a2b3c4-0016-4000-a000-000000000016
 status: stable
 description: Detects installation of authorization plugins, which can execute code during the login process with elevated privileges.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1547/002/

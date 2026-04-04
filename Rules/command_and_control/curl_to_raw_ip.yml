@@ -2,7 +2,7 @@ title: curl or wget Connection to Raw IP Address
 id: d1a2b3c4-0043-4000-a000-000000000043
 status: experimental
 description: Detects curl or wget connecting directly to an IP address rather than a hostname, often seen in C2 communication.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1071/001/

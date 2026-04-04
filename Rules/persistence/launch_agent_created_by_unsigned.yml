@@ -2,7 +2,7 @@ title: LaunchAgent Created by Unsigned Process
 id: d1a2b3c4-0010-4000-a000-000000000010
 status: stable
 description: Detects creation of LaunchAgent plist files by unsigned or ad-hoc signed processes.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1543/001/

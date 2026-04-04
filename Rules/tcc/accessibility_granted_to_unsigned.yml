@@ -2,7 +2,7 @@ title: Accessibility Permission Granted to Unsigned Application
 id: d1a2b3c4-0081-4000-a000-000000000081
 status: stable
 description: Detects when Accessibility TCC permission is granted to an unsigned application. Accessibility access enables keylogging and UI control.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1056/001/

@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects a binary executing from a temporary location and then deleting
     itself — classic dropper behavior.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1070/004/

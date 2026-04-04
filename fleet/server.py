@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-HawkEye Fleet Collector Server
+MacCrab Fleet Collector Server
 
-Receives telemetry from HawkEye instances, aggregates IOC sightings,
+Receives telemetry from MacCrab instances, aggregates IOC sightings,
 and provides fleet-wide threat intelligence back to endpoints.
 
 Usage:
@@ -29,10 +29,10 @@ from typing import Optional
 # Configuration
 # ---------------------------------------------------------------------------
 
-API_KEY = os.environ.get("HAWKEYE_FLEET_KEY", "")
-DB_PATH = os.environ.get("HAWKEYE_FLEET_DB", "fleet.db")
+API_KEY = os.environ.get("MACCRAB_FLEET_KEY", "")
+DB_PATH = os.environ.get("MACCRAB_FLEET_DB", "fleet.db")
 
-app = FastAPI(title="HawkEye Fleet Collector", version="0.4.0")
+app = FastAPI(title="MacCrab Fleet Collector", version="0.4.0")
 
 # Request size limit middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -296,22 +296,22 @@ async def dashboard():
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return """
-    <html><head><title>HawkEye Fleet</title>
+    <html><head><title>MacCrab Fleet</title>
     <style>body{font-family:system-ui;max-width:800px;margin:40px auto;padding:0 20px}
     h1{color:#333}table{width:100%;border-collapse:collapse}td,th{padding:8px;border:1px solid #ddd;text-align:left}
     th{background:#f5f5f5}</style></head>
     <body>
-    <h1>HawkEye Fleet Collector</h1>
+    <h1>MacCrab Fleet Collector</h1>
     <p>API Endpoints:</p>
     <ul>
-        <li><code>POST /api/telemetry</code> — Push telemetry from HawkEye instances</li>
+        <li><code>POST /api/telemetry</code> — Push telemetry from MacCrab instances</li>
         <li><code>GET /api/iocs</code> — Pull aggregated IOC intelligence</li>
         <li><code>GET /api/incidents</code> — Fleet-wide incident summary</li>
         <li><code>GET /api/dashboard</code> — Fleet overview stats</li>
     </ul>
-    <p>Configure HawkEye instances with:</p>
-    <pre>export HAWKEYE_FLEET_URL=http://this-server:8443
-export HAWKEYE_FLEET_KEY=your-api-key
+    <p>Configure MacCrab instances with:</p>
+    <pre>export MACCRAB_FLEET_URL=http://this-server:8443
+export MACCRAB_FLEET_KEY=your-api-key
 make dev</pre>
     </body></html>
     """
@@ -324,7 +324,7 @@ make dev</pre>
 @app.on_event("startup")
 async def startup():
     init_db(DB_PATH)
-    print(f"HawkEye Fleet Collector started (db: {DB_PATH})")
+    print(f"MacCrab Fleet Collector started (db: {DB_PATH})")
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +334,7 @@ async def startup():
 if __name__ == "__main__":
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="HawkEye Fleet Collector")
+    parser = argparse.ArgumentParser(description="MacCrab Fleet Collector")
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--db", default="fleet.db")

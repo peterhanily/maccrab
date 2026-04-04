@@ -2,7 +2,7 @@ title: SUID/SGID Binary Created in Suspicious Directory
 id: d1a2b3c4-0409-4000-a000-000000000409
 status: experimental
 description: Detects file creation events where chmod sets the setuid or setgid bit on a file in /tmp, /var/tmp, /usr/local, or user-writable directories. Attackers drop SUID root binaries as part of privilege escalation exploits to maintain elevated access or as a persistence mechanism after exploitation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1068/

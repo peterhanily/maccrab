@@ -1,4 +1,4 @@
-# HawkEye
+# MacCrab
 
 **Local-first macOS threat detection engine with Sigma-compatible rules**
 
@@ -10,9 +10,9 @@
 
 ---
 
-## What is HawkEye?
+## What is MacCrab?
 
-HawkEye is an on-device security detection engine for macOS that evaluates Sigma-compatible detection rules against real-time Endpoint Security framework events, Unified Log entries, TCC permission changes, and network connections -- with no SIEM, no cloud, and no infrastructure required. Its key differentiator is **temporal-causal sequence detection**: the ability to correlate ordered chains of events (e.g., download, then execute, then persist, then call home) within time windows and across process lineage, combined with a **baseline anomaly learning** engine that adapts to your machine's normal behavior. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- but native to macOS, running entirely on your machine.
+MacCrab is an on-device security detection engine for macOS that evaluates Sigma-compatible detection rules against real-time Endpoint Security framework events, Unified Log entries, TCC permission changes, and network connections -- with no SIEM, no cloud, and no infrastructure required. Its key differentiator is **temporal-causal sequence detection**: the ability to correlate ordered chains of events (e.g., download, then execute, then persist, then call home) within time windows and across process lineage, combined with a **baseline anomaly learning** engine that adapts to your machine's normal behavior. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- but native to macOS, running entirely on your machine.
 
 ---
 
@@ -67,7 +67,7 @@ A status bar application providing:
 ## Architecture
 
 ```
-                          HawkEye Detection Pipeline
+                          MacCrab Detection Pipeline
 
  +-----------------+    +------------------+    +------------------+
  |  Event Sources  |    |   Enrichment     |    |   Detection      |
@@ -109,7 +109,7 @@ swift build
 ```bash
 python3 Compiler/compile_rules.py \
     --input-dir Rules/ \
-    --output-dir ~/Library/Application\ Support/HawkEye/compiled_rules/
+    --output-dir ~/Library/Application\ Support/MacCrab/compiled_rules/
 ```
 
 ### Run the Daemon
@@ -118,7 +118,7 @@ The daemon requires root privileges for the Endpoint Security framework:
 
 ```bash
 # Start the detection daemon
-sudo .build/debug/hawkeyed
+sudo .build/debug/maccrabd
 ```
 
 ### Control and Query
@@ -127,13 +127,13 @@ In another terminal:
 
 ```bash
 # Check daemon status
-.build/debug/hawkctl status
+.build/debug/maccrabctl status
 
 # View recent alerts
-.build/debug/hawkctl alerts
+.build/debug/maccrabctl alerts
 
 # Tail the live event stream
-.build/debug/hawkctl events tail 20
+.build/debug/maccrabctl events tail 20
 ```
 
 ---
@@ -157,7 +157,7 @@ Apple restricts the Endpoint Security entitlement to binaries signed with a prov
 
 ### 1. Create an entitlements file
 
-Create `hawkeyed.entitlements`:
+Create `maccrabd.entitlements`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -175,8 +175,8 @@ Create `hawkeyed.entitlements`:
 
 ```bash
 swift build
-codesign --sign - --entitlements hawkeyed.entitlements \
-    --force .build/debug/hawkeyed
+codesign --sign - --entitlements maccrabd.entitlements \
+    --force .build/debug/maccrabd
 ```
 
 ### 3. Approve in System Settings
@@ -189,9 +189,9 @@ For distribution, you need an Apple Developer account with the Endpoint Security
 
 ```bash
 codesign --sign "Developer ID Application: Your Name (TEAM_ID)" \
-    --entitlements hawkeyed.entitlements \
+    --entitlements maccrabd.entitlements \
     --options runtime \
-    .build/release/hawkeyed
+    .build/release/maccrabd
 ```
 
 ---
@@ -200,7 +200,7 @@ codesign --sign "Developer ID Application: Your Name (TEAM_ID)" \
 
 ### Format
 
-HawkEye uses a Sigma-compatible YAML format for detection rules. Single-event rules follow the [standard Sigma specification](https://sigmahq.io/docs/). Temporal sequence rules extend the format with `type: sequence`, `steps`, `window`, and `correlation` fields.
+MacCrab uses a Sigma-compatible YAML format for detection rules. Single-event rules follow the [standard Sigma specification](https://sigmahq.io/docs/). Temporal sequence rules extend the format with `type: sequence`, `steps`, `window`, and `correlation` fields.
 
 Rules are compiled from YAML to an optimized JSON predicate format before being loaded by the detection engine at runtime.
 
@@ -233,7 +233,7 @@ status: stable
 description: >
     Detects a shell interpreter spawned as a child of a browser process,
     which may indicate exploitation or malicious download execution.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/004/
@@ -266,7 +266,7 @@ level: high
 
 ### Example: Temporal Sequence Rule
 
-Sequence rules are HawkEye's novel extension to the Sigma format. They define multi-step attack chains with time windows, ordering constraints, and process lineage correlation:
+Sequence rules are MacCrab's novel extension to the Sigma format. They define multi-step attack chains with time windows, ordering constraints, and process lineage correlation:
 
 ```yaml
 title: Download to Persistence to C2 Attack Chain
@@ -276,7 +276,7 @@ description: >
     Detects a complete attack chain: file downloaded to Downloads/tmp,
     executed as unsigned binary, installs persistence via LaunchAgent/Daemon,
     then makes outbound network connection (C2 callback).
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 tags:
     - attack.execution
@@ -356,10 +356,10 @@ Key sequence rule fields:
 ```bash
 # Compile your new rule
 python3 Compiler/compile_rules.py --input-dir Rules/ \
-    --output-dir ~/Library/Application\ Support/HawkEye/compiled_rules/
+    --output-dir ~/Library/Application\ Support/MacCrab/compiled_rules/
 
 # Verify it loaded
-.build/debug/hawkctl rules list | grep "your rule title"
+.build/debug/maccrabctl rules list | grep "your rule title"
 ```
 
 ---
@@ -370,17 +370,17 @@ python3 Compiler/compile_rules.py --input-dir Rules/ \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HAWKEYE_RULES_DIR` | `~/Library/Application Support/HawkEye/compiled_rules/` | Directory containing compiled JSON rule files |
-| `HAWKEYE_LOG_DIR` | `~/Library/Application Support/HawkEye/logs/` | Directory for JSONL alert and event log files |
-| `HAWKEYE_WEBHOOK_URL` | *(none)* | URL for JSON POST webhook delivery of alerts |
-| `HAWKEYE_SYSLOG_HOST` | *(none)* | Syslog receiver hostname or IP |
-| `HAWKEYE_SYSLOG_PORT` | `514` | Syslog receiver port |
-| `HAWKEYE_SYSLOG_PROTO` | `udp` | Syslog transport protocol (`udp` or `tcp`) |
-| `HAWKEYE_MIN_SEVERITY` | `low` | Minimum severity level for output (`informational`, `low`, `medium`, `high`, `critical`) |
+| `MACCRAB_RULES_DIR` | `~/Library/Application Support/MacCrab/compiled_rules/` | Directory containing compiled JSON rule files |
+| `MACCRAB_LOG_DIR` | `~/Library/Application Support/MacCrab/logs/` | Directory for JSONL alert and event log files |
+| `MACCRAB_WEBHOOK_URL` | *(none)* | URL for JSON POST webhook delivery of alerts |
+| `MACCRAB_SYSLOG_HOST` | *(none)* | Syslog receiver hostname or IP |
+| `MACCRAB_SYSLOG_PORT` | `514` | Syslog receiver port |
+| `MACCRAB_SYSLOG_PROTO` | `udp` | Syslog transport protocol (`udp` or `tcp`) |
+| `MACCRAB_MIN_SEVERITY` | `low` | Minimum severity level for output (`informational`, `low`, `medium`, `high`, `critical`) |
 
 ### Baseline Engine
 
-The baseline anomaly engine builds a profile of normal activity over a configurable learning period. Configuration is stored in `~/Library/Application Support/HawkEye/baseline_config.json`:
+The baseline anomaly engine builds a profile of normal activity over a configurable learning period. Configuration is stored in `~/Library/Application Support/MacCrab/baseline_config.json`:
 
 ```json
 {
@@ -400,7 +400,7 @@ After the learning period, the engine alerts when it observes processes, network
 
 ### Alert Deduplication
 
-To prevent alert fatigue, HawkEye deduplicates alerts using a configurable suppression window. Alerts with the same rule ID, process executable, and (where applicable) file path or network destination are suppressed for a configurable duration after the first firing:
+To prevent alert fatigue, MacCrab deduplicates alerts using a configurable suppression window. Alerts with the same rule ID, process executable, and (where applicable) file path or network destination are suppressed for a configurable duration after the first firing:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -413,14 +413,14 @@ To prevent alert fatigue, HawkEye deduplicates alerts using a configurable suppr
 ## Project Structure
 
 ```
-hawkeye/
+maccrab/
 ├── Package.swift                          # Swift Package Manager manifest
 ├── LICENSE                                # Apache 2.0 (code)
 ├── README.md                              # This file
 ├── CONTRIBUTING.md                        # Contribution guide
 │
 ├── Sources/
-│   ├── HawkEyeCore/                      # Core detection library
+│   ├── MacCrabCore/                      # Core detection library
 │   │   ├── Events/                        # Event model types
 │   │   │   ├── Event.swift                #   Unified event struct
 │   │   │   ├── EventEnums.swift           #   Category, type, severity enums
@@ -452,14 +452,14 @@ hawkeye/
 │   │   └── Models/                        # Shared model types
 │   │       └── Alert.swift                #   Alert model
 │   │
-│   ├── hawkeyed/                          # Daemon executable
+│   ├── maccrabd/                          # Daemon executable
 │   │   └── main.swift                     #   Entry point, signal handling, pipeline setup
 │   │
-│   ├── hawkctl/                           # CLI control tool
+│   ├── maccrabctl/                           # CLI control tool
 │   │   └── main.swift                     #   Status, alerts, events, rule management
 │   │
-│   └── HawkEyeApp/                       # SwiftUI status bar app (Xcode project)
-│       ├── HawkEyeApp.swift               #   App entry point
+│   └── MacCrabApp/                       # SwiftUI status bar app (Xcode project)
+│       ├── MacCrabApp.swift               #   App entry point
 │       ├── AppState.swift                 #   Observable app state
 │       ├── Views/
 │       │   ├── MainView.swift             #   Primary window
@@ -487,14 +487,14 @@ hawkeye/
 │   └── compile_rules.py                   # Sigma YAML to JSON predicate compiler
 │
 └── Tests/
-    └── HawkEyeCoreTests/                  # Unit and integration tests
+    └── MacCrabCoreTests/                  # Unit and integration tests
 ```
 
 ---
 
 ## How It Compares
 
-| Capability | HawkEye | coreSigma | osquery | Santa | Commercial EDR |
+| Capability | MacCrab | coreSigma | osquery | Santa | Commercial EDR |
 |------------|:-------:|:---------:|:-------:|:-----:|:--------------:|
 | Real-time ES events | Yes | Yes | Scheduled | Exec only | Yes |
 | Sigma rule format | Yes | Yes | No | No | Varies |
@@ -541,6 +541,6 @@ Code contributions are licensed under the [Apache License 2.0](LICENSE). We use 
 ## Acknowledgments
 
 - [**SigmaHQ**](https://github.com/SigmaHQ/sigma) -- for the Sigma detection rule format and the community-driven rule repository that inspired this project's rule structure
-- [**Objective-See Foundation**](https://objective-see.org/) -- for pioneering open-source macOS security research, tools, and reference implementations that informed HawkEye's design
+- [**Objective-See Foundation**](https://objective-see.org/) -- for pioneering open-source macOS security research, tools, and reference implementations that informed MacCrab's design
 - [**coreSigma (Nebulock)**](https://github.com/nebulock/coreSigma) -- for the pySigma macOS ESF pipeline work that demonstrated Sigma rule evaluation against Endpoint Security events
 - **Apple Endpoint Security framework** -- for providing the kernel-level visibility that makes real-time detection possible on macOS

@@ -5,7 +5,7 @@ description: >
     Detects execution of unsigned x86_64 binaries on Apple Silicon via Rosetta 2
     translation. Attackers may use x86 binaries to evade ARM-native detection
     tools or because their tooling hasn't been ported to ARM.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1036/

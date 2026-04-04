@@ -5,7 +5,7 @@ description: >
     Detects installation of MDM configuration profiles that modify security
     settings. Rogue profiles can disable Gatekeeper, allow unsigned code,
     or install root certificates for MITM attacks.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1562/001/

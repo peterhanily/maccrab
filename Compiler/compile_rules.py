@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-compile_rules.py — Sigma YAML to HawkEye JSON predicate compiler.
+compile_rules.py — Sigma YAML to MacCrab JSON predicate compiler.
 
 Reads Sigma detection rules in YAML format and compiles them to the JSON
-predicate format consumed by HawkEye's RuleEngine.
+predicate format consumed by MacCrab's RuleEngine.
 
 Dependencies:
     - PyYAML (pip install pyyaml)
@@ -904,7 +904,7 @@ def extract_referenced_sections(condition_str: str, sections: dict) -> list[str]
 
 def determine_condition_type(condition_str: str, sections: dict) -> str:
     """
-    Infer the HawkEye condition type from a Sigma condition string.
+    Infer the MacCrab condition type from a Sigma condition string.
 
     NOTE: This function is retained for backward compatibility but is no longer
     used by the main compilation path (which uses the AST-based parser).
@@ -935,7 +935,7 @@ def determine_condition_type(condition_str: str, sections: dict) -> str:
 
 def compile_rule(rule_data: dict, source_file: str):
     """
-    Compile a single Sigma YAML rule into the HawkEye JSON predicate format.
+    Compile a single Sigma YAML rule into the MacCrab JSON predicate format.
 
     Returns the compiled rule dict, or None if the rule should be skipped.
     """
@@ -1203,7 +1203,7 @@ def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compile Sigma YAML rules to HawkEye JSON predicate format."
+        description="Compile Sigma YAML rules to MacCrab JSON predicate format."
     )
     parser.add_argument(
         "--input-dir",

@@ -2,7 +2,7 @@ title: Security Tool Process Terminated
 id: d1a2b3c4-0022-4000-a000-000000000022
 status: experimental
 description: Detects kill signals sent to known macOS security tool processes.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1562/001/
@@ -29,7 +29,7 @@ detection:
             - 'Netiquette'
             - 'DNSMonitor'
             - 'Santa'
-            - 'hawkeyed'
+            - 'maccrabd'
             - 'CrowdStrike'
             - 'Falcon'
             - 'SentinelOne'

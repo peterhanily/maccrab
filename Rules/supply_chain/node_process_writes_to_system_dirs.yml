@@ -6,7 +6,7 @@ description: >
     Legitimate Node.js applications should not write to system directories. The Axios
     NPM compromise (March 2026) dropped a RAT binary into /Library/Caches/ via a
     postinstall hook running in Node.js.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

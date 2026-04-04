@@ -2,7 +2,7 @@ title: launchctl Submit to Register Job Dynamically
 id: d1a2b3c4-0208-4000-a000-000000000208
 status: stable
 description: Detects use of launchctl submit to dynamically register a job without a plist file. This technique can be used to establish persistence or execute commands while bypassing file-based detection.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1569/001/

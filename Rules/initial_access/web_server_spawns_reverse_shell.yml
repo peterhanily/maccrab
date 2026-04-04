@@ -2,7 +2,7 @@ title: Web Server Spawns Reverse Shell or Download Utility
 id: d1a2b3c4-0412-4000-a000-000000000412
 status: experimental
 description: Detects web server processes spawning network utilities such as curl, wget, nc (netcat), ncat, or python with network-related arguments. After exploiting a web application, attackers commonly use these tools to download second-stage payloads or establish reverse shell connections back to their command and control infrastructure.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1190/

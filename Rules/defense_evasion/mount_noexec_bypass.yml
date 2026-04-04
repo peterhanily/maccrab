@@ -2,7 +2,7 @@ title: Mount or Diskutil noexec Flag Manipulation
 id: d1a2b3c4-0227-4000-a000-000000000227
 status: experimental
 description: Detects mount or diskutil commands that manipulate noexec flags on volumes. Adversaries may remount volumes without noexec to enable execution from those volumes.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1562/001/

@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects osascript spawning a shell that downloads content via curl/wget
     and then executes something — common macOS social engineering chain.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/002/

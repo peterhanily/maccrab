@@ -6,7 +6,7 @@ description: >
     other than npm itself. The Shai-Hulud 2.0 worm (November 2025) harvested npm tokens
     to propagate by publishing malicious versions of victim's packages, affecting 25,000+
     GitHub repositories.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1552/001/

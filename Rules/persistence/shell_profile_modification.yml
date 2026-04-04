@@ -2,7 +2,7 @@ title: Shell Profile Modified by Non-Shell Process
 id: d1a2b3c4-0013-4000-a000-000000000013
 status: experimental
 description: Detects modifications to shell profile files (.zshrc, .bashrc, .bash_profile, .zprofile) by non-shell processes, which may indicate persistence via shell initialization.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1546/004/

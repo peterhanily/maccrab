@@ -5,7 +5,7 @@ description: >
     Detects use of task_for_pid() or process_set_exception_ports() which
     grants full control over another process's memory and execution. This
     is the fundamental mechanism for process injection on macOS.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1055/

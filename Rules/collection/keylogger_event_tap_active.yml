@@ -5,7 +5,7 @@ description: >
     Detects processes that create Core Graphics event taps monitoring keyboard
     events (kCGEventKeyDown). This is the primary mechanism for keylogging on
     macOS. Legitimate uses are rare and limited to accessibility tools.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1056/001/

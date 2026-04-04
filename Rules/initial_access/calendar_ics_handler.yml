@@ -2,7 +2,7 @@ title: Calendar Invitation Handler Spawning Processes
 id: d1a2b3c4-0296-4000-a000-000000000296
 status: experimental
 description: Detects the Calendar app or CalendarAgent spawning unexpected child processes after processing ICS files. Malicious calendar invitations with crafted URLs or attachments may trigger code execution.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1566/001/

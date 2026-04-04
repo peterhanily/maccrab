@@ -2,7 +2,7 @@ title: Direct Write to Privacy Preferences Plist
 id: d1a2b3c4-0224-4000-a000-000000000224
 status: stable
 description: Detects direct modification of privacy preferences plist files outside the normal TCC framework. Adversaries may tamper with these files to grant themselves permissions without user consent.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1562/001/

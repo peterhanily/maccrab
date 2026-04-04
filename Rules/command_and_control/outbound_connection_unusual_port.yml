@@ -2,7 +2,7 @@ title: Outbound Connection on Unusual Port from Unsigned Binary
 id: d1a2b3c4-0041-4000-a000-000000000041
 status: experimental
 description: Detects outbound network connections on non-standard ports from unsigned or ad-hoc signed binaries.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1571/

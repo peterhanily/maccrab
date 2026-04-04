@@ -2,7 +2,7 @@ title: Mail.app Database Accessed by Non-Mail Process
 id: d1a2b3c4-0234-4000-a000-000000000234
 status: experimental
 description: Detects access to the Mail.app database by a process other than Mail. Adversaries may access the mail database to steal email content, credentials, and attachments.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1114/001/

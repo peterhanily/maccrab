@@ -2,7 +2,7 @@ title: macOS Shadow Hash Plist Access
 id: d1a2b3c4-0403-4000-a000-000000000403
 status: experimental
 description: Detects access to user plist files under /var/db/dslocal/nodes/Default/users/ which contain ShadowHashData (PBKDF2/SALTED-SHA512 password hashes) on macOS. Extracting these hashes enables offline password cracking.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1003/

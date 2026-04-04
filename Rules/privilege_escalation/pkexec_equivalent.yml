@@ -2,7 +2,7 @@ title: AuthorizationExecuteWithPrivileges Pattern Detected
 id: d1a2b3c4-0272-4000-a000-000000000272
 status: experimental
 description: Detects patterns associated with the deprecated AuthorizationExecuteWithPrivileges API, including the security execute-with-privileges command and common helper tool installation patterns used for privilege escalation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1548/004/

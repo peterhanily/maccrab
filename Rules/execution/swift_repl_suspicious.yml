@@ -2,7 +2,7 @@ title: Swift REPL Execution from Non-Xcode Parent
 id: d1a2b3c4-0101-4000-a000-000000000101
 status: experimental
 description: Detects the Swift REPL being invoked by a process other than Xcode or related developer tools. Attackers may abuse the Swift REPL to execute arbitrary code on macOS without compiling a binary.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/

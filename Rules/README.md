@@ -1,6 +1,6 @@
-# HawkEye Detection Rules
+# MacCrab Detection Rules
 
-This directory contains the detection rules used by HawkEye's rule engine. Rules are written in a Sigma-compatible YAML format and compiled to JSON predicates before being loaded at runtime.
+This directory contains the detection rules used by MacCrab's rule engine. Rules are written in a Sigma-compatible YAML format and compiled to JSON predicates before being loaded at runtime.
 
 ---
 
@@ -8,7 +8,7 @@ This directory contains the detection rules used by HawkEye's rule engine. Rules
 
 Each rule is a standard [Sigma](https://sigmahq.io/) YAML file with `logsource.product: macos`. Rules define detection logic using field selectors, modifiers (`contains`, `endswith`, `startswith`, `re`, etc.), and boolean conditions.
 
-HawkEye extends the Sigma format with **temporal sequence rules** (`type: sequence`), which define multi-step detection chains with time windows, ordering constraints, and process lineage correlation. See the main [README](../README.md) for detailed examples of both formats.
+MacCrab extends the Sigma format with **temporal sequence rules** (`type: sequence`), which define multi-step detection chains with time windows, ordering constraints, and process lineage correlation. See the main [README](../README.md) for detailed examples of both formats.
 
 ### Required Fields
 
@@ -20,7 +20,7 @@ Every rule must include:
 | `id` | Unique UUID (v4 format) |
 | `status` | `stable`, `experimental`, or `test` |
 | `description` | What the rule detects and why it matters |
-| `author` | Author name or `HawkEye Community` |
+| `author` | Author name or `MacCrab Community` |
 | `date` | Creation date in `YYYY/MM/DD` format |
 | `tags` | MITRE ATT&CK tags (e.g., `attack.execution`, `attack.t1059.004`) |
 | `logsource` | Must include `product: macos` and a `category` |
@@ -69,7 +69,7 @@ Sequence rules in `sequences/` span multiple tactics. They are stored separately
    python3 -c "import uuid; print(uuid.uuid4())"
    ```
 
-4. Write the detection logic using Sigma field names and modifiers. HawkEye supports the following Sigma field names mapped to macOS event attributes:
+4. Write the detection logic using Sigma field names and modifiers. MacCrab supports the following Sigma field names mapped to macOS event attributes:
 
    | Sigma Field | Maps To |
    |-------------|---------|
@@ -91,19 +91,19 @@ Sequence rules in `sequences/` span multiple tactics. They are stored separately
 7. Compile and verify:
    ```bash
    python3 Compiler/compile_rules.py --input-dir Rules/ \
-       --output-dir ~/Library/Application\ Support/HawkEye/compiled_rules/
+       --output-dir ~/Library/Application\ Support/MacCrab/compiled_rules/
    ```
 
 ---
 
 ## Compiling Rules
 
-Rules must be compiled from YAML to JSON before HawkEye can load them. The compiler validates rule structure, maps Sigma field names to internal field paths, and outputs one JSON file per rule:
+Rules must be compiled from YAML to JSON before MacCrab can load them. The compiler validates rule structure, maps Sigma field names to internal field paths, and outputs one JSON file per rule:
 
 ```bash
 python3 Compiler/compile_rules.py \
     --input-dir Rules/ \
-    --output-dir ~/Library/Application\ Support/HawkEye/compiled_rules/
+    --output-dir ~/Library/Application\ Support/MacCrab/compiled_rules/
 ```
 
 The compiler requires Python 3.9+ and PyYAML (`pip install pyyaml`).

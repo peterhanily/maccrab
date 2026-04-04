@@ -2,7 +2,7 @@ title: Multiple TCC Permissions Granted Rapidly
 id: d1a2b3c4-0083-4000-a000-000000000083
 status: experimental
 description: Detects multiple TCC permission grants to the same application within a short timeframe, which may indicate automated permission manipulation.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1562/001/

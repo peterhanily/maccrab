@@ -2,7 +2,7 @@ title: Application Bundle Created Outside /Applications
 id: d1a2b3c4-0214-4000-a000-000000000214
 status: experimental
 description: Detects creation of .app bundles in non-standard locations such as /tmp, /Users/Shared, or hidden directories. Malware commonly stages application bundles outside /Applications to avoid detection.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1036/005/

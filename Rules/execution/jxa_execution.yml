@@ -2,7 +2,7 @@ title: JXA (JavaScript for Automation) Execution
 id: d1a2b3c4-0007-4000-a000-000000000007
 status: experimental
 description: Detects osascript executing JavaScript for Automation (JXA), increasingly used for macOS malware.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/007/

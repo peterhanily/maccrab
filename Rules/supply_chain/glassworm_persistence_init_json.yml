@@ -6,7 +6,7 @@ description: >
     (Jan-March 2026) used ~/init.json as a persistence and configuration file for its
     C2 infrastructure. This file in the home directory root is unusual and not part of
     any standard application configuration.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1195/001/

@@ -2,7 +2,7 @@ title: Process Listing by Unsigned Process
 id: d1a2b3c4-0123-4000-a000-000000000123
 status: experimental
 description: Detects process listing tools (ps, top) being executed by an unsigned or ad-hoc signed process. Malware often enumerates running processes to identify security tools, sandbox environments, or target processes.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1057/

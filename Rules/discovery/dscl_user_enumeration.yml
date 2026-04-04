@@ -2,7 +2,7 @@ title: User Enumeration via dscl
 id: d1a2b3c4-0122-4000-a000-000000000122
 status: experimental
 description: Detects the use of dscl (Directory Service command line) to enumerate local or directory users, groups, and account details. Commonly used in post-exploitation reconnaissance.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1033/

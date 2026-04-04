@@ -2,7 +2,7 @@ title: Login or Logout Hook Configured via defaults
 id: d1a2b3c4-0108-4000-a000-000000000108
 status: stable
 description: Detects the use of the defaults command to configure LoginHook or LogoutHook in the com.apple.loginwindow preference domain. These hooks execute scripts at user login or logout and serve as a legacy persistence mechanism.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1037/002/

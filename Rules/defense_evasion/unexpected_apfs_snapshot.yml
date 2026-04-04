@@ -5,7 +5,7 @@ description: >
     Detects creation of APFS snapshots outside of normal Time Machine backups.
     Attackers can use snapshots to hide data, stage exfiltration, or create
     restore points before deploying destructive payloads.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/04/04
 references:
     - https://attack.mitre.org/techniques/T1564/

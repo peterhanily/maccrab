@@ -2,7 +2,7 @@ title: Camera TCC Permission Granted to Non-Standard Application
 id: d1a2b3c4-0127-4000-a000-000000000127
 status: experimental
 description: Detects when Camera TCC permission is granted to applications other than well-known video conferencing and communication tools. Unauthorized camera access may indicate spyware or surveillance activity.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1125/

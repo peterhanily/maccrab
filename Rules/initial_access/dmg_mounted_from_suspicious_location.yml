@@ -2,7 +2,7 @@ title: DMG Mounted from Suspicious Location
 id: d1a2b3c4-0070-4000-a000-000000000070
 status: experimental
 description: Detects hdiutil mounting disk images from temporary or staging directories.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1204/002/

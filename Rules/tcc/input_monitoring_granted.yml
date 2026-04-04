@@ -2,7 +2,7 @@ title: Input Monitoring TCC Permission Granted
 id: d1a2b3c4-0126-4000-a000-000000000126
 status: stable
 description: Detects when Input Monitoring (ListenEvent) TCC permission is granted. This permission allows an application to monitor keyboard and mouse input globally, which can be abused for keylogging.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1056/

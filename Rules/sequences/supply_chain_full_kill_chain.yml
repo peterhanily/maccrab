@@ -5,7 +5,7 @@ description: >
     Detects the complete supply chain attack kill chain: a package manager installs
     something, which drops persistence (LaunchAgent/cron/.pth), then harvests
     credentials and exfiltrates them. Covers npm, pip, and gem attack patterns.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://labs.cloudsecurityalliance.org/research/csa-research-note-teampcp-supply-chain-ai-tooling-20260330-c/

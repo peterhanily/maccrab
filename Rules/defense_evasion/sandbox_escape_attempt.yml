@@ -2,7 +2,7 @@ title: Sandbox Escape Attempt Detected
 id: d1a2b3c4-0220-4000-a000-000000000220
 status: experimental
 description: Detects command-line patterns associated with macOS sandbox escape attempts, including sandbox-exec abuse and known sandbox profile manipulation techniques.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1497/001/

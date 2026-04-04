@@ -2,7 +2,7 @@ title: Swift Compile and Execute from Temp Directory
 id: d1a2b3c4-0207-4000-a000-000000000207
 status: experimental
 description: Detects swiftc compilation of source files from temporary directories followed by execution. Adversaries may compile and run Swift code on-the-fly to evade detection by avoiding pre-compiled binaries.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1059/

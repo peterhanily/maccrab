@@ -2,7 +2,7 @@ title: at Job Scheduled
 id: d1a2b3c4-0018-4000-a000-000000000018
 status: experimental
 description: Detects use of the at command to schedule one-time job execution, which can be used for persistence or delayed payload execution.
-author: HawkEye Community
+author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1053/002/
