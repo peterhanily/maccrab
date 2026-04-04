@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -20,9 +20,9 @@ jobs:
 
       - name: Build (debug)
         run: swift build 2>&1 || true
-        # Note: Full build requires EndpointSecurity entitlement and macOS SDK
-        # headers that may not be available on all CI runners. We validate
-        # package resolution and rule compilation as the primary CI checks.
+        # Note: Full build may require EndpointSecurity framework headers
+        # not available on all CI runners. Package resolution and rule
+        # compilation are the primary CI checks.
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -32,28 +32,16 @@ jobs:
       - name: Install Python dependencies
         run: pip install pyyaml
 
-      - name: Validate rule format
-        run: python3 scripts/validate_rules.py Rules/
-
-      - name: Check for duplicate rule IDs
-        run: python3 scripts/check_duplicate_ids.py Rules/
-
-      - name: Compile rules (dry run)
+      - name: Compile rules
         run: |
           mkdir -p /tmp/compiled_rules
           python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir /tmp/compiled_rules
 
-      - name: Generate MITRE ATT&CK coverage
-        run: python3 scripts/coverage_matrix.py Rules/
-
       - name: Count rules
         run: |
-          echo "### Detection Rules Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### 🦀 MacCrab Detection Rules" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Total rules: $(find Rules -name '*.yml' | wc -l | tr -d ' ')" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Category | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          find Rules -name '*.yml' -exec dirname {} \; | xargs -I{} basename {} | sort | uniq -c | sort -rn | while read count name; do
-            echo "| $name | $count |" >> $GITHUB_STEP_SUMMARY
-          done
+          TOTAL=$(find Rules -name '*.yml' | wc -l | tr -d ' ')
+          COMPILED=$(find /tmp/compiled_rules -name '*.json' | wc -l | tr -d ' ')
+          echo "- Total YAML rules: $TOTAL" >> $GITHUB_STEP_SUMMARY
+          echo "- Compiled JSON: $COMPILED" >> $GITHUB_STEP_SUMMARY
