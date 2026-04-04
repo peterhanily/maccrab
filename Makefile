@@ -71,8 +71,14 @@ test:
 test-full:
 	./scripts/test.sh
 
+test-fp:
+	./scripts/false-positive-test.sh
+
 test-integration:
 	./scripts/integration-test.sh
+
+lint-rules:
+	./scripts/rule-lint.sh
 
 test-stress:
 	./scripts/stress-test.sh 60

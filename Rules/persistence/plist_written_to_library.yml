@@ -22,7 +22,14 @@ detection:
             - '/private/tmp/'
             - '/var/tmp/'
             - '/var/folders/'
-    condition: selection_target and selection_source
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection_target and selection_source and not filter_system and not filter_apple_signed
 falsepositives:
     - Installer packages writing configuration plists
     - Legitimate software first-run configuration

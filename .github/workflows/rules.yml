@@ -31,5 +31,8 @@ jobs:
           mkdir -p /tmp/compiled_rules
           python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir /tmp/compiled_rules
 
+      - name: Lint rules for system process filter coverage
+        run: ./scripts/rule-lint.sh
+
       - name: Generate MITRE ATT&CK coverage matrix
         run: python3 scripts/coverage_matrix.py Rules/

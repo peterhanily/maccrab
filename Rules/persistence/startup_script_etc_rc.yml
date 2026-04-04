@@ -19,7 +19,14 @@ detection:
             - '/etc/rc.local'
             - '/private/etc/rc.d/'
             - '/private/etc/rc.local'
-    condition: selection
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
 falsepositives:
     - Legacy system administration scripts
     - Very old configuration management tools

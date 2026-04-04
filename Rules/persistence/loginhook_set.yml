@@ -22,7 +22,14 @@ detection:
             - 'LogoutHook'
     selection_write:
         CommandLine|contains: 'write'
-    condition: selection and selection_hook and selection_write
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and selection_hook and selection_write and not filter_system and not filter_apple_signed
 falsepositives:
     - Legacy enterprise management tools that still use login hooks
     - IT administrators configuring login scripts

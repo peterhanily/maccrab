@@ -20,7 +20,14 @@ detection:
             - '/tmp/'
             - '/private/tmp/'
             - '/var/folders/'
-    condition: selection_btm and selection_process
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection_btm and selection_process and not filter_system and not filter_apple_signed
 falsepositives:
     - Installer packages running from temp directories
 level: high
