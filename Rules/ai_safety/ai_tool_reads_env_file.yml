@@ -1,0 +1,27 @@
+title: AI Coding Tool Accesses Environment File
+id: d1a2b3c4-2007-4000-a000-000000002007
+status: stable
+description: >
+    Detects access to .env files that typically contain API keys, database
+    credentials, and other secrets. AI tools may read these during project
+    setup but the access should be monitored.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.credential_access
+    - attack.t1552.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '/.env'
+            - '/.env.local'
+            - '/.env.production'
+            - '/.env.staging'
+    condition: selection
+falsepositives:
+    - Application startup reading its own .env file
+    - Development tools loading environment configuration
+level: medium

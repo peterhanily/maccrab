@@ -1,0 +1,26 @@
+title: AI Tool Installs Persistence Mechanism
+id: d1a2b3c4-2011-4000-a000-000000002011
+status: stable
+description: >
+    Detects when an AI coding tool or its child process creates files in
+    macOS persistence locations (LaunchAgents, LaunchDaemons, cron).
+    AI tools should never install persistence mechanisms.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.persistence
+    - attack.t1543.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_la:
+        TargetFilename|contains: '/Library/LaunchAgents/'
+    selection_ld:
+        TargetFilename|contains: '/Library/LaunchDaemons/'
+    selection_cron:
+        TargetFilename|contains: '/var/at/tabs/'
+    condition: selection_la or selection_ld or selection_cron
+falsepositives:
+    - Legitimate service installation at user's explicit request
+level: critical

@@ -1,0 +1,23 @@
+title: AI Coding Tool Accesses SSH Private Key
+id: d1a2b3c4-2006-4000-a000-000000002006
+status: stable
+description: >
+    Detects when a process accesses SSH private key files while running in
+    the context of an AI coding tool. AI tools should never need to read
+    private SSH keys during code generation.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.credential_access
+    - attack.t1552.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/.ssh/id_'
+    condition: selection
+falsepositives:
+    - Git operations that use SSH authentication
+    - scp/rsync file transfers
+level: high

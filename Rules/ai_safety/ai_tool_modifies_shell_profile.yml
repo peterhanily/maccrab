@@ -1,0 +1,27 @@
+title: AI Tool Modifies Shell Profile
+id: d1a2b3c4-2010-4000-a000-000000002010
+status: stable
+description: >
+    Detects when an AI tool or its child process modifies shell profiles
+    (.zshrc, .bashrc, .bash_profile). While sometimes legitimate, this
+    can indicate persistence installation via prompt injection.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.persistence
+    - attack.t1546.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '/.zshrc'
+            - '/.bashrc'
+            - '/.bash_profile'
+            - '/.profile'
+            - '/.zprofile'
+    condition: selection
+falsepositives:
+    - User explicitly asking AI to add PATH entries or aliases
+level: medium

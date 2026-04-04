@@ -174,7 +174,10 @@ struct MacCrabDaemon {
         let aiRegistry = AIToolRegistry()
         let lineageRef = await enricher.lineage
         let aiTracker = AIProcessTracker(lineage: lineageRef, registry: aiRegistry)
-        print("AI Guard active (monitoring Claude Code, Codex, OpenClaw, Cursor)")
+        let credentialFence = CredentialFence()
+        let projectBoundary = ProjectBoundary()
+        print("AI Guard active (monitoring Claude Code, Codex, OpenClaw, Cursor)"
+              + "\n  Credential fence: \(CredentialFence.defaultPaths.count) sensitive paths monitored")
 
         // Statistical anomaly detector
         let statisticalDetector = StatisticalAnomalyDetector(zThreshold: 3.0, minSamples: 50)
@@ -668,6 +671,7 @@ struct MacCrabDaemon {
             let aiProc = enrichedEvent.process
             if let aiType = aiRegistry.isAITool(executablePath: aiProc.executable) {
                 await aiTracker.registerAIProcess(pid: aiProc.pid, type: aiType, projectDir: aiProc.workingDirectory)
+                await projectBoundary.registerBoundary(aiPid: aiProc.pid, projectDir: aiProc.workingDirectory)
                 enrichedEvent.enrichments["ai_tool"] = aiType.rawValue
                 enrichedEvent.enrichments["ai_tool_name"] = aiType.displayName
             } else {
@@ -727,6 +731,71 @@ struct MacCrabDaemon {
                                 detail: "AI tool writing to \(file.path)",
                                 forProcess: aiProc.pid, path: aiProc.executable
                             )
+                        }
+                    }
+
+                    // === Credential Fence: check file access against sensitive paths ===
+                    if let filePath = enrichedEvent.file?.path {
+                        if let (credType, credDesc) = credentialFence.checkAccessDetailed(
+                            filePath: filePath,
+                            aiToolName: aiType?.displayName ?? "AI tool"
+                        ) {
+                            let alert = Alert(
+                                ruleId: "maccrab.ai-guard.credential-access",
+                                ruleTitle: "🦀 AI Tool Accessed \(credType.rawValue)",
+                                severity: .critical,
+                                eventId: enrichedEvent.id.uuidString,
+                                processPath: aiProc.executable,
+                                processName: aiProc.name,
+                                description: credDesc,
+                                mitreTactics: "attack.credential_access",
+                                mitreTechniques: "attack.t1552.001",
+                                suppressed: false
+                            )
+                            try? await alertStore.insert(alert: alert)
+                            await notifier.notify(alert: alert)
+                            await behaviorScoring.addIndicator(
+                                named: "ai_tool_credential_access",
+                                detail: "\(credType.rawValue): \(filePath)",
+                                forProcess: aiProc.pid, path: aiProc.executable
+                            )
+                            print("[CRIT] AI credential access: \(aiType?.displayName ?? "AI") → \(credType.rawValue)")
+                        }
+
+                        // === Project Boundary: check writes outside project dir ===
+                        if let sessionPid = await aiTracker.session(forPid: aiProc.pid)?.aiPid ?? nil {
+                            // Noop — use the session lookup below
+                        }
+                        // Check via the child-to-session mapping
+                        let sessions = await aiTracker.activeSessions()
+                        for session in sessions where session.childPids.contains(aiProc.pid) || session.aiPid == aiProc.pid {
+                            if let violation = await projectBoundary.checkWrite(
+                                filePath: filePath,
+                                aiSessionPid: session.aiPid,
+                                aiToolName: aiType?.displayName ?? "AI tool"
+                            ) {
+                                let alert = Alert(
+                                    ruleId: "maccrab.ai-guard.boundary-violation",
+                                    ruleTitle: "🦀 AI Tool Wrote Outside Project Directory",
+                                    severity: .high,
+                                    eventId: enrichedEvent.id.uuidString,
+                                    processPath: aiProc.executable,
+                                    processName: aiProc.name,
+                                    description: violation.description,
+                                    mitreTactics: "attack.defense_evasion",
+                                    mitreTechniques: "attack.t1036",
+                                    suppressed: false
+                                )
+                                try? await alertStore.insert(alert: alert)
+                                await notifier.notify(alert: alert)
+                                await behaviorScoring.addIndicator(
+                                    named: "ai_tool_boundary_violation",
+                                    detail: "Wrote to \(filePath) outside \(session.projectDir)",
+                                    forProcess: aiProc.pid, path: aiProc.executable
+                                )
+                                print("[HIGH] AI boundary violation: \(filePath) outside \(session.projectDir)")
+                            }
+                            break
                         }
                     }
                 }
