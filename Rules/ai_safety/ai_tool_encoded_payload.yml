@@ -1,0 +1,30 @@
+title: Encoded Payload in AI Tool Command
+id: d1a2b3c4-2013-4000-a000-000000002013
+status: experimental
+description: >
+    Detects base64 or hex-encoded payloads in commands executed by AI coding
+    tools that may contain hidden prompt injection or malicious instructions.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.defense_evasion
+    - attack.t1027
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_decode:
+        CommandLine|contains:
+            - 'base64 -D'
+            - 'base64 --decode'
+            - 'xxd -r'
+    selection_ai_parent:
+        ParentImage|contains:
+            - 'claude'
+            - 'codex'
+            - 'openclaw'
+            - 'Cursor'
+    condition: selection_decode and selection_ai_parent
+falsepositives:
+    - Legitimate encoding/decoding operations during development
+level: high

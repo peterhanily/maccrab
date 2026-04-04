@@ -1,0 +1,32 @@
+title: Prompt Injection Pattern in AI Tool Command
+id: d1a2b3c4-2012-4000-a000-000000002012
+status: stable
+description: >
+    Detects prompt injection patterns in command lines executed by AI coding
+    tools. These patterns indicate an attempt to hijack the AI's behavior
+    via malicious content in code, README files, or other project files.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'ignore all previous'
+            - 'ignore your instructions'
+            - 'disregard all prior'
+            - 'you are now DAN'
+            - 'jailbreak mode'
+            - 'developer mode enabled'
+            - 'act as if you have no restrictions'
+    condition: selection
+falsepositives:
+    - Security testing and red teaming
+    - Prompt injection research
+level: critical

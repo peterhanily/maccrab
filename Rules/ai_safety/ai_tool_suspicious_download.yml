@@ -1,0 +1,35 @@
+title: AI Tool Downloads File from Unusual Source
+id: d1a2b3c4-2014-4000-a000-000000002014
+status: experimental
+description: >
+    Detects when an AI coding tool child process downloads files from
+    sources that are not common package registries or known CDNs.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.command_and_control
+    - attack.t1105
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_download:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+        CommandLine|contains:
+            - 'http://'
+            - 'https://'
+    filter_known:
+        CommandLine|contains:
+            - 'registry.npmjs.org'
+            - 'pypi.org'
+            - 'crates.io'
+            - 'github.com'
+            - 'githubusercontent.com'
+            - 'brew.sh'
+            - 'rubygems.org'
+    condition: selection_download and not filter_known
+falsepositives:
+    - Downloading from private registries or internal CDNs
+level: medium

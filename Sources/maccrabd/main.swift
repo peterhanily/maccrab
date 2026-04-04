@@ -176,8 +176,11 @@ struct MacCrabDaemon {
         let aiTracker = AIProcessTracker(lineage: lineageRef, registry: aiRegistry)
         let credentialFence = CredentialFence()
         let projectBoundary = ProjectBoundary()
-        print("AI Guard active (monitoring Claude Code, Codex, OpenClaw, Cursor)"
-              + "\n  Credential fence: \(CredentialFence.defaultPaths.count) sensitive paths monitored")
+        let injectionScanner = PromptInjectionScanner(confidenceThreshold: 40)
+        let scannerStatus = await injectionScanner.isAvailable ? "active" : "unavailable (pip install forensicate)"
+        print("AI Guard active (monitoring Claude Code, Codex, OpenClaw, Cursor)")
+        print("  Credential fence: \(CredentialFence.defaultPaths.count) sensitive paths")
+        print("  Prompt injection scanner: \(scannerStatus)")
 
         // Statistical anomaly detector
         let statisticalDetector = StatisticalAnomalyDetector(zThreshold: 3.0, minSamples: 50)
@@ -796,6 +799,33 @@ struct MacCrabDaemon {
                                 print("[HIGH] AI boundary violation: \(filePath) outside \(session.projectDir)")
                             }
                             break
+                        }
+                    }
+                    // === Prompt Injection Scanning (Forensicate.ai) ===
+                    if await injectionScanner.isAvailable {
+                        let textToScan = aiProc.commandLine
+                        if !textToScan.isEmpty, textToScan.count > 20 {
+                            if let (indicator, detail) = await injectionScanner.scanForSeverity(textToScan) {
+                                let alert = Alert(
+                                    ruleId: "maccrab.ai-guard.prompt-injection",
+                                    ruleTitle: "🦀 Prompt Injection Detected in AI Tool Command",
+                                    severity: indicator.contains("critical") || indicator.contains("compound") ? .critical : .high,
+                                    eventId: enrichedEvent.id.uuidString,
+                                    processPath: aiProc.executable,
+                                    processName: aiProc.name,
+                                    description: "Prompt injection detected in command executed by \(aiType?.displayName ?? "AI tool"). \(detail)",
+                                    mitreTactics: "attack.initial_access",
+                                    mitreTechniques: "attack.t1195.001",
+                                    suppressed: false
+                                )
+                                try? await alertStore.insert(alert: alert)
+                                await notifier.notify(alert: alert)
+                                await behaviorScoring.addIndicator(
+                                    named: indicator, detail: detail,
+                                    forProcess: aiProc.pid, path: aiProc.executable
+                                )
+                                print("[CRIT] Prompt injection in AI context: \(detail.prefix(100))")
+                            }
                         }
                     }
                 }

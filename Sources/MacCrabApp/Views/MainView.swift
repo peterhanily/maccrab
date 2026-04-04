@@ -69,6 +69,13 @@ struct MainView: View {
                     .tag(AppState.Tab.tcc)
                     .keyboardShortcut("4", modifiers: .command)
 
+                AIActivityView(appState: appState)
+                    .tabItem {
+                        Label("AI Guard", systemImage: "cpu")
+                    }
+                    .tag(AppState.Tab.aiGuard)
+                    .keyboardShortcut("5", modifiers: .command)
+
                 DocsView()
                     .tabItem {
                         Label("Docs", systemImage: "book")
