@@ -357,36 +357,141 @@ public actor SelfDefense {
 
     // MARK: - Periodic Checks
 
+    /// Tracks the last known PID for watchdog verification.
+    private let startPID = getpid()
+    private var lastParentPID = getppid()
+    private var processStartTime = Date()
+    private var consecutiveTamperCount = 0
+
     private func startPeriodicChecks() {
         Task {
             while isActive {
-                try? await Task.sleep(nanoseconds: 30_000_000_000) // Every 30 seconds
+                try? await Task.sleep(nanoseconds: 15_000_000_000) // Every 15 seconds
                 guard isActive else { break }
 
-                // Anti-debug continuous check
+                // 1. Anti-debug continuous check
                 if Self.isBeingDebugged() {
                     let event = TamperEvent(
                         type: .debuggerAttached,
-                        description: "Debugger attached to MacCrab (PID \(getpid())). Attempting to detach.",
+                        description: "Debugger attached to MacCrab (PID \(getpid())). This may indicate reverse engineering or tampering.",
                         severity: .critical
                     )
                     await handleTamperEvent(event)
-                    // Log for forensic record — ptrace(PT_DENY_ATTACH) requires C interop
                     logger.critical("Debugger detected — anti-debug measures logged")
                 }
 
-                // Integrity check
+                // 2. Integrity check (binary hash, rules hash, file existence)
                 let events = integrityCheck()
                 for event in events {
                     await handleTamperEvent(event)
                 }
 
-                // If plist was deleted, attempt to re-register with launchd
+                // 3. Process identity verification — are we still who we think we are?
+                let currentPID = getpid()
+                if currentPID != startPID {
+                    await handleTamperEvent(TamperEvent(
+                        type: .binaryModified,
+                        description: "PID changed from \(startPID) to \(currentPID). Process may have been replaced.",
+                        severity: .critical
+                    ))
+                }
+
+                // 4. Parent process change detection (re-parenting attack)
+                let currentParent = getppid()
+                if currentParent != lastParentPID && lastParentPID != 1 {
+                    // Parent changed and it wasn't orphan adoption by launchd
+                    await handleTamperEvent(TamperEvent(
+                        type: .processKillAttempt,
+                        description: "Parent process changed from PID \(lastParentPID) to \(currentParent). Possible process manipulation.",
+                        severity: .high
+                    ))
+                    lastParentPID = currentParent
+                }
+
+                // 5. LaunchDaemon plist restoration check
                 let plistPath = "/Library/LaunchDaemons/com.maccrab.daemon.plist"
                 if monitoredPaths.contains(where: { $0.path == plistPath })
                     && !FileManager.default.fileExists(atPath: plistPath) {
-                    logger.critical("LaunchDaemon plist deleted — MacCrab will not auto-start on reboot")
+                    await handleTamperEvent(TamperEvent(
+                        type: .plistRemoved,
+                        description: "LaunchDaemon plist deleted — MacCrab will not auto-start on reboot. Path: \(plistPath)",
+                        path: plistPath,
+                        severity: .critical
+                    ))
                 }
+
+                // 6. Check if another process is impersonating MacCrab
+                await checkForImpersonation()
+
+                // 7. Verify environment hasn't been tampered with
+                checkEnvironmentIntegrity()
+
+                // 8. Escalate if we see repeated tampering
+                if !events.isEmpty {
+                    consecutiveTamperCount += 1
+                    if consecutiveTamperCount >= 3 {
+                        await handleTamperEvent(TamperEvent(
+                            type: .binaryModified,
+                            description: "SUSTAINED TAMPERING DETECTED: \(consecutiveTamperCount) consecutive integrity failures. Active attack in progress.",
+                            severity: .critical
+                        ))
+                    }
+                } else {
+                    consecutiveTamperCount = 0
+                }
+            }
+        }
+    }
+
+    // MARK: - Impersonation Detection
+
+    /// Check if another process is running with our name (possible replacement attack).
+    private func checkForImpersonation() async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-x", "maccrabd"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let pids = output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+
+        // Filter out our own PID
+        let otherPids = pids.filter { $0 != getpid() }
+        if !otherPids.isEmpty {
+            await handleTamperEvent(TamperEvent(
+                type: .processKillAttempt,
+                description: "Another maccrabd process detected (PIDs: \(otherPids)). Possible replacement or injection attack.",
+                severity: .critical
+            ))
+        }
+    }
+
+    // MARK: - Environment Integrity
+
+    /// Check for environment variable tampering that could affect security.
+    private func checkEnvironmentIntegrity() {
+        let suspiciousVars = [
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_FRAMEWORK_PATH",
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FORCE_FLAT_NAMESPACE",
+            "CFNETWORK_LIBRARY_PATH",
+            "MallocStackLogging",
+        ]
+
+        let env = Foundation.ProcessInfo.processInfo.environment
+        for varName in suspiciousVars {
+            if let value = env[varName], !value.isEmpty {
+                let event = TamperEvent(
+                    type: .binaryModified,
+                    description: "Suspicious environment variable set on MacCrab: \(varName)=\(value.prefix(100)). Possible library injection.",
+                    severity: .critical
+                )
+                Task { await handleTamperEvent(event) }
             }
         }
     }
@@ -396,15 +501,24 @@ public actor SelfDefense {
     private func handleTamperEvent(_ event: TamperEvent) {
         logger.critical("TAMPER DETECTED: [\(event.type.rawValue)] \(event.description)")
 
-        // Write tamper event to a separate forensic log that's harder to tamper with
-        let forensicLog = NSTemporaryDirectory() + "maccrab_tamper.log"
+        // Write to multiple forensic log locations (harder to tamper with all simultaneously)
+        let logLocations = [
+            NSTemporaryDirectory() + "maccrab_tamper.log",
+            "/var/log/maccrab_tamper.log",  // May fail without root — that's OK
+            NSHomeDirectory() + "/.maccrab_tamper.log",
+        ]
+
         let line = "[\(ISO8601DateFormatter().string(from: event.timestamp))] [\(event.type.rawValue)] \(event.description)\n"
-        if let handle = FileHandle(forWritingAtPath: forensicLog) {
-            handle.seekToEndOfFile()
-            handle.write(line.data(using: .utf8)!)
-            handle.closeFile()
-        } else {
-            FileManager.default.createFile(atPath: forensicLog, contents: line.data(using: .utf8))
+        let lineData = line.data(using: .utf8)!
+
+        for logPath in logLocations {
+            let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+            if fd >= 0 {
+                lineData.withUnsafeBytes { ptr in
+                    _ = write(fd, ptr.baseAddress!, ptr.count)
+                }
+                close(fd)
+            }
         }
 
         tamperHandler?(event)
