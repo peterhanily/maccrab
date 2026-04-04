@@ -100,9 +100,11 @@ check_alert() {
     fi
 }
 
-# Helper: count alerts before/after
+# Helper: count alerts in the database
 count_alerts() {
-    .build/debug/maccrabctl alerts 1000 2>/dev/null | grep -c "^[🔴🟡🟠🟢⚪]" 2>/dev/null || echo "0"
+    local count
+    count=$(sqlite3 "$HOME/Library/Application Support/MacCrab/events.db" "SELECT COUNT(*) FROM alerts;" 2>/dev/null) || true
+    echo "${count:-0}" | tr -d '[:space:]'
 }
 
 INITIAL_ALERTS=$(count_alerts || echo "0")
@@ -429,22 +431,22 @@ echo -e "${BOLD}Detection Coverage:${NC}"
 
 # Check for specific detection categories
 CATEGORIES=(
-    "reverse.shell:Reverse Shell"
-    "osascript:AppleScript Execution"
-    "launch.agent:LaunchAgent Persistence"
-    "quarantine:Quarantine Bypass"
-    "curl:Network Connection"
-    "authorization:Auth Plugin"
-    "sip:SIP Status"
-    "keychain:Credential Access"
-    "base64:Base64 Decode"
-    "dyld:DYLD Injection"
-    "behavioral:Behavioral Score"
-    "entropy:Entropy/DGA"
+    "event.tap:Event Tap / Keylogger Detection"
+    "quarantine:Quarantine Bypass Detection"
+    "launchagent:LaunchAgent Persistence Detection"
+    "launch.agent:LaunchAgent (alt pattern)"
+    "unsigned:Unsigned Process Detection"
+    "cookie:Browser Data Access Detection"
+    "sip:SIP Status Detection"
+    "authorization:Auth Plugin Detection"
+    "behavioral:Behavioral Score Detection"
+    "entropy:Entropy/DGA Detection"
     "dns:DNS Detection"
+    "xprotect:XProtect Status Detection"
+    "spotlight:Spotlight Importer Detection"
 )
 
-ALERT_TEXT=$(.build/debug/maccrabctl alerts 100 2>/dev/null || echo "")
+ALERT_TEXT=$(sqlite3 "$HOME/Library/Application Support/MacCrab/events.db" "SELECT rule_title || ' ' || COALESCE(description,'') FROM alerts;" 2>/dev/null || echo "")
 for cat_check in "${CATEGORIES[@]}"; do
     pattern="${cat_check%%:*}"
     name="${cat_check##*:}"
