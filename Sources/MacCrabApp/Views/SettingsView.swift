@@ -212,7 +212,7 @@ struct SettingsView: View {
                 .frame(width: 200)
 
             VStack(spacing: 4) {
-                Text("7 event sources  |  8 detection layers  |  227 rules")
+                Text("7 event sources | 8 detection layers | 241 rules")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Text("Apache 2.0 (code)  |  DRL 1.1 (rules)")

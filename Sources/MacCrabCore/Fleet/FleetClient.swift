@@ -220,7 +220,7 @@ public actor FleetClient {
         process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
         try? process.run()
-        inputPipe.fileHandleForWriting.write(string.data(using: .utf8)!)
+        inputPipe.fileHandleForWriting.write(string.data(using: .utf8) ?? Data())
         inputPipe.fileHandleForWriting.closeFile()
         process.waitUntilExit()
         let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""

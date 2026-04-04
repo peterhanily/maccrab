@@ -509,7 +509,7 @@ public actor SelfDefense {
         ]
 
         let line = "[\(ISO8601DateFormatter().string(from: event.timestamp))] [\(event.type.rawValue)] \(event.description)\n"
-        let lineData = line.data(using: .utf8)!
+        let lineData = line.data(using: .utf8) ?? Data()
 
         for logPath in logLocations {
             let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o600)
