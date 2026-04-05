@@ -18,6 +18,11 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 # Copy executable
 cp "$BUILD_DIR/MacCrabApp" "$APP_BUNDLE/Contents/MacOS/MacCrab"
 
+# Copy app icon
+if [ -f "$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns" ]; then
+    cp "$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+fi
+
 # Create Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,12 +41,14 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>0.5.0</string>
     <key>CFBundleExecutable</key>
     <string>MacCrab</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
