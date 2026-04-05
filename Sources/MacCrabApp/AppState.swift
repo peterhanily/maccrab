@@ -108,18 +108,13 @@ final class AppState: ObservableObject {
     // MARK: Public interface
 
     func refresh() async {
-        // Check daemon connectivity via DB modification time (no subprocess spawn)
+        // Check daemon connectivity: DB exists + has data = connected
+        // Also check for WAL file which indicates active writer (daemon)
         let dbPath = dataDir + "/events.db"
         let fm = FileManager.default
-        let dbExists = fm.fileExists(atPath: dbPath)
-
-        if dbExists {
-            // DB modified in last 30 seconds means daemon is active
-            let modDate = (try? fm.attributesOfItem(atPath: dbPath))?[.modificationDate] as? Date
-            isConnected = modDate.map { Date().timeIntervalSince($0) < 30 } ?? false
-        } else {
-            isConnected = false
-        }
+        let dbExists = fm.isReadableFile(atPath: dbPath)
+        let walExists = fm.fileExists(atPath: dbPath + "-wal")
+        isConnected = dbExists && (walExists || fm.fileExists(atPath: dbPath + "-shm"))
 
         guard dbExists else {
             eventsPerSecond = 0
