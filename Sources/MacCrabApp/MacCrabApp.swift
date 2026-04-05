@@ -141,18 +141,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showDashboard() {
         NSApplication.shared.activate(ignoringOtherApps: true)
-        for window in NSApplication.shared.windows where window.title.contains("MacCrab") {
+        // Try to find and show any existing window
+        if let window = NSApplication.shared.windows.first(where: { !$0.title.isEmpty && $0.title != "Item-0" }) {
             window.makeKeyAndOrderFront(nil)
             return
+        }
+        // If no window found, show all windows (unhides minimized ones)
+        for window in NSApplication.shared.windows {
+            window.makeKeyAndOrderFront(nil)
         }
     }
 
     @objc private func openSettings() {
         NSApplication.shared.activate(ignoringOtherApps: true)
+        // Use the standard macOS settings mechanism
         if #available(macOS 14.0, *) {
-            NSApplication.shared.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
         } else {
-            NSApplication.shared.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
     }
 
