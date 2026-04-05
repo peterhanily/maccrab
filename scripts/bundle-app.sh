@@ -31,9 +31,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.maccrab.app</string>
     <key>CFBundleVersion</key>
-    <string>0.4.0</string>
+    <string>0.5.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.4.0</string>
+    <string>0.5.0</string>
     <key>CFBundleExecutable</key>
     <string>MacCrab</string>
     <key>CFBundlePackageType</key>
@@ -41,7 +41,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
-    <false/>
+    <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>

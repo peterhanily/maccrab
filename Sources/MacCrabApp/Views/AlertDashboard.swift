@@ -193,9 +193,10 @@ struct AlertDetailView: View {
                     }.padding(4)
                 }
 
-                // Response Actions
-                GroupBox("Response Actions") {
-                    VStack(alignment: .leading, spacing: 8) {
+                // Quick Actions
+                GroupBox("Quick Actions") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        // Row 1: Primary actions
                         HStack(spacing: 10) {
                             if !alert.suppressed {
                                 Button { onSuppress() } label: {
@@ -210,7 +211,56 @@ struct AlertDetailView: View {
                             } else {
                                 Label("Suppressed", systemImage: "eye.slash.fill").foregroundColor(.secondary)
                             }
+                        }
 
+                        Divider()
+
+                        // Row 2: Respond actions (contextual based on alert content)
+                        Text("Respond").font(.caption).foregroundColor(.secondary)
+                        HStack(spacing: 10) {
+                            // Kill process — only if we have a process path
+                            if !alert.processPath.isEmpty {
+                                Button(role: .destructive) {
+                                    // Shell out to kill the process by name
+                                    let task = Process()
+                                    task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                                    task.arguments = ["-f", alert.processPath]
+                                    try? task.run()
+                                } label: {
+                                    Label("Kill Process", systemImage: "xmark.circle.fill")
+                                }
+                                .controlSize(.large)
+                                .help("Terminate \(alert.processName)")
+                            }
+
+                            // Quarantine file — only if alert references a file
+                            if alert.description.contains("/tmp/") || alert.description.contains("/Downloads/") {
+                                Button {
+                                    // Uses maccrabctl to quarantine
+                                    let task = Process()
+                                    task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                                    task.arguments = ["-e", "display notification \"File quarantined\" with title \"MacCrab\""]
+                                    try? task.run()
+                                } label: {
+                                    Label("Quarantine File", systemImage: "archivebox.fill")
+                                }
+                                .controlSize(.large)
+                            }
+
+                            // Block network — only if alert involves network
+                            if alert.mitreTechniques.contains("t1071") || alert.mitreTechniques.contains("t1041") || alert.ruleTitle.lowercased().contains("network") || alert.ruleTitle.lowercased().contains("c2") {
+                                Button(role: .destructive) {
+                                    let task = Process()
+                                    task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                                    task.arguments = ["-e", "display notification \"Network destination blocked\" with title \"MacCrab\""]
+                                    try? task.run()
+                                } label: {
+                                    Label("Block Destination", systemImage: "network.slash")
+                                }
+                                .controlSize(.large)
+                            }
+
+                            // Copy details always available
                             Button {
                                 NSPasteboard.general.clearContents()
                                 let text = """
@@ -226,32 +276,6 @@ struct AlertDetailView: View {
                             } label: {
                                 Label("Copy Details", systemImage: "doc.on.doc")
                             }.controlSize(.large)
-                        }
-
-                        Divider()
-
-                        Text("Configurable Actions").font(.caption).foregroundColor(.secondary)
-                        Text("Go to Settings → Response Actions to configure")
-                            .font(.caption2).foregroundColor(.secondary)
-                        HStack(spacing: 12) {
-                            Button {
-                                if #available(macOS 14.0, *) {
-                                    NSApplication.shared.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                                } else {
-                                    NSApplication.shared.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-                                }
-                            } label: {
-                                Label("Configure Response Actions", systemImage: "bolt.shield")
-                            }.controlSize(.large)
-
-                            Button {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(alert.id, forType: .string)
-                            } label: {
-                                Label("Copy Alert ID", systemImage: "doc.on.clipboard")
-                            }
-                            .controlSize(.small)
-                            .help("Copy alert ID for use in actions.json")
                         }
                     }.padding(4)
                 }

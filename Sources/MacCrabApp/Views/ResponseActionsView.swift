@@ -40,6 +40,12 @@ struct ResponseActionsView: View {
                 Text("Response Actions")
                     .font(.title2).fontWeight(.bold)
                 Spacer()
+                Button {
+                    config = ActionConfig()  // Resets to built-in defaults
+                    save()
+                } label: {
+                    Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
+                }.controlSize(.small)
                 Button { showAddSheet = true } label: {
                     Label("Add Rule Action", systemImage: "plus")
                 }.buttonStyle(.borderedProminent).controlSize(.small)
@@ -161,7 +167,10 @@ struct ResponseActionsView: View {
 
     private func load() {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let decoded = try? JSONDecoder().decode(ActionConfig.self, from: data) else { return }
+              let decoded = try? JSONDecoder().decode(ActionConfig.self, from: data) else {
+            // No config file — use built-in defaults (already set via default values)
+            return
+        }
         config = decoded
     }
 
@@ -179,12 +188,60 @@ struct ResponseActionsView: View {
 // MARK: - Data Models
 
 private struct ActionConfig: Codable {
-    var defaults: [ActionEntry] = []
-    var rules: [String: [ActionEntry]] = [:]
+    var defaults: [ActionEntry] = ActionConfig.builtInDefaults
+    var rules: [String: [ActionEntry]] = ActionConfig.builtInRuleActions
+
+    static let builtInDefaults: [ActionEntry] = [
+        ActionEntry(action: "notify", minimumSeverity: "critical", scriptPath: nil),
+        ActionEntry(action: "log", minimumSeverity: "low", scriptPath: nil),
+    ]
+
+    static let builtInRuleActions: [String: [ActionEntry]] = [
+        // AI Guard — critical credential access gets escalated notification
+        "maccrab.ai-guard.credential-access": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "high", scriptPath: nil),
+        ],
+        // Event tap keylogger — kill the process
+        "maccrab.deep.event-tap-keylogger": [
+            ActionEntry(action: "kill", minimumSeverity: "critical", scriptPath: nil),
+            ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil),
+        ],
+        // Prompt injection — escalated notification
+        "maccrab.ai-guard.prompt-injection": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "high", scriptPath: nil),
+        ],
+        // Cross-process attack chain — escalated notification
+        "maccrab.correlator.cross-process": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "high", scriptPath: nil),
+        ],
+        // MCP suspicious server — escalated notification
+        "maccrab.ai-guard.mcp-mcp_server_suspicious": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "high", scriptPath: nil),
+        ],
+        // AI boundary violation — notify
+        "maccrab.ai-guard.boundary-violation": [
+            ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil),
+        ],
+        // Behavioral score threshold — escalated notification
+        "maccrab.behavior.composite": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "high", scriptPath: nil),
+        ],
+        // Threat intel DNS match — escalated notification + block
+        "maccrab.dns.threat-intel-match": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "critical", scriptPath: nil),
+        ],
+        // Self-defense tamper — escalated notification
+        "maccrab.self-defense.binary_modified": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "critical", scriptPath: nil),
+        ],
+        "maccrab.self-defense.rules_modified": [
+            ActionEntry(action: "escalateNotification", minimumSeverity: "critical", scriptPath: nil),
+        ],
+    ]
 }
 
 private struct ActionEntry: Codable {
-    var action: String // "log", "notify", "kill", "quarantine", "script"
+    var action: String // "log", "notify", "kill", "quarantine", "script", "escalateNotification", "blockNetwork"
     var minimumSeverity: String // "low", "medium", "high", "critical"
     var scriptPath: String?
 }
@@ -195,7 +252,7 @@ private struct ActionRow: View {
     @Binding var action: ActionEntry
     let onDelete: () -> Void
 
-    let actions = ["log", "notify", "kill", "quarantine", "script"]
+    let actions = ["log", "notify", "escalateNotification", "kill", "quarantine", "blockNetwork", "script"]
     let severities = ["informational", "low", "medium", "high", "critical"]
 
     var actionIcon: String {
@@ -204,6 +261,8 @@ private struct ActionRow: View {
         case "quarantine": return "archivebox.fill"
         case "script": return "terminal.fill"
         case "notify": return "bell.fill"
+        case "escalateNotification": return "bell.badge.fill"
+        case "blockNetwork": return "network.slash"
         default: return "doc.text"
         }
     }
@@ -214,6 +273,8 @@ private struct ActionRow: View {
         case "quarantine": return .orange
         case "script": return .blue
         case "notify": return .green
+        case "escalateNotification": return .purple
+        case "blockNetwork": return .red
         default: return .secondary
         }
     }
@@ -282,11 +343,13 @@ private struct AddRuleActionSheet: View {
 
             HStack {
                 Picker("Action", selection: $action.action) {
+                    Text("Log Only").tag("log")
                     Text("Notify").tag("notify")
+                    Text("Escalate Notification").tag("escalateNotification")
                     Text("Kill Process").tag("kill")
                     Text("Quarantine File").tag("quarantine")
+                    Text("Block Network").tag("blockNetwork")
                     Text("Run Script").tag("script")
-                    Text("Log Only").tag("log")
                 }.controlSize(.large)
 
                 Picker("Min Severity", selection: $action.minimumSeverity) {
