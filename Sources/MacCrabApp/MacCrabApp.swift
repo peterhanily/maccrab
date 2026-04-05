@@ -98,9 +98,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDashboard()
             })
 
-            let styledView = popoverView.preferredColorScheme(.dark)
-            let hostingController = NSHostingController(rootView: styledView)
-            let contentSize = NSSize(width: 340, height: 220)
+            let bubbleView = SpeechBubbleWrapper(content: popoverView)
+            let hostingController = NSHostingController(rootView: bubbleView)
+            let contentSize = NSSize(width: 340, height: 240)
             hostingController.preferredContentSize = contentSize
 
             // Use a floating panel positioned in the top-right corner
@@ -122,7 +122,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             panel.titleVisibility = .hidden
             panel.titlebarAppearsTransparent = true
             panel.isMovableByWindowBackground = true
-            panel.backgroundColor = NSColor(red: 0.12, green: 0.12, blue: 0.18, alpha: 0.95)
+            panel.backgroundColor = .clear
+            panel.isOpaque = false
             panel.hasShadow = true
             panel.orderFrontRegardless()
 
@@ -206,6 +207,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - Speech Bubble Wrapper
+
+struct SpeechBubbleWrapper<Content: View>: View {
+    let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Triangle tail pointing up (toward the menu bar crab)
+            BubbleTail()
+                .fill(Color.white)
+                .frame(width: 20, height: 10)
+                .padding(.trailing, 40)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+
+            // Main bubble body
+            content
+                .padding(0)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .shadow(color: .black.opacity(0.15), radius: 12, x: 0, y: 4)
+                .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
+        }
+        .padding(8)
+    }
+}
+
+/// A small triangle shape for the speech bubble tail
+struct BubbleTail: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
 // MARK: - Alert Popover View (Speech Bubble Content)
 
 struct AlertPopoverView: View {
@@ -242,6 +281,7 @@ struct AlertPopoverView: View {
             // Rule title
             Text(alert.ruleTitle)
                 .font(.system(.body, weight: .semibold))
+                .foregroundColor(.primary)
                 .lineLimit(2)
 
             // Process info
@@ -297,6 +337,7 @@ struct AlertPopoverView: View {
         }
         .padding(14)
         .frame(width: 320)
+        .preferredColorScheme(.light)
     }
 }
 
