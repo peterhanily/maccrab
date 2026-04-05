@@ -206,6 +206,10 @@ struct MacCrabDaemon {
         // AI network sandbox — monitors AI tool network connections against allowlist
         let aiNetworkSandbox = AINetworkSandbox(customConfigPath: supportDir + "/ai_network_allowlist.json")
 
+        // Package freshness checker — queries registries for package age
+        let packageChecker = PackageFreshnessChecker()
+        print("Package freshness checker active (npm, PyPI, Homebrew, Cargo)")
+
         // Cross-process correlator — links events across unrelated process trees
         let crossProcessCorrelator = CrossProcessCorrelator()
 
@@ -964,6 +968,39 @@ struct MacCrabDaemon {
                                 print("[CRIT] Prompt injection in AI context: \(detail.prefix(100))")
                             }
                         }
+                    }
+                }
+            }
+
+            // === Package freshness check for install commands ===
+            if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
+                let packages = PackageFreshnessChecker.parseInstallCommand(enrichedEvent.process.commandLine)
+                if !packages.isEmpty {
+                    let results = await packageChecker.checkPackages(packages)
+                    for result in results where result.riskLevel >= .medium {
+                        let severity: Severity = result.riskLevel == .critical ? .critical : result.riskLevel == .high ? .high : .medium
+                        let alert = Alert(
+                            ruleId: "maccrab.supply-chain.fresh-package",
+                            ruleTitle: "Fresh Package Installed: \(result.name) (\(result.registry.rawValue))",
+                            severity: severity,
+                            eventId: enrichedEvent.id.uuidString,
+                            processPath: enrichedEvent.process.executable,
+                            processName: enrichedEvent.process.name,
+                            description: result.description,
+                            mitreTactics: "attack.initial_access",
+                            mitreTechniques: "attack.t1195.002",
+                            suppressed: false
+                        )
+                        try? await alertStore.insert(alert: alert)
+                        await notifier.notify(alert: alert)
+                        await behaviorScoring.addIndicator(
+                            named: "fresh_package_install",
+                            detail: "\(result.name) (\(result.registry.rawValue)) age: \(result.ageInDays.map { String(format: "%.1f", $0) } ?? "unknown") days",
+                            forProcess: enrichedEvent.process.pid,
+                            path: enrichedEvent.process.executable
+                        )
+                        let riskIcon = result.riskLevel == .critical ? "[CRIT]" : result.riskLevel == .high ? "[HIGH]" : "[MED] "
+                        print("\(riskIcon) Fresh package: \(result.name) (\(result.registry.rawValue)) — \(result.description)")
                     }
                 }
             }
