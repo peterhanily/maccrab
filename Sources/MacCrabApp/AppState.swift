@@ -30,6 +30,9 @@ final class AppState: ObservableObject {
 
     // MARK: Private
 
+    /// Callback for showing critical alert popovers in the menu bar
+    var onCriticalAlert: ((AlertViewModel) -> Void)?
+
     private var pollTimer: AnyCancellable?
     private var previousEventCount: Int = 0
     private var rulesLoaded_cached = false
@@ -292,6 +295,13 @@ final class AppState: ObservableObject {
                 recentAlerts = Array(dashboardAlerts.prefix(5))
                 totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
                 lastAlertTimestamp = newViewModels.first?.timestamp ?? lastAlertTimestamp
+
+                // Trigger crab speech bubble for critical/high alerts
+                if let newest = newViewModels.first,
+                   (newest.severity == .critical || newest.severity == .high),
+                   !newest.suppressed, !isPatternSuppressed(newest) {
+                    onCriticalAlert?(newest)
+                }
             }
         } catch {}
     }
