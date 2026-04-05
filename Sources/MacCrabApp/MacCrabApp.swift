@@ -37,33 +37,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.activate(ignoringOtherApps: true)
+        // Create the status bar item immediately — don't wait for window onAppear
+        createStatusBarItem()
     }
 
     @MainActor func setupStatusBar(appState: AppState) {
-        guard statusItem == nil else { return }
         self.appState = appState
+        // Register callback for critical alert popups
+        appState.onCriticalAlert = { [weak self] alert in
+            self?.showAlertPopover(alert: alert)
+        }
+    }
 
+    private func createStatusBarItem() {
+        guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.title = "🦀"
             button.font = NSFont.systemFont(ofSize: 14)
+            // No menu assigned — left click shows dashboard, right click shows menu
             button.action = #selector(statusBarClicked)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        }
-
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "🦀 MacCrab Active", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d"))
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
-        statusItem?.menu = menu
-
-        // Register callback for critical alert popups
-        appState.onCriticalAlert = { [weak self] alert in
-            self?.showAlertPopover(alert: alert)
         }
     }
 
@@ -125,8 +120,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func statusBarClicked() {
         if let event = NSApp.currentEvent, event.type == .rightMouseUp {
-            // Right-click shows menu
+            // Right-click shows context menu
+            let menu = NSMenu()
+            menu.addItem(NSMenuItem(title: "🦀 MacCrab Active", action: nil, keyEquivalent: ""))
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d"))
+            menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+            statusItem?.menu = menu
             statusItem?.button?.performClick(nil)
+            // Remove menu after showing so left-click works normally next time
+            DispatchQueue.main.async { self.statusItem?.menu = nil }
         } else {
             // Left-click shows dashboard
             showDashboard()
