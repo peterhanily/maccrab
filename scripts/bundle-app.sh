@@ -50,7 +50,10 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc sign so macOS doesn't block it
-codesign --force --sign - "$APP_BUNDLE" 2>/dev/null || true
+# Ad-hoc sign (deep to cover embedded frameworks) so macOS doesn't block it
+codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
+
+# Remove quarantine xattr so macOS doesn't block the app
+xattr -cr "$APP_BUNDLE" 2>/dev/null || true
 
 echo "$APP_BUNDLE"

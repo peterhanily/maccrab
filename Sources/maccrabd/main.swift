@@ -321,20 +321,31 @@ struct MacCrabDaemon {
         print("Network connection collector active (5s poll)")
 
         // Load compiled rules (single-event)
-        // Also check for rules next to the binary (development convenience)
+        // Check both the system dir and the binary-local dir; prefer whichever has more
+        // JSON files (the one with more rules is fresher from a recent build or install).
         let binaryDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().path
         let localCompiledRules = binaryDir + "/compiled_rules"
         let effectiveRulesDir: String
-        if FileManager.default.fileExists(atPath: localCompiledRules) {
-            let localFiles = (try? FileManager.default.contentsOfDirectory(atPath: localCompiledRules))?.filter { $0.hasSuffix(".json") } ?? []
-            if !localFiles.isEmpty {
+        do {
+            let systemFiles = (try? fm.contentsOfDirectory(atPath: compiledRulesDir))?.filter { $0.hasSuffix(".json") } ?? []
+            let localFiles: [String]
+            if fm.fileExists(atPath: localCompiledRules) {
+                localFiles = (try? fm.contentsOfDirectory(atPath: localCompiledRules))?.filter { $0.hasSuffix(".json") } ?? []
+            } else {
+                localFiles = []
+            }
+            if !localFiles.isEmpty && localFiles.count >= systemFiles.count {
+                effectiveRulesDir = localCompiledRules
+                print("Using local compiled rules: \(localCompiledRules) (\(localFiles.count) files, system has \(systemFiles.count))")
+            } else if !systemFiles.isEmpty {
+                effectiveRulesDir = compiledRulesDir
+                print("Using system compiled rules: \(compiledRulesDir) (\(systemFiles.count) files)")
+            } else if !localFiles.isEmpty {
                 effectiveRulesDir = localCompiledRules
                 print("Using local compiled rules: \(localCompiledRules) (\(localFiles.count) files)")
             } else {
                 effectiveRulesDir = compiledRulesDir
             }
-        } else {
-            effectiveRulesDir = compiledRulesDir
         }
         let rulesURL = URL(fileURLWithPath: effectiveRulesDir)
         do {
