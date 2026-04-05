@@ -11,6 +11,8 @@ struct AlertDashboard: View {
     @State private var searchText: String = ""
     @State private var showSuppressed: Bool = false
     @State private var selectedAlert: AlertViewModel? = nil
+    @State private var suppressedAlertName: String?
+    @State private var showUndoToast = false
 
     private var filteredAlerts: [AlertViewModel] {
         var results = appState.dashboardAlerts
@@ -60,10 +62,12 @@ struct AlertDashboard: View {
                 Toggle("Suppressed", isOn: $showSuppressed)
                     .toggleStyle(.checkbox)
                     .font(.caption)
+                    .accessibilityLabel("Show suppressed alerts")
 
                 TextField("Search...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
+                    .frame(minWidth: 150, idealWidth: 200, maxWidth: 300)
+                    .accessibilityLabel("Search alerts")
             }
             .padding()
 
@@ -93,7 +97,13 @@ struct AlertDashboard: View {
                     // Alert list
                     List(filteredAlerts, selection: $selectedAlert) { alert in
                         AlertRow(alert: alert) {
+                            suppressedAlertName = alert.ruleTitle
+                            showUndoToast = true
                             Task { await appState.suppressAlert(alert.id) }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                                showUndoToast = false
+                                suppressedAlertName = nil
+                            }
                         }
                         .tag(alert)
                         .contentShape(Rectangle())
@@ -104,16 +114,39 @@ struct AlertDashboard: View {
                     if let alert = selectedAlert {
                         Divider()
                         AlertDetailView(alert: alert, onSuppress: {
+                            suppressedAlertName = alert.ruleTitle
+                            showUndoToast = true
                             Task { await appState.suppressAlert(alert.id) }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                                showUndoToast = false
+                                suppressedAlertName = nil
+                            }
                         }, onSuppressPattern: {
                             Task { await appState.suppressPattern(ruleTitle: alert.ruleTitle, processName: alert.processName) }
                             selectedAlert = nil
                         })
-                        .frame(width: 400)
+                        .frame(minWidth: 300, idealWidth: 400, maxWidth: 500)
                         .transition(.move(edge: .trailing))
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: selectedAlert)
+            }
+            if showUndoToast, let name = suppressedAlertName {
+                HStack {
+                    Text("Suppressed: \(name)")
+                        .font(.caption)
+                    Spacer()
+                    Button("Undo") {
+                        showUndoToast = false
+                        // TODO: unsuppress the alert
+                    }
+                    .font(.caption)
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .transition(.move(edge: .bottom))
             }
         }
         .task {
@@ -146,6 +179,22 @@ struct AlertDetailView: View {
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(alert.severityColor.opacity(0.1))
                     .clipShape(Capsule())
+
+                    // Show configured response action badge if applicable
+                    if Self.hasConfiguredAction(for: alert) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bolt.shield.fill")
+                                .font(.caption2)
+                            Text("Auto-response configured")
+                                .font(.caption2)
+                        }
+                        .foregroundColor(.purple)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.purple.opacity(0.1))
+                        .clipShape(Capsule())
+                    }
+
                     Spacer()
                     Text(alert.dateTimeString).font(.caption).foregroundColor(.secondary)
                 }
@@ -323,7 +372,9 @@ struct AlertDetailView: View {
                                 NSPasteboard.general.setString(text, forType: .string)
                             } label: {
                                 Label("Copy Details", systemImage: "doc.on.doc")
-                            }.controlSize(.large)
+                            }
+                            .controlSize(.large)
+                            .accessibilityHint("Copies alert details to clipboard")
                         }
 
                         if let feedback = actionFeedback {
@@ -341,6 +392,26 @@ struct AlertDetailView: View {
                 Spacer()
             }.padding()
         }.background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    /// Check if the alert's rule has a configured response action in actions.json.
+    private static func hasConfiguredAction(for alert: AlertViewModel) -> Bool {
+        let fm = FileManager.default
+        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            .map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+
+        let path = fm.isReadableFile(atPath: systemDir + "/actions.json")
+            ? systemDir + "/actions.json"
+            : userDir + "/actions.json"
+
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rules = json["rules"] as? [String: Any] else {
+            return false
+        }
+        return rules.keys.contains(where: { alert.ruleTitle.lowercased().contains($0.lowercased()) || $0 == alert.id })
     }
 }
 

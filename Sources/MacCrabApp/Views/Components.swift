@@ -30,7 +30,7 @@ struct SeverityChip: View {
                 )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(severity.rawValue) severity")
+        .accessibilityLabel("\(severity.label) severity filter")
     }
 }
 

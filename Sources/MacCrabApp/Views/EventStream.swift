@@ -157,7 +157,7 @@ struct EventStream: View {
                        let event = filteredEvents.first(where: { $0.id == selectedID }) {
                         Divider()
                         EventDetailPanel(event: event)
-                            .frame(width: 350)
+                            .frame(minWidth: 280, idealWidth: 350, maxWidth: 450)
                             .transition(.move(edge: .trailing))
                     }
                 }

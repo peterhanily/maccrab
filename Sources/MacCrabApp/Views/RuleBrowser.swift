@@ -140,8 +140,8 @@ struct RuleBrowser: View {
 
                     TextField("Search rules...", text: $searchText)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 250)
-                        .accessibilityLabel("Search detection rules")
+                        .frame(minWidth: 150, idealWidth: 200, maxWidth: 300)
+                        .accessibilityLabel("Search rules")
                 }
                 .padding()
                 .sheet(isPresented: $showRuleWizard) {

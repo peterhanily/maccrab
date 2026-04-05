@@ -32,6 +32,7 @@ struct MainView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Refresh data")
+                .accessibilityLabel("Refresh all data")
             }
             .padding(.horizontal)
             .padding(.vertical, 8)

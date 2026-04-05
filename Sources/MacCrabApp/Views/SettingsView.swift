@@ -36,7 +36,7 @@ struct SettingsView: View {
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
         .padding(20)
-        .frame(width: 520, height: 380)
+        .frame(minWidth: 480, idealWidth: 520, maxWidth: 700, minHeight: 350, idealHeight: 400, maxHeight: 600)
     }
 
     // MARK: - General
@@ -81,6 +81,7 @@ struct SettingsView: View {
 
             GroupBox("Startup") {
                 Toggle("Launch MacCrab at login", isOn: $launchAtLogin)
+                    .accessibilityLabel("Launch MacCrab at login")
                     .padding(8)
             }
 
@@ -91,12 +92,18 @@ struct SettingsView: View {
                         .font(.callout)
 
                     Toggle("Auto-quarantine malicious files", isOn: $autoQuarantine)
+                        .accessibilityLabel("Auto-quarantine malicious files")
+                        .accessibilityHint("Applies only to critical severity alerts")
                         .help("Automatically move files flagged by critical-severity rules to quarantine")
 
                     Toggle("Auto-kill malicious processes", isOn: $autoKill)
+                        .accessibilityLabel("Auto-kill malicious processes")
+                        .accessibilityHint("Applies only to critical severity alerts")
                         .help("Automatically terminate processes that trigger critical detection rules")
 
                     Toggle("Auto-block C2 destinations", isOn: $autoBlock)
+                        .accessibilityLabel("Auto-block C2 destinations")
+                        .accessibilityHint("Applies only to critical severity alerts")
                         .help("Automatically add PF firewall rules to block command-and-control IPs")
 
                     Text("These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab.")
@@ -115,6 +122,7 @@ struct SettingsView: View {
             GroupBox("macOS Notifications") {
                 VStack(alignment: .leading, spacing: 12) {
                     Toggle("Show notifications for detection alerts", isOn: $alertNotifications)
+                        .accessibilityLabel("Show notifications for detection alerts")
 
                     if alertNotifications {
                         HStack {

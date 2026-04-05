@@ -45,10 +45,15 @@ struct ResponseActionsView: View {
                     save()
                 } label: {
                     Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
-                }.controlSize(.small)
+                }
+                .controlSize(.small)
+                .accessibilityLabel("Reset all response actions to defaults")
                 Button { showAddSheet = true } label: {
                     Label("Add Rule Action", systemImage: "plus")
-                }.buttonStyle(.borderedProminent).controlSize(.small)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .accessibilityLabel("Add a new response action rule")
             }
             .padding()
 
@@ -111,7 +116,9 @@ struct ResponseActionsView: View {
                                             save()
                                         } label: {
                                             Image(systemName: "trash").foregroundColor(.red).font(.caption)
-                                        }.buttonStyle(.borderless)
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .accessibilityLabel("Delete this action")
                                     }
 
                                     ForEach((config.rules[ruleId] ?? []).indices, id: \.self) { i in
@@ -316,7 +323,9 @@ private struct ActionRow: View {
 
             Button { onDelete() } label: {
                 Image(systemName: "minus.circle").foregroundColor(.red)
-            }.buttonStyle(.borderless)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Delete this action")
         }
         .padding(.vertical, 2)
     }
