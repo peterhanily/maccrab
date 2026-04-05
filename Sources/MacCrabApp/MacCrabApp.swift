@@ -287,8 +287,10 @@ struct AlertPopoverView: View {
                 .padding(.top, 2)
             }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+        .padding(.top, 2)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.white)
         .preferredColorScheme(.light)
     }
