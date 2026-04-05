@@ -164,6 +164,10 @@ struct MacCrabDaemon {
         // Incident grouper — clusters related alerts into attack timelines
         let incidentGrouper = IncidentGrouper(correlationWindow: 300, staleWindow: 600)
 
+        // Campaign detector — meta-alert engine: chains alerts into kill chains,
+        // alert storms, AI compromise patterns, and coordinated attacks
+        let campaignDetector = CampaignDetector()
+
         // Load response action config if it exists
         let actionConfigPath = supportDir + "/actions.json"
         if FileManager.default.fileExists(atPath: actionConfigPath) {
@@ -789,6 +793,7 @@ struct MacCrabDaemon {
                 try? await processTreeAnalyzer.save()
                 await deduplicator.sweep()
                 await crossProcessCorrelator.purgeStale()
+                await campaignDetector.sweep()
             }
         }
         maintenanceTimer.resume()
@@ -1309,6 +1314,36 @@ struct MacCrabDaemon {
                         parentPath: enrichedEvent.process.ancestors.first?.executable,
                         tactics: tactics
                     )
+
+                    // Campaign detection: chain alerts into higher-level patterns
+                    let alertSummary = CampaignDetector.AlertSummary(
+                        ruleId: alert.ruleId,
+                        ruleTitle: alert.ruleTitle,
+                        severity: match.severity,
+                        processPath: alert.processPath,
+                        timestamp: alert.timestamp,
+                        tactics: Set(tactics)
+                    )
+                    let campaigns = await campaignDetector.processAlert(alertSummary)
+                    for campaign in campaigns {
+                        let campaignAlert = Alert(
+                            id: campaign.id,
+                            timestamp: campaign.detectedAt,
+                            ruleId: "maccrab.campaign.\(campaign.type.rawValue)",
+                            ruleTitle: campaign.title,
+                            severity: campaign.severity,
+                            eventId: alert.id,
+                            processPath: campaign.alerts.last?.processPath,
+                            processName: nil,
+                            description: campaign.description,
+                            mitreTactics: campaign.tactics.joined(separator: ","),
+                            mitreTechniques: "",
+                            suppressed: false
+                        )
+                        try? await alertStore.insert(alert: campaignAlert)
+                        await notifier.notify(alert: campaignAlert)
+                        print("[CAMPAIGN] \(campaign.type.rawValue): \(campaign.title)")
+                    }
 
                     // Log alert to stdout
                     let severityIcon: String
