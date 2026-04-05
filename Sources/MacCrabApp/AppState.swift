@@ -36,6 +36,11 @@ final class AppState: ObservableObject {
     private var lastAlertTimestamp: Date = .distantPast
     private var lastEventTimestamp: Date = .distantPast
 
+    /// Cached DB connections — avoid reopening on every poll cycle
+    private var cachedAlertStore: AlertStore?
+    private var cachedEventStore: EventStore?
+    private var dbLastChecked: Date = .distantPast
+
     /// Resolve the MacCrab data directory.
     /// Prefers the system dir (root daemon) when its DB exists and is newer
     /// than the user dir DB, which may contain stale data from a previous
@@ -73,7 +78,8 @@ final class AppState: ObservableObject {
     // MARK: Initialization
 
     init() {
-        pollTimer = Timer.publish(every: 5.0, on: .main, in: .common)
+        // Poll every 10 seconds (not 5 — reduces CPU by 50%)
+        pollTimer = Timer.publish(every: 10.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
@@ -83,24 +89,39 @@ final class AppState: ObservableObject {
         Task { await refresh() }
     }
 
+    /// Get or create cached alert store (avoids reopening SQLite on every poll)
+    private func alertStore() throws -> AlertStore {
+        if let store = cachedAlertStore { return store }
+        let store = try AlertStore(directory: dataDir)
+        cachedAlertStore = store
+        return store
+    }
+
+    /// Get or create cached event store
+    private func eventStore() throws -> EventStore {
+        if let store = cachedEventStore { return store }
+        let store = try EventStore(directory: dataDir)
+        cachedEventStore = store
+        return store
+    }
+
     // MARK: Public interface
 
     func refresh() async {
-        // Check daemon connectivity (lightweight check)
-        let daemonRunning = FileManager.default.fileExists(atPath: "/proc/\(getpid())") || {
-            let t = Process()
-            t.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            t.arguments = ["-x", "maccrabd"]
-            t.standardOutput = FileHandle.nullDevice
-            t.standardError = FileHandle.nullDevice
-            try? t.run()
-            t.waitUntilExit()
-            return t.terminationStatus == 0
-        }()
-        let dbExists = FileManager.default.fileExists(atPath: dataDir + "/events.db")
-        isConnected = daemonRunning || dbExists
+        // Check daemon connectivity via DB modification time (no subprocess spawn)
+        let dbPath = dataDir + "/events.db"
+        let fm = FileManager.default
+        let dbExists = fm.fileExists(atPath: dbPath)
 
-        guard isConnected else {
+        if dbExists {
+            // DB modified in last 30 seconds means daemon is active
+            let modDate = (try? fm.attributesOfItem(atPath: dbPath))?[.modificationDate] as? Date
+            isConnected = modDate.map { Date().timeIntervalSince($0) < 30 } ?? false
+        } else {
+            isConnected = false
+        }
+
+        guard dbExists else {
             eventsPerSecond = 0
             return
         }
@@ -120,7 +141,7 @@ final class AppState: ObservableObject {
 
     func loadAlerts(limit: Int = 500) async {
         do {
-            let store = try AlertStore(directory: dataDir)
+            let store = try alertStore()
             let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
             dashboardAlerts = alerts.map { alertToViewModel($0) }
             recentAlerts = Array(dashboardAlerts.prefix(5))
@@ -132,7 +153,7 @@ final class AppState: ObservableObject {
 
     func loadEvents(limit: Int = 500, filter: String? = nil) async {
         do {
-            let store = try EventStore(directory: dataDir)
+            let store = try eventStore()
             let raw: [Event]
             if let query = filter, !query.isEmpty {
                 raw = try await store.search(text: query, limit: limit)
@@ -172,7 +193,7 @@ final class AppState: ObservableObject {
 
     func loadTCCEvents() async {
         do {
-            let store = try EventStore(directory: dataDir)
+            let store = try eventStore()
             let tccRaw = try await store.events(since: Date.distantPast, category: .tcc, limit: 200)
             tccEvents = tccRaw.compactMap { event -> TCCEventViewModel? in
                 guard let tcc = event.tcc else { return nil }
@@ -196,7 +217,7 @@ final class AppState: ObservableObject {
 
     func suppressAlert(_ alertId: String) async {
         do {
-            let store = try AlertStore(directory: dataDir)
+            let store = try alertStore()
             try await store.suppress(alertId: alertId)
             await loadAlerts()
         } catch {
@@ -213,7 +234,7 @@ final class AppState: ObservableObject {
 
         // Suppress all matching alerts in DB
         do {
-            let store = try AlertStore(directory: dataDir)
+            let store = try alertStore()
             for alert in dashboardAlerts where alert.ruleTitle == ruleTitle && alert.processName == processName && !alert.suppressed {
                 try await store.suppress(alertId: alert.id)
             }
@@ -264,7 +285,7 @@ final class AppState: ObservableObject {
 
     private func loadAlertsIncremental() async {
         do {
-            let store = try AlertStore(directory: dataDir)
+            let store = try alertStore()
             let newAlerts = try await store.alerts(since: lastAlertTimestamp, limit: 100)
             let newViewModels = newAlerts
                 .filter { $0.timestamp > lastAlertTimestamp }
@@ -282,7 +303,7 @@ final class AppState: ObservableObject {
 
     private func loadEventsIncremental() async {
         do {
-            let store = try EventStore(directory: dataDir)
+            let store = try eventStore()
             let newEvents = try await store.events(since: lastEventTimestamp, limit: 200)
             let newViewModels = newEvents
                 .filter { $0.timestamp > lastEventTimestamp }
@@ -375,9 +396,9 @@ final class AppState: ObservableObject {
 
     private func updateStats() async {
         do {
-            let store = try EventStore(directory: dataDir)
+            let store = try eventStore()
             let currentCount = try await store.count()
-            eventsPerSecond = max(0, (currentCount - previousEventCount) / 5)
+            eventsPerSecond = max(0, (currentCount - previousEventCount) / 10)
             previousEventCount = currentCount
         } catch {}
     }
