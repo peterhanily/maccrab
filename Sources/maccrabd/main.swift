@@ -231,6 +231,22 @@ struct MacCrabDaemon {
         await mcpMonitor.start()
         print("MCP server monitor active (watching Claude, Cursor, Continue, VS Code, Windsurf configs)")
 
+        // USB device monitor — detects mass storage, HID keyboard emulation
+        let usbMonitor = USBMonitor(pollInterval: 10)
+        await usbMonitor.start()
+        print("USB device monitor active")
+
+        // Database encryption — AES-256 field encryption, key in Keychain
+        let dbEncryption = DatabaseEncryption(
+            enabled: Foundation.ProcessInfo.processInfo.environment["MACCRAB_ENCRYPT_DB"] == "1"
+        )
+        if dbEncryption.isEnabled {
+            print("Database encryption: active (AES-256, key in Keychain)")
+        }
+
+        // Report generator — HTML incident reports (used by maccrabctl export)
+        _ = ReportGenerator()  // Available for on-demand report generation
+
         // Notarization checker — verifies notarization status of executed binaries
         let notarizationChecker = NotarizationChecker()
 
@@ -737,6 +753,30 @@ struct MacCrabDaemon {
                     )
                 }
                 print("[MCP] \(mcpEvent.eventType.rawValue): \(mcpEvent.serverName) — \(mcpEvent.reason)")
+            }
+        }
+
+        // USB device monitoring task
+        Task {
+            for await usbEvent in usbMonitor.events {
+                let severity: Severity = usbEvent.isMassStorage ? .high : .medium
+                let alert = Alert(
+                    ruleId: "maccrab.usb.\(usbEvent.isConnected ? "connected" : "disconnected")",
+                    ruleTitle: "USB Device \(usbEvent.isConnected ? "Connected" : "Disconnected"): \(usbEvent.productName)",
+                    severity: severity,
+                    eventId: UUID().uuidString,
+                    processPath: nil,
+                    processName: "kernel",
+                    description: "\(usbEvent.vendorName) \(usbEvent.productName) (VID:0x\(String(usbEvent.vendorId, radix: 16)) PID:0x\(String(usbEvent.productId, radix: 16)))\(usbEvent.isMassStorage ? " [MASS STORAGE]" : "")\(usbEvent.serialNumber.isEmpty ? "" : " SN:\(usbEvent.serialNumber)")",
+                    mitreTactics: "attack.initial_access",
+                    mitreTechniques: "attack.t1200",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                if usbEvent.isMassStorage {
+                    await notifier.notify(alert: alert)
+                }
+                print("[USB] \(usbEvent.isConnected ? "+" : "-") \(usbEvent.vendorName) \(usbEvent.productName)\(usbEvent.isMassStorage ? " [MASS STORAGE]" : "")")
             }
         }
 
