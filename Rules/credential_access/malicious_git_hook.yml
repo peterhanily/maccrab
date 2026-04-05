@@ -21,7 +21,14 @@ detection:
             - '/tmp/'
             - '/Downloads/'
             - '/Users/Shared/'
-    condition: selection_hook and selection_suspicious_path
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection_hook and selection_suspicious_path and not filter_system and not filter_apple_signed
 falsepositives:
     - Legitimate development workflows in temporary directories
 level: high
