@@ -1,0 +1,42 @@
+title: Trojan Source Bidirectional Override in Source Code
+id: d1a2b3c4-0370-4000-a000-000000000370
+status: experimental
+description: >
+    Detects source code files containing Unicode bidirectional override characters
+    (U+202A-202E, U+2066-2069) which can be used in Trojan Source attacks to make
+    malicious code appear benign in code review while executing differently.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1027/
+    - https://trojansource.codes/
+tags:
+    - attack.defense_evasion
+    - attack.t1027
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '.py'
+            - '.js'
+            - '.ts'
+            - '.swift'
+            - '.go'
+            - '.rs'
+            - '.c'
+            - '.cpp'
+            - '.java'
+            - '.rb'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Internationalized source code with legitimate RTL text
+    - Arabic/Hebrew string literals in source files
+level: high

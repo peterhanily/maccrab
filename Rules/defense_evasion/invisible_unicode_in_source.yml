@@ -1,0 +1,40 @@
+title: Invisible Unicode Characters in Source Code File
+id: d1a2b3c4-0371-4000-a000-000000000371
+status: experimental
+description: >
+    Detects file writes to source code containing zero-width characters (U+200B-200D,
+    U+FEFF, U+2060-2064) or Unicode tag characters (U+E0000-E007F). These can be
+    used for EchoLeak attacks, ASCII smuggling, or GlassWorm-style binary encoding
+    to hide prompt injection payloads in seemingly normal code.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1027/
+tags:
+    - attack.defense_evasion
+    - attack.initial_access
+    - attack.t1027
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '.md'
+            - '.txt'
+            - '.py'
+            - '.js'
+            - '.ts'
+            - '.json'
+            - '.yaml'
+            - '.yml'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Rich text editors that use zero-width spaces for formatting
+level: medium

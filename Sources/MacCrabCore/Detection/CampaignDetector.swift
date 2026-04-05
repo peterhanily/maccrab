@@ -355,6 +355,14 @@ public actor CampaignDetector {
             "AI Tool Exploitation Chain",
     ]
 
+    /// Check if an alert represents a compound prompt injection threat.
+    /// Compound threats from forensicate indicate multi-vector injection attacks
+    /// and should be weighted more heavily in campaign detection.
+    private func isCompoundPromptInjection(_ alert: AlertSummary) -> Bool {
+        alert.ruleId == "maccrab.ai-guard.prompt-injection"
+            && alert.ruleTitle.localizedCaseInsensitiveContains("compound")
+    }
+
     private func checkAICompromise() -> Campaign? {
         let cutoff = Date().addingTimeInterval(-campaignWindow)
         let aiAlerts = recentAlerts.filter {
@@ -362,11 +370,18 @@ public actor CampaignDetector {
         }
         guard aiAlerts.count >= 2 else { return nil }
 
-        // Collect distinct AI Guard categories
+        // Collect distinct AI Guard categories.
+        // Compound prompt injection threats (multi-vector attacks detected by
+        // forensicate) count as 2 categories: the original "prompt-injection"
+        // plus a synthetic "prompt-injection-compound" category, reflecting
+        // their higher severity as a multi-vector indicator.
         var categories = Set<String>()
         for alert in aiAlerts {
             if let cat = aiGuardCategory(from: alert.ruleId) {
                 categories.insert(cat)
+                if isCompoundPromptInjection(alert) {
+                    categories.insert("prompt-injection-compound")
+                }
             }
         }
 
