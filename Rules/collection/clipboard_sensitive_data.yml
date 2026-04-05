@@ -1,0 +1,36 @@
+title: Sensitive Data Placed on System Clipboard
+id: d1a2b3c4-0360-4000-a000-000000000360
+status: experimental
+description: >
+    Detects when sensitive data (API keys, tokens, private keys, passwords)
+    appears on the system clipboard. Infostealers like Atomic and Poseidon
+    harvest clipboard content for cryptocurrency addresses and credentials.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1115/
+tags:
+    - attack.collection
+    - attack.credential_access
+    - attack.t1115
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'pbcopy'
+            - 'pbpaste'
+            - 'NSPasteboard'
+            - 'UIPasteboard'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Password managers copying to clipboard
+    - Development tools using clipboard APIs
+level: medium

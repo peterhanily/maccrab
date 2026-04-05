@@ -1,0 +1,47 @@
+title: DNS-over-HTTPS by Non-Browser Process
+id: d1a2b3c4-0361-4000-a000-000000000361
+status: experimental
+description: >
+    Detects non-browser processes connecting to known DNS-over-HTTPS resolver
+    IPs (Google 8.8.8.8, Cloudflare 1.1.1.1, etc.) on port 443. Malware uses
+    DoH to bypass DNS monitoring and exfiltrate data through encrypted DNS queries.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1071/004/
+tags:
+    - attack.command_and_control
+    - attack.defense_evasion
+    - attack.t1071.004
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection:
+        DestinationPort: 443
+        DestinationIp:
+            - '8.8.8.8'
+            - '8.8.4.4'
+            - '1.1.1.1'
+            - '1.0.0.1'
+            - '9.9.9.9'
+            - '149.112.112.112'
+    filter_browsers:
+        Image|endswith:
+            - '/Google Chrome'
+            - '/Google Chrome Helper'
+            - '/firefox'
+            - '/Safari'
+            - '/Microsoft Edge'
+            - '/Arc'
+            - '/Brave Browser'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    condition: selection and not filter_browsers and not filter_system
+falsepositives:
+    - Legitimate applications using DoH for privacy
+    - VPN clients that route DNS through DoH
+level: high

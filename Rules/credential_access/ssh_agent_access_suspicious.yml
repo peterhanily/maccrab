@@ -1,0 +1,36 @@
+title: SSH Agent Socket Accessed by Suspicious Process
+id: d1a2b3c4-0363-4000-a000-000000000363
+status: experimental
+description: Detects processes like curl, python, node accessing the SSH agent socket, potentially hijacking SSH credentials for lateral movement.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1563/001/
+tags:
+    - attack.lateral_movement
+    - attack.credential_access
+    - attack.t1563.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: 'SSH_AUTH_SOCK'
+    selection_process:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+            - '/python'
+            - '/python3'
+            - '/node'
+            - '/nc'
+            - '/ncat'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: (selection or selection_process) and not filter_system
+falsepositives:
+    - SSH-based deployment scripts
+    - Git over SSH operations
+level: high

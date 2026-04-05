@@ -1,0 +1,36 @@
+title: Suspicious Browser Extension with Dangerous Permissions
+id: d1a2b3c4-0365-4000-a000-000000000365
+status: experimental
+description: >
+    Detects browser extensions with dangerous permission combinations including
+    webRequest (traffic interception), nativeMessaging (process spawning),
+    cookies (session theft), or all_urls (full site access).
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1176/
+tags:
+    - attack.persistence
+    - attack.collection
+    - attack.t1176
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Extensions/'
+            - '/extensions/'
+        TargetFilename|endswith:
+            - 'manifest.json'
+            - '.xpi'
+            - '.crx'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_system
+falsepositives:
+    - Legitimate extension installations
+    - Browser updates installing bundled extensions
+level: medium

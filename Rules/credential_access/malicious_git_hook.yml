@@ -1,0 +1,27 @@
+title: Git Hook Execution from Suspicious Directory
+id: d1a2b3c4-0364-4000-a000-000000000364
+status: experimental
+description: Detects git hooks executing from temporary or download directories, indicating a cloned malicious repository.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.execution
+    - attack.persistence
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_hook:
+        CommandLine|contains: '.git/hooks/'
+    selection_suspicious_path:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/Downloads/'
+            - '/Users/Shared/'
+    condition: selection_hook and selection_suspicious_path
+falsepositives:
+    - Legitimate development workflows in temporary directories
+level: high
