@@ -325,6 +325,9 @@ public actor SelfDefense {
                     if path.contains("rules") || path.contains("compiled") {
                         eventType = .rulesModified
                     } else if path.contains("events.db") {
+                        // The daemon writes to events.db constantly — this is normal.
+                        // Only flag DB modifications as tampering for critical paths.
+                        if !critical { return }
                         eventType = .databaseModified
                     }
                     message = "\(desc) was modified: \(path)"
