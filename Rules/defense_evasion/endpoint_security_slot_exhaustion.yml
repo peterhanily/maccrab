@@ -1,0 +1,38 @@
+title: Endpoint Security Client Slot Exhaustion Attempt
+id: d1a2b3c4-0343-4000-a000-000000000343
+status: experimental
+description: >
+    Detects rapid creation of Endpoint Security connections via IOServiceOpen,
+    which could exhaust the kernel's 3-client limit and prevent legitimate
+    ES clients (xprotectd, EDR tools) from functioning. The undocumented
+    NoAuthClient (type=2) allows root to create connections without the
+    ES entitlement.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'IOServiceOpen'
+            - 'EndpointSecurity'
+            - 'es_new_client'
+            - 'NoAuthClient'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Endpoint security products initializing their ES clients
+    - Security research tools
+level: critical

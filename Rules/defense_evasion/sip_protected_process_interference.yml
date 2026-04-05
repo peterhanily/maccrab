@@ -1,0 +1,39 @@
+title: Attempt to Kill or Signal SIP-Protected Security Process
+id: d1a2b3c4-0344-4000-a000-000000000344
+status: stable
+description: >
+    Detects attempts to kill or send signals to SIP-protected security processes
+    (xprotectd, syspolicyd, endpointsecurityd). These processes are immune to
+    SIGKILL but the attempt reveals an adversary trying to disable security
+    infrastructure.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_kill:
+        Image|endswith:
+            - '/kill'
+            - '/pkill'
+            - '/killall'
+    selection_target:
+        CommandLine|contains:
+            - 'xprotectd'
+            - 'syspolicyd'
+            - 'endpointsecurityd'
+            - 'MRT'
+            - 'XProtect'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection_kill and selection_target and not filter_system
+falsepositives:
+    - System administrators investigating stuck security processes
+level: critical

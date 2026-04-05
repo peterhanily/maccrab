@@ -150,6 +150,37 @@ struct MacCrabDaemon {
         }
         print("Self-defense active (binary integrity, file monitoring, anti-debug)")
 
+        // ES infrastructure health monitor
+        let esHealthMonitor = ESClientMonitor(pollInterval: 60)
+        await esHealthMonitor.start()
+        let esHealth = await esHealthMonitor.currentStatus()
+        if esHealth.isHealthy {
+            print("ES infrastructure: healthy (xprotectd, syspolicyd, endpointsecurityd running)")
+        } else {
+            print("ES infrastructure: DEGRADED — \(esHealth.issues.joined(separator: ", "))")
+        }
+
+        // ES health monitoring task
+        Task {
+            for await healthEvent in esHealthMonitor.events {
+                let alert = Alert(
+                    ruleId: "maccrab.self-defense.\(healthEvent.type.rawValue)",
+                    ruleTitle: "ES Infrastructure: \(healthEvent.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
+                    severity: healthEvent.severity,
+                    eventId: UUID().uuidString,
+                    processPath: nil,
+                    processName: "maccrabd",
+                    description: healthEvent.description,
+                    mitreTactics: "attack.defense_evasion",
+                    mitreTechniques: "attack.t1562.001",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+                print("[ES-HEALTH] \(healthEvent.type.rawValue): \(healthEvent.description)")
+            }
+        }
+
         // Threat intelligence feed
         let threatIntel = ThreatIntelFeed(cacheDir: supportDir + "/threat_intel")
         await threatIntel.start()
@@ -395,6 +426,7 @@ struct MacCrabDaemon {
         // Start ES collector (optional — requires root + ES entitlement)
         // Falls back to eslogger proxy if entitlement is missing.
         var esloggerCollector: EsloggerCollector? = nil
+        var kdebugCollector: KdebugCollector? = nil
         var esMode = "unavailable"
 
         if isRoot {
@@ -410,13 +442,20 @@ struct MacCrabDaemon {
                     await esloggerCollector!.start()
                     logger.info("eslogger proxy collector started")
                     esMode = "eslogger proxy"
+                } else if KdebugCollector.isAvailable() {
+                    // Third fallback: kdebug via fs_usage (root only, no entitlement, no FDA)
+                    let kdebug = KdebugCollector()
+                    await kdebug.start()
+                    kdebugCollector = kdebug
+                    logger.info("kdebug collector started via fs_usage")
+                    esMode = "kdebug (fs_usage)"
                 } else {
-                    logger.warning("eslogger not found — ES events unavailable")
+                    logger.warning("No kernel event source available")
                     print("  To enable: sign binary with ES entitlement, or install macOS 13+ for eslogger")
                 }
             }
         } else {
-            // Non-root: try eslogger anyway (it needs root, but let it fail gracefully)
+            // Non-root: try eslogger (needs root but fail gracefully)
             if EsloggerCollector.isAvailable() {
                 esloggerCollector = EsloggerCollector()
                 await esloggerCollector!.start()
@@ -437,6 +476,15 @@ struct MacCrabDaemon {
             }
 
             // Source 1b: eslogger proxy events (fallback when ES entitlement unavailable)
+            if let kdebug = kdebugCollector {
+                Task {
+                    for await event in kdebug.events {
+                        continuation.yield(event)
+                    }
+                }
+            }
+
+            // Source 1c: eslogger proxy events
             if let eslogger = esloggerCollector {
                 Task {
                     for await event in eslogger.events {
@@ -493,6 +541,7 @@ struct MacCrabDaemon {
           - Event tap monitor: active
           - System policy monitor: active
           - MCP server monitor: active
+          - ES client health monitor: \(esHealth.isHealthy ? "healthy" : "DEGRADED")
 
         Detection Stack:
           - Single-event Sigma rules (\(singleRuleCount) loaded)
