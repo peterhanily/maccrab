@@ -140,20 +140,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showDashboard() {
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        // Try to find and show any existing window
-        if let window = NSApplication.shared.windows.first(where: { !$0.title.isEmpty && $0.title != "Item-0" }) {
+        // Activate the app first
+        NSApp.activate(ignoringOtherApps: true)
+
+        // If windows exist, show them
+        let appWindows = NSApp.windows.filter { $0.canBecomeMain }
+        if let window = appWindows.first {
             window.makeKeyAndOrderFront(nil)
-            return
-        }
-        // If no window found, show all windows (unhides minimized ones)
-        for window in NSApplication.shared.windows {
-            window.makeKeyAndOrderFront(nil)
+        } else {
+            // No windows — re-open the app which triggers SwiftUI to create a new WindowGroup window
+            if let bundleURL = Bundle.main.bundleURL as URL? {
+                NSWorkspace.shared.openApplication(at: bundleURL, configuration: NSWorkspace.OpenConfiguration())
+            }
         }
     }
 
     @objc private func openSettings() {
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        NSApp.activate(ignoringOtherApps: true)
         // Use the standard macOS settings mechanism
         if #available(macOS 14.0, *) {
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
@@ -164,6 +167,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    // Prevent window close from destroying the window — hide it instead
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
