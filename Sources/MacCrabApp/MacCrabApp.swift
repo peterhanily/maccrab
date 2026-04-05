@@ -82,46 +82,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Critical Alert Popover (Crab Speech Bubble)
 
     func showAlertPopover(alert: AlertViewModel) {
-        // Must run on main thread for UI operations
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            // Dedup: don't show same alert twice
             guard alert.id != self.lastPopoverAlertId else { return }
             self.lastPopoverAlertId = alert.id
-            // Dismiss any existing popover
-            self.popover?.close()
+
+            // Close any existing alert panel
+            self.alertPanel?.close()
             self.dismissTimer?.invalidate()
 
             let popoverView = AlertPopoverView(alert: alert, onDismiss: { [weak self] in
-                self?.popover?.close()
+                self?.alertPanel?.close()
             }, onShowDashboard: { [weak self] in
-                self?.popover?.close()
+                self?.alertPanel?.close()
                 self?.showDashboard()
             })
 
             let hostingController = NSHostingController(rootView: popoverView)
-            hostingController.preferredContentSize = NSSize(width: 340, height: 0)
+            let contentSize = NSSize(width: 340, height: 220)
+            hostingController.preferredContentSize = contentSize
 
-            let pop = NSPopover()
-            pop.contentViewController = hostingController
-            pop.behavior = .transient
-            pop.animates = true
-            self.popover = pop
+            // Use a floating panel positioned in the top-right corner
+            guard let screen = NSScreen.main else { return }
+            let screenFrame = screen.visibleFrame
+            let panelX = screenFrame.maxX - contentSize.width - 16
+            let panelY = screenFrame.maxY - contentSize.height - 8
+            let panelFrame = NSRect(x: panelX, y: panelY, width: contentSize.width, height: contentSize.height)
 
-            // Show from the status bar button (menu bar, top-right)
-            if let button = self.statusItem?.button {
-                pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            }
+            let panel = NSPanel(
+                contentRect: panelFrame,
+                styleMask: [.nonactivatingPanel, .titled, .closable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            panel.contentViewController = hostingController
+            panel.level = .floating
+            panel.isFloatingPanel = true
+            panel.titleVisibility = .hidden
+            panel.titlebarAppearsTransparent = true
+            panel.isMovableByWindowBackground = true
+            panel.backgroundColor = NSColor(red: 0.12, green: 0.12, blue: 0.18, alpha: 0.95)
+            panel.hasShadow = true
+            panel.orderFrontRegardless()
+
+            self.alertPanel = panel
 
             // Flash the crab
             self.flashCrab(for: alert.severity)
 
             // Auto-dismiss after 8 seconds
             self.dismissTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
-                self?.popover?.close()
+                self?.alertPanel?.close()
             }
         }
     }
+    private var alertPanel: NSPanel?
 
     private func flashCrab(for severity: Severity) {
         guard let button = statusItem?.button else { return }
