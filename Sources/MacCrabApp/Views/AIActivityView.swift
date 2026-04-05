@@ -15,13 +15,13 @@ struct AIActivityView: View {
             HStack(spacing: 12) {
                 Text("🦀")
                     .font(.title2)
-                Text("AI Tool Activity")
+                Text(String(localized: "aiGuard.title", defaultValue: "AI Tool Activity"))
                     .font(.title2)
                     .fontWeight(.bold)
 
                 Spacer()
 
-                Text("Monitors Claude Code, Codex, OpenClaw, Cursor and their child processes")
+                Text(String(localized: "aiGuard.subtitle", defaultValue: "Monitors Claude Code, Codex, OpenClaw, Cursor and their child processes"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -62,7 +62,7 @@ struct AIActivityView: View {
                     // What's monitored
                     GroupBox {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("What AI Guard Monitors")
+                            Text(String(localized: "aiGuard.whatMonitors", defaultValue: "What AI Guard Monitors"))
                                 .font(.headline)
 
                             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
@@ -82,7 +82,7 @@ struct AIActivityView: View {
                     // Supported tools
                     GroupBox {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Supported AI Coding Tools")
+                            Text(String(localized: "aiGuard.supportedTools", defaultValue: "Supported AI Coding Tools"))
                                 .font(.headline)
 
                             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
@@ -102,7 +102,7 @@ struct AIActivityView: View {
                     // Recent AI alerts
                     GroupBox {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Recent AI Safety Alerts")
+                            Text(String(localized: "aiGuard.recentAlerts", defaultValue: "Recent AI Safety Alerts"))
                                 .font(.headline)
 
                             let aiAlerts = appState.dashboardAlerts.filter {
@@ -117,9 +117,9 @@ struct AIActivityView: View {
                                         .font(.title)
                                         .foregroundColor(.green)
                                     VStack(alignment: .leading) {
-                                        Text("No AI safety alerts")
+                                        Text(String(localized: "aiGuard.noAlerts", defaultValue: "No AI safety alerts"))
                                             .font(.headline)
-                                        Text("AI tools are operating within safe boundaries")
+                                        Text(String(localized: "aiGuard.noAlertsDesc", defaultValue: "AI tools are operating within safe boundaries"))
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                     }
@@ -150,9 +150,9 @@ struct AIActivityView: View {
                     // Credential fence info
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Credential Fence — Protected Paths")
+                            Text(String(localized: "aiGuard.credentialFenceTitle", defaultValue: "Credential Fence \u{2014} Protected Paths"))
                                 .font(.headline)
-                            Text("AI tools will trigger CRITICAL alerts if they access any of these:")
+                            Text(String(localized: "aiGuard.credentialFenceDesc", defaultValue: "AI tools will trigger CRITICAL alerts if they access any of these:"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 

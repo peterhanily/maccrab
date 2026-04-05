@@ -705,14 +705,12 @@ struct MacCrabCtl {
     }
 
     static func formatBytes(_ bytes: UInt64) -> String {
-        if bytes < 1024 { return "\(bytes) B" }
-        if bytes < 1024 * 1024 { return String(format: "%.1f KB", Double(bytes) / 1024) }
-        if bytes < 1024 * 1024 * 1024 { return String(format: "%.1f MB", Double(bytes) / (1024 * 1024)) }
-        return String(format: "%.1f GB", Double(bytes) / (1024 * 1024 * 1024))
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     static func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
+        formatter.locale = Locale.current
         formatter.dateStyle = .short
         formatter.timeStyle = .medium
         return formatter.string(from: date)

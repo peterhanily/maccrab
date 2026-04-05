@@ -1,0 +1,272 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Base (English) localization.
+
+   Key naming convention:
+     <view>.<element>   — e.g. alerts.title, events.empty
+     action.<name>      — e.g. action.suppress, action.kill
+     status.<name>      — e.g. status.connected
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "Alerts";
+"tabs.events" = "Events";
+"tabs.rules" = "Rules";
+"tabs.permissions" = "Permissions";
+"tabs.aiGuard" = "AI Guard";
+"tabs.docs" = "Docs";
+"tabs.settings" = "Settings";
+
+/* ── Connection status ── */
+"status.connected" = "Connected";
+"status.disconnected" = "Disconnected";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "Alerts";
+"alerts.empty" = "No alerts \u2014 all clear";
+"alerts.noMatch" = "No alerts matching filters";
+"alerts.clearFilters" = "Clear Filters";
+"alerts.suppressed" = "Suppressed";
+"alerts.active" = "Active";
+"alerts.autoResponseConfigured" = "Auto-response configured";
+"alerts.suppressedToast" = "Suppressed: %@";
+"alerts.undo" = "Undo";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "Description";
+"alertDetail.processDetails" = "Process Details";
+"alertDetail.mitreAttack" = "MITRE ATT\u0026CK";
+"alertDetail.metadata" = "Metadata";
+"alertDetail.quickActions" = "Quick Actions";
+"alertDetail.respond" = "Respond";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "Alert ID";
+"alertDetail.severity" = "Severity";
+"alertDetail.status" = "Status";
+"alertDetail.name" = "Name";
+"alertDetail.path" = "Path";
+"alertDetail.directory" = "Directory";
+
+/* ── Quick Actions ── */
+"action.suppress" = "Suppress This";
+"action.suppressAll" = "Suppress All Like This";
+"action.kill" = "Kill Process";
+"action.quarantine" = "Quarantine File";
+"action.block" = "Block Destination";
+"action.copyDetails" = "Copy Details";
+
+/* ── Kill process confirmation ── */
+"action.kill.confirm" = "Kill %@?";
+"action.kill.message" = "This will terminate %@ at %@. This action cannot be undone.";
+"action.kill.success" = "Process terminated";
+"action.kill.failure" = "Failed to terminate process";
+
+/* ── Quarantine confirmation ── */
+"action.quarantine.confirm" = "Quarantine file from %@?";
+"action.quarantine.message" = "This will move the referenced file to quarantine. The file will no longer be accessible at its original location.";
+"action.quarantine.success" = "File quarantined";
+"action.quarantine.failure" = "Failed to quarantine file";
+
+/* ── Block network confirmation ── */
+"action.block.confirm" = "Block network destination?";
+"action.block.message" = "This will block the network destination associated with %@. Applications will no longer be able to reach this endpoint.";
+"action.block.success" = "Network destination blocked";
+"action.block.failure" = "Failed to block destination";
+
+/* ── Event Stream ── */
+"events.title" = "Events";
+"events.noMatch" = "No events matching current filters";
+"events.clearFilters" = "Clear Filters";
+"events.allCategories" = "All Categories";
+"events.autoScroll" = "Auto-scroll";
+"events.resume" = "Resume";
+"events.pause" = "Pause";
+"events.live" = "Live";
+"events.paused" = "Paused";
+"events.perSecond" = "%d events/sec";
+"events.copyDetails" = "Copy Event Details";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "Process";
+"eventDetail.detail" = "Detail";
+"eventDetail.metadata" = "Event Metadata";
+
+/* ── Event table columns ── */
+"eventColumn.time" = "Time";
+"eventColumn.action" = "Action";
+"eventColumn.category" = "Category";
+"eventColumn.process" = "Process";
+"eventColumn.detail" = "Detail";
+"eventColumn.signer" = "Signer";
+
+/* ── Rule Browser ── */
+"rules.title" = "Rules";
+"rules.tactics" = "Tactics";
+"rules.allRules" = "All Rules";
+"rules.noMatch" = "No rules matching current filters";
+"rules.createRule" = "Create Rule";
+"rules.searchRules" = "Search rules...";
+"rules.enabled" = "Enabled";
+"rules.disabled" = "Disabled";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "Description";
+"ruleDetail.mitreAttack" = "MITRE ATT\u0026CK";
+"ruleDetail.tags" = "Tags";
+"ruleDetail.metadata" = "Metadata";
+"ruleDetail.responseActions" = "Response Actions";
+"ruleDetail.configureInActions" = "Configure in actions.json:";
+"ruleDetail.copyDetails" = "Copy Details";
+"ruleDetail.openJSON" = "Open JSON";
+"ruleDetail.copyId" = "Copy ID";
+"ruleDetail.ruleId" = "Rule ID";
+"ruleDetail.severity" = "Severity";
+"ruleDetail.status" = "Status";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "TCC Permission Timeline";
+"tcc.allServices" = "All Services";
+"tcc.all" = "All";
+"tcc.granted" = "Granted";
+"tcc.denied" = "Denied";
+"tcc.emptyDefault" = "No permission changes detected yet";
+"tcc.noMatch" = "No TCC events matching current filters";
+"tcc.clearFilters" = "Clear Filters";
+"tcc.totalEventsLabel" = "total events";
+
+/* ── Settings ── */
+"settings.general" = "General";
+"settings.notifications" = "Notifications";
+"settings.daemon" = "Daemon";
+"settings.responseActions" = "Response Actions";
+"settings.about" = "About";
+
+/* ── Settings: General ── */
+"settings.dataRetention" = "Data Retention";
+"settings.keepEventsFor" = "Keep events for";
+"settings.retentionHelp" = "Events, alerts, and baseline data older than this will be automatically pruned.";
+"settings.uiRefresh" = "UI Refresh";
+"settings.pollDaemon" = "Poll daemon every";
+"settings.pollHelp" = "How often the app checks the daemon's database for new events and alerts.";
+"settings.startup" = "Startup";
+"settings.launchAtLogin" = "Launch MacCrab at login";
+
+/* ── Settings: Auto-Response ── */
+"settings.autoResponse" = "Auto-Response";
+"settings.autoResponseDesc" = "Automatically respond to critical threats";
+"settings.autoQuarantine" = "Auto-quarantine malicious files";
+"settings.autoKill" = "Auto-kill malicious processes";
+"settings.autoBlock" = "Auto-block C2 destinations";
+"settings.autoResponseNote" = "These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab.";
+
+/* ── Settings: Notifications ── */
+"settings.macosNotifications" = "macOS Notifications";
+"settings.showNotifications" = "Show notifications for detection alerts";
+"settings.minimumSeverity" = "Minimum severity:";
+"settings.severityHelp" = "Only alerts at or above this severity will trigger a macOS notification.";
+"settings.informational" = "Informational";
+"settings.low" = "Low";
+"settings.medium" = "Medium";
+"settings.high" = "High";
+"settings.criticalOnly" = "Critical only";
+
+/* ── Settings: Daemon ── */
+"settings.daemonStatus" = "Status";
+"settings.daemonRunning" = "Running";
+"settings.daemonStopped" = "Stopped";
+"settings.rulesLoaded" = "Rules loaded";
+"settings.eventsPerSec" = "Events/sec";
+"settings.database" = "Database";
+"settings.actions" = "Actions";
+"settings.reloadRules" = "Reload Rules";
+"settings.refreshConnection" = "Refresh Connection";
+
+/* ── Settings: About ── */
+"settings.aboutTagline" = "Local-first macOS threat detection engine";
+"settings.aboutStats" = "7 event sources | 8 detection layers | 241 rules";
+"settings.aboutLicense" = "Apache 2.0 (code)  |  DRL 1.1 (rules)";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrab Active";
+"statusBar.notRunning" = "Daemon Not Running";
+"statusBar.eventsPerSecLabel" = "events/sec";
+"statusBar.rulesLoadedLabel" = "rules loaded";
+"statusBar.alertsTodayLabel" = "alerts today";
+"statusBar.noRecentAlerts" = "No recent alerts";
+"statusBar.recentAlerts" = "Recent Alerts";
+"statusBar.openDashboard" = "Open Dashboard...";
+"statusBar.reloadRules" = "Reload Rules";
+"statusBar.refresh" = "Refresh";
+"statusBar.settings" = "Settings...";
+"statusBar.quit" = "Quit MacCrab";
+
+/* ── AI Activity View ── */
+"aiGuard.title" = "AI Tool Activity";
+"aiGuard.subtitle" = "Monitors Claude Code, Codex, OpenClaw, Cursor and their child processes";
+"aiGuard.statusActive" = "Active";
+"aiGuard.toolsMonitored" = "Tools Monitored";
+"aiGuard.credentialFence" = "Credential Fence";
+"aiGuard.credentialFencePaths" = "30+ paths";
+"aiGuard.aiAlerts" = "AI Alerts";
+"aiGuard.whatMonitors" = "What AI Guard Monitors";
+"aiGuard.supportedTools" = "Supported AI Coding Tools";
+"aiGuard.recentAlerts" = "Recent AI Safety Alerts";
+"aiGuard.noAlerts" = "No AI safety alerts";
+"aiGuard.noAlertsDesc" = "AI tools are operating within safe boundaries";
+"aiGuard.credentialFenceTitle" = "Credential Fence \u2014 Protected Paths";
+"aiGuard.credentialFenceDesc" = "AI tools will trigger CRITICAL alerts if they access any of these:";
+
+/* ── AI Guard monitor items ── */
+"aiGuard.shellSpawning" = "Shell Spawning";
+"aiGuard.shellSpawningDesc" = "Every shell process spawned by AI tools";
+"aiGuard.credentialAccess" = "Credential Access";
+"aiGuard.credentialAccessDesc" = "SSH keys, .env, AWS, tokens, keychains";
+"aiGuard.projectBoundary" = "Project Boundary";
+"aiGuard.projectBoundaryDesc" = "File writes outside project directory";
+"aiGuard.packageInstalls" = "Package Installs";
+"aiGuard.packageInstallsDesc" = "npm, pip, cargo, brew from AI context";
+"aiGuard.privilegeEscalation" = "Privilege Escalation";
+"aiGuard.privilegeEscalationDesc" = "sudo and setuid from AI processes";
+"aiGuard.networkActivity" = "Network Activity";
+"aiGuard.networkActivityDesc" = "Outbound connections from AI children";
+"aiGuard.promptInjection" = "Prompt Injection";
+"aiGuard.promptInjectionDesc" = "Forensicate.ai scanning of commands";
+"aiGuard.persistence" = "Persistence";
+"aiGuard.persistenceDesc" = "LaunchAgents, cron, login items";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "Response Actions";
+"responseActions.resetDefaults" = "Reset to Defaults";
+"responseActions.addRuleAction" = "Add Rule Action";
+"responseActions.explanation" = "Response actions execute automatically when detection rules fire.";
+"responseActions.explanationDetail" = "Configure what happens when specific rules trigger \u2014 kill processes, quarantine files, send notifications, or run custom scripts.";
+"responseActions.defaultActions" = "Default Actions (all rules)";
+"responseActions.noDefaults" = "No default actions configured";
+"responseActions.addDefault" = "Add Default Action";
+"responseActions.perRule" = "Per-Rule Actions";
+"responseActions.noPerRule" = "No per-rule actions configured";
+"responseActions.noPerRuleHint" = "Click 'Add Rule Action' to configure responses for specific rules.";
+"responseActions.addAction" = "Add Action";
+"responseActions.activeSuppressions" = "Active Suppressions";
+"responseActions.suppressionsDesc" = "Alerts matching these patterns are hidden from the dashboard.";
+"responseActions.suppressionsHint" = "Manage via 'Suppress All Like This' button in alert details.";
+"responseActions.saved" = "Saved. Restart daemon to apply.";
+"responseActions.whenSeverity" = "when severity \u2265";
+
+/* ── Add Rule Action Sheet ── */
+"addRuleAction.title" = "Add Response Action for Rule";
+"addRuleAction.ruleIdHint" = "Rule ID (paste from rule detail panel)";
+"addRuleAction.ruleIdPlaceholder" = "e.g., d1a2b3c4-2001-4000-a000-000000002001";
+"addRuleAction.cancel" = "Cancel";
+"addRuleAction.add" = "Add Action";
+
+/* ── Signer types ── */
+"signer.apple" = "Apple";
+"signer.appStore" = "App Store";
+"signer.devId" = "Dev ID";
+"signer.adHoc" = "Ad Hoc";
+"signer.unsigned" = "Unsigned";
+
+/* ── Components ── */
+"components.suppress" = "Suppress";
+"components.refreshData" = "Refresh data";

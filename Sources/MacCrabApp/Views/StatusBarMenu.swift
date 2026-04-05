@@ -12,22 +12,24 @@ struct StatusBarMenu: View {
             Image(systemName: appState.isConnected ? "circle.fill" : "circle")
                 .font(.system(size: 6))
                 .foregroundColor(appState.isConnected ? .green : .red)
-            Text(appState.isConnected ? "MacCrab Active" : "Daemon Not Running")
+            Text(appState.isConnected
+                ? String(localized: "statusBar.active", defaultValue: "MacCrab Active")
+                : String(localized: "statusBar.notRunning", defaultValue: "Daemon Not Running"))
                 .font(.headline)
         }
 
         Divider()
 
-        Label("\(appState.eventsPerSecond) events/sec", systemImage: "waveform.path.ecg")
-        Label("\(appState.rulesLoaded) rules loaded", systemImage: "shield.checkered")
-        Label("\(appState.totalAlerts) alerts today", systemImage: "exclamationmark.triangle")
+        Label(title: { Text("\(appState.eventsPerSecond) events/sec") }, icon: { Image(systemName: "waveform.path.ecg") })
+        Label(title: { Text("\(appState.rulesLoaded) rules loaded") }, icon: { Image(systemName: "shield.checkered") })
+        Label(title: { Text("\(appState.totalAlerts) alerts today") }, icon: { Image(systemName: "exclamationmark.triangle") })
 
         Divider()
 
         if appState.recentAlerts.isEmpty {
-            Text("No recent alerts").foregroundColor(.secondary)
+            Text(String(localized: "statusBar.noRecentAlerts", defaultValue: "No recent alerts")).foregroundColor(.secondary)
         } else {
-            Text("Recent Alerts").font(.caption).foregroundColor(.secondary)
+            Text(String(localized: "statusBar.recentAlerts", defaultValue: "Recent Alerts")).font(.caption).foregroundColor(.secondary)
             ForEach(appState.recentAlerts.prefix(5)) { alert in
                 Button {
                     appState.selectedTab = .alerts
@@ -47,19 +49,19 @@ struct StatusBarMenu: View {
 
         Divider()
 
-        Button("Open Dashboard...") { showDashboard() }
+        Button(String(localized: "statusBar.openDashboard", defaultValue: "Open Dashboard...")) { showDashboard() }
             .keyboardShortcut("d")
-        Button("Reload Rules") { appState.reloadDaemonRules() }
+        Button(String(localized: "statusBar.reloadRules", defaultValue: "Reload Rules")) { appState.reloadDaemonRules() }
             .keyboardShortcut("r")
-        Button("Refresh") { Task { await appState.refresh() } }
+        Button(String(localized: "statusBar.refresh", defaultValue: "Refresh")) { Task { await appState.refresh() } }
             .keyboardShortcut("f")
 
         Divider()
 
         if #available(macOS 14.0, *) {
-            SettingsLink { Text("Settings...") }.keyboardShortcut(",")
+            SettingsLink { Text(String(localized: "statusBar.settings", defaultValue: "Settings...")) }.keyboardShortcut(",")
         }
-        Button("Quit MacCrab") { NSApplication.shared.terminate(nil) }
+        Button(String(localized: "statusBar.quit", defaultValue: "Quit MacCrab")) { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }
 

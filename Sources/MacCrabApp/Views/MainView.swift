@@ -44,42 +44,42 @@ struct MainView: View {
             TabView(selection: $appState.selectedTab) {
                 AlertDashboard(appState: appState)
                     .tabItem {
-                        Label("Alerts", systemImage: "exclamationmark.triangle")
+                        Label(String(localized: "tabs.alerts", defaultValue: "Alerts"), systemImage: "exclamationmark.triangle")
                     }
                     .tag(AppState.Tab.alerts)
                     .keyboardShortcut("1", modifiers: .command)
 
                 EventStream(appState: appState)
                     .tabItem {
-                        Label("Events", systemImage: "list.bullet")
+                        Label(String(localized: "tabs.events", defaultValue: "Events"), systemImage: "list.bullet")
                     }
                     .tag(AppState.Tab.events)
                     .keyboardShortcut("2", modifiers: .command)
 
                 RuleBrowser(appState: appState)
                     .tabItem {
-                        Label("Rules", systemImage: "shield")
+                        Label(String(localized: "tabs.rules", defaultValue: "Rules"), systemImage: "shield")
                     }
                     .tag(AppState.Tab.rules)
                     .keyboardShortcut("3", modifiers: .command)
 
                 TCCTimeline(appState: appState)
                     .tabItem {
-                        Label("Permissions", systemImage: "lock.shield")
+                        Label(String(localized: "tabs.permissions", defaultValue: "Permissions"), systemImage: "lock.shield")
                     }
                     .tag(AppState.Tab.tcc)
                     .keyboardShortcut("4", modifiers: .command)
 
                 AIActivityView(appState: appState)
                     .tabItem {
-                        Label("AI Guard", systemImage: "cpu")
+                        Label(String(localized: "tabs.aiGuard", defaultValue: "AI Guard"), systemImage: "cpu")
                     }
                     .tag(AppState.Tab.aiGuard)
                     .keyboardShortcut("5", modifiers: .command)
 
                 DocsView()
                     .tabItem {
-                        Label("Docs", systemImage: "book")
+                        Label(String(localized: "tabs.docs", defaultValue: "Docs"), systemImage: "book")
                     }
                     .tag(AppState.Tab.docs)
                     .keyboardShortcut("5", modifiers: .command)

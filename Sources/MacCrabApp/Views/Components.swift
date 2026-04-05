@@ -55,7 +55,7 @@ struct AlertRow: View {
                         .font(.headline)
                         .lineLimit(1)
                     if alert.suppressed {
-                        Text("Suppressed")
+                        Text(String(localized: "alerts.suppressed", defaultValue: "Suppressed"))
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -91,7 +91,7 @@ struct AlertRow: View {
                     Spacer()
 
                     if !alert.suppressed {
-                        Button("Suppress") {
+                        Button(String(localized: "components.suppress", defaultValue: "Suppress")) {
                             onSuppress()
                         }
                         .font(.caption)
@@ -192,7 +192,7 @@ struct RuleRow: View {
                     .lineLimit(1)
                 Spacer()
                 if !rule.enabled {
-                    Text("Disabled")
+                    Text(String(localized: "rules.disabled", defaultValue: "Disabled"))
                         .font(.caption2)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -264,7 +264,9 @@ struct ConnectionStatusBadge: View {
             Circle()
                 .fill(isConnected ? Color.green : Color.red)
                 .frame(width: 6, height: 6)
-            Text(isConnected ? "Connected" : "Disconnected")
+            Text(isConnected
+                ? String(localized: "status.connected", defaultValue: "Connected")
+                : String(localized: "status.disconnected", defaultValue: "Disconnected"))
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }

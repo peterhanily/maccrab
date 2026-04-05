@@ -44,7 +44,7 @@ struct EventStream: View {
         VStack(alignment: .leading, spacing: 0) {
             // Toolbar
             HStack(spacing: 12) {
-                Text("Events")
+                Text(String(localized: "events.title", defaultValue: "Events"))
                     .font(.title2)
                     .fontWeight(.bold)
 
@@ -75,7 +75,7 @@ struct EventStream: View {
                 Divider()
                     .frame(height: 16)
 
-                Toggle("Auto-scroll", isOn: $autoScroll)
+                Toggle(String(localized: "events.autoScroll", defaultValue: "Auto-scroll"), isOn: $autoScroll)
                     .toggleStyle(.checkbox)
                     .font(.caption)
                     .accessibilityLabel("Auto-scroll to newest events")
@@ -84,7 +84,9 @@ struct EventStream: View {
                     isPaused.toggle()
                 } label: {
                     Image(systemName: isPaused ? "play.fill" : "pause.fill")
-                    Text(isPaused ? "Resume" : "Pause")
+                    Text(isPaused
+                        ? String(localized: "events.resume", defaultValue: "Resume")
+                        : String(localized: "events.pause", defaultValue: "Pause"))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -102,11 +104,11 @@ struct EventStream: View {
                     Image(systemName: "list.bullet.rectangle")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.5))
-                    Text("No events matching current filters")
+                    Text(String(localized: "events.noMatch", defaultValue: "No events matching current filters"))
                         .font(.headline)
                         .foregroundColor(.secondary)
                     if filterCategory != nil || !filterText.isEmpty {
-                        Button("Clear Filters") {
+                        Button(String(localized: "events.clearFilters", defaultValue: "Clear Filters")) {
                             filterCategory = nil
                             filterText = ""
                         }
@@ -169,13 +171,13 @@ struct EventStream: View {
                 if isPaused {
                     Image(systemName: "pause.circle.fill")
                         .foregroundColor(.orange)
-                    Text("Paused")
+                    Text(String(localized: "events.paused", defaultValue: "Paused"))
                         .foregroundColor(.orange)
                 } else {
                     Image(systemName: "circle.fill")
                         .foregroundColor(.green)
                         .font(.system(size: 6))
-                    Text("Live")
+                    Text(String(localized: "events.live", defaultValue: "Live"))
                         .foregroundColor(.green)
                 }
                 Spacer()
@@ -242,7 +244,7 @@ private struct EventDetailPanel: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                GroupBox("Process") {
+                GroupBox(String(localized: "eventDetail.process", defaultValue: "Process")) {
                     VStack(alignment: .leading, spacing: 6) {
                         EventDetailRow(label: "Name", value: event.processName)
                         EventDetailRow(label: "PID", value: String(event.pid))
@@ -252,7 +254,7 @@ private struct EventDetailPanel: View {
                     }.padding(4)
                 }
 
-                GroupBox("Detail") {
+                GroupBox(String(localized: "eventDetail.detail", defaultValue: "Detail")) {
                     Text(event.detail)
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
@@ -260,7 +262,7 @@ private struct EventDetailPanel: View {
                         .padding(4)
                 }
 
-                GroupBox("Event Metadata") {
+                GroupBox(String(localized: "eventDetail.metadata", defaultValue: "Event Metadata")) {
                     VStack(alignment: .leading, spacing: 6) {
                         EventDetailRow(label: "ID", value: event.id.uuidString)
                         EventDetailRow(label: "Category", value: event.category.rawValue)
@@ -281,7 +283,7 @@ private struct EventDetailPanel: View {
                     """
                     NSPasteboard.general.setString(text, forType: .string)
                 } label: {
-                    Label("Copy Event Details", systemImage: "doc.on.doc")
+                    Label(String(localized: "events.copyDetails", defaultValue: "Copy Event Details"), systemImage: "doc.on.doc")
                 }
                 .controlSize(.large)
 

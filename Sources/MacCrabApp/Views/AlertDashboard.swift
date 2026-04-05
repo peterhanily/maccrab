@@ -40,7 +40,7 @@ struct AlertDashboard: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header with severity filter chips and search
             HStack(spacing: 12) {
-                Text("Alerts")
+                Text(String(localized: "alerts.title", defaultValue: "Alerts"))
                     .font(.title2)
                     .fontWeight(.bold)
 
@@ -80,11 +80,13 @@ struct AlertDashboard: View {
                     Image(systemName: "shield.checkmark")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.5))
-                    Text(appState.dashboardAlerts.isEmpty ? "No alerts — all clear" : "No alerts matching filters")
+                    Text(appState.dashboardAlerts.isEmpty
+                        ? String(localized: "alerts.empty", defaultValue: "No alerts \u{2014} all clear")
+                        : String(localized: "alerts.noMatch", defaultValue: "No alerts matching filters"))
                         .font(.headline)
                         .foregroundColor(.secondary)
                     if selectedSeverity != nil || !searchText.isEmpty {
-                        Button("Clear Filters") {
+                        Button(String(localized: "alerts.clearFilters", defaultValue: "Clear Filters")) {
                             selectedSeverity = nil
                             searchText = ""
                         }
@@ -185,7 +187,7 @@ struct AlertDetailView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "bolt.shield.fill")
                                 .font(.caption2)
-                            Text("Auto-response configured")
+                            Text(String(localized: "alerts.autoResponseConfigured", defaultValue: "Auto-response configured"))
                                 .font(.caption2)
                         }
                         .foregroundColor(.purple)
@@ -203,26 +205,26 @@ struct AlertDetailView: View {
 
                 // Description
                 if !alert.description.isEmpty {
-                    GroupBox("Description") {
+                    GroupBox(String(localized: "alertDetail.description", defaultValue: "Description")) {
                         Text(alert.description).font(.body).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(4)
                     }
                 }
 
                 // Process details
-                GroupBox("Process Details") {
+                GroupBox(String(localized: "alertDetail.processDetails", defaultValue: "Process Details")) {
                     VStack(alignment: .leading, spacing: 6) {
-                        DetailRow(label: "Name", value: alert.processName)
-                        DetailRow(label: "Path", value: alert.processPath)
+                        DetailRow(label: String(localized: "alertDetail.name", defaultValue: "Name"), value: alert.processName)
+                        DetailRow(label: String(localized: "alertDetail.path", defaultValue: "Path"), value: alert.processPath)
                         if !alert.processPath.isEmpty {
-                            DetailRow(label: "Directory", value: (alert.processPath as NSString).deletingLastPathComponent)
+                            DetailRow(label: String(localized: "alertDetail.directory", defaultValue: "Directory"), value: (alert.processPath as NSString).deletingLastPathComponent)
                         }
                     }.padding(4)
                 }
 
                 // MITRE ATT&CK
                 if !alert.mitreTechniques.isEmpty {
-                    GroupBox("MITRE ATT&CK") {
+                    GroupBox(String(localized: "alertDetail.mitreAttack", defaultValue: "MITRE ATT&CK")) {
                         VStack(alignment: .leading, spacing: 6) {
                             let techniques = alert.mitreTechniques.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
                             ForEach(techniques, id: \.self) { tech in
@@ -239,61 +241,63 @@ struct AlertDetailView: View {
                 }
 
                 // Alert metadata
-                GroupBox("Metadata") {
+                GroupBox(String(localized: "alertDetail.metadata", defaultValue: "Metadata")) {
                     VStack(alignment: .leading, spacing: 6) {
-                        DetailRow(label: "Alert ID", value: alert.id)
-                        DetailRow(label: "Severity", value: alert.severity.label)
-                        DetailRow(label: "Status", value: alert.suppressed ? "Suppressed" : "Active")
+                        DetailRow(label: String(localized: "alertDetail.alertId", defaultValue: "Alert ID"), value: alert.id)
+                        DetailRow(label: String(localized: "alertDetail.severity", defaultValue: "Severity"), value: alert.severity.label)
+                        DetailRow(label: String(localized: "alertDetail.status", defaultValue: "Status"), value: alert.suppressed
+                            ? String(localized: "alerts.suppressed", defaultValue: "Suppressed")
+                            : String(localized: "alerts.active", defaultValue: "Active"))
                     }.padding(4)
                 }
 
                 // Quick Actions
-                GroupBox("Quick Actions") {
+                GroupBox(String(localized: "alertDetail.quickActions", defaultValue: "Quick Actions")) {
                     VStack(alignment: .leading, spacing: 10) {
                         // Row 1: Primary actions
                         HStack(spacing: 10) {
                             if !alert.suppressed {
                                 Button { onSuppress() } label: {
-                                    Label("Suppress This", systemImage: "eye.slash")
+                                    Label(String(localized: "action.suppress", defaultValue: "Suppress This"), systemImage: "eye.slash")
                                 }.controlSize(.large)
 
                                 Button { onSuppressPattern?() } label: {
-                                    Label("Suppress All Like This", systemImage: "eye.slash.circle")
+                                    Label(String(localized: "action.suppressAll", defaultValue: "Suppress All Like This"), systemImage: "eye.slash.circle")
                                 }
                                 .controlSize(.large)
                                 .help("Suppress all alerts matching '\(alert.ruleTitle)' from '\(alert.processName)'")
                             } else {
-                                Label("Suppressed", systemImage: "eye.slash.fill").foregroundColor(.secondary)
+                                Label(String(localized: "alerts.suppressed", defaultValue: "Suppressed"), systemImage: "eye.slash.fill").foregroundColor(.secondary)
                             }
                         }
 
                         Divider()
 
                         // Row 2: Respond actions (contextual based on alert content)
-                        Text("Respond").font(.caption).foregroundColor(.secondary)
+                        Text(String(localized: "alertDetail.respond", defaultValue: "Respond")).font(.caption).foregroundColor(.secondary)
                         HStack(spacing: 10) {
                             // Kill process — only if we have a process path
                             if !alert.processPath.isEmpty {
                                 Button(role: .destructive) {
                                     showKillConfirm = true
                                 } label: {
-                                    Label("Kill Process", systemImage: "xmark.circle.fill")
+                                    Label(String(localized: "action.kill", defaultValue: "Kill Process"), systemImage: "xmark.circle.fill")
                                 }
                                 .controlSize(.large)
                                 .help("Terminate \(alert.processName)")
                                 .confirmationDialog(
-                                    "Kill \(alert.processName)?",
+                                    "\(String(localized: "action.kill", defaultValue: "Kill Process")) — \(alert.processName)?",
                                     isPresented: $showKillConfirm,
                                     titleVisibility: .visible
                                 ) {
-                                    Button("Kill Process", role: .destructive) {
+                                    Button(String(localized: "action.kill", defaultValue: "Kill Process"), role: .destructive) {
                                         let task = Process()
                                         task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
                                         task.arguments = ["-f", alert.processPath]
                                         if (try? task.run()) != nil {
-                                            actionFeedback = "Process terminated"
+                                            actionFeedback = String(localized: "action.kill.success", defaultValue: "Process terminated")
                                         } else {
-                                            actionFeedback = "Failed to terminate process"
+                                            actionFeedback = String(localized: "action.kill.failure", defaultValue: "Failed to terminate process")
                                         }
                                     }
                                 } message: {
@@ -306,26 +310,26 @@ struct AlertDetailView: View {
                                 Button(role: .destructive) {
                                     showQuarantineConfirm = true
                                 } label: {
-                                    Label("Quarantine File", systemImage: "archivebox.fill")
+                                    Label(String(localized: "action.quarantine", defaultValue: "Quarantine File"), systemImage: "archivebox.fill")
                                 }
                                 .controlSize(.large)
                                 .confirmationDialog(
-                                    "Quarantine file from \(alert.processName)?",
+                                    "\(String(localized: "action.quarantine", defaultValue: "Quarantine File")) — \(alert.processName)?",
                                     isPresented: $showQuarantineConfirm,
                                     titleVisibility: .visible
                                 ) {
-                                    Button("Quarantine File", role: .destructive) {
+                                    Button(String(localized: "action.quarantine", defaultValue: "Quarantine File"), role: .destructive) {
                                         let task = Process()
                                         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
                                         task.arguments = ["-e", "display notification \"File quarantined\" with title \"MacCrab\""]
                                         if (try? task.run()) != nil {
-                                            actionFeedback = "File quarantined"
+                                            actionFeedback = String(localized: "action.quarantine.success", defaultValue: "File quarantined")
                                         } else {
-                                            actionFeedback = "Failed to quarantine file"
+                                            actionFeedback = String(localized: "action.quarantine.failure", defaultValue: "Failed to quarantine file")
                                         }
                                     }
                                 } message: {
-                                    Text("This will move the referenced file to quarantine. The file will no longer be accessible at its original location.")
+                                    Text(String(localized: "action.quarantine.message", defaultValue: "This will move the referenced file to quarantine. The file will no longer be accessible at its original location."))
                                 }
                             }
 
@@ -334,22 +338,22 @@ struct AlertDetailView: View {
                                 Button(role: .destructive) {
                                     showBlockConfirm = true
                                 } label: {
-                                    Label("Block Destination", systemImage: "network.slash")
+                                    Label(String(localized: "action.block", defaultValue: "Block Destination"), systemImage: "network.slash")
                                 }
                                 .controlSize(.large)
                                 .confirmationDialog(
-                                    "Block network destination?",
+                                    String(localized: "action.block.confirm", defaultValue: "Block network destination?"),
                                     isPresented: $showBlockConfirm,
                                     titleVisibility: .visible
                                 ) {
-                                    Button("Block Destination", role: .destructive) {
+                                    Button(String(localized: "action.block", defaultValue: "Block Destination"), role: .destructive) {
                                         let task = Process()
                                         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
                                         task.arguments = ["-e", "display notification \"Network destination blocked\" with title \"MacCrab\""]
                                         if (try? task.run()) != nil {
-                                            actionFeedback = "Network destination blocked"
+                                            actionFeedback = String(localized: "action.block.success", defaultValue: "Network destination blocked")
                                         } else {
-                                            actionFeedback = "Failed to block destination"
+                                            actionFeedback = String(localized: "action.block.failure", defaultValue: "Failed to block destination")
                                         }
                                     }
                                 } message: {
@@ -371,7 +375,7 @@ struct AlertDetailView: View {
                                 """
                                 NSPasteboard.general.setString(text, forType: .string)
                             } label: {
-                                Label("Copy Details", systemImage: "doc.on.doc")
+                                Label(String(localized: "action.copyDetails", defaultValue: "Copy Details"), systemImage: "doc.on.doc")
                             }
                             .controlSize(.large)
                             .accessibilityHint("Copies alert details to clipboard")

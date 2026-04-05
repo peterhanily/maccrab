@@ -54,7 +54,7 @@ struct RuleBrowser: View {
         HSplitView {
             // Tactic sidebar
             VStack(alignment: .leading, spacing: 0) {
-                Text("Tactics")
+                Text(String(localized: "rules.tactics", defaultValue: "Tactics"))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 12)
@@ -66,7 +66,7 @@ struct RuleBrowser: View {
                     HStack {
                         Image(systemName: "shield")
                             .foregroundColor(.accentColor)
-                        Text("All Rules")
+                        Text(String(localized: "rules.allRules", defaultValue: "All Rules"))
                         Spacer()
                         Text("\(appState.rules.count)")
                             .font(.caption)
@@ -99,7 +99,7 @@ struct RuleBrowser: View {
             // Rules list
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 12) {
-                    Text("Rules")
+                    Text(String(localized: "rules.title", defaultValue: "Rules"))
                         .font(.title2)
                         .fontWeight(.bold)
 
@@ -133,7 +133,7 @@ struct RuleBrowser: View {
                     Button {
                         showRuleWizard = true
                     } label: {
-                        Label("Create Rule", systemImage: "plus")
+                        Label(String(localized: "rules.createRule", defaultValue: "Create Rule"), systemImage: "plus")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -156,7 +156,7 @@ struct RuleBrowser: View {
                         Image(systemName: "shield.slash")
                             .font(.system(size: 48))
                             .foregroundColor(.secondary.opacity(0.5))
-                        Text("No rules matching current filters")
+                        Text(String(localized: "rules.noMatch", defaultValue: "No rules matching current filters"))
                             .font(.headline)
                             .foregroundColor(.secondary)
                         Spacer()
@@ -233,7 +233,10 @@ private struct RuleDetailPanel: View {
 
                 // Status
                 HStack {
-                    Label(rule.enabled ? "Enabled" : "Disabled", systemImage: rule.enabled ? "checkmark.circle" : "xmark.circle")
+                    Label(rule.enabled
+                        ? String(localized: "rules.enabled", defaultValue: "Enabled")
+                        : String(localized: "rules.disabled", defaultValue: "Disabled"),
+                        systemImage: rule.enabled ? "checkmark.circle" : "xmark.circle")
                         .foregroundColor(rule.enabled ? .green : .red)
                         .font(.caption)
                     Spacer()
@@ -241,7 +244,7 @@ private struct RuleDetailPanel: View {
 
                 // Description
                 if !rule.description.isEmpty {
-                    GroupBox("Description") {
+                    GroupBox(String(localized: "ruleDetail.description", defaultValue: "Description")) {
                         Text(rule.description).font(.body).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(4)
                     }
@@ -249,7 +252,7 @@ private struct RuleDetailPanel: View {
 
                 // MITRE ATT&CK
                 if !rule.techniqueIds.isEmpty {
-                    GroupBox("MITRE ATT&CK") {
+                    GroupBox(String(localized: "ruleDetail.mitreAttack", defaultValue: "MITRE ATT&CK")) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Image(systemName: "shield.fill").foregroundColor(.purple).font(.caption)
@@ -270,7 +273,7 @@ private struct RuleDetailPanel: View {
 
                 // Tags
                 if !rule.tags.isEmpty {
-                    GroupBox("Tags") {
+                    GroupBox(String(localized: "ruleDetail.tags", defaultValue: "Tags")) {
                         FlowLayout(spacing: 4) {
                             ForEach(rule.tags, id: \.self) { tag in
                                 Text(tag)
@@ -284,18 +287,20 @@ private struct RuleDetailPanel: View {
                 }
 
                 // Metadata
-                GroupBox("Metadata") {
+                GroupBox(String(localized: "ruleDetail.metadata", defaultValue: "Metadata")) {
                     VStack(alignment: .leading, spacing: 6) {
-                        RuleDetailRow(label: "Rule ID", value: rule.id)
-                        RuleDetailRow(label: "Severity", value: rule.level.capitalized)
-                        RuleDetailRow(label: "Status", value: rule.enabled ? "Enabled" : "Disabled")
+                        RuleDetailRow(label: String(localized: "ruleDetail.ruleId", defaultValue: "Rule ID"), value: rule.id)
+                        RuleDetailRow(label: String(localized: "ruleDetail.severity", defaultValue: "Severity"), value: rule.level.capitalized)
+                        RuleDetailRow(label: String(localized: "ruleDetail.status", defaultValue: "Status"), value: rule.enabled
+                            ? String(localized: "rules.enabled", defaultValue: "Enabled")
+                            : String(localized: "rules.disabled", defaultValue: "Disabled"))
                     }.padding(4)
                 }
 
                 // Response Actions config
-                GroupBox("Response Actions") {
+                GroupBox(String(localized: "ruleDetail.responseActions", defaultValue: "Response Actions")) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Configure in actions.json:").font(.caption).foregroundColor(.secondary)
+                        Text(String(localized: "ruleDetail.configureInActions", defaultValue: "Configure in actions.json:")).font(.caption).foregroundColor(.secondary)
                         Text("""
                         {
                           "rules": {
@@ -321,7 +326,7 @@ private struct RuleDetailPanel: View {
                         let text = "Rule: \(rule.title)\nID: \(rule.id)\nSeverity: \(rule.level)\nTactic: \(rule.tacticName)\nTechniques: \(rule.techniqueIds.joined(separator: ", "))\nDescription: \(rule.description)"
                         NSPasteboard.general.setString(text, forType: .string)
                     } label: {
-                        Label("Copy Details", systemImage: "doc.on.doc")
+                        Label(String(localized: "ruleDetail.copyDetails", defaultValue: "Copy Details"), systemImage: "doc.on.doc")
                     }.controlSize(.large)
 
                     Button {
@@ -344,14 +349,14 @@ private struct RuleDetailPanel: View {
                             }
                         }
                     } label: {
-                        Label("Open JSON", systemImage: "doc.text")
+                        Label(String(localized: "ruleDetail.openJSON", defaultValue: "Open JSON"), systemImage: "doc.text")
                     }.controlSize(.large)
 
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(rule.id, forType: .string)
                     } label: {
-                        Label("Copy ID", systemImage: "number")
+                        Label(String(localized: "ruleDetail.copyId", defaultValue: "Copy ID"), systemImage: "number")
                     }.controlSize(.large)
                 }
 

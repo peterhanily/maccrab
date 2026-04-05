@@ -53,7 +53,7 @@ struct TCCTimeline: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack(spacing: 12) {
-                Text("TCC Permission Timeline")
+                Text(String(localized: "tcc.title", defaultValue: "TCC Permission Timeline"))
                     .font(.title2)
                     .fontWeight(.bold)
 
@@ -68,7 +68,7 @@ struct TCCTimeline: View {
 
                 // Service filter
                 Picker("Service", selection: $filterService) {
-                    Text("All Services").tag(nil as String?)
+                    Text(String(localized: "tcc.allServices", defaultValue: "All Services")).tag(nil as String?)
                     Divider()
                     ForEach(serviceNames, id: \.self) { name in
                         Text(name).tag(name as String?)
@@ -78,9 +78,9 @@ struct TCCTimeline: View {
 
                 // Allowed/denied filter
                 Picker("Status", selection: $filterAllowed) {
-                    Text("All").tag(nil as Bool?)
-                    Text("Granted").tag(true as Bool?)
-                    Text("Denied").tag(false as Bool?)
+                    Text(String(localized: "tcc.all", defaultValue: "All")).tag(nil as Bool?)
+                    Text(String(localized: "tcc.granted", defaultValue: "Granted")).tag(true as Bool?)
+                    Text(String(localized: "tcc.denied", defaultValue: "Denied")).tag(false as Bool?)
                 }
                 .frame(width: 120)
 
@@ -100,12 +100,12 @@ struct TCCTimeline: View {
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.5))
                     Text(appState.tccEvents.isEmpty
-                        ? "No permission changes detected yet"
-                        : "No TCC events matching current filters")
+                        ? String(localized: "tcc.emptyDefault", defaultValue: "No permission changes detected yet")
+                        : String(localized: "tcc.noMatch", defaultValue: "No TCC events matching current filters"))
                         .font(.headline)
                         .foregroundColor(.secondary)
                     if filterService != nil || filterAllowed != nil || !searchText.isEmpty {
-                        Button("Clear Filters") {
+                        Button(String(localized: "tcc.clearFilters", defaultValue: "Clear Filters")) {
                             filterService = nil
                             filterAllowed = nil
                             searchText = ""
@@ -128,7 +128,7 @@ struct TCCTimeline: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
                     .font(.caption)
-                Text("\(granted) granted")
+                Text("\(granted) \(String(localized: "tcc.granted", defaultValue: "granted"))")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -136,13 +136,13 @@ struct TCCTimeline: View {
                     .foregroundColor(.red)
                     .font(.caption)
                     .padding(.leading, 8)
-                Text("\(denied) denied")
+                Text("\(denied) \(String(localized: "tcc.denied", defaultValue: "denied"))")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
                 Spacer()
 
-                Text("\(appState.tccEvents.count) total events")
+                Text("\(appState.tccEvents.count) \(String(localized: "tcc.totalEventsLabel", defaultValue: "total events"))")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -169,7 +169,9 @@ private struct TCCEventRow: View {
                 Image(systemName: event.allowed ? "checkmark.circle.fill" : "xmark.circle.fill")
                     .foregroundColor(event.allowed ? .green : .red)
                     .font(.title3)
-                Text(event.allowed ? "(Granted)" : "(Denied)")
+                Text(event.allowed
+                    ? String(localized: "tcc.granted", defaultValue: "Granted")
+                    : String(localized: "tcc.denied", defaultValue: "Denied"))
                     .font(.caption2)
                     .foregroundColor(event.allowed ? .green : .red)
             }
@@ -180,7 +182,9 @@ private struct TCCEventRow: View {
                 HStack {
                     Text(event.friendlyServiceName)
                         .font(.headline)
-                    Text(event.allowed ? "Granted" : "Denied")
+                    Text(event.allowed
+                        ? String(localized: "tcc.granted", defaultValue: "Granted")
+                        : String(localized: "tcc.denied", defaultValue: "Denied"))
                         .font(.caption)
                         .fontWeight(.semibold)
                         .padding(.horizontal, 6)

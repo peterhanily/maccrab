@@ -37,19 +37,19 @@ struct ResponseActionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Response Actions")
+                Text(String(localized: "responseActions.title", defaultValue: "Response Actions"))
                     .font(.title2).fontWeight(.bold)
                 Spacer()
                 Button {
                     config = ActionConfig()  // Resets to built-in defaults
                     save()
                 } label: {
-                    Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
+                    Label(String(localized: "responseActions.resetDefaults", defaultValue: "Reset to Defaults"), systemImage: "arrow.counterclockwise")
                 }
                 .controlSize(.small)
                 .accessibilityLabel("Reset all response actions to defaults")
                 Button { showAddSheet = true } label: {
-                    Label("Add Rule Action", systemImage: "plus")
+                    Label(String(localized: "responseActions.addRuleAction", defaultValue: "Add Rule Action"), systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -64,18 +64,18 @@ struct ResponseActionsView: View {
                     // Explanation
                     GroupBox {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Response actions execute automatically when detection rules fire.")
+                            Text(String(localized: "responseActions.explanation", defaultValue: "Response actions execute automatically when detection rules fire."))
                                 .font(.callout)
-                            Text("Configure what happens when specific rules trigger — kill processes, quarantine files, send notifications, or run custom scripts.")
+                            Text(String(localized: "responseActions.explanationDetail", defaultValue: "Configure what happens when specific rules trigger \u{2014} kill processes, quarantine files, send notifications, or run custom scripts."))
                                 .font(.caption).foregroundColor(.secondary)
                         }.padding(4)
                     }
 
                     // Default actions
-                    GroupBox("Default Actions (all rules)") {
+                    GroupBox(String(localized: "responseActions.defaultActions", defaultValue: "Default Actions (all rules)")) {
                         VStack(alignment: .leading, spacing: 8) {
                             if config.defaults.isEmpty {
-                                Text("No default actions configured").font(.caption).foregroundColor(.secondary)
+                                Text(String(localized: "responseActions.noDefaults", defaultValue: "No default actions configured")).font(.caption).foregroundColor(.secondary)
                             }
                             ForEach(config.defaults.indices, id: \.self) { i in
                                 ActionRow(action: $config.defaults[i], onDelete: {
@@ -87,19 +87,19 @@ struct ResponseActionsView: View {
                                 config.defaults.append(ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil))
                                 save()
                             } label: {
-                                Label("Add Default Action", systemImage: "plus.circle")
+                                Label(String(localized: "responseActions.addDefault", defaultValue: "Add Default Action"), systemImage: "plus.circle")
                             }.font(.caption)
                         }.padding(8)
                     }
 
                     // Per-rule actions
-                    GroupBox("Per-Rule Actions") {
+                    GroupBox(String(localized: "responseActions.perRule", defaultValue: "Per-Rule Actions")) {
                         VStack(alignment: .leading, spacing: 12) {
                             if config.rules.isEmpty {
                                 VStack(spacing: 8) {
                                     Image(systemName: "bolt.slash").font(.title2).foregroundColor(.secondary.opacity(0.5))
-                                    Text("No per-rule actions configured").font(.caption).foregroundColor(.secondary)
-                                    Text("Click 'Add Rule Action' to configure responses for specific rules.")
+                                    Text(String(localized: "responseActions.noPerRule", defaultValue: "No per-rule actions configured")).font(.caption).foregroundColor(.secondary)
+                                    Text(String(localized: "responseActions.noPerRuleHint", defaultValue: "Click 'Add Rule Action' to configure responses for specific rules."))
                                         .font(.caption2).foregroundColor(.secondary)
                                 }.frame(maxWidth: .infinity).padding()
                             }
@@ -147,11 +147,11 @@ struct ResponseActionsView: View {
                     }
 
                     // Suppression patterns
-                    GroupBox("Active Suppressions") {
-                        Text("Alerts matching these patterns are hidden from the dashboard.")
+                    GroupBox(String(localized: "responseActions.activeSuppressions", defaultValue: "Active Suppressions")) {
+                        Text(String(localized: "responseActions.suppressionsDesc", defaultValue: "Alerts matching these patterns are hidden from the dashboard."))
                             .font(.caption).foregroundColor(.secondary)
                         // This is managed via AppState.suppressionPatterns
-                        Text("Manage via 'Suppress All Like This' button in alert details.")
+                        Text(String(localized: "responseActions.suppressionsHint", defaultValue: "Manage via 'Suppress All Like This' button in alert details."))
                             .font(.caption2).foregroundColor(.secondary)
                     }
 
@@ -299,7 +299,7 @@ private struct ActionRow: View {
             .frame(width: 110)
             .controlSize(.small)
 
-            Text("when severity ≥")
+            Text(String(localized: "responseActions.whenSeverity", defaultValue: "when severity \u{2265}"))
                 .font(.caption).foregroundColor(.secondary)
 
             Picker("Severity", selection: $action.minimumSeverity) {
@@ -341,10 +341,10 @@ private struct AddRuleActionSheet: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("Add Response Action for Rule").font(.headline)
+            Text(String(localized: "addRuleAction.title", defaultValue: "Add Response Action for Rule")).font(.headline)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Rule ID (paste from rule detail panel)").font(.caption).foregroundColor(.secondary)
+                Text(String(localized: "addRuleAction.ruleIdHint", defaultValue: "Rule ID (paste from rule detail panel)")).font(.caption).foregroundColor(.secondary)
                 TextField("e.g., d1a2b3c4-2001-4000-a000-000000002001", text: $ruleId)
                     .textFieldStyle(.roundedBorder)
                     .controlSize(.large)
@@ -379,9 +379,9 @@ private struct AddRuleActionSheet: View {
             }
 
             HStack {
-                Button("Cancel") { dismiss() }
+                Button(String(localized: "addRuleAction.cancel", defaultValue: "Cancel")) { dismiss() }
                 Spacer()
-                Button("Add Action") {
+                Button(String(localized: "addRuleAction.add", defaultValue: "Add Action")) {
                     guard !ruleId.isEmpty else { return }
                     onAdd(ruleId, action)
                     dismiss()

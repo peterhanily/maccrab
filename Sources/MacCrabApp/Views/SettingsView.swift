@@ -21,19 +21,19 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             generalTab
-                .tabItem { Label("General", systemImage: "gear") }
+                .tabItem { Label(String(localized: "settings.general", defaultValue: "General"), systemImage: "gear") }
 
             notificationsTab
-                .tabItem { Label("Notifications", systemImage: "bell") }
+                .tabItem { Label(String(localized: "settings.notifications", defaultValue: "Notifications"), systemImage: "bell") }
 
             daemonTab
-                .tabItem { Label("Daemon", systemImage: "server.rack") }
+                .tabItem { Label(String(localized: "settings.daemon", defaultValue: "Daemon"), systemImage: "server.rack") }
 
             ResponseActionsView()
-                .tabItem { Label("Response Actions", systemImage: "bolt.shield") }
+                .tabItem { Label(String(localized: "settings.responseActions", defaultValue: "Response Actions"), systemImage: "bolt.shield") }
 
             aboutTab
-                .tabItem { Label("About", systemImage: "info.circle") }
+                .tabItem { Label(String(localized: "settings.about", defaultValue: "About"), systemImage: "info.circle") }
         }
         .padding(20)
         .frame(minWidth: 480, idealWidth: 520, maxWidth: 700, minHeight: 350, idealHeight: 400, maxHeight: 600)
@@ -43,10 +43,10 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         VStack(alignment: .leading, spacing: 20) {
-            GroupBox("Data Retention") {
+            GroupBox(String(localized: "settings.dataRetention", defaultValue: "Data Retention")) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Keep events for")
+                        Text(String(localized: "settings.keepEventsFor", defaultValue: "Keep events for"))
                         Stepper(
                             "\(retentionDays) days",
                             value: $retentionDays,
@@ -54,17 +54,17 @@ struct SettingsView: View {
                             step: 1
                         )
                     }
-                    Text("Events, alerts, and baseline data older than this will be automatically pruned.")
+                    Text(String(localized: "settings.retentionHelp", defaultValue: "Events, alerts, and baseline data older than this will be automatically pruned."))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 .padding(8)
             }
 
-            GroupBox("UI Refresh") {
+            GroupBox(String(localized: "settings.uiRefresh", defaultValue: "UI Refresh")) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Poll daemon every")
+                        Text(String(localized: "settings.pollDaemon", defaultValue: "Poll daemon every"))
                         Stepper(
                             "\(pollIntervalSeconds) seconds",
                             value: $pollIntervalSeconds,
@@ -72,41 +72,41 @@ struct SettingsView: View {
                             step: 1
                         )
                     }
-                    Text("How often the app checks the daemon's database for new events and alerts.")
+                    Text(String(localized: "settings.pollHelp", defaultValue: "How often the app checks the daemon's database for new events and alerts."))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 .padding(8)
             }
 
-            GroupBox("Startup") {
-                Toggle("Launch MacCrab at login", isOn: $launchAtLogin)
+            GroupBox(String(localized: "settings.startup", defaultValue: "Startup")) {
+                Toggle(String(localized: "settings.launchAtLogin", defaultValue: "Launch MacCrab at login"), isOn: $launchAtLogin)
                     .accessibilityLabel("Launch MacCrab at login")
                     .padding(8)
             }
 
             // Auto-Response Configuration
-            GroupBox("Auto-Response") {
+            GroupBox(String(localized: "settings.autoResponse", defaultValue: "Auto-Response")) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Automatically respond to critical threats")
+                    Text(String(localized: "settings.autoResponseDesc", defaultValue: "Automatically respond to critical threats"))
                         .font(.callout)
 
-                    Toggle("Auto-quarantine malicious files", isOn: $autoQuarantine)
+                    Toggle(String(localized: "settings.autoQuarantine", defaultValue: "Auto-quarantine malicious files"), isOn: $autoQuarantine)
                         .accessibilityLabel("Auto-quarantine malicious files")
                         .accessibilityHint("Applies only to critical severity alerts")
                         .help("Automatically move files flagged by critical-severity rules to quarantine")
 
-                    Toggle("Auto-kill malicious processes", isOn: $autoKill)
+                    Toggle(String(localized: "settings.autoKill", defaultValue: "Auto-kill malicious processes"), isOn: $autoKill)
                         .accessibilityLabel("Auto-kill malicious processes")
                         .accessibilityHint("Applies only to critical severity alerts")
                         .help("Automatically terminate processes that trigger critical detection rules")
 
-                    Toggle("Auto-block C2 destinations", isOn: $autoBlock)
+                    Toggle(String(localized: "settings.autoBlock", defaultValue: "Auto-block C2 destinations"), isOn: $autoBlock)
                         .accessibilityLabel("Auto-block C2 destinations")
                         .accessibilityHint("Applies only to critical severity alerts")
                         .help("Automatically add PF firewall rules to block command-and-control IPs")
 
-                    Text("These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab.")
+                    Text(String(localized: "settings.autoResponseNote", defaultValue: "These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab."))
                         .font(.caption).foregroundColor(.secondary)
                 }.padding(8)
             }
@@ -119,26 +119,26 @@ struct SettingsView: View {
 
     private var notificationsTab: some View {
         VStack(alignment: .leading, spacing: 20) {
-            GroupBox("macOS Notifications") {
+            GroupBox(String(localized: "settings.macosNotifications", defaultValue: "macOS Notifications")) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle("Show notifications for detection alerts", isOn: $alertNotifications)
+                    Toggle(String(localized: "settings.showNotifications", defaultValue: "Show notifications for detection alerts"), isOn: $alertNotifications)
                         .accessibilityLabel("Show notifications for detection alerts")
 
                     if alertNotifications {
                         HStack {
-                            Text("Minimum severity:")
+                            Text(String(localized: "settings.minimumSeverity", defaultValue: "Minimum severity:"))
                             Picker("", selection: $minAlertSeverity) {
-                                Text("Informational").tag("informational")
-                                Text("Low").tag("low")
-                                Text("Medium").tag("medium")
-                                Text("High").tag("high")
-                                Text("Critical only").tag("critical")
+                                Text(String(localized: "settings.informational", defaultValue: "Informational")).tag("informational")
+                                Text(String(localized: "settings.low", defaultValue: "Low")).tag("low")
+                                Text(String(localized: "settings.medium", defaultValue: "Medium")).tag("medium")
+                                Text(String(localized: "settings.high", defaultValue: "High")).tag("high")
+                                Text(String(localized: "settings.criticalOnly", defaultValue: "Critical only")).tag("critical")
                             }
                             .labelsHidden()
                             .frame(width: 160)
                         }
 
-                        Text("Only alerts at or above this severity will trigger a macOS notification.")
+                        Text(String(localized: "settings.severityHelp", defaultValue: "Only alerts at or above this severity will trigger a macOS notification."))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -154,16 +154,18 @@ struct SettingsView: View {
 
     private var daemonTab: some View {
         VStack(alignment: .leading, spacing: 20) {
-            GroupBox("Status") {
+            GroupBox(String(localized: "settings.daemonStatus", defaultValue: "Status")) {
                 VStack(spacing: 12) {
                     HStack {
-                        Label("Daemon", systemImage: "server.rack")
+                        Label(String(localized: "settings.daemon", defaultValue: "Daemon"), systemImage: "server.rack")
                         Spacer()
                         HStack(spacing: 6) {
                             Circle()
                                 .fill(appState.isConnected ? Color.green : Color.red)
                                 .frame(width: 10, height: 10)
-                            Text(appState.isConnected ? "Running" : "Stopped")
+                            Text(appState.isConnected
+                                ? String(localized: "settings.daemonRunning", defaultValue: "Running")
+                                : String(localized: "settings.daemonStopped", defaultValue: "Stopped"))
                                 .fontWeight(.medium)
                                 .foregroundColor(appState.isConnected ? .primary : .red)
                         }
@@ -172,21 +174,21 @@ struct SettingsView: View {
                     Divider()
 
                     HStack {
-                        Label("Rules loaded", systemImage: "shield.checkered")
+                        Label(String(localized: "settings.rulesLoaded", defaultValue: "Rules loaded"), systemImage: "shield.checkered")
                         Spacer()
                         Text("\(appState.rulesLoaded)")
                             .foregroundColor(.secondary)
                     }
 
                     HStack {
-                        Label("Events/sec", systemImage: "waveform.path.ecg")
+                        Label(String(localized: "settings.eventsPerSec", defaultValue: "Events/sec"), systemImage: "waveform.path.ecg")
                         Spacer()
                         Text("\(appState.eventsPerSecond)")
                             .foregroundColor(.secondary)
                     }
 
                     HStack {
-                        Label("Database", systemImage: "cylinder")
+                        Label(String(localized: "settings.database", defaultValue: "Database"), systemImage: "cylinder")
                         Spacer()
                         Text(databasePath)
                             .font(.caption)
@@ -198,18 +200,18 @@ struct SettingsView: View {
                 .padding(8)
             }
 
-            GroupBox("Actions") {
+            GroupBox(String(localized: "settings.actions", defaultValue: "Actions")) {
                 HStack(spacing: 12) {
                     Button {
                         appState.reloadDaemonRules()
                     } label: {
-                        Label("Reload Rules", systemImage: "arrow.clockwise")
+                        Label(String(localized: "settings.reloadRules", defaultValue: "Reload Rules"), systemImage: "arrow.clockwise")
                     }
 
                     Button {
                         Task { await appState.refresh() }
                     } label: {
-                        Label("Refresh Connection", systemImage: "arrow.triangle.2.circlepath")
+                        Label(String(localized: "settings.refreshConnection", defaultValue: "Refresh Connection"), systemImage: "arrow.triangle.2.circlepath")
                     }
                 }
                 .padding(8)
@@ -232,7 +234,7 @@ struct SettingsView: View {
                 .font(.title)
                 .fontWeight(.bold)
 
-            Text("Local-first macOS threat detection engine")
+            Text(String(localized: "settings.aboutTagline", defaultValue: "Local-first macOS threat detection engine"))
                 .foregroundColor(.secondary)
 
             Text("v0.5.0")
@@ -243,10 +245,10 @@ struct SettingsView: View {
                 .frame(width: 200)
 
             VStack(spacing: 4) {
-                Text("7 event sources | 8 detection layers | 241 rules")
+                Text(String(localized: "settings.aboutStats", defaultValue: "7 event sources | 8 detection layers | 241 rules"))
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("Apache 2.0 (code)  |  DRL 1.1 (rules)")
+                Text(String(localized: "settings.aboutLicense", defaultValue: "Apache 2.0 (code)  |  DRL 1.1 (rules)"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "MacCrab",
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v13)
     ],
@@ -37,7 +38,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "MacCrabApp",
-            dependencies: ["MacCrabCore"]
+            dependencies: ["MacCrabCore"],
+            resources: [
+                .process("Resources"),
+            ]
         ),
         .testTarget(
             name: "MacCrabCoreTests",
