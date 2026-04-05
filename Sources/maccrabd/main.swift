@@ -244,8 +244,45 @@ struct MacCrabDaemon {
             print("Database encryption: active (AES-256, key in Keychain)")
         }
 
-        // Report generator — HTML incident reports (used by maccrabctl export)
-        _ = ReportGenerator()  // Available for on-demand report generation
+        // Report generator — HTML incident reports
+        let reportGenerator = ReportGenerator()
+
+        // Clipboard monitor — detects sensitive data and injection on clipboard
+        let clipboardMonitor = ClipboardMonitor(pollInterval: 3)
+        await clipboardMonitor.start()
+        let clipboardInjectionDetector = ClipboardInjectionDetector()
+        print("Clipboard monitor active (sensitive data + injection detection)")
+
+        // Browser extension monitor — scans Chrome/Firefox/Brave/Edge/Arc
+        let browserExtMonitor = BrowserExtensionMonitor(pollInterval: 120)
+        await browserExtMonitor.start()
+        print("Browser extension monitor active")
+
+        // Ultrasonic attack monitor — FFT mic sampling for DolphinAttack/NUIT
+        let ultrasonicMonitor = UltrasonicMonitor(pollInterval: 60)
+        await ultrasonicMonitor.start()
+        print("Ultrasonic attack monitor active (DolphinAttack, NUIT, SurfingAttack)")
+
+        // DoH evasion detector — flags non-browser DoH usage
+        let dohDetector = DoHDetector()
+
+        // TLS fingerprinter — C2 beacon detection via connection interval analysis
+        let tlsFingerprinter = TLSFingerprinter()
+
+        // Git security monitor — credential theft, SSH agent hijack, malicious hooks
+        let gitSecurityMonitor = GitSecurityMonitor()
+
+        // File injection scanner — scans files AI tools access for hidden prompt injection
+        let fileInjectionScanner = FileInjectionScanner()
+        if await fileInjectionScanner.isAvailable {
+            print("File injection scanner active (forensicate + inline detection)")
+        }
+
+        // Natural language threat hunter
+        let threatHunter = ThreatHunter(databasePath: supportDir + "/events.db")
+
+        // Auto rule generator — creates Sigma rules from observed campaigns
+        let ruleGenerator = RuleGenerator(outputDir: supportDir + "/compiled_rules")
 
         // Notarization checker — verifies notarization status of executed binaries
         let notarizationChecker = NotarizationChecker()
@@ -783,6 +820,66 @@ struct MacCrabDaemon {
             }
         }
 
+        // Clipboard monitoring task
+        _ = clipboardInjectionDetector  // Available for dashboard/CLI on-demand scanning
+        Task {
+            for await clipEvent in clipboardMonitor.events {
+                if clipEvent.containsSensitiveData {
+                    let alert = Alert(
+                        ruleId: "maccrab.clipboard.sensitive-data",
+                        ruleTitle: "Sensitive Data on Clipboard",
+                        severity: .medium,
+                        eventId: UUID().uuidString,
+                        processPath: nil, processName: "pasteboard",
+                        description: "Sensitive data detected on clipboard (API key, token, SSH key, or credential). Types: \(clipEvent.contentTypes.prefix(3).joined(separator: ", "))",
+                        mitreTactics: "attack.collection", mitreTechniques: "attack.t1115",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    print("[CLIP] Sensitive data detected on clipboard")
+                }
+            }
+        }
+
+        // Browser extension monitoring task
+        Task {
+            for await extEvent in browserExtMonitor.events {
+                let severity: Severity = extEvent.isSuspicious ? .high : .medium
+                let alert = Alert(
+                    ruleId: "maccrab.browser.\(extEvent.isNew ? "extension-installed" : "extension-modified")",
+                    ruleTitle: "\(extEvent.browser.capitalized) Extension \(extEvent.isNew ? "Installed" : "Modified"): \(extEvent.extensionName)",
+                    severity: severity,
+                    eventId: UUID().uuidString,
+                    processPath: extEvent.extensionPath, processName: extEvent.browser,
+                    description: "\(extEvent.extensionName) (ID: \(extEvent.extensionId))\(extEvent.isSuspicious ? " — SUSPICIOUS: \(extEvent.suspicionReason ?? "dangerous permissions")" : "")\nPermissions: \(extEvent.permissions.prefix(5).joined(separator: ", "))",
+                    mitreTactics: "attack.persistence", mitreTechniques: "attack.t1176",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                if extEvent.isSuspicious { await notifier.notify(alert: alert) }
+                print("[EXT] \(extEvent.browser): \(extEvent.extensionName)\(extEvent.isSuspicious ? " [SUSPICIOUS]" : "")")
+            }
+        }
+
+        // Ultrasonic attack monitoring task
+        Task {
+            for await usEvent in ultrasonicMonitor.events {
+                let alert = Alert(
+                    ruleId: "maccrab.ultrasonic.\(usEvent.attackType.rawValue)",
+                    ruleTitle: "Ultrasonic Attack Detected: \(usEvent.attackType.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
+                    severity: .critical,
+                    eventId: UUID().uuidString,
+                    processPath: nil, processName: "microphone",
+                    description: "Ultrasonic voice injection detected at \(String(format: "%.0f", usEvent.peakFrequencyHz)) Hz. Energy ratio: \(String(format: "%.1f", usEvent.energyRatio)) dB. Confidence: \(String(format: "%.0f", usEvent.confidence * 100))%.",
+                    mitreTactics: "attack.initial_access", mitreTechniques: "attack.t1200",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+                print("[ULTRASONIC] \(usEvent.attackType.rawValue) at \(String(format: "%.0f", usEvent.peakFrequencyHz)) Hz!")
+            }
+        }
+
         // DNS event processing task
         Task {
             for await dnsQuery in dnsCollector.events {
@@ -900,6 +997,7 @@ struct MacCrabDaemon {
                 await deduplicator.sweep()
                 await crossProcessCorrelator.purgeStale()
                 await campaignDetector.sweep()
+                await tlsFingerprinter.sweep()
             }
         }
         maintenanceTimer.resume()
@@ -1365,6 +1463,98 @@ struct MacCrabDaemon {
                 )
             }
 
+            // === DoH evasion detection ===
+            if let net = enrichedEvent.network {
+                if let dohViolation = await dohDetector.check(
+                    processName: enrichedEvent.process.name,
+                    processPath: enrichedEvent.process.executable,
+                    pid: enrichedEvent.process.pid,
+                    destinationIP: net.destinationIp,
+                    destinationPort: net.destinationPort
+                ) {
+                    let alert = Alert(
+                        ruleId: "maccrab.network.doh-evasion",
+                        ruleTitle: "DNS-over-HTTPS Evasion: \(dohViolation.processName) → \(dohViolation.resolverName)",
+                        severity: .high,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: dohViolation.processPath, processName: dohViolation.processName,
+                        description: "Non-browser process using DoH resolver \(dohViolation.resolverName) (\(dohViolation.destinationIP):443)",
+                        mitreTactics: "attack.command_and_control", mitreTechniques: "attack.t1071.004",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                }
+
+                // === TLS fingerprinting / C2 beacon detection ===
+                if let tlsAlert = await tlsFingerprinter.analyze(
+                    processName: enrichedEvent.process.name,
+                    processPath: enrichedEvent.process.executable,
+                    destinationIP: net.destinationIp,
+                    destinationPort: net.destinationPort,
+                    timestamp: enrichedEvent.timestamp
+                ) {
+                    let alert = Alert(
+                        ruleId: "maccrab.network.\(tlsAlert.alertType.rawValue)",
+                        ruleTitle: tlsAlert.detail.prefix(80).description,
+                        severity: tlsAlert.severity,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: tlsAlert.processPath, processName: tlsAlert.processName,
+                        description: tlsAlert.detail,
+                        mitreTactics: "attack.command_and_control", mitreTechniques: "attack.t1071.001",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    if tlsAlert.severity >= .high { await notifier.notify(alert: alert) }
+                }
+            }
+
+            // === Git security monitoring ===
+            if enrichedEvent.eventCategory == .process || enrichedEvent.eventCategory == .file {
+                if let gitEvent = await gitSecurityMonitor.checkProcess(
+                    name: enrichedEvent.process.name,
+                    path: enrichedEvent.process.executable,
+                    pid: enrichedEvent.process.pid,
+                    commandLine: enrichedEvent.process.commandLine,
+                    filePath: enrichedEvent.file?.path,
+                    envVars: nil
+                ) {
+                    let alert = Alert(
+                        ruleId: "maccrab.git.\(gitEvent.type.rawValue)",
+                        ruleTitle: "Git Security: \(gitEvent.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
+                        severity: gitEvent.severity,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: gitEvent.processPath, processName: gitEvent.processName,
+                        description: gitEvent.detail,
+                        mitreTactics: "attack.credential_access", mitreTechniques: "attack.t1555",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    if gitEvent.severity >= .high { await notifier.notify(alert: alert) }
+                }
+            }
+
+            // === File injection scanning (AI tool file access) ===
+            if enrichedEvent.enrichments["ai_tool"] != nil || enrichedEvent.enrichments["ai_tool_child"] != nil,
+               let filePath = enrichedEvent.file?.path {
+                if let scanResult = await fileInjectionScanner.scanFile(path: filePath) {
+                    let alert = Alert(
+                        ruleId: "maccrab.ai-guard.file-injection",
+                        ruleTitle: "Prompt Injection in File: \((filePath as NSString).lastPathComponent)",
+                        severity: scanResult.severity,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: enrichedEvent.process.executable,
+                        processName: enrichedEvent.process.name,
+                        description: "Hidden prompt injection detected in \(filePath) (\(scanResult.confidence)% confidence). Threats: \(scanResult.threats.joined(separator: "; "))",
+                        mitreTactics: "attack.initial_access", mitreTechniques: "attack.t1195.002",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                    print("[FILE-INJECT] \(filePath): \(scanResult.threats.first ?? "injection detected")")
+                }
+            }
+
             // === Behavioral scoring: process-level indicators ===
             let proc = enrichedEvent.process
             if proc.codeSignature == nil || proc.codeSignature?.signerType == .unsigned {
@@ -1518,6 +1708,17 @@ struct MacCrabDaemon {
                         try? await alertStore.insert(alert: campaignAlert)
                         await notifier.notify(alert: campaignAlert)
                         print("[CAMPAIGN] \(campaign.type.rawValue): \(campaign.title)")
+
+                        // Auto-generate a Sigma rule from the campaign
+                        let campaignAlerts = campaign.alerts.map { a in
+                            (ruleId: a.ruleId, ruleTitle: a.ruleTitle, processPath: a.processPath, tactics: a.tactics, timestamp: a.timestamp)
+                        }
+                        if let rule = await ruleGenerator.generateFromCampaign(
+                            campaignType: campaign.type.rawValue,
+                            alerts: campaignAlerts
+                        ) {
+                            print("[RULE-GEN] Auto-generated: \(rule.filename)")
+                        }
                     }
 
                     // Log alert to stdout

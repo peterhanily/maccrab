@@ -5,12 +5,12 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey)]()
-[![Rules](https://img.shields.io/badge/detection%20rules-262-orange)]()
+[![Rules](https://img.shields.io/badge/detection%20rules-273-orange)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
 ---
 
-MacCrab is an on-device security detection engine for macOS. It evaluates 262 Sigma-compatible detection rules against real-time kernel events, Unified Log streams, TCC permission changes, DNS queries, and network connections -- entirely on your machine, with no SIEM, no cloud infrastructure, and no telemetry leaving the host.
+MacCrab is an on-device security detection engine for macOS. It evaluates 273 Sigma-compatible detection rules against real-time kernel events, Unified Log streams, TCC permission changes, DNS queries, and network connections -- entirely on your machine, with no SIEM, no cloud infrastructure, and no telemetry leaving the host.
 
 What sets it apart from other open-source macOS tools:
 
@@ -78,7 +78,7 @@ MacCrab ingests from eight real-time event sources, covering kernel-level proces
 
 ## Detection Stack
 
-### Rules (262 compiled)
+### Rules (273 compiled)
 
 | Layer | Count | Description |
 |-------|:-----:|-------------|
@@ -191,7 +191,7 @@ Rules can trigger configurable response actions ranging from passive to active:
 | TCC Abuse | `tcc/` | 6 | -- | 6 |
 | Lateral Movement | `lateral_movement/` | 3 | -- | 3 |
 | Temporal Sequences | `sequences/` | -- | 20 | 20 |
-| **Total** | | **221** | **20** | **262** |
+| **Total** | | **221** | **20** | **273** |
 
 ---
 
@@ -660,7 +660,7 @@ maccrab/
 │       └── ViewModels/
 │           └── ViewModels.swift
 │
-├── Rules/                               # 262 Sigma-compatible detection rules
+├── Rules/                               # 273 Sigma-compatible detection rules
 │   ├── execution/          (22)
 │   ├── persistence/        (28)
 │   ├── defense_evasion/    (32)
