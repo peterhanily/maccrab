@@ -1,0 +1,62 @@
+title: MDM Profile Removal Attempt
+id: d1a2b3c4-0331-4000-a000-000000000331
+status: experimental
+description: >
+    Detects attempts to remove MDM configuration profiles, which may indicate
+    an adversary trying to escape enterprise security controls. MDM profiles
+    enforce security policies, manage certificates, and control device
+    configuration. Removing them can disable endpoint protection, remove
+    managed certificates, and eliminate compliance monitoring. This rule
+    specifically looks for removal attempts not initiated by known MDM agents
+    or system processes.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+    - https://attack.mitre.org/techniques/T1070/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/profiles'
+        CommandLine|contains:
+            - 'remove'
+            - 'uninstall'
+            - '-R'
+            - '-D'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_mdm_agents:
+        ParentImage|contains:
+            - '/jamf'
+            - '/JamfAgent'
+            - '/JamfManagementService'
+            - '/mosyle'
+            - '/MosyleAgent'
+            - '/kandji'
+            - '/KandjiAgent'
+            - '/mdmclient'
+            - '/MDMDaemon'
+            - '/munki'
+            - '/ManagedClient'
+            - '/fleetd'
+            - '/osqueryd'
+            - '/Addigy'
+            - '/SimpleMDM'
+            - '/Hexnode'
+            - '/FileWave'
+    filter_apple_signed:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_system and not filter_mdm_agents and not filter_apple_signed
+falsepositives:
+    - IT administrators performing legitimate profile rotation
+    - Device decommissioning or re-enrollment workflows
+    - MDM migration from one vendor to another
+level: critical

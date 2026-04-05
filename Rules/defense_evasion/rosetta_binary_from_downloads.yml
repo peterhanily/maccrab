@@ -1,0 +1,36 @@
+title: x86_64 Binary Executed from Downloads or Temp Directory
+id: d1a2b3c4-0302-4000-a000-000000000302
+status: experimental
+description: >
+    Detects x86_64 binary execution from Downloads or temporary directories on
+    Apple Silicon. This combined indicator (non-native architecture + suspicious
+    origin) is highly suspicious and matches observed DPRK malware delivery.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.defense_evasion
+    - attack.execution
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_arch:
+        Architecture: 'x86_64'
+    selection_path:
+        Image|contains:
+            - '/Downloads/'
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/Users/Shared/'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection_arch and selection_path and not filter_signed
+falsepositives:
+    - Legitimate x86 installers downloaded for migration
+level: critical

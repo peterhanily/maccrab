@@ -25,6 +25,8 @@ public actor SystemPolicyMonitor {
     /// Baseline state for diffing.
     private var knownPlugins: Set<String> = []
     private var knownBTMItems: Set<String> = []
+    private var knownMDMProfiles: Set<String> = []
+    private var mdmProfilesBaselined = false
     private var lastSIPStatus: String?
     private var lastXProtectVersion: String?
 
@@ -52,6 +54,8 @@ public actor SystemPolicyMonitor {
         case gatekeeperOverride = "gatekeeper_override"
         case rogueXPCService = "rogue_xpc_service"
         case rogueMDMProfile = "rogue_mdm_profile"
+        case mdmProfileInstalled = "mdm_profile_installed"
+        case mdmProfileRemoved = "mdm_profile_removed"
         case unexpectedSnapshot = "unexpected_apfs_snapshot"
     }
 
@@ -337,14 +341,56 @@ public actor SystemPolicyMonitor {
     // MARK: - MDM Profile Detection
 
     private func checkMDMProfiles() {
-        let output = runCommand("/usr/bin/profiles", args: ["list", "-output", "stdout-xml"])
-        if output.isEmpty { return }
+        // Enumerate current profiles from the profiles CLI (triggers MDM refresh)
+        _ = runCommand("/usr/bin/profiles", args: ["list", "-output", "stdout-xml"])
 
-        // Look for configuration profiles
+        // Scan the configuration profiles directory
         let profileDir = "/var/db/ConfigurationProfiles"
-        guard let items = try? FileManager.default.contentsOfDirectory(atPath: profileDir) else { return }
+        let currentProfiles: Set<String>
+        if let items = try? FileManager.default.contentsOfDirectory(atPath: profileDir) {
+            currentProfiles = Set(items.filter { $0.hasSuffix(".mobileconfig") || $0.hasSuffix(".plist") })
+        } else {
+            currentProfiles = []
+        }
 
-        for item in items where item.hasSuffix(".mobileconfig") || item.hasSuffix(".plist") {
+        // --- Drift detection: detect installations and removals ---
+        if mdmProfilesBaselined {
+            // Detect newly installed profiles
+            let addedProfiles = currentProfiles.subtracting(knownMDMProfiles)
+            for profile in addedProfiles {
+                let fullPath = profileDir + "/" + profile
+                emit(SystemPolicyEvent(
+                    type: .mdmProfileInstalled,
+                    description: "MDM configuration profile installed: \(profile). New profiles may modify security policy, install certificates, or change device configuration.",
+                    path: fullPath,
+                    severity: .high,
+                    mitreTactic: "attack.defense_evasion",
+                    mitreTechnique: "attack.t1562.001"
+                ))
+            }
+
+            // Detect removed profiles
+            let removedProfiles = knownMDMProfiles.subtracting(currentProfiles)
+            for profile in removedProfiles {
+                let fullPath = profileDir + "/" + profile
+                emit(SystemPolicyEvent(
+                    type: .mdmProfileRemoved,
+                    description: "MDM configuration profile removed: \(profile). Profile removal may indicate evasion of enterprise security controls.",
+                    path: fullPath,
+                    severity: .critical,
+                    mitreTactic: "attack.defense_evasion",
+                    mitreTechnique: "attack.t1562.001"
+                ))
+            }
+        } else {
+            mdmProfilesBaselined = true
+        }
+
+        // Update baseline
+        knownMDMProfiles = currentProfiles
+
+        // --- Content inspection: check for security-modifying profiles ---
+        for item in currentProfiles {
             let fullPath = profileDir + "/" + item
 
             // Read profile to check if it modifies security settings
@@ -352,6 +398,8 @@ public actor SystemPolicyMonitor {
                 let suspicious = [
                     "allowSigned", "DisableGatekeeper", "allowAllApps",
                     "PayloadRemovalDisallowed", "com.apple.ManagedClient",
+                    "com.apple.security.firewall", "forceAutoFillUpdate",
+                    "allowRoot", "com.apple.TCC",
                 ]
                 for keyword in suspicious where data.contains(keyword) {
                     emit(SystemPolicyEvent(

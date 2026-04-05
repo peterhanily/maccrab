@@ -551,6 +551,8 @@ struct MacCrabDaemon {
                 case .xprotectOutdated: "xprotect_outdated"
                 case .quarantineStripped: "removes_quarantine"
                 case .gatekeeperOverride: "gatekeeper_override"
+                case .mdmProfileInstalled: "mdm_profile_installed"
+                case .mdmProfileRemoved: "mdm_profile_removed"
                 default: nil
                 }
                 if let name = indicatorName {

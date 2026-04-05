@@ -1,0 +1,47 @@
+title: Keychain Password Extraction via security CLI
+id: d1a2b3c4-0320-4000-a000-000000000320
+status: experimental
+description: >
+    Detects the macOS security CLI being used to extract passwords, certificates,
+    or dump the entire keychain. The security command can retrieve stored credentials
+    in plaintext when the keychain is unlocked. Adversaries use commands like
+    'security find-generic-password -w' to extract individual passwords or
+    'security dump-keychain' to harvest all stored credentials at once.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1555/001/
+    - https://www.netmeister.org/blog/keychain-passwords.html
+    - https://objective-see.org/blog/blog_0x25.html
+tags:
+    - attack.credential_access
+    - attack.t1555.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_image:
+        Image|endswith: '/security'
+    selection_commands:
+        CommandLine|contains:
+            - 'find-generic-password -w'
+            - 'find-generic-password -g'
+            - 'find-internet-password -w'
+            - 'find-internet-password -g'
+            - 'dump-keychain'
+            - 'export -t identities'
+            - 'export -t certs'
+            - 'find-certificate -a -p'
+    filter_system_parent:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection_image and selection_commands and not filter_system_parent and not filter_apple_signed
+falsepositives:
+    - Developer scripts retrieving signing certificates for Xcode builds
+    - CI/CD systems accessing code signing credentials
+    - Enterprise IT tools rotating or auditing stored credentials
+level: critical

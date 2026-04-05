@@ -1,0 +1,45 @@
+title: Unsigned x86_64 Binary Execution via Rosetta 2
+id: d1a2b3c4-0301-4000-a000-000000000301
+status: experimental
+description: >
+    Detects execution of unsigned x86_64 binaries on Apple Silicon hardware
+    via Rosetta 2 translation. DPRK-attributed groups (Lazarus, Sapphire Sleet)
+    deliberately ship x86-64 binaries because Rosetta 2 has weaker security
+    enforcement than native ARM64 execution.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
+    - https://cloud.google.com/blog/topics/threat-intelligence/rosetta2-artifacts-macos-intrusions
+tags:
+    - attack.defense_evasion
+    - attack.execution
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Architecture: 'x86_64'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/usr/bin/'
+    filter_known_x86:
+        Image|contains:
+            - '/Homebrew/'
+            - '/opt/homebrew/'
+            - '/usr/local/Cellar/'
+    condition: selection and not filter_signed and not filter_system and not filter_known_x86
+falsepositives:
+    - Legacy x86-only applications not yet ported to ARM64
+    - Development tools with x86-only dependencies
+    - Homebrew packages compiled for x86_64
+level: high

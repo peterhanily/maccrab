@@ -1,0 +1,101 @@
+title: Package Lockfile Modified Outside Package Manager
+id: d1a2b3c4-0310-4000-a000-000000000310
+status: experimental
+description: >
+    Detects modifications to package manager lockfiles by processes that are not
+    the expected package manager. Lockfiles pin exact dependency versions and hashes;
+    unauthorized modification can inject malicious packages into the supply chain
+    without changing the manifest (package.json, Pipfile, etc.). This is a key
+    indicator of dependency confusion and lockfile injection attacks.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1195/002/
+    - https://snyk.io/blog/lockfile-injection-attack/
+    - https://blog.ulisesgascon.com/lockfile-posioned
+tags:
+    - attack.persistence
+    - attack.t1195.002
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '/package-lock.json'
+            - '/yarn.lock'
+            - '/pnpm-lock.yaml'
+            - '/Pipfile.lock'
+            - '/poetry.lock'
+            - '/Gemfile.lock'
+            - '/go.sum'
+            - '/Cargo.lock'
+            - '/composer.lock'
+    filter_npm:
+        Image|endswith:
+            - '/npm'
+            - '/npm-cli.js'
+        ParentImage|endswith:
+            - '/node'
+    filter_yarn:
+        Image|endswith:
+            - '/yarn'
+            - '/yarn.js'
+        ParentImage|endswith:
+            - '/node'
+    filter_pnpm:
+        Image|endswith:
+            - '/pnpm'
+        ParentImage|endswith:
+            - '/node'
+    filter_pip:
+        Image|endswith:
+            - '/pip'
+            - '/pip3'
+            - '/pipenv'
+        ParentImage|endswith:
+            - '/python'
+            - '/python3'
+    filter_poetry:
+        Image|endswith:
+            - '/poetry'
+        ParentImage|endswith:
+            - '/python'
+            - '/python3'
+    filter_bundle:
+        Image|endswith:
+            - '/bundle'
+            - '/bundler'
+        ParentImage|endswith:
+            - '/ruby'
+    filter_go:
+        Image|endswith:
+            - '/go'
+    filter_cargo:
+        Image|endswith:
+            - '/cargo'
+    filter_composer:
+        Image|endswith:
+            - '/composer'
+            - '/composer.phar'
+        ParentImage|endswith:
+            - '/php'
+    filter_node_direct:
+        Image|endswith:
+            - '/node'
+        CommandLine|contains:
+            - 'npm'
+            - 'yarn'
+            - 'pnpm'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+        SignerType: 'apple'
+    condition: selection and not filter_npm and not filter_yarn and not filter_pnpm and not filter_pip and not filter_poetry and not filter_bundle and not filter_go and not filter_cargo and not filter_composer and not filter_node_direct and not filter_system
+falsepositives:
+    - IDE plugins that update lockfiles (e.g., Renovate, Dependabot running locally)
+    - Git merge operations resolving lockfile conflicts
+    - Editors auto-saving lockfiles after manual edits
+    - Monorepo tools (Lerna, Nx) orchestrating package installations
+level: high

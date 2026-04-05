@@ -1,0 +1,58 @@
+title: Direct Keychain Database File Access
+id: d1a2b3c4-0321-4000-a000-000000000321
+status: experimental
+description: >
+    Detects non-Apple processes directly reading keychain database files on disk.
+    The keychain database (.keychain-db) stores encrypted credentials. While the
+    preferred API is the Security framework, adversaries may attempt to directly
+    read and exfiltrate the database file for offline brute-force attacks against
+    the keychain password, bypassing the API-level access controls.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1555/001/
+    - https://objective-see.org/blog/blog_0x36.html
+tags:
+    - attack.credential_access
+    - attack.t1555.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains: '/Keychains/'
+        TargetFilename|endswith: '.keychain-db'
+    filter_apple_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/usr/bin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    filter_password_managers:
+        Image|endswith:
+            - '/1Password'
+            - '/Bitwarden'
+            - '/Dashlane'
+            - '/LastPass'
+            - '/KeePassXC'
+            - '/Enpass'
+    filter_security_tools:
+        Image|endswith:
+            - '/security'
+            - '/securityd'
+            - '/secd'
+            - '/trustd'
+            - '/authd'
+    filter_backup:
+        Image|endswith:
+            - '/backupd'
+            - '/TMCacheDelete'
+            - '/Time Machine'
+    condition: selection and not filter_apple_system and not filter_apple_signed and not filter_password_managers and not filter_security_tools and not filter_backup
+falsepositives:
+    - Third-party password managers not in the allowlist
+    - Backup software copying keychain files
+    - Security audit tools enumerating keychain databases
+level: high

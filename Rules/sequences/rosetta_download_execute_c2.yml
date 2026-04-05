@@ -1,0 +1,57 @@
+title: Rosetta 2 Download-Execute-C2 Chain
+id: e1f2a3b4-0301-4000-b000-000000000301
+status: experimental
+description: >
+    Detects a complete attack chain using Rosetta 2: file written to Downloads/tmp,
+    executed as unsigned x86_64 binary via Rosetta 2 translation, then makes
+    outbound network connection (C2 callback). Matches DPRK POOLRAT delivery chain.
+author: MacCrab Community
+date: 2026/04/05
+tags:
+    - attack.defense_evasion
+    - attack.execution
+    - attack.command_and_control
+
+type: sequence
+window: 300s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: download
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - '/Downloads/'
+                  - '/tmp/'
+          condition: selection
+
+    - id: execute
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Architecture: 'x86_64'
+          filter_signed:
+              SignerType:
+                  - 'apple'
+                  - 'appStore'
+                  - 'devId'
+          condition: selection and not filter_signed
+
+    - id: c2
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          condition: selection
+      process: execute.descendant
+
+trigger: execute and c2
+level: critical
