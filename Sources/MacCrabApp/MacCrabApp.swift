@@ -98,9 +98,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDashboard()
             })
 
-            let bubbleView = SpeechBubbleWrapper(content: popoverView)
-            let hostingController = NSHostingController(rootView: bubbleView)
-            let contentSize = NSSize(width: 340, height: 240)
+            let hostingController = NSHostingController(rootView: popoverView)
+            let contentSize = NSSize(width: 360, height: 200)
             hostingController.preferredContentSize = contentSize
 
             // Use a floating panel positioned in the top-right corner
@@ -112,19 +111,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             let panel = NSPanel(
                 contentRect: panelFrame,
-                styleMask: [.nonactivatingPanel, .titled, .closable, .fullSizeContentView],
+                styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless],
                 backing: .buffered,
                 defer: false
             )
             panel.contentViewController = hostingController
             panel.level = .floating
             panel.isFloatingPanel = true
-            panel.titleVisibility = .hidden
-            panel.titlebarAppearsTransparent = true
-            panel.isMovableByWindowBackground = true
-            panel.backgroundColor = .clear
-            panel.isOpaque = false
+            panel.backgroundColor = .white
             panel.hasShadow = true
+            panel.isMovableByWindowBackground = true
+            // Rounded corners
+            panel.contentView?.wantsLayer = true
+            panel.contentView?.layer?.cornerRadius = 12
+            panel.contentView?.layer?.masksToBounds = true
             panel.orderFrontRegardless()
 
             self.alertPanel = panel
@@ -207,45 +207,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - Speech Bubble Wrapper
-
-struct SpeechBubbleWrapper<Content: View>: View {
-    let content: Content
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Triangle tail pointing up (toward the menu bar crab)
-            BubbleTail()
-                .fill(Color.white)
-                .frame(width: 20, height: 10)
-                .padding(.trailing, 40)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-
-            // Main bubble body
-            content
-                .padding(0)
-                .background(Color.white)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .shadow(color: .black.opacity(0.15), radius: 12, x: 0, y: 4)
-                .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
-        }
-        .padding(8)
-    }
-}
-
-/// A small triangle shape for the speech bubble tail
-struct BubbleTail: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.closeSubpath()
-        return path
-    }
-}
-
-// MARK: - Alert Popover View (Speech Bubble Content)
+// MARK: - Alert Notification View
 
 struct AlertPopoverView: View {
     let alert: AlertViewModel
@@ -253,90 +215,82 @@ struct AlertPopoverView: View {
     let onShowDashboard: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Header with severity badge
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(alert.severityColor)
-                    .frame(width: 12, height: 12)
+        HStack(alignment: .top, spacing: 12) {
+            // Crab icon
+            Text("🦀")
+                .font(.system(size: 28))
+                .frame(width: 36, height: 36)
 
-                Text(alert.severity == .critical ? "CRITICAL" : "HIGH")
-                    .font(.system(.caption, design: .rounded, weight: .bold))
-                    .foregroundColor(alert.severityColor)
-
-                Spacer()
-
-                Text(alert.timeAgoString)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-
-                Button(action: onDismiss) {
-                    Image(systemName: "xmark.circle.fill")
+            // Content
+            VStack(alignment: .leading, spacing: 4) {
+                // Title row
+                HStack {
+                    Text("MacCrab")
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .font(.caption)
-                }
-                .buttonStyle(.plain)
-            }
-
-            // Rule title
-            Text(alert.ruleTitle)
-                .font(.system(.body, weight: .semibold))
-                .foregroundColor(.primary)
-                .lineLimit(2)
-
-            // Process info
-            if !alert.processName.isEmpty {
-                HStack(spacing: 4) {
-                    Image(systemName: "gearshape.fill")
+                    Spacer()
+                    Text(alert.timeAgoString)
                         .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(alert.processName)
+                        .foregroundColor(Color(.tertiaryLabelColor))
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(.tertiaryLabelColor))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Alert title
+                Text(alert.ruleTitle)
+                    .font(.system(.subheadline, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+
+                // Description
+                if !alert.description.isEmpty {
+                    Text(alert.description)
                         .font(.caption)
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
-            }
 
-            // Description (truncated)
-            if !alert.description.isEmpty {
-                Text(alert.description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(3)
-            }
+                // Bottom row: severity + action
+                HStack(spacing: 8) {
+                    // Severity pill
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(alert.severityColor)
+                            .frame(width: 6, height: 6)
+                        Text(alert.severity == .critical ? "Critical" : "High")
+                            .font(.system(.caption2, weight: .medium))
+                            .foregroundColor(alert.severityColor)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(alert.severityColor.opacity(0.1))
+                    .clipShape(Capsule())
 
-            // MITRE badge
-            if !alert.mitreTechniques.isEmpty {
-                HStack(spacing: 4) {
-                    Image(systemName: "shield.fill")
-                        .font(.caption2)
-                        .foregroundColor(.orange)
-                    Text(alert.mitreTechniques.split(separator: ",").first.map(String.init) ?? "")
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundColor(.orange)
+                    if !alert.processName.isEmpty {
+                        Text(alert.processName)
+                            .font(.caption2)
+                            .foregroundColor(Color(.tertiaryLabelColor))
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Button(action: onShowDashboard) {
+                        Text("View")
+                            .font(.system(.caption2, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
                 }
-            }
-
-            Divider()
-
-            // Action buttons
-            HStack(spacing: 12) {
-                Button(action: onShowDashboard) {
-                    Label("View in Dashboard", systemImage: "arrow.right.circle")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-
-                Button(action: onDismiss) {
-                    Text("Dismiss")
-                        .font(.caption)
-                }
-                .controlSize(.small)
+                .padding(.top, 2)
             }
         }
-        .padding(14)
-        .frame(width: 320)
+        .padding(12)
+        .frame(width: 340)
         .preferredColorScheme(.light)
     }
 }
