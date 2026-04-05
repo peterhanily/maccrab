@@ -111,20 +111,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             let panel = NSPanel(
                 contentRect: panelFrame,
-                styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless],
+                styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )
             panel.contentViewController = hostingController
             panel.level = .floating
             panel.isFloatingPanel = true
+            panel.titleVisibility = .hidden
+            panel.titlebarAppearsTransparent = true
             panel.backgroundColor = .white
             panel.hasShadow = true
             panel.isMovableByWindowBackground = true
-            // Rounded corners
-            panel.contentView?.wantsLayer = true
-            panel.contentView?.layer?.cornerRadius = 12
-            panel.contentView?.layer?.masksToBounds = true
             panel.orderFrontRegardless()
 
             self.alertPanel = panel
