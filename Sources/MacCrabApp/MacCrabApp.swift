@@ -55,11 +55,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem?.button {
             button.title = "🦀"
             button.font = NSFont.systemFont(ofSize: 14)
-            // No menu assigned — left click shows dashboard, right click shows menu
-            button.action = #selector(statusBarClicked)
-            button.target = self
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+
+        // Attach a menu — clicking the crab opens this menu
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "🦀 MacCrab", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d"))
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Quit MacCrab", action: #selector(quit), keyEquivalent: "q"))
+        statusItem?.menu = menu
     }
 
     // MARK: - Critical Alert Popover (Crab Speech Bubble)
@@ -119,23 +125,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Status Bar Actions
 
     @objc private func statusBarClicked() {
-        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
-            // Right-click shows context menu
-            let menu = NSMenu()
-            menu.addItem(NSMenuItem(title: "🦀 MacCrab Active", action: nil, keyEquivalent: ""))
-            menu.addItem(NSMenuItem.separator())
-            menu.addItem(NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d"))
-            menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
-            menu.addItem(NSMenuItem.separator())
-            menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
-            statusItem?.menu = menu
-            statusItem?.button?.performClick(nil)
-            // Remove menu after showing so left-click works normally next time
-            DispatchQueue.main.async { self.statusItem?.menu = nil }
-        } else {
-            // Left-click shows dashboard
-            showDashboard()
-        }
+        showDashboard()
     }
 
     @objc private func showDashboard() {
