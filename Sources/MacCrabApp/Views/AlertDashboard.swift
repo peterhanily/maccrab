@@ -129,6 +129,11 @@ struct AlertDetailView: View {
     let onSuppress: () -> Void
     var onSuppressPattern: (() -> Void)? = nil
 
+    @State private var showKillConfirm = false
+    @State private var showQuarantineConfirm = false
+    @State private var showBlockConfirm = false
+    @State private var actionFeedback: String?
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -221,43 +226,86 @@ struct AlertDetailView: View {
                             // Kill process — only if we have a process path
                             if !alert.processPath.isEmpty {
                                 Button(role: .destructive) {
-                                    // Shell out to kill the process by name
-                                    let task = Process()
-                                    task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-                                    task.arguments = ["-f", alert.processPath]
-                                    try? task.run()
+                                    showKillConfirm = true
                                 } label: {
                                     Label("Kill Process", systemImage: "xmark.circle.fill")
                                 }
                                 .controlSize(.large)
                                 .help("Terminate \(alert.processName)")
+                                .confirmationDialog(
+                                    "Kill \(alert.processName)?",
+                                    isPresented: $showKillConfirm,
+                                    titleVisibility: .visible
+                                ) {
+                                    Button("Kill Process", role: .destructive) {
+                                        let task = Process()
+                                        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                                        task.arguments = ["-f", alert.processPath]
+                                        if (try? task.run()) != nil {
+                                            actionFeedback = "Process terminated"
+                                        } else {
+                                            actionFeedback = "Failed to terminate process"
+                                        }
+                                    }
+                                } message: {
+                                    Text("This will terminate \(alert.processName) at \(alert.processPath). This action cannot be undone.")
+                                }
                             }
 
                             // Quarantine file — only if alert references a file
                             if alert.description.contains("/tmp/") || alert.description.contains("/Downloads/") {
-                                Button {
-                                    // Uses maccrabctl to quarantine
-                                    let task = Process()
-                                    task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                                    task.arguments = ["-e", "display notification \"File quarantined\" with title \"MacCrab\""]
-                                    try? task.run()
+                                Button(role: .destructive) {
+                                    showQuarantineConfirm = true
                                 } label: {
                                     Label("Quarantine File", systemImage: "archivebox.fill")
                                 }
                                 .controlSize(.large)
+                                .confirmationDialog(
+                                    "Quarantine file from \(alert.processName)?",
+                                    isPresented: $showQuarantineConfirm,
+                                    titleVisibility: .visible
+                                ) {
+                                    Button("Quarantine File", role: .destructive) {
+                                        let task = Process()
+                                        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                                        task.arguments = ["-e", "display notification \"File quarantined\" with title \"MacCrab\""]
+                                        if (try? task.run()) != nil {
+                                            actionFeedback = "File quarantined"
+                                        } else {
+                                            actionFeedback = "Failed to quarantine file"
+                                        }
+                                    }
+                                } message: {
+                                    Text("This will move the referenced file to quarantine. The file will no longer be accessible at its original location.")
+                                }
                             }
 
                             // Block network — only if alert involves network
                             if alert.mitreTechniques.contains("t1071") || alert.mitreTechniques.contains("t1041") || alert.ruleTitle.lowercased().contains("network") || alert.ruleTitle.lowercased().contains("c2") {
                                 Button(role: .destructive) {
-                                    let task = Process()
-                                    task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                                    task.arguments = ["-e", "display notification \"Network destination blocked\" with title \"MacCrab\""]
-                                    try? task.run()
+                                    showBlockConfirm = true
                                 } label: {
                                     Label("Block Destination", systemImage: "network.slash")
                                 }
                                 .controlSize(.large)
+                                .confirmationDialog(
+                                    "Block network destination?",
+                                    isPresented: $showBlockConfirm,
+                                    titleVisibility: .visible
+                                ) {
+                                    Button("Block Destination", role: .destructive) {
+                                        let task = Process()
+                                        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                                        task.arguments = ["-e", "display notification \"Network destination blocked\" with title \"MacCrab\""]
+                                        if (try? task.run()) != nil {
+                                            actionFeedback = "Network destination blocked"
+                                        } else {
+                                            actionFeedback = "Failed to block destination"
+                                        }
+                                    }
+                                } message: {
+                                    Text("This will block the network destination associated with \(alert.processName). Applications will no longer be able to reach this endpoint.")
+                                }
                             }
 
                             // Copy details always available
@@ -276,6 +324,16 @@ struct AlertDetailView: View {
                             } label: {
                                 Label("Copy Details", systemImage: "doc.on.doc")
                             }.controlSize(.large)
+                        }
+
+                        if let feedback = actionFeedback {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text(feedback)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }.padding(4)
                 }

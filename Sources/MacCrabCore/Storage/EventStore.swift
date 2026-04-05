@@ -159,7 +159,7 @@ public actor EventStore {
             attributes: nil
         )
         try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
+            [.posixPermissions: 0o750],
             ofItemAtPath: maccrabDir.path
         )
 
@@ -168,7 +168,7 @@ public actor EventStore {
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o644)
+        chmod(databasePath, 0o640)
     }
 
     /// Creates an `EventStore` at a custom path (useful for testing).
@@ -291,9 +291,48 @@ public actor EventStore {
             throw EventStoreError.prepareFailed("Insert statement not prepared")
         }
 
+        // Sanitize the command line to redact secrets (passwords, tokens, API keys)
+        // before persisting to the database.
+        let sanitizedCommandLine = CommandSanitizer.sanitize(event.process.commandLine)
+
+        // Build the event with a sanitized process for JSON serialisation.
+        let sanitizedProcess = ProcessInfo(
+            pid: event.process.pid,
+            ppid: event.process.ppid,
+            rpid: event.process.rpid,
+            name: event.process.name,
+            executable: event.process.executable,
+            commandLine: sanitizedCommandLine,
+            args: event.process.args.map { CommandSanitizer.sanitize($0) },
+            workingDirectory: event.process.workingDirectory,
+            userId: event.process.userId,
+            userName: event.process.userName,
+            groupId: event.process.groupId,
+            startTime: event.process.startTime,
+            exitCode: event.process.exitCode,
+            codeSignature: event.process.codeSignature,
+            ancestors: event.process.ancestors,
+            architecture: event.process.architecture,
+            isPlatformBinary: event.process.isPlatformBinary
+        )
+        let sanitizedEvent = Event(
+            id: event.id,
+            timestamp: event.timestamp,
+            eventCategory: event.eventCategory,
+            eventType: event.eventType,
+            eventAction: event.eventAction,
+            process: sanitizedProcess,
+            file: event.file,
+            network: event.network,
+            tcc: event.tcc,
+            enrichments: event.enrichments,
+            severity: event.severity,
+            ruleMatches: event.ruleMatches
+        )
+
         let jsonData: Data
         do {
-            jsonData = try encoder.encode(event)
+            jsonData = try encoder.encode(sanitizedEvent)
         } catch {
             throw EventStoreError.encodingFailed(error.localizedDescription)
         }
@@ -322,8 +361,8 @@ public actor EventStore {
         bindText(stmt, index: 8, value: event.process.name)
         // 9: process_path (executable)
         bindText(stmt, index: 9, value: event.process.executable)
-        // 10: process_commandline
-        bindText(stmt, index: 10, value: event.process.commandLine)
+        // 10: process_commandline (sanitized)
+        bindText(stmt, index: 10, value: sanitizedCommandLine)
         // 11: process_ppid
         sqlite3_bind_int(stmt, 11, event.process.ppid)
         // 12: process_signer
@@ -348,7 +387,7 @@ public actor EventStore {
         bindTextOrNull(stmt, index: 19, value: event.tcc?.service)
         // 20: tcc_client
         bindTextOrNull(stmt, index: 20, value: event.tcc?.client)
-        // 21: raw_json
+        // 21: raw_json (sanitized)
         bindText(stmt, index: 21, value: jsonString)
 
         let rc = sqlite3_step(stmt)

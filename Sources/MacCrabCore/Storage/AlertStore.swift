@@ -131,7 +131,7 @@ public actor AlertStore {
             attributes: nil
         )
         try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
+            [.posixPermissions: 0o750],
             ofItemAtPath: maccrabDir.path
         )
 
@@ -140,7 +140,7 @@ public actor AlertStore {
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o644)
+        chmod(databasePath, 0o640)
     }
 
     /// Creates an `AlertStore` at a custom path (useful for testing).

@@ -5,6 +5,7 @@
 // Actions range from passive (log, notify) to active (kill, quarantine, block).
 
 import Foundation
+import Darwin
 import os.log
 
 // MARK: - Action Types
@@ -365,10 +366,17 @@ public actor ResponseEngine {
         return true
     }
 
-    /// Validate that a string looks like an IPv4 or IPv6 address (no shell injection).
+    /// Validate that a string is a well-formed IPv4 or IPv6 address using the
+    /// system's `inet_pton()` parser. This rejects anything that is not a real
+    /// IP address, preventing command injection through the PF rule string.
     private nonisolated func isValidIP(_ ip: String) -> Bool {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".:"))
-        return ip.unicodeScalars.allSatisfy { allowed.contains($0) } && !ip.isEmpty
+        var addr4 = in_addr()
+        var addr6 = in6_addr()
+        // Check IPv4
+        if inet_pton(AF_INET, ip, &addr4) == 1 { return true }
+        // Check IPv6
+        if inet_pton(AF_INET6, ip, &addr6) == 1 { return true }
+        return false
     }
 
     /// Append a rule to the PF anchor file.
