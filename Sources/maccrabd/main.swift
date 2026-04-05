@@ -1329,6 +1329,42 @@ struct MacCrabDaemon {
                 }
             }
 
+            // === CDHash threat intel matching (from eslogger) ===
+            if let cdhash = enrichedEvent.enrichments["process.cdhash"],
+               await threatIntel.isHashMalicious(cdhash) {
+                let alert = Alert(
+                    ruleId: "maccrab.threat-intel.hash-match",
+                    ruleTitle: "Known Malicious Binary (CDHash Match)",
+                    severity: .critical,
+                    eventId: enrichedEvent.id.uuidString,
+                    processPath: enrichedEvent.process.executable,
+                    processName: enrichedEvent.process.name,
+                    description: "Process binary CDHash \(cdhash) matches known-malicious hash from threat intelligence feed",
+                    mitreTactics: "attack.execution",
+                    mitreTechniques: "attack.t1204",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+                await behaviorScoring.addIndicator(
+                    named: "known_malicious_hash",
+                    detail: "CDHash: \(cdhash)",
+                    forProcess: enrichedEvent.process.pid,
+                    path: enrichedEvent.process.executable
+                )
+                print("[CRIT] Threat intel hash match: \(enrichedEvent.process.name) CDHash=\(cdhash)")
+            }
+
+            // === DYLD injection via environment variables (from eslogger) ===
+            if let dyldEnv = enrichedEvent.enrichments["exec.dyld_env"] {
+                await behaviorScoring.addIndicator(
+                    named: "library_injection",
+                    detail: "DYLD env var: \(dyldEnv.prefix(100))",
+                    forProcess: enrichedEvent.process.pid,
+                    path: enrichedEvent.process.executable
+                )
+            }
+
             // === Behavioral scoring: process-level indicators ===
             let proc = enrichedEvent.process
             if proc.codeSignature == nil || proc.codeSignature?.signerType == .unsigned {

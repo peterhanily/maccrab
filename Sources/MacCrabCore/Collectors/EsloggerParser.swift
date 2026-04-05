@@ -43,85 +43,77 @@ public enum EsloggerParser {
             return nil
         }
 
+        let event: Event?
         switch eventName {
-
-        // -----------------------------------------------------------------
-        // MARK: Process Events
-        // -----------------------------------------------------------------
-
-        case "exec":
-            return parseExec(eventPayload, timestamp: timestamp)
-
-        case "fork":
-            return parseFork(eventPayload, timestamp: timestamp)
-
-        case "exit":
-            return Event(
-                timestamp: timestamp,
-                eventCategory: .process,
-                eventType: .end,
-                eventAction: "exit",
-                process: processInfo,
-                severity: .informational
-            )
-
-        // -----------------------------------------------------------------
-        // MARK: File Events
-        // -----------------------------------------------------------------
-
-        case "create":
-            return parseCreate(eventPayload, timestamp: timestamp, process: processInfo)
-
-        case "write":
-            return parseWrite(eventPayload, timestamp: timestamp, process: processInfo)
-
-        case "close":
-            return parseClose(eventPayload, timestamp: timestamp, process: processInfo)
-
-        case "rename":
-            return parseRename(eventPayload, timestamp: timestamp, process: processInfo)
-
-        case "unlink":
-            return parseUnlink(eventPayload, timestamp: timestamp, process: processInfo)
-
-        // -----------------------------------------------------------------
-        // MARK: Signal Events
-        // -----------------------------------------------------------------
-
-        case "signal":
-            return parseSignal(eventPayload, timestamp: timestamp, process: processInfo)
-
-        // -----------------------------------------------------------------
-        // MARK: Kext Events
-        // -----------------------------------------------------------------
-
-        case "kextload":
-            return parseKextload(eventPayload, timestamp: timestamp, process: processInfo)
-
-        // -----------------------------------------------------------------
-        // MARK: Memory Protection Events
-        // -----------------------------------------------------------------
-
-        case "mmap":
-            return parseMmap(eventPayload, timestamp: timestamp, process: processInfo)
-
-        case "mprotect":
-            return parseMprotect(eventPayload, timestamp: timestamp, process: processInfo)
-
-        // -----------------------------------------------------------------
-        // MARK: Ownership & Permission Events
-        // -----------------------------------------------------------------
-
-        case "setowner":
-            return parseSetowner(eventPayload, timestamp: timestamp, process: processInfo)
-
-        case "setmode":
-            return parseSetmode(eventPayload, timestamp: timestamp, process: processInfo)
-
+        case "exec":    event = parseExec(eventPayload, timestamp: timestamp)
+        case "fork":    event = parseFork(eventPayload, timestamp: timestamp)
+        case "exit":    event = Event(timestamp: timestamp, eventCategory: .process, eventType: .end, eventAction: "exit", process: processInfo, severity: .informational)
+        case "create":  event = parseCreate(eventPayload, timestamp: timestamp, process: processInfo)
+        case "write":   event = parseWrite(eventPayload, timestamp: timestamp, process: processInfo)
+        case "close":   event = parseClose(eventPayload, timestamp: timestamp, process: processInfo)
+        case "rename":  event = parseRename(eventPayload, timestamp: timestamp, process: processInfo)
+        case "unlink":  event = parseUnlink(eventPayload, timestamp: timestamp, process: processInfo)
+        case "signal":  event = parseSignal(eventPayload, timestamp: timestamp, process: processInfo)
+        case "kextload": event = parseKextload(eventPayload, timestamp: timestamp, process: processInfo)
+        case "mmap":    event = parseMmap(eventPayload, timestamp: timestamp, process: processInfo)
+        case "mprotect": event = parseMprotect(eventPayload, timestamp: timestamp, process: processInfo)
+        case "setowner": event = parseSetowner(eventPayload, timestamp: timestamp, process: processInfo)
+        case "setmode": event = parseSetmode(eventPayload, timestamp: timestamp, process: processInfo)
         default:
             logger.debug("Unhandled eslogger event type: \(eventName)")
-            return nil
+            event = nil
         }
+
+        // Enrich event with eslogger-specific metadata not in ProcessInfo
+        guard var result = event else { return nil }
+
+        // CDHash — binary identity hash for threat intel matching
+        let cdhash = str(processDict, "cdhash")
+        if !cdhash.isEmpty {
+            result.enrichments["process.cdhash"] = cdhash
+        }
+
+        // Session ID — for lateral movement detection across login sessions
+        let sessionId = int(processDict, "session_id")
+        if sessionId != 0 {
+            result.enrichments["process.session_id"] = String(sessionId)
+        }
+
+        // Sequence numbers — for gap/drop detection
+        if let globalSeq = json["global_seq_num"] as? Int {
+            result.enrichments["es.global_seq_num"] = String(globalSeq)
+        }
+
+        // Environment variables — detect DYLD injection in env, not just command line
+        if eventName == "exec" {
+            let envVars = extractEnvVars(from: eventPayload)
+            for envVar in envVars {
+                if envVar.hasPrefix("DYLD_INSERT_LIBRARIES=") ||
+                   envVar.hasPrefix("DYLD_FRAMEWORK_PATH=") ||
+                   envVar.hasPrefix("DYLD_LIBRARY_PATH=") {
+                    result.enrichments["exec.dyld_env"] = envVar
+                }
+            }
+            // dyld_exec_path — Rosetta/DYLD path manipulation
+            if let dyldPath = (eventPayload["dyld_exec_path"] as? [String: Any])?["path"] as? String,
+               !dyldPath.isEmpty {
+                result.enrichments["exec.dyld_exec_path"] = dyldPath
+            }
+        }
+
+        return result
+    }
+
+    /// Extract environment variables from exec event payload.
+    private static func extractEnvVars(from payload: [String: Any]) -> [String] {
+        // Real eslogger: { "count": N, "items": [{"value": "VAR=val"}, ...] }
+        if let envObj = payload["env"] as? [String: Any],
+           let items = envObj["items"] as? [[String: Any]] {
+            return items.compactMap { $0["value"] as? String }
+        }
+        // Fallback: simple array
+        if let envArray = payload["env"] as? [String] { return envArray }
+        return []
     }
 
     // MARK: - Process Extraction
@@ -175,12 +167,24 @@ public enum EsloggerParser {
             return .unsigned
         }()
 
+        // CDHash — enables threat intel binary hash matching
+        let cdhash = str(processDict, "cdhash")
+
         let codeSignature = CodeSignatureInfo(
             signerType: signerType,
             teamId: teamId.isEmpty ? nil : teamId,
             signingId: signingId.isEmpty ? nil : signingId,
             flags: flags
         )
+
+        // Responsible PID (macOS-specific attribution)
+        let rpid: Int32 = {
+            if let responsibleToken = dict(processDict, "responsible_audit_token") {
+                let rPid = int(responsibleToken, "pid")
+                if rPid != 0 { return Int32(rPid) }
+            }
+            return 0
+        }()
 
         // Ancestor from ppid (matches ESHelpers behavior)
         var ancestors: [ProcessAncestor] = []
@@ -192,14 +196,17 @@ public enum EsloggerParser {
             ))
         }
 
-        // Start time
+        // Start time from eslogger (real process birth time, not event time)
         let startTimeStr = str(processDict, "start_time")
         let startTime = startTimeStr.isEmpty ? Date() : parseTimestamp(startTimeStr)
 
-        return ProcessInfo(
+        // Session ID for lateral movement detection
+        let sessionId = int(processDict, "session_id")
+
+        let process = ProcessInfo(
             pid: pid,
             ppid: ppid,
-            rpid: 0,
+            rpid: rpid,
             name: processName,
             executable: executablePath,
             commandLine: "",
@@ -207,13 +214,20 @@ public enum EsloggerParser {
             workingDirectory: "",
             userId: uid,
             userName: "",
-            groupId: 0,
+            groupId: UInt32(int(processDict, "group_id")),
             startTime: startTime,
             codeSignature: codeSignature,
             ancestors: ancestors,
             architecture: architecture,
             isPlatformBinary: isPlatformBinary
         )
+
+        // Store cdhash and session_id as enrichments won't fit in ProcessInfo struct
+        // They'll be accessible via the Event.enrichments dict when set by the caller
+        _ = cdhash  // Used by parseExec to set enrichments
+        _ = sessionId
+
+        return process
     }
 
     // MARK: - Event-Specific Parsers
