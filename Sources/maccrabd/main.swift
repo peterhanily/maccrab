@@ -350,26 +350,53 @@ struct MacCrabDaemon {
         }
 
         // Start ES collector (optional — requires root + ES entitlement)
+        // Falls back to eslogger proxy if entitlement is missing.
+        var esloggerCollector: EsloggerCollector? = nil
+        var esMode = "unavailable"
+
         if isRoot {
             do {
                 collector = try ESCollector()
-                logger.info("ES collector started successfully")
-                print("Endpoint Security collector active")
+                logger.info("ES collector started successfully (native client)")
+                esMode = "native client"
             } catch {
-                logger.warning("ES collector unavailable: \(error)")
-                print("Warning: Endpoint Security unavailable (\(error))")
-                print("  To enable: sign binary with com.apple.developer.endpoint-security.client entitlement")
+                logger.warning("ES entitlement unavailable: \(error)")
+                // Fallback: use eslogger proxy (same kernel events, no entitlement)
+                if EsloggerCollector.isAvailable() {
+                    esloggerCollector = EsloggerCollector()
+                    await esloggerCollector!.start()
+                    logger.info("eslogger proxy collector started")
+                    esMode = "eslogger proxy"
+                } else {
+                    logger.warning("eslogger not found — ES events unavailable")
+                    print("  To enable: sign binary with ES entitlement, or install macOS 13+ for eslogger")
+                }
             }
         } else {
-            print("Endpoint Security: skipped (requires root)")
+            // Non-root: try eslogger anyway (it needs root, but let it fail gracefully)
+            if EsloggerCollector.isAvailable() {
+                esloggerCollector = EsloggerCollector()
+                await esloggerCollector!.start()
+                esMode = "eslogger proxy (may need root)"
+            }
         }
+        print("Endpoint Security: \(esMode)")
 
         // Merge all event sources into a single stream
         let eventStream = AsyncStream<Event> { continuation in
-            // Source 1: Endpoint Security events (if available)
+            // Source 1a: Native Endpoint Security events (if available)
             if let es = collector {
                 Task {
                     for await event in es.events {
+                        continuation.yield(event)
+                    }
+                }
+            }
+
+            // Source 1b: eslogger proxy events (fallback when ES entitlement unavailable)
+            if let eslogger = esloggerCollector {
+                Task {
+                    for await event in eslogger.events {
                         continuation.yield(event)
                     }
                 }
@@ -412,7 +439,7 @@ struct MacCrabDaemon {
         PID: \(Foundation.ProcessInfo.processInfo.processIdentifier)
 
         Event Sources:
-          - Endpoint Security (ES): \(collector != nil ? "active" : "unavailable")
+          - Endpoint Security (ES): \(esMode)
           - Unified Log (12 subsystems): \(ulCollector != nil ? "active" : "unavailable")
           - TCC permission monitor: active
           - Network connection collector: active
