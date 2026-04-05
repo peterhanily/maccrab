@@ -99,7 +99,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             })
 
             let hostingController = NSHostingController(rootView: popoverView)
-            let contentSize = NSSize(width: 360, height: 200)
+            let contentSize = NSSize(width: 344, height: 140)
             hostingController.preferredContentSize = contentSize
 
             // Use a floating panel positioned in the top-right corner
@@ -287,8 +287,9 @@ struct AlertPopoverView: View {
                 .padding(.top, 2)
             }
         }
-        .padding(12)
-        .frame(width: 340)
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.white)
         .preferredColorScheme(.light)
     }
 }
