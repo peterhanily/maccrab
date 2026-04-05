@@ -332,6 +332,8 @@ public actor SelfDefense {
                     }
                     message = "\(desc) was modified: \(path)"
                 } else if data.contains(.attrib) {
+                    // Skip attrib changes on the DB — WAL checkpoints and chmod are normal
+                    if path.contains("events.db") && !critical { return }
                     message = "\(desc) had attributes changed: \(path)"
                 }
 
