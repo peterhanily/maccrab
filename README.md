@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey)]()
 [![Rules](https://img.shields.io/badge/detection%20rules-273-orange)]()
+[![Version](https://img.shields.io/badge/version-v1.0.0-blue)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
 ---
@@ -20,6 +21,23 @@ What sets it apart from other open-source macOS tools:
 - **Threat intelligence enrichment** -- match file hashes, IPs, and domains against abuse.ch feeds (Feodo, URLhaus, MalwareBazaar) in real time.
 
 Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- but native to macOS, running as a single daemon with a SwiftUI dashboard.
+
+---
+
+## What's New in v1.0.0
+
+- 273 Sigma-compatible detection rules
+- 5-tier detection hierarchy (rules, sequences, ML, campaigns, cross-process)
+- AI Guard monitoring 8 coding tools + MCP servers
+- Zero-entitlement kernel events via eslogger proxy
+- Package freshness checking (npm, PyPI, Homebrew, Cargo)
+- Ultrasonic attack detection
+- Natural language threat hunting
+- Clipboard, browser extension, USB monitoring
+- TLS fingerprinting and C2 beacon detection
+- Auto rule generation from observed attacks
+- Encrypted database (AES-256)
+- HTML incident reports
 
 ---
 
@@ -226,6 +244,12 @@ Additional views: Settings panel, Response Actions configuration.
 ---
 
 ## Quick Start
+
+### Install via Homebrew
+
+```bash
+brew install --cask maccrab
+```
 
 ### Build and run
 
