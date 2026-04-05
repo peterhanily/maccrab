@@ -1,0 +1,25 @@
+title: USB HID Keyboard Emulation Device (Rubber Ducky)
+id: d1a2b3c4-0351-4000-a000-000000000351
+status: experimental
+description: Detects USB devices that register as HID keyboards, which may be keystroke injection devices (USB Rubber Ducky, BadUSB).
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1200/
+tags:
+    - attack.initial_access
+    - attack.execution
+    - attack.t1200
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'IOHIDDevice'
+            - 'kIOHIDDeviceUsagePageKey'
+    condition: selection
+falsepositives:
+    - Normal USB keyboard connections
+    - KVM switches
+level: high

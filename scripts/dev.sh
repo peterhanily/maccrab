@@ -137,10 +137,26 @@ bundle_app() {
     fi
 }
 
+# ─── Log rotation ─────────────────────────────────────────────────────
+
+rotate_log() {
+    local log="/tmp/maccrabd.log"
+    if [ -f "$log" ]; then
+        local size
+        size=$(stat -f%z "$log" 2>/dev/null || echo 0)
+        if [ "$size" -gt 10485760 ]; then  # 10MB
+            mv "$log" "$log.$(date +%s)"
+            # Keep only last 3 rotated logs
+            ls -t /tmp/maccrabd.log.* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null
+        fi
+    fi
+}
+
 # ─── Start daemon ─────────────────────────────────────────────────────
 
 start_daemon() {
     local use_sudo="$1"
+    rotate_log
 
     if [ "$use_sudo" = "true" ]; then
         info "Starting daemon with Endpoint Security (sudo)..."

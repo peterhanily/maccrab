@@ -4,12 +4,9 @@
 // Monitors Endpoint Security infrastructure health via observable indicators.
 // Detects tampering with ES clients, slot exhaustion, and security daemon health.
 //
-// Background: macOS EndpointSecurity IOKit driver (com.apple.EndpointSecurity)
-// supports an undocumented NoAuthClient (type=2) that returns diagnostic info
-// about active ES clients without requiring the ES entitlement — only root.
-// This monitor checks ES health via observable side effects: whether the key
-// security daemons (xprotectd, syspolicyd, endpointsecurityd) are running,
-// and estimates ES client slot occupancy.
+// Checks ES health via observable side effects: whether the key security
+// daemons (xprotectd, syspolicyd, endpointsecurityd) are running, and
+// estimates ES client slot occupancy from known consumers.
 
 import Foundation
 import os.log

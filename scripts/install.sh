@@ -53,13 +53,24 @@ python3 Compiler/compile_rules.py \
     --input-dir Rules/ \
     --output-dir "$SUPPORT_DIR/compiled_rules" 2>&1 | tail -5
 
-# Install launchd plist
+# Ensure compiled rules have correct permissions
+chmod -R 644 "$SUPPORT_DIR/compiled_rules/"*.json 2>/dev/null || true
+chmod -R 644 "$SUPPORT_DIR/compiled_rules/sequences/"*.json 2>/dev/null || true
+find "$SUPPORT_DIR/compiled_rules" -type d -exec chmod 755 {} \;
+
+RULE_COUNT=$(find "$SUPPORT_DIR/compiled_rules" -name '*.json' | wc -l | tr -d ' ')
+info "Installed $RULE_COUNT compiled rules."
+
+# Install launchd plist (update binary path to match PREFIX)
 info "Installing launchd daemon plist..."
 if launchctl list "$PLIST_NAME" &>/dev/null; then
     warn "Stopping existing daemon..."
     launchctl unload "$PLIST_DIR/$PLIST_NAME.plist" 2>/dev/null || true
 fi
-cp -f "$PLIST_NAME.plist" "$PLIST_DIR/$PLIST_NAME.plist"
+
+# Generate plist with correct binary path from PREFIX
+sed "s|/usr/local/bin/maccrabd|$PREFIX/bin/maccrabd|g" \
+    "$PLIST_NAME.plist" > "$PLIST_DIR/$PLIST_NAME.plist"
 chown root:wheel "$PLIST_DIR/$PLIST_NAME.plist"
 chmod 644 "$PLIST_DIR/$PLIST_NAME.plist"
 
@@ -67,13 +78,38 @@ chmod 644 "$PLIST_DIR/$PLIST_NAME.plist"
 info "Starting MacCrab daemon..."
 launchctl load "$PLIST_DIR/$PLIST_NAME.plist"
 
-# Verify
+# Post-install verification
+info "Verifying installation..."
+VERIFY_OK=true
+
 sleep 2
 if pgrep -x maccrabd >/dev/null; then
-    info "MacCrab daemon is running (PID $(pgrep -x maccrabd))."
+    info "Daemon is running (PID $(pgrep -x maccrabd))."
 else
     warn "Daemon may not have started. Check: sudo launchctl list $PLIST_NAME"
     warn "Logs: $SUPPORT_DIR/maccrabd.log"
+    VERIFY_OK=false
+fi
+
+if [ ! -x "$PREFIX/bin/maccrabd" ]; then
+    warn "Binary not found or not executable: $PREFIX/bin/maccrabd"
+    VERIFY_OK=false
+fi
+
+if [ ! -x "$PREFIX/bin/maccrabctl" ]; then
+    warn "CLI tool not found or not executable: $PREFIX/bin/maccrabctl"
+    VERIFY_OK=false
+fi
+
+if [ "$RULE_COUNT" -lt 1 ]; then
+    warn "No compiled rules found in $SUPPORT_DIR/compiled_rules/"
+    VERIFY_OK=false
+fi
+
+if [ "$VERIFY_OK" = true ]; then
+    info "All checks passed."
+else
+    warn "Some checks failed — review warnings above."
 fi
 
 echo ""

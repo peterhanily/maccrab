@@ -14,6 +14,9 @@ struct SettingsView: View {
     @AppStorage("minAlertSeverity") var minAlertSeverity: String = "medium"
     @AppStorage("pollIntervalSeconds") var pollIntervalSeconds: Int = 5
     @AppStorage("launchAtLogin") var launchAtLogin: Bool = false
+    @AppStorage("autoQuarantine") private var autoQuarantine = false
+    @AppStorage("autoKill") private var autoKill = false
+    @AppStorage("autoBlock") private var autoBlock = false
 
     var body: some View {
         TabView {
@@ -79,6 +82,26 @@ struct SettingsView: View {
             GroupBox("Startup") {
                 Toggle("Launch MacCrab at login", isOn: $launchAtLogin)
                     .padding(8)
+            }
+
+            // Auto-Response Configuration
+            GroupBox("Auto-Response") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Automatically respond to critical threats")
+                        .font(.callout)
+
+                    Toggle("Auto-quarantine malicious files", isOn: $autoQuarantine)
+                        .help("Automatically move files flagged by critical-severity rules to quarantine")
+
+                    Toggle("Auto-kill malicious processes", isOn: $autoKill)
+                        .help("Automatically terminate processes that trigger critical detection rules")
+
+                    Toggle("Auto-block C2 destinations", isOn: $autoBlock)
+                        .help("Automatically add PF firewall rules to block command-and-control IPs")
+
+                    Text("These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab.")
+                        .font(.caption).foregroundColor(.secondary)
+                }.padding(8)
             }
 
             Spacer()

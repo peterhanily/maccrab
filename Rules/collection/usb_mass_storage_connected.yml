@@ -1,0 +1,31 @@
+title: USB Mass Storage Device Connected
+id: d1a2b3c4-0350-4000-a000-000000000350
+status: stable
+description: Detects connection of USB mass storage devices which could be used for data exfiltration or malware delivery.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1200/
+tags:
+    - attack.initial_access
+    - attack.exfiltration
+    - attack.t1200
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'diskutil mount'
+            - 'diskutil mountDisk'
+            - 'hdiutil attach'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Legitimate removable media usage
+level: medium
