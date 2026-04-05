@@ -125,8 +125,9 @@ public actor CrossProcessCorrelator {
     ///   - correlationWindow: Maximum time span (seconds) for events to be
     ///     considered part of the same chain. Defaults to 300 (5 minutes).
     ///   - minChainLength: Minimum number of events from different PIDs
-    ///     required to emit a chain. Defaults to 2.
-    public init(correlationWindow: TimeInterval = 300, minChainLength: Int = 2) {
+    ///     required to emit a chain. Defaults to 3 (reduces noise from
+    ///     normal multi-process traffic like browsers + git to same CDN).
+    public init(correlationWindow: TimeInterval = 300, minChainLength: Int = 3) {
         self.correlationWindow = correlationWindow
         self.minChainLength = minChainLength
         self.lastPurge = Date()

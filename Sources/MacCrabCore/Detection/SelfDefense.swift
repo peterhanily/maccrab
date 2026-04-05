@@ -98,11 +98,13 @@ public actor SelfDefense {
         // Build list of paths to monitor
         var paths: [MonitoredPath] = []
 
-        // The binary itself
+        // The binary itself — non-critical in development builds (.build/debug)
+        // to avoid alert storms during rebuild cycles
+        let isDev = binaryPath.contains(".build/debug")
         paths.append(MonitoredPath(
             path: binaryPath,
             description: "MacCrab daemon binary",
-            critical: true
+            critical: !isDev
         ))
 
         // LaunchDaemon plist

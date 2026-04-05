@@ -34,19 +34,28 @@ public actor AINetworkSandbox {
         "crates.io",
         "pkg.go.dev", "proxy.golang.org", "sum.golang.org",
         // Source control
-        "github.com", "api.github.com",
+        "github.com", "api.github.com", "github.githubassets.com",
         "gitlab.com",
         "bitbucket.org",
         // AI services
-        "api.anthropic.com",
-        "api.openai.com",
-        "api.githubcopilot.com",
+        "api.anthropic.com", "claude.ai", "anthropic.com",
+        "api.openai.com", "openai.com", "chatgpt.com",
+        "api.githubcopilot.com", "copilot.github.com",
         "generativelanguage.googleapis.com",
+        "api.cursor.com", "cursor.sh",
+        "aider.chat",
+        "continue.dev",
         // CDNs and common dev services
         "cdn.jsdelivr.net",
         "unpkg.com",
         "raw.githubusercontent.com",
         "objects.githubusercontent.com",
+        // Common dev infrastructure
+        "docker.io", "registry.docker.com",
+        "hub.docker.com", "auth.docker.io",
+        "npmjs.com",
+        "stackoverflow.com",
+        "docs.rs",
     ]
 
     /// IP addresses that are always allowed (well-known DNS, etc.).
@@ -111,6 +120,7 @@ public actor AINetworkSandbox {
 
     /// Recent violations for deduplication and audit.
     private var recentViolations: [Violation] = []
+    private var ipViolationTimes: [String: Date] = [:]
 
     /// Maximum number of cached violations.
     private let maxCachedViolations: Int
@@ -178,6 +188,14 @@ public actor AINetworkSandbox {
         if ipAllowlist.contains(destinationIP) {
             return nil
         }
+
+        // Rate-limit: only fire once per IP per hour (avoid alert storms)
+        let ipKey = destinationIP
+        if let lastSeen = ipViolationTimes[ipKey],
+           Date().timeIntervalSince(lastSeen) < 3600 {
+            return nil
+        }
+        ipViolationTimes[ipKey] = Date()
 
         // IP is not in allowlist
         let violation = Violation(
