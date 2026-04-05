@@ -1,0 +1,44 @@
+title: Non-System Binary Lacks Notarization
+id: d1a2b3c4-3004-4000-a000-000000003004
+status: stable
+description: >
+    Detects execution of a binary that is not notarized by Apple, is not
+    Apple-signed, and does not reside under /System/. Since macOS 10.15,
+    Apple requires notarization for all distributed software. A binary
+    lacking notarization may indicate malware, a trojanized tool, or
+    software that has bypassed Gatekeeper protections. This is especially
+    concerning for binaries in ~/Downloads or /tmp.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution
+    - https://attack.mitre.org/techniques/T1553/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        NotarizationStatus: 'not_notarized'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/bin/'
+            - '/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    filter_xcode:
+        Image|startswith:
+            - '/Applications/Xcode'
+            - '/Library/Developer/'
+    condition: selection and not filter_system and not filter_apple_signed and not filter_xcode
+falsepositives:
+    - Locally compiled development binaries
+    - Open source tools installed via Homebrew (some may lack notarization)
+    - Legacy software predating notarization requirement
+level: high

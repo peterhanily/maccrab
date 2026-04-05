@@ -1,0 +1,39 @@
+title: MCP Server Configuration Added
+id: d1a2b3c4-3001-4000-a000-000000003001
+status: stable
+description: >
+    Detects when a new MCP (Model Context Protocol) server is added to an AI
+    coding tool configuration. MCP servers extend AI tool capabilities by
+    providing additional tools and resources. Malicious MCP servers can inject
+    prompt poisoning, exfiltrate sensitive data from projects, or gain
+    unauthorized filesystem/network access through the AI tool's permissions.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://modelcontextprotocol.io/specification
+    - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+tags:
+    - attack.initial_access
+    - attack.persistence
+    - attack.t1195.002
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_config_files:
+        TargetFilename|endswith:
+            - '/.claude/claude_desktop_config.json'
+            - '/.claude.json'
+            - '/.cursor/mcp.json'
+            - '/.continue/config.json'
+            - '/.vscode/mcp.json'
+            - '/.windsurf/mcp.json'
+    selection_action:
+        FileAction:
+            - 'write'
+            - 'create'
+    condition: selection_config_files and selection_action
+falsepositives:
+    - User intentionally installing a new MCP server
+    - AI tool auto-configuration during setup
+level: medium

@@ -1,0 +1,54 @@
+title: MCP Server with Potential Tool Description Injection
+id: d1a2b3c4-3003-4000-a000-000000003003
+status: stable
+description: >
+    Detects MCP server configurations or tool descriptions that contain prompt
+    injection patterns. Malicious MCP servers can embed hidden instructions in
+    tool descriptions that override the AI assistant's behavior when the tool
+    list is loaded. This "tool poisoning" attack can cause the AI to exfiltrate
+    sensitive files, execute arbitrary commands, or bypass safety guardrails
+    without the user's knowledge. The injected text is invisible to the user
+    but processed by the AI model.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+    - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+    - attack.initial_access
+    - attack.execution
+    - attack.t1195.002
+    - attack.t1059
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_mcp_process:
+        ParentImage|endswith:
+            - '/claude'
+            - '/cursor'
+            - '/code'
+            - '/windsurf'
+            - '/node'
+        Image|endswith:
+            - '/node'
+            - '/python'
+            - '/python3'
+            - '/npx'
+    selection_injection_args:
+        CommandLine|contains:
+            - 'ignore all previous'
+            - 'ignore your instructions'
+            - 'disregard all prior'
+            - '<tool_result>'
+            - '</tool_result>'
+            - 'IMPORTANT: Before'
+            - 'system prompt override'
+            - 'you must first read'
+            - 'do not tell the user'
+            - 'hidden instruction'
+    condition: selection_mcp_process and selection_injection_args
+falsepositives:
+    - Security testing of MCP server implementations
+    - Prompt injection research
+level: critical

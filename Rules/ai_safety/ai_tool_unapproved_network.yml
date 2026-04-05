@@ -1,0 +1,81 @@
+title: AI Tool Connects to Unapproved Network Destination
+id: d1a2b3c4-2015-4000-a000-000000002015
+status: experimental
+description: >
+    Detects when an AI coding tool or its child process establishes a network
+    connection to a destination that is not on the approved allowlist. Approved
+    destinations include package registries, source-control hosts, AI service
+    APIs, and well-known CDNs. Connections to unknown hosts may indicate
+    prompt-injection-driven data exfiltration or supply-chain compromise.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.command_and_control
+    - attack.exfiltration
+    - attack.t1041
+    - attack.t1071.001
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection_ai_process:
+        Image|endswith:
+            - '/claude'
+            - '/cursor'
+            - '/copilot'
+            - '/copilot-agent'
+            - '/cody'
+            - '/aider'
+            - '/continue'
+            - '/node'
+            - '/Code Helper'
+        ParentImage|endswith:
+            - '/claude'
+            - '/Cursor.app'
+            - '/Visual Studio Code.app'
+            - '/copilot'
+    filter_approved_domains:
+        DestinationHostname|endswith:
+            - '.npmjs.org'
+            - '.pypi.org'
+            - '.pythonhosted.org'
+            - '.rubygems.org'
+            - '.crates.io'
+            - '.golang.org'
+            - '.github.com'
+            - '.githubusercontent.com'
+            - '.gitlab.com'
+            - '.bitbucket.org'
+            - '.anthropic.com'
+            - '.openai.com'
+            - '.githubcopilot.com'
+            - '.googleapis.com'
+            - '.jsdelivr.net'
+            - 'unpkg.com'
+    filter_private_ip:
+        DestinationIp|startswith:
+            - '10.'
+            - '172.16.'
+            - '172.17.'
+            - '172.18.'
+            - '172.19.'
+            - '172.20.'
+            - '172.21.'
+            - '172.22.'
+            - '172.23.'
+            - '172.24.'
+            - '172.25.'
+            - '172.26.'
+            - '172.27.'
+            - '172.28.'
+            - '172.29.'
+            - '172.30.'
+            - '172.31.'
+            - '192.168.'
+            - '127.'
+    condition: selection_ai_process and not filter_approved_domains and not filter_private_ip
+falsepositives:
+    - Connections to internal/private package registries
+    - AI tool updates from vendor CDNs
+    - Custom MCP server connections
+level: high

@@ -1,0 +1,71 @@
+title: AI Tool Child Process Uploads Data to Non-Standard Destination
+id: d1a2b3c4-2016-4000-a000-000000002016
+status: experimental
+description: >
+    Detects when an AI coding tool's child process uses curl, wget, or Python
+    to upload data (POST/PUT) to a destination that is not a known package
+    registry, source-control host, or AI service API. This pattern often
+    indicates prompt-injection-driven exfiltration where the AI agent is
+    tricked into sending project files, credentials, or environment data to
+    an attacker-controlled server.
+author: MacCrab Community
+date: 2026/04/04
+tags:
+    - attack.exfiltration
+    - attack.t1041
+    - attack.t1048.003
+    - attack.command_and_control
+    - attack.t1071.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_upload_tool:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+            - '/python'
+            - '/python3'
+            - '/node'
+            - '/ruby'
+    selection_upload_method:
+        CommandLine|contains:
+            - '-X POST'
+            - '-X PUT'
+            - '--data'
+            - '--data-binary'
+            - '--data-raw'
+            - '--data-urlencode'
+            - '-d {'
+            - '-d @'
+            - '--upload-file'
+            - '-T '
+            - 'requests.post'
+            - 'requests.put'
+            - 'urllib.request.urlopen'
+            - 'fetch('
+            - '.post('
+            - '.put('
+    filter_known_destinations:
+        CommandLine|contains:
+            - 'registry.npmjs.org'
+            - 'pypi.org'
+            - 'crates.io'
+            - 'rubygems.org'
+            - 'github.com'
+            - 'api.github.com'
+            - 'gitlab.com'
+            - 'bitbucket.org'
+            - 'api.anthropic.com'
+            - 'api.openai.com'
+            - 'api.githubcopilot.com'
+            - 'generativelanguage.googleapis.com'
+            - 'localhost'
+            - '127.0.0.1'
+            - '::1'
+    condition: selection_upload_tool and selection_upload_method and not filter_known_destinations
+falsepositives:
+    - Uploading to private artifact registries
+    - CI/CD webhook notifications
+    - Legitimate API calls to internal services
+level: critical

@@ -1,0 +1,84 @@
+title: Notarized Binary Drops and Executes Unnotarized Payload
+id: e1f2a3b4-3005-4000-b000-000000003005
+status: experimental
+description: >
+    Detects a three-stage dropper pattern: a notarized binary executes, then
+    writes or downloads a new binary to disk, and finally that new binary
+    executes WITHOUT notarization. This is a common technique where attackers
+    use a legitimately notarized application as the initial access vector,
+    which then deploys an unnotarized malicious payload to evade Gatekeeper.
+    The notarized first stage passes all macOS security checks while the
+    actual malware runs unnotarized.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1553/001/
+    - https://attack.mitre.org/techniques/T1105/
+tags:
+    - attack.defense_evasion
+    - attack.execution
+    - attack.t1553.001
+    - attack.t1105
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: notarized_exec
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              NotarizationStatus: 'notarized'
+          filter_system:
+              Image|startswith:
+                  - '/System/'
+                  - '/usr/bin/'
+                  - '/usr/sbin/'
+                  - '/bin/'
+                  - '/sbin/'
+          condition: selection and not filter_system
+
+    - id: drop_binary
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              FileAction:
+                  - 'create'
+                  - 'write'
+              TargetFilename|endswith:
+                  - '.app/Contents/MacOS/'
+                  - '.dylib'
+              TargetFilename|re: '.*\.(app|bin|dylib|so|bundle|tool)$'
+          selection_temp:
+              TargetFilename|startswith:
+                  - '/tmp/'
+                  - '/private/tmp/'
+                  - '/var/folders/'
+                  - '/Users/'
+          condition: (selection or selection_temp)
+      process: notarized_exec.descendant
+
+    - id: unnotarized_exec
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              NotarizationStatus: 'not_notarized'
+          filter_system:
+              Image|startswith:
+                  - '/System/'
+                  - '/usr/bin/'
+                  - '/usr/sbin/'
+                  - '/bin/'
+                  - '/sbin/'
+          condition: selection and not filter_system
+
+trigger: all
+level: critical

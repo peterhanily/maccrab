@@ -1,0 +1,45 @@
+title: MCP Server with Suspicious Command Path
+id: d1a2b3c4-3002-4000-a000-000000003002
+status: stable
+description: >
+    Detects MCP server configurations that reference commands in suspicious
+    locations such as /tmp, /var/tmp, ~/Downloads, or /Users/Shared. Legitimate
+    MCP servers are typically installed via package managers to standard paths.
+    A server binary in a temporary or downloads directory may indicate a
+    trojanized MCP server attempting to gain persistent access through the AI
+    tool or exfiltrate project data via tool responses.
+author: MacCrab Community
+date: 2026/04/04
+references:
+    - https://modelcontextprotocol.io/specification
+    - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+tags:
+    - attack.execution
+    - attack.defense_evasion
+    - attack.t1059
+    - attack.t1036
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_config_files:
+        TargetFilename|endswith:
+            - '/.claude/claude_desktop_config.json'
+            - '/.claude.json'
+            - '/.cursor/mcp.json'
+            - '/.continue/config.json'
+            - '/.vscode/mcp.json'
+            - '/.windsurf/mcp.json'
+    selection_suspicious_content:
+        FileContent|contains:
+            - '"/tmp/'
+            - '"/private/tmp/'
+            - '"/var/tmp/'
+            - '/Downloads/'
+            - '/Users/Shared/'
+    selection_mcp_key:
+        FileContent|contains: '"mcpServers"'
+    condition: selection_config_files and selection_suspicious_content and selection_mcp_key
+falsepositives:
+    - Developer testing a locally-built MCP server from a temporary directory
+level: high
