@@ -234,10 +234,16 @@ public enum EsloggerParser {
 
         let targetInfo = extractProcess(from: targetDict, architecture: architecture)
 
-        // Args
+        // Args — eslogger uses { "count": N, "items": [{"value": "arg"}, ...] }
         let args: [String] = {
-            guard let argsArray = payload["args"] as? [String] else { return [] }
-            return argsArray
+            // Try the structured format first (real eslogger output)
+            if let argsObj = payload["args"] as? [String: Any],
+               let items = argsObj["items"] as? [[String: Any]] {
+                return items.compactMap { $0["value"] as? String }
+            }
+            // Fallback: simple string array (test fixtures)
+            if let argsArray = payload["args"] as? [String] { return argsArray }
+            return []
         }()
         let commandLine = args.joined(separator: " ")
 
@@ -292,21 +298,35 @@ public enum EsloggerParser {
         )
     }
 
+    /// Check if destination_type indicates an existing file.
+    /// eslogger uses strings ("existing_file"/"new_path") while the ES C API uses ints (0/1).
+    private static func isExistingFile(_ payload: [String: Any]) -> Bool {
+        if let s = payload["destination_type"] as? String { return s == "existing_file" }
+        if let n = payload["destination_type"] as? Int { return n == 0 }
+        return false
+    }
+
     private static func parseCreate(_ payload: [String: Any], timestamp: Date, process: ProcessInfo) -> Event {
-        let destinationType = int(payload, "destination_type")
+        let destDict = dict(payload, "destination") ?? [:]
         let path: String
-        if destinationType == 0 {
-            // ES_DESTINATION_TYPE_EXISTING_FILE
-            let destDict = dict(payload, "destination") ?? [:]
+        if isExistingFile(payload) {
             let existingFile = dict(destDict, "existing_file") ?? [:]
             path = str(existingFile, "path")
         } else {
-            // ES_DESTINATION_TYPE_NEW_PATH
-            let destDict = dict(payload, "destination") ?? [:]
-            let newPath = dict(destDict, "new_path") ?? [:]
-            let dirDict = dict(newPath, "dir") ?? [:]
-            let dir = str(dirDict, "path")
-            let filename = str(newPath, "filename")
+            // new_path: eslogger nests dir+filename under destination directly (not under new_path)
+            let dir: String
+            let filename: String
+            if let newPathDict = dict(destDict, "new_path") {
+                // Some versions nest under new_path
+                let dirDict = dict(newPathDict, "dir") ?? [:]
+                dir = str(dirDict, "path")
+                filename = str(newPathDict, "filename")
+            } else {
+                // Others put existing_file as the parent dir + filename at destination level
+                let dirDict = dict(destDict, "existing_file") ?? [:]
+                dir = str(dirDict, "path")
+                filename = str(destDict, "filename")
+            }
             path = dir.hasSuffix("/") ? dir + filename : dir + "/" + filename
         }
 
@@ -359,20 +379,23 @@ public enum EsloggerParser {
         let sourceDict = dict(payload, "source") ?? [:]
         let sourcePath = str(sourceDict, "path")
 
-        let destinationType = int(payload, "destination_type")
+        let destDict = dict(payload, "destination") ?? [:]
         let destPath: String
-        if destinationType == 0 {
-            // ES_DESTINATION_TYPE_EXISTING_FILE
-            let destDict = dict(payload, "destination") ?? [:]
+        if isExistingFile(payload) {
             let existingFile = dict(destDict, "existing_file") ?? [:]
             destPath = str(existingFile, "path")
         } else {
-            // ES_DESTINATION_TYPE_NEW_PATH
-            let destDict = dict(payload, "destination") ?? [:]
-            let newPath = dict(destDict, "new_path") ?? [:]
-            let dirDict = dict(newPath, "dir") ?? [:]
-            let dir = str(dirDict, "path")
-            let filename = str(newPath, "filename")
+            let dir: String
+            let filename: String
+            if let newPathDict = dict(destDict, "new_path") {
+                let dirDict = dict(newPathDict, "dir") ?? [:]
+                dir = str(dirDict, "path")
+                filename = str(newPathDict, "filename")
+            } else {
+                let dirDict = dict(destDict, "existing_file") ?? [:]
+                dir = str(dirDict, "path")
+                filename = str(destDict, "filename")
+            }
             destPath = dir.hasSuffix("/") ? dir + filename : dir + "/" + filename
         }
 

@@ -34,11 +34,20 @@ public actor EsloggerCollector {
     private var readTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
 
-    /// Event types to subscribe to (matching ESCollector's 14 types).
+    /// Event types to subscribe to — core 14 from ESCollector plus valuable extras.
     private static let eventTypes = [
+        // Core 14 (matching ESCollector)
         "exec", "fork", "exit", "create", "write", "close",
         "rename", "unlink", "signal", "kextload",
         "mmap", "mprotect", "setowner", "setmode",
+        // Extended (macOS 14+, gracefully ignored on older versions)
+        "sudo", "su", "authentication",
+        "tcc_modify",
+        "btm_launch_item_add", "btm_launch_item_remove",
+        "xp_malware_detected", "xp_malware_remediated",
+        "gatekeeper_user_override",
+        "remote_thread_create",
+        "xpc_connect",
     ]
 
     /// Paths to skip BEFORE JSON parsing (fast-path muting).
@@ -74,11 +83,39 @@ public actor EsloggerCollector {
         FileManager.default.fileExists(atPath: "/usr/bin/eslogger")
     }
 
+    /// Preflight check: verify eslogger can actually run (root + FDA).
+    /// Returns nil on success, or a human-readable error string.
+    public nonisolated static func preflightCheck() -> String? {
+        guard getuid() == 0 else {
+            return "MacCrab must run as root (sudo)"
+        }
+        guard isAvailable() else {
+            return "eslogger not found (requires macOS 13+)"
+        }
+        // Try --list-events to verify TCC/FDA
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/eslogger")
+        proc.arguments = ["--list-events"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        try? proc.run()
+        proc.waitUntilExit()
+        if proc.terminationStatus != 0 {
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            if output.contains("TCC") || output.contains("Full Disk Access") || output.contains("FDA") {
+                return "Terminal needs Full Disk Access. Open System Settings → Privacy & Security → Full Disk Access and add your terminal app."
+            }
+            return "eslogger failed with status \(proc.terminationStatus): \(output.prefix(200))"
+        }
+        return nil
+    }
+
     // MARK: - Initialization
 
     public init() {
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(1024)) { continuation in
+        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(4096)) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation

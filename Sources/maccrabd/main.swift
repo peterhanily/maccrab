@@ -453,7 +453,10 @@ struct MacCrabDaemon {
             } catch {
                 logger.warning("ES entitlement unavailable: \(error)")
                 // Fallback: use eslogger proxy (same kernel events, no entitlement)
-                if EsloggerCollector.isAvailable() {
+                if let preflightError = EsloggerCollector.preflightCheck() {
+                    logger.warning("eslogger preflight failed: \(preflightError)")
+                    print("  eslogger: \(preflightError)")
+                } else if EsloggerCollector.isAvailable() {
                     esloggerCollector = EsloggerCollector()
                     await esloggerCollector!.start()
                     logger.info("eslogger proxy collector started")
