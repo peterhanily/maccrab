@@ -98,7 +98,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDashboard()
             })
 
-            let hostingController = NSHostingController(rootView: popoverView)
+            let styledView = popoverView.preferredColorScheme(.dark)
+            let hostingController = NSHostingController(rootView: styledView)
             let contentSize = NSSize(width: 340, height: 220)
             hostingController.preferredContentSize = contentSize
 
