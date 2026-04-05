@@ -82,40 +82,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Critical Alert Popover (Crab Speech Bubble)
 
     func showAlertPopover(alert: AlertViewModel) {
-        // Dedup: don't show same alert twice
-        guard alert.id != lastPopoverAlertId else { return }
-        lastPopoverAlertId = alert.id
-        // Dismiss any existing popover
-        popover?.close()
-        dismissTimer?.invalidate()
+        // Must run on main thread for UI operations
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Dedup: don't show same alert twice
+            guard alert.id != self.lastPopoverAlertId else { return }
+            self.lastPopoverAlertId = alert.id
+            // Dismiss any existing popover
+            self.popover?.close()
+            self.dismissTimer?.invalidate()
 
-        let popoverView = AlertPopoverView(alert: alert, onDismiss: { [weak self] in
-            self?.popover?.close()
-        }, onShowDashboard: { [weak self] in
-            self?.popover?.close()
-            self?.showDashboard()
-        })
+            let popoverView = AlertPopoverView(alert: alert, onDismiss: { [weak self] in
+                self?.popover?.close()
+            }, onShowDashboard: { [weak self] in
+                self?.popover?.close()
+                self?.showDashboard()
+            })
 
-        let hostingController = NSHostingController(rootView: popoverView)
-        hostingController.preferredContentSize = NSSize(width: 340, height: 0)
+            let hostingController = NSHostingController(rootView: popoverView)
+            hostingController.preferredContentSize = NSSize(width: 340, height: 0)
 
-        let pop = NSPopover()
-        pop.contentViewController = hostingController
-        pop.behavior = .transient
-        pop.animates = true
-        self.popover = pop
+            let pop = NSPopover()
+            pop.contentViewController = hostingController
+            pop.behavior = .transient
+            pop.animates = true
+            self.popover = pop
 
-        // Show from the status bar button
-        if let button = statusItem?.button {
-            pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        }
+            // Show from the status bar button (menu bar, top-right)
+            if let button = self.statusItem?.button {
+                pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            }
 
-        // Flash the crab
-        flashCrab(for: alert.severity)
+            // Flash the crab
+            self.flashCrab(for: alert.severity)
 
-        // Auto-dismiss after 8 seconds
-        dismissTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
-            self?.popover?.close()
+            // Auto-dismiss after 8 seconds
+            self.dismissTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
+                self?.popover?.close()
+            }
         }
     }
 
@@ -157,11 +161,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        // Use the standard macOS settings mechanism
+        // Try multiple approaches to open Settings
         if #available(macOS 14.0, *) {
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
+        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        // Fallback: use keyboard shortcut simulation (Cmd+,)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if NSApp.windows.filter({ $0.title.lowercased().contains("settings") || $0.title.lowercased().contains("preferences") }).isEmpty {
+                let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0, context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43)
+                if let event = event { NSApp.sendEvent(event) }
+            }
         }
     }
 
