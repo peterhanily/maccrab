@@ -54,6 +54,9 @@ public actor ProcessTreeAnalyzer {
     /// tighten to -6.0 or -4.0 for stricter detection.
     private let anomalyThreshold: Double
 
+    /// Maximum number of unique transition edges before pruning least-frequent ones.
+    private let maxUniqueTransitions: Int = 50_000
+
     /// Learning vs active detection mode.
     public enum Mode: String, Sendable {
         case learning   // Accumulating transition data, no scoring
@@ -175,6 +178,9 @@ public actor ProcessTreeAnalyzer {
         transitionCounts[parent, default: [:]][child, default: 0] += 1
         parentTotals[parent, default: 0] += 1
         totalTransitions += 1
+
+        // Prune least-frequent transitions if model exceeds size cap.
+        pruneIfNeeded()
 
         // Check for auto-activation.
         if mode == .learning && totalTransitions >= minTransitions {
@@ -403,6 +409,46 @@ public actor ProcessTreeAnalyzer {
             uniqueParents: uniqueParents,
             uniqueEdges: uniqueEdges
         )
+    }
+
+    // MARK: - Model Size Management
+
+    /// Prune the least-frequent transitions if the model exceeds `maxUniqueTransitions`
+    /// unique edges. Removes the bottom ~20% of transitions by count to create headroom.
+    private func pruneIfNeeded() {
+        let uniqueEdges = transitionCounts.values.reduce(0) { $0 + $1.count }
+        guard uniqueEdges > maxUniqueTransitions else { return }
+
+        // Collect all edges with their counts
+        var allEdges: [(parent: String, child: String, count: Int)] = []
+        for (parent, children) in transitionCounts {
+            for (child, count) in children {
+                allEdges.append((parent, child, count))
+            }
+        }
+
+        // Sort ascending by count and remove bottom 20%
+        allEdges.sort { $0.count < $1.count }
+        let toRemove = allEdges.count / 5  // 20%
+
+        var removedCount = 0
+        for i in 0..<toRemove {
+            let edge = allEdges[i]
+            if var children = transitionCounts[edge.parent] {
+                children.removeValue(forKey: edge.child)
+                if children.isEmpty {
+                    transitionCounts.removeValue(forKey: edge.parent)
+                    parentTotals.removeValue(forKey: edge.parent)
+                } else {
+                    transitionCounts[edge.parent] = children
+                    // Recompute parentTotal for this parent
+                    parentTotals[edge.parent] = children.values.reduce(0, +)
+                }
+                removedCount += 1
+            }
+        }
+
+        logger.info("Pruned \(removedCount) least-frequent transitions (was \(uniqueEdges) edges, cap \(self.maxUniqueTransitions))")
     }
 
     // MARK: - Markov Chain Scoring

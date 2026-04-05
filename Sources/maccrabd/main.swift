@@ -861,6 +861,16 @@ struct MacCrabDaemon {
             let hours = uptime / 3600
             let minutes = (uptime % 3600) / 60
             logger.info("Stats: \(eventCount) events processed, \(alertCount) alerts, uptime \(hours)h\(minutes)m")
+
+            // Report eslogger sequence-gap drops (buffer overflow indicator)
+            if let eslogger = esloggerCollector {
+                Task {
+                    let dropped = await eslogger.getDroppedEventCount()
+                    if dropped > 0 {
+                        logger.warning("eslogger: \(dropped) events dropped (sequence gaps)")
+                    }
+                }
+            }
         }
         statsTimer.resume()
 

@@ -72,6 +72,9 @@ public actor AlertStore {
         if !isReadOnly {
             Self.exec(handle, "PRAGMA journal_mode = WAL")
             Self.exec(handle, "PRAGMA synchronous = NORMAL")
+            Self.exec(handle, "PRAGMA wal_autocheckpoint = 10000")  // Checkpoint every 10K pages (~40MB) instead of default 1K
+            Self.exec(handle, "PRAGMA cache_size = -64000")  // 64MB cache (negative = KB)
+            Self.exec(handle, "PRAGMA mmap_size = 268435456")  // 256MB memory-mapped I/O
         }
         Self.exec(handle, "PRAGMA foreign_keys = ON")
 
@@ -91,6 +94,8 @@ public actor AlertStore {
             "CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts(event_id)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_ts_severity ON alerts(timestamp, severity)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_rule_ts ON alerts(rule_id, timestamp)",
         ]
         for sql in schemaSQLs { Self.exec(handle, sql) }
 

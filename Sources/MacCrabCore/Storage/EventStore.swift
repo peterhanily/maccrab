@@ -80,6 +80,9 @@ public actor EventStore {
         if !isReadOnly {
             Self.exec(handle, "PRAGMA journal_mode = WAL")
             Self.exec(handle, "PRAGMA synchronous = NORMAL")
+            Self.exec(handle, "PRAGMA wal_autocheckpoint = 10000")  // Checkpoint every 10K pages (~40MB) instead of default 1K
+            Self.exec(handle, "PRAGMA cache_size = -64000")  // 64MB cache (negative = KB)
+            Self.exec(handle, "PRAGMA mmap_size = 268435456")  // 256MB memory-mapped I/O
         }
         Self.exec(handle, "PRAGMA foreign_keys = ON")
 
@@ -102,6 +105,9 @@ public actor EventStore {
             "CREATE INDEX IF NOT EXISTS idx_events_category ON events(event_category)",
             "CREATE INDEX IF NOT EXISTS idx_events_process_path ON events(process_path)",
             "CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity)",
+            "CREATE INDEX IF NOT EXISTS idx_events_ts_severity ON events(timestamp, severity)",
+            "CREATE INDEX IF NOT EXISTS idx_events_ts_category ON events(timestamp, event_category)",
+            "CREATE INDEX IF NOT EXISTS idx_events_process_ts ON events(process_path, timestamp)",
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
                 process_name, process_path, process_commandline,

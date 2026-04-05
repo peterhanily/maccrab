@@ -64,6 +64,12 @@ public actor IncidentGrouper {
     /// Time after last alert before an incident goes stale.
     private let staleWindow: TimeInterval
 
+    /// Maximum number of incidents to track before evicting the oldest stale ones.
+    private let maxIncidents: Int = 1_000
+
+    /// Maximum number of entries in the processToIncident lookup map.
+    private let maxProcessMappings: Int = 10_000
+
     // MARK: - State
 
     /// Active incidents keyed by ID.
@@ -228,6 +234,27 @@ public actor IncidentGrouper {
         // Purge very old stale incidents (> 24 hours)
         incidents = incidents.filter { _, inc in
             inc.status == .closed ? true : now.timeIntervalSince(inc.lastSeen) < 86400
+        }
+
+        // Enforce hard cap on incidents: evict oldest stale, then oldest closed
+        if incidents.count > maxIncidents {
+            let excess = incidents.count - maxIncidents
+            let toEvict = incidents
+                .filter { $0.value.status == .stale || $0.value.status == .closed }
+                .sorted { $0.value.lastSeen < $1.value.lastSeen }
+                .prefix(excess)
+                .map(\.key)
+            for id in toEvict {
+                incidents.removeValue(forKey: id)
+            }
+        }
+
+        // Enforce hard cap on processToIncident map
+        if processToIncident.count > maxProcessMappings {
+            // Remove mappings that point to incidents that no longer exist
+            processToIncident = processToIncident.filter { _, incidentId in
+                incidents[incidentId] != nil
+            }
         }
     }
 }

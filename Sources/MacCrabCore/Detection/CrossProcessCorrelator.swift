@@ -75,6 +75,9 @@ public actor CrossProcessCorrelator {
     /// Minimum number of events (from different PIDs) to form a chain.
     private let minChainLength: Int
 
+    /// Maximum number of distinct artifacts tracked per map before eviction.
+    private let maxArtifactsPerMap: Int = 10_000
+
     // MARK: - State
 
     /// File path -> ordered list of events touching that path.
@@ -213,6 +216,11 @@ public actor CrossProcessCorrelator {
         fileArtifacts = purgeArtifactMap(fileArtifacts, cutoff: cutoff)
         networkArtifacts = purgeArtifactMap(networkArtifacts, cutoff: cutoff)
         domainArtifacts = purgeArtifactMap(domainArtifacts, cutoff: cutoff)
+
+        // Enforce hard cap per map: evict oldest artifacts if still over limit
+        fileArtifacts = evictIfOverLimit(fileArtifacts)
+        networkArtifacts = evictIfOverLimit(networkArtifacts)
+        domainArtifacts = evictIfOverLimit(domainArtifacts)
 
         lastPurge = Date()
         logger.debug("Purge complete — files: \(self.fileArtifacts.count), network: \(self.networkArtifacts.count), domains: \(self.domainArtifacts.count)")
@@ -426,6 +434,25 @@ public actor CrossProcessCorrelator {
             }
         }
         return result
+    }
+
+    /// Evict the oldest artifacts if the map exceeds `maxArtifactsPerMap`.
+    /// "Oldest" is determined by the most recent event timestamp in each artifact's list.
+    private func evictIfOverLimit(
+        _ map: [String: [ChainEvent]]
+    ) -> [String: [ChainEvent]] {
+        guard map.count > maxArtifactsPerMap else { return map }
+
+        // Sort by newest event timestamp (ascending) and keep only the most recent entries
+        let sorted = map.sorted { lhs, rhs in
+            let lhsLatest = lhs.value.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? .distantPast
+            let rhsLatest = rhs.value.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? .distantPast
+            return lhsLatest < rhsLatest
+        }
+        let toKeep = sorted.suffix(maxArtifactsPerMap)
+        let evicted = map.count - maxArtifactsPerMap
+        logger.warning("Evicted \(evicted) oldest artifact entries to enforce \(self.maxArtifactsPerMap) cap")
+        return Dictionary(uniqueKeysWithValues: toKeep.map { ($0.key, $0.value) })
     }
 
     /// Run a purge pass if enough time has elapsed since the last one
