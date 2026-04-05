@@ -91,6 +91,15 @@ compile_rules() {
     mkdir -p "$user_rules/sequences"
     cp -f "$rules_out"/*.json "$user_rules/" 2>/dev/null || true
     cp -f "$rules_out"/sequences/*.json "$user_rules/sequences/" 2>/dev/null || true
+
+    # Copy to system Application Support for root daemon (if writable)
+    local sys_rules="/Library/Application Support/MacCrab/compiled_rules"
+    if [ -w "$sys_rules" ] 2>/dev/null || sudo -n true 2>/dev/null; then
+        sudo mkdir -p "$sys_rules/sequences" 2>/dev/null
+        sudo cp -f "$rules_out"/*.json "$sys_rules/" 2>/dev/null
+        sudo cp -f "$rules_out"/sequences/*.json "$sys_rules/sequences/" 2>/dev/null
+        ok "Rules deployed to system directory"
+    fi
 }
 
 # ─── Codesign with ES entitlement ─────────────────────────────────────

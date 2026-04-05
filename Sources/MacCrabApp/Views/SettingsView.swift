@@ -204,7 +204,7 @@ struct SettingsView: View {
             Text("Local-first macOS threat detection engine")
                 .foregroundColor(.secondary)
 
-            Text("v0.4.0")
+            Text("v0.5.0")
                 .font(.caption)
                 .foregroundColor(.secondary)
 

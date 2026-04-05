@@ -146,7 +146,7 @@ struct MacCrabCtl {
     }
 
     static func printVersion() {
-        print("MacCrab Detection Engine v0.4.0")
+        print("MacCrab Detection Engine v0.5.0")
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
         print("https://github.com/maccrab-detection/maccrab")
     }

@@ -191,6 +191,30 @@ struct MacCrabDaemon {
         // Statistical anomaly detector
         let statisticalDetector = StatisticalAnomalyDetector(zThreshold: 3.0, minSamples: 50)
 
+        // MCP server monitor — watches AI tool configs for suspicious MCP server registrations
+        let mcpMonitor = MCPMonitor()
+        await mcpMonitor.start()
+        print("MCP server monitor active (watching Claude, Cursor, Continue, VS Code, Windsurf configs)")
+
+        // Notarization checker — verifies notarization status of executed binaries
+        let notarizationChecker = NotarizationChecker()
+
+        // AI network sandbox — monitors AI tool network connections against allowlist
+        let aiNetworkSandbox = AINetworkSandbox(customConfigPath: supportDir + "/ai_network_allowlist.json")
+
+        // Cross-process correlator — links events across unrelated process trees
+        let crossProcessCorrelator = CrossProcessCorrelator()
+
+        // Process tree ML — Markov chain anomaly detection on parent-child transitions
+        let processTreeAnalyzer = ProcessTreeAnalyzer(modelPath: supportDir + "/process_tree_model.json")
+        do {
+            try await processTreeAnalyzer.load()
+            let treeStats = await processTreeAnalyzer.stats()
+            print("Process tree ML: \(treeStats.mode.rawValue) (\(treeStats.transitions) transitions, \(treeStats.uniqueParents) parents)")
+        } catch {
+            print("Process tree ML: starting fresh learning period")
+        }
+
         // Fleet telemetry (optional — configure via MACCRAB_FLEET_URL env var)
         let fleetClient = FleetClient()
         if let fleet = fleetClient {
@@ -427,12 +451,15 @@ struct MacCrabDaemon {
         }
 
         // Print startup banner
+        let singleRuleCount = await ruleEngine.ruleCount
+        let seqRuleCount = await sequenceEngine.ruleCount
+        let bannerTreeStats = await processTreeAnalyzer.stats()
         print("""
 
         ╔══════════════════════════════════════════╗
         ║         MacCrab Detection Engine         ║
         ║       Local-First macOS Security         ║
-        ║                  v0.4.0                   ║
+        ║                  v0.5.0                   ║
         ╚══════════════════════════════════════════╝
 
         Status: Active
@@ -440,18 +467,37 @@ struct MacCrabDaemon {
 
         Event Sources:
           - Endpoint Security (ES): \(esMode)
-          - Unified Log (12 subsystems): \(ulCollector != nil ? "active" : "unavailable")
+          - Unified Log (\(14) subsystems): \(ulCollector != nil ? "active" : "unavailable")
           - TCC permission monitor: active
           - Network connection collector: active
+          - DNS collector (BPF): active
+          - Event tap monitor: active
+          - System policy monitor: active
+          - MCP server monitor: active
 
-        Detection Layers:
-          - Single-event Sigma rules
-          - Temporal sequence rules
-          - Baseline anomaly detection (learned)
+        Detection Stack:
+          - Single-event Sigma rules (\(singleRuleCount) loaded)
+          - Temporal sequence rules (\(seqRuleCount) loaded)
+          - Baseline anomaly engine
+          - Cross-process correlator
+          - Process tree ML: \(bannerTreeStats.mode.rawValue) (\(bannerTreeStats.transitions) transitions)
+          - Statistical anomaly detector
+          - Behavioral scoring (70+ indicators)
+
+        AI Guard:
+          - Tool monitoring: Claude Code, Codex, OpenClaw, Cursor + 4 more
+          - Credential fence: \(CredentialFence.defaultPaths.count) sensitive paths
+          - Project boundary enforcement
+          - AI network sandbox
+          - MCP server monitoring
+          - Prompt injection scanner: \(scannerStatus)
 
         Enrichment:
           - Process lineage graph
           - Code signing cache
+          - Notarization checker
+          - Quarantine provenance
+          - Threat intelligence (abuse.ch)
           - YARA file scanning (if available)
 
         Storage: \(supportDir)/events.db
@@ -597,6 +643,35 @@ struct MacCrabDaemon {
             }
         }
 
+        // MCP server monitoring task
+        Task {
+            for await mcpEvent in mcpMonitor.events {
+                let severity: Severity = mcpEvent.eventType == .suspicious ? .critical : .high
+                let alert = Alert(
+                    ruleId: "maccrab.ai-guard.mcp-\(mcpEvent.eventType.rawValue)",
+                    ruleTitle: "MCP Server \(mcpEvent.eventType.rawValue.replacingOccurrences(of: "_", with: " ").capitalized): \(mcpEvent.serverName)",
+                    severity: severity,
+                    eventId: UUID().uuidString,
+                    processPath: mcpEvent.command,
+                    processName: mcpEvent.serverName,
+                    description: "\(mcpEvent.reason). Config: \(mcpEvent.configFile). Command: \(mcpEvent.command) \(mcpEvent.args.joined(separator: " "))",
+                    mitreTactics: "attack.initial_access",
+                    mitreTechniques: "attack.t1195.002",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+                if mcpEvent.eventType == .suspicious {
+                    await behaviorScoring.addIndicator(
+                        named: "mcp_server_suspicious",
+                        detail: "\(mcpEvent.serverName): \(mcpEvent.reason)",
+                        forProcess: 0, path: mcpEvent.command
+                    )
+                }
+                print("[MCP] \(mcpEvent.eventType.rawValue): \(mcpEvent.serverName) — \(mcpEvent.reason)")
+            }
+        }
+
         // DNS event processing task
         Task {
             for await dnsQuery in dnsCollector.events {
@@ -700,7 +775,9 @@ struct MacCrabDaemon {
         maintenanceTimer.setEventHandler {
             Task {
                 try? await baselineEngine.save()
+                try? await processTreeAnalyzer.save()
                 await deduplicator.sweep()
+                await crossProcessCorrelator.purgeStale()
             }
         }
         maintenanceTimer.resume()
@@ -871,6 +948,131 @@ struct MacCrabDaemon {
                                 print("[CRIT] Prompt injection in AI context: \(detail.prefix(100))")
                             }
                         }
+                    }
+                }
+            }
+
+            // === Notarization check for executed binaries ===
+            if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
+                let notarResult = await notarizationChecker.check(binaryPath: enrichedEvent.process.executable)
+                enrichedEvent.enrichments["notarization.status"] = notarResult.status.rawValue
+                if let source = notarResult.source {
+                    enrichedEvent.enrichments["notarization.source"] = source
+                }
+                if notarResult.status == .notNotarized && enrichedEvent.process.codeSignature?.signerType != .apple {
+                    await behaviorScoring.addIndicator(
+                        named: "not_notarized",
+                        detail: enrichedEvent.process.executable,
+                        forProcess: enrichedEvent.process.pid,
+                        path: enrichedEvent.process.executable
+                    )
+                }
+            }
+
+            // === AI Network Sandbox: check outbound connections from AI tools ===
+            if enrichedEvent.eventCategory == .network,
+               let aiTool = enrichedEvent.enrichments["ai_tool"],
+               let net = enrichedEvent.network {
+                if let violation = await aiNetworkSandbox.checkConnection(
+                    aiToolName: aiTool,
+                    processPid: enrichedEvent.process.pid,
+                    processPath: enrichedEvent.process.executable,
+                    destinationIP: net.destinationIp,
+                    destinationPort: net.destinationPort,
+                    destinationDomain: net.destinationHostname
+                ) {
+                    let alert = Alert(
+                        ruleId: "maccrab.ai-guard.network-sandbox",
+                        ruleTitle: "AI Tool Connected to Unapproved Destination",
+                        severity: .high,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: enrichedEvent.process.executable,
+                        processName: enrichedEvent.process.name,
+                        description: violation.reason,
+                        mitreTactics: "attack.exfiltration",
+                        mitreTechniques: "attack.t1041",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                    await behaviorScoring.addIndicator(
+                        named: "ai_tool_unapproved_network",
+                        detail: "\(violation.destinationDomain ?? violation.destinationIP):\(violation.destinationPort)",
+                        forProcess: enrichedEvent.process.pid,
+                        path: enrichedEvent.process.executable
+                    )
+                }
+            }
+
+            // === Cross-process correlation ===
+            if let file = enrichedEvent.file {
+                let action = enrichedEvent.eventAction == "exec" ? "execute" : enrichedEvent.eventAction
+                if let chain = await crossProcessCorrelator.recordFileEvent(
+                    path: file.path, action: action,
+                    pid: enrichedEvent.process.pid,
+                    processName: enrichedEvent.process.name,
+                    processPath: enrichedEvent.process.executable,
+                    timestamp: enrichedEvent.timestamp
+                ) {
+                    let alert = Alert(
+                        ruleId: "maccrab.correlator.cross-process",
+                        ruleTitle: "Cross-Process Attack Chain: \(chain.description.prefix(60))",
+                        severity: chain.severity,
+                        eventId: UUID().uuidString,
+                        processPath: chain.events.last?.processPath,
+                        processName: chain.events.last?.processName,
+                        description: "Cross-process chain (\(chain.processCount) processes, \(chain.events.count) events, \(Int(chain.timeSpanSeconds))s): \(chain.description)",
+                        mitreTactics: "attack.execution",
+                        mitreTechniques: "attack.t1204",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                    print("[XPROC] \(chain.description)")
+                }
+            }
+            if let net = enrichedEvent.network {
+                if let chain = await crossProcessCorrelator.recordNetworkEvent(
+                    destinationIP: net.destinationIp,
+                    destinationPort: net.destinationPort,
+                    destinationDomain: net.destinationHostname,
+                    pid: enrichedEvent.process.pid,
+                    processName: enrichedEvent.process.name,
+                    processPath: enrichedEvent.process.executable,
+                    timestamp: enrichedEvent.timestamp
+                ) {
+                    let alert = Alert(
+                        ruleId: "maccrab.correlator.network-convergence",
+                        ruleTitle: "Multiple Processes Contacting Same Destination",
+                        severity: chain.severity,
+                        eventId: UUID().uuidString,
+                        processPath: chain.events.last?.processPath,
+                        processName: chain.events.last?.processName,
+                        description: chain.description,
+                        mitreTactics: "attack.command_and_control",
+                        mitreTechniques: "attack.t1071",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    await notifier.notify(alert: alert)
+                }
+            }
+
+            // === Process Tree ML: record transition and check for anomalies ===
+            if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
+                let parentName = enrichedEvent.process.ancestors.first?.name ?? "unknown"
+                let childName = enrichedEvent.process.name
+                if let logProb = await processTreeAnalyzer.recordTransition(
+                    parentName: parentName, childName: childName
+                ) {
+                    if logProb < -8.0 {
+                        enrichedEvent.enrichments["tree.anomaly_score"] = String(format: "%.2f", logProb)
+                        await behaviorScoring.addIndicator(
+                            named: "anomalous_process_tree",
+                            detail: "\(parentName) → \(childName) (logP=\(String(format: "%.1f", logProb)))",
+                            forProcess: enrichedEvent.process.pid,
+                            path: enrichedEvent.process.executable
+                        )
                     }
                 }
             }
