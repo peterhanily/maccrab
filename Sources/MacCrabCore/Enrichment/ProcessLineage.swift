@@ -260,6 +260,18 @@ public actor ProcessLineage {
         )
     }
 
+    // MARK: Node Lookup
+
+    /// Return the process name for a given pid, or nil if not tracked.
+    public func name(of pid: pid_t) -> String? {
+        nodes[pid]?.name
+    }
+
+    /// Return the executable path for a given pid, or nil if not tracked.
+    public func path(of pid: pid_t) -> String? {
+        nodes[pid]?.path
+    }
+
     // MARK: Diagnostics
 
     /// The number of nodes currently tracked (for monitoring / tests).
