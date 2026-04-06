@@ -15,7 +15,7 @@ struct MacCrabApp: App {
         // Main dashboard window — opens on launch.
         WindowGroup("MacCrab Dashboard") {
             MainView(appState: appState)
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(minWidth: 950, minHeight: 600)
                 .onAppear {
                     appDelegate.setupStatusBar(appState: appState)
                     if !hasCompletedSetup {
