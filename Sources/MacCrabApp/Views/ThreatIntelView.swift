@@ -21,6 +21,9 @@ struct ThreatIntelView: View {
     @AppStorage("threatIntel.abuseIPDBKey") private var abuseIPDBKey = ""
     @AppStorage("threatIntel.otxKey") private var otxKey = ""
     @AppStorage("threatIntel.shodanKey") private var shodanKey = ""
+    @AppStorage("threatIntel.urlscanKey") private var urlscanKey = ""
+    @AppStorage("threatIntel.greynoiseKey") private var greynoiseKey = ""
+    @AppStorage("threatIntel.hibpKey") private var hibpKey = ""
 
     enum IntelSection: String, CaseIterable {
         case overview = "Overview"
@@ -141,6 +144,17 @@ struct ThreatIntelView: View {
             FeedCard(name: "AbuseIPDB", url: "https://abuseipdb.com", type: "IP reputation and abuse reports", status: abuseIPDBKey.isEmpty ? "Not configured" : "Configured", color: abuseIPDBKey.isEmpty ? .secondary : .green)
             FeedCard(name: "AlienVault OTX", url: "https://otx.alienvault.com", type: "Open threat exchange pulses", status: otxKey.isEmpty ? "Not configured" : "Configured", color: otxKey.isEmpty ? .secondary : .green)
             FeedCard(name: "Shodan", url: "https://shodan.io", type: "Internet-wide host intelligence", status: shodanKey.isEmpty ? "Not configured" : "Configured", color: shodanKey.isEmpty ? .secondary : .green)
+            FeedCard(name: "URLScan.io", url: "https://urlscan.io", type: "URL scanning and screenshots", status: urlscanKey.isEmpty ? "Not configured" : "Configured", color: urlscanKey.isEmpty ? .secondary : .green)
+            FeedCard(name: "GreyNoise", url: "https://greynoise.io", type: "IP noise/threat classification", status: greynoiseKey.isEmpty ? "Not configured" : "Configured", color: greynoiseKey.isEmpty ? .secondary : .green)
+            FeedCard(name: "Have I Been Pwned", url: "https://haveibeenpwned.com", type: "Credential breach detection", status: hibpKey.isEmpty ? "Not configured" : "Configured", color: hibpKey.isEmpty ? .secondary : .green)
+
+            Divider()
+
+            Text("Free Feeds (no API key needed)")
+                .font(.headline)
+                .padding(.top, 8)
+
+            FeedCard(name: "PhishTank", url: "https://phishtank.org", type: "Phishing URL database", status: "Available", color: .green)
 
             Divider()
 
@@ -317,6 +331,39 @@ struct ThreatIntelView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
                     Link("Get a free API key →", destination: URL(string: "https://account.shodan.io/register")!)
+                        .font(.caption2)
+                }.padding(4)
+            }
+
+            GroupBox("URLScan.io") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("URL scanning, screenshots, and threat verdicts").font(.caption).foregroundColor(.secondary)
+                    SecureField("API Key", text: $urlscanKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                    Link("Get a free API key →", destination: URL(string: "https://urlscan.io/user/signup")!)
+                        .font(.caption2)
+                }.padding(4)
+            }
+
+            GroupBox("GreyNoise") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("IP noise and threat classification — identify scanners vs targeted attacks").font(.caption).foregroundColor(.secondary)
+                    SecureField("API Key", text: $greynoiseKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                    Link("Get a free API key →", destination: URL(string: "https://viz.greynoise.io/signup")!)
+                        .font(.caption2)
+                }.padding(4)
+            }
+
+            GroupBox("Have I Been Pwned") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Credential breach detection — check if accounts appear in known breaches").font(.caption).foregroundColor(.secondary)
+                    SecureField("API Key", text: $hibpKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                    Link("Get an API key →", destination: URL(string: "https://haveibeenpwned.com/API/Key")!)
                         .font(.caption2)
                 }.padding(4)
             }
