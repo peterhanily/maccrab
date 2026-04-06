@@ -43,23 +43,30 @@ struct AlertRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            // Severity indicator bar
+            // Severity indicator bar — grey for suppressed
             RoundedRectangle(cornerRadius: 2)
-                .fill(alert.severityColor)
+                .fill(alert.suppressed ? Color.secondary.opacity(0.3) : alert.severityColor)
                 .frame(width: 4)
                 .padding(.vertical, 2)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
+                    if alert.suppressed {
+                        Image(systemName: "eye.slash.fill")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                     Text(alert.ruleTitle)
                         .font(.headline)
                         .lineLimit(1)
+                        .foregroundColor(alert.suppressed ? .secondary : .primary)
                     if alert.suppressed {
                         Text(String(localized: "alerts.suppressed", defaultValue: "Suppressed"))
                             .font(.caption2)
+                            .foregroundColor(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.secondary.opacity(0.2))
+                            .background(Color.secondary)
                             .clipShape(Capsule())
                     }
                     Spacer()
@@ -76,7 +83,7 @@ struct AlertRow: View {
                 HStack(spacing: 12) {
                     Label(alert.severity.label, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
-                        .foregroundColor(alert.severityColor)
+                        .foregroundColor(alert.suppressed ? .secondary : alert.severityColor)
 
                     Label(alert.processName, systemImage: "gearshape")
                         .font(.caption)
@@ -101,7 +108,10 @@ struct AlertRow: View {
             }
         }
         .padding(.vertical, 6)
-        .opacity(alert.suppressed ? 0.5 : 1.0)
+        .padding(.horizontal, alert.suppressed ? 4 : 0)
+        .background(alert.suppressed ? Color.secondary.opacity(0.05) : Color.clear)
+        .cornerRadius(6)
+        .opacity(alert.suppressed ? 0.65 : 1.0)
         .accessibilityElement(children: .combine)
     }
 }
