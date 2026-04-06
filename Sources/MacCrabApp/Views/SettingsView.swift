@@ -18,6 +18,33 @@ struct SettingsView: View {
     @AppStorage("autoKill") private var autoKill = false
     @AppStorage("autoBlock") private var autoBlock = false
 
+    @State private var selectedLanguage: String = {
+        let current = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "en"
+        return current
+    }()
+    @State private var initialLanguage: String = {
+        UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "en"
+    }()
+
+    private var languageChanged: Bool { selectedLanguage != initialLanguage }
+
+    private let availableLanguages: [(code: String, name: String, native: String)] = [
+        ("en", "English", "English"),
+        ("es", "Spanish", "Español"),
+        ("fr", "French", "Français"),
+        ("de", "German", "Deutsch"),
+        ("ja", "Japanese", "日本語"),
+        ("zh-Hans", "Chinese (Simplified)", "简体中文"),
+        ("ko", "Korean", "한국어"),
+        ("pt-BR", "Portuguese (Brazil)", "Português"),
+        ("it", "Italian", "Italiano"),
+        ("nl", "Dutch", "Nederlands"),
+        ("zh-Hant", "Chinese (Traditional)", "繁體中文"),
+        ("ru", "Russian", "Русский"),
+        ("sv", "Swedish", "Svenska"),
+        ("pl", "Polish", "Polski"),
+    ]
+
     // Webhook notification settings
     @AppStorage("webhookSlackURL") private var webhookSlackURL: String = ""
     @AppStorage("webhookTeamsURL") private var webhookTeamsURL: String = ""
@@ -83,6 +110,32 @@ struct SettingsView: View {
                         Text(String(localized: "settings.pollHelp", defaultValue: "How often the app checks the daemon's database for new events and alerts."))
                             .font(.caption)
                             .foregroundColor(.secondary)
+                    }
+                    .padding(8)
+                }
+
+                GroupBox(String(localized: "settings.language", defaultValue: "Language")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker(String(localized: "settings.displayLanguage", defaultValue: "Display language"), selection: $selectedLanguage) {
+                            ForEach(availableLanguages, id: \.code) { lang in
+                                Text("\(lang.native) (\(lang.name))").tag(lang.code)
+                            }
+                        }
+                        .accessibilityLabel("Display language")
+                        .onChange(of: selectedLanguage) { newValue in
+                            UserDefaults.standard.set([newValue], forKey: "AppleLanguages")
+                        }
+
+                        if languageChanged {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                                Text(String(localized: "settings.restartForLanguage", defaultValue: "Restart MacCrab to apply language change"))
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                        }
                     }
                     .padding(8)
                 }
