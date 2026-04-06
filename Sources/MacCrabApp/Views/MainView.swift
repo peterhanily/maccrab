@@ -10,6 +10,7 @@ import SwiftUI
 
 struct MainView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +34,8 @@ struct MainView: View {
                 .buttonStyle(.borderless)
                 .help("Refresh data")
                 .accessibilityLabel("Refresh all data")
+                .keyboardShortcut("r", modifiers: .command)
+                .overlay(showButtonShapes ? RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.5), lineWidth: 1) : nil)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
@@ -86,14 +89,14 @@ struct MainView: View {
 
                 ThreatIntelView(appState: appState)
                     .tabItem {
-                        Label("Threat Intel", systemImage: "binoculars")
+                        Label(String(localized: "tabs.threatIntel", defaultValue: "Threat Intel"), systemImage: "binoculars")
                     }
                     .tag(AppState.Tab.threatIntel)
                     .keyboardShortcut("7", modifiers: .command)
 
                 IntegrationsView(appState: appState)
                     .tabItem {
-                        Label("Integrations", systemImage: "puzzlepiece.extension")
+                        Label(String(localized: "tabs.integrations", defaultValue: "Integrations"), systemImage: "puzzlepiece.extension")
                     }
                     .tag(AppState.Tab.integrations)
                     .keyboardShortcut("8", modifiers: .command)

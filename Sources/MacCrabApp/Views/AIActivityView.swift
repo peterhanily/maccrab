@@ -202,6 +202,8 @@ private struct StatusCard: View {
         .padding()
         .background(color.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
     }
 }
 

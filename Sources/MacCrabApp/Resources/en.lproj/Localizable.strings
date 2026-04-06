@@ -270,3 +270,68 @@
 /* ── Components ── */
 "components.suppress" = "Suppress";
 "components.refreshData" = "Refresh data";
+
+/* ── Tabs (new) ── */
+"tabs.prevention" = "Prevention";
+"tabs.threatIntel" = "Threat Intel";
+"tabs.integrations" = "Integrations";
+
+/* ── Prevention View ── */
+"prevention.title" = "Prevention";
+"prevention.enableAll" = "Enable All";
+"prevention.enableAllHint" = "Toggles all prevention mechanisms on or off";
+"prevention.description" = "Active prevention blocks threats before they cause damage. Each mechanism can be individually enabled or disabled.";
+"prevention.threatsBlocked" = "Threats Blocked";
+"prevention.domainsSinkholed" = "Domains Sinkholed";
+"prevention.ipsBlocked" = "IPs Blocked";
+"prevention.packagesGated" = "Packages Gated";
+"prevention.recentActivity" = "Recent Prevention Activity";
+"prevention.mechanisms" = "Prevention Mechanisms";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "Threat Intelligence";
+"threatIntel.sectionPicker" = "Threat intel section";
+"threatIntel.importTitle" = "Import Custom IOCs";
+"threatIntel.importDesc" = "Add your own indicators of compromise from text lists, CSV files, JSON arrays, or STIX 2.1 bundles.";
+"threatIntel.iocType" = "IOC Type";
+"threatIntel.pasteIOCs" = "Paste IOCs (one per line)";
+"threatIntel.iocTextEditor" = "IOC text input";
+"threatIntel.importFromText" = "Import from Text";
+"threatIntel.importFromTextHint" = "Imports pasted IOCs into the threat intelligence database";
+"threatIntel.importFromFile" = "Import from File...";
+"threatIntel.importFromFileHint" = "Opens file picker to import threat intelligence";
+"threatIntel.apiKeys" = "API Keys";
+"threatIntel.apiKeysDesc" = "Configure API keys to enable additional threat intelligence feeds. Keys are stored securely in macOS preferences.";
+
+/* ── Integrations View ── */
+"integrations.title" = "Integrations";
+"integrations.scan" = "Scan";
+"integrations.scanHint" = "Scans for installed security tools";
+"integrations.description" = "MacCrab detects and correlates alerts from other macOS security tools. Read-only \u2014 MacCrab never modifies other tools' configuration.";
+"integrations.clickScan" = "Click Scan to detect installed security tools";
+"integrations.available" = "Available Integrations";
+"integrations.notInstalled" = "Not installed";
+"integrations.running" = "Running";
+"integrations.installed" = "Installed";
+"integrations.export" = "Export for Other Tools";
+"integrations.exportDesc" = "Generate threat intel in formats compatible with other tools:";
+"integrations.exportLSRules" = "Export .lsrules for Little Snitch";
+"integrations.exportLSRulesHint" = "Saves threat intel in Little Snitch format";
+"integrations.exportCSV" = "Export IOCs as CSV";
+"integrations.exportCSVHint" = "Exports all indicators of compromise as a CSV file";
+"integrations.exportNote" = "Exported files can be manually imported into each tool. MacCrab never modifies other tools' configuration.";
+
+/* ── Accessibility ── */
+"rules.clearTactic" = "Clear tactic filter";
+"wizard.close" = "Close";
+
+/* ── Webhook Settings ── */
+"settings.webhookIntegrations" = "Webhook Integrations";
+"settings.webhookDesc" = "Send alerts to external services. Leave blank to disable.";
+"settings.webhookMinSeverity" = "Minimum severity:";
+"settings.slackWebhook" = "Slack Webhook URL";
+"settings.teamsWebhook" = "Microsoft Teams Webhook URL";
+"settings.discordWebhook" = "Discord Webhook URL";
+"settings.pagerdutyKey" = "PagerDuty Routing Key";
+"settings.noWebhooksConfigured" = "No webhook integrations configured";
+"settings.webhooksActive" = "Active: %@";

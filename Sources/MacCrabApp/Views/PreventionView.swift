@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PreventionView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     // Prevention toggle states (persisted via @AppStorage)
     @AppStorage("prevention.dnsSinkhole") private var dnsSinkholeEnabled = false
@@ -17,36 +18,39 @@ struct PreventionView: View {
             VStack(alignment: .leading, spacing: 16) {
                 // Header
                 HStack {
-                    Text("Prevention")
+                    Text(String(localized: "prevention.title", defaultValue: "Prevention"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
                     // Master toggle
-                    Toggle("Enable All", isOn: Binding(
+                    Toggle(String(localized: "prevention.enableAll", defaultValue: "Enable All"), isOn: Binding(
                         get: { allEnabled },
                         set: { setAll($0) }
                     ))
                     .toggleStyle(.switch)
+                    .accessibilityLabel(String(localized: "prevention.enableAll", defaultValue: "Enable All"))
+                    .accessibilityHint(String(localized: "prevention.enableAllHint", defaultValue: "Toggles all prevention mechanisms on or off"))
+                    .keyboardShortcut("p", modifiers: .command)
                 }
                 .padding(.horizontal)
                 .padding(.top)
 
-                Text("Active prevention blocks threats before they cause damage. Each mechanism can be individually enabled or disabled.")
+                Text(String(localized: "prevention.description", defaultValue: "Active prevention blocks threats before they cause damage. Each mechanism can be individually enabled or disabled."))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal)
 
                 // === Metrics Dashboard ===
                 HStack(spacing: 16) {
-                    MetricBox(label: "Threats Blocked", value: "\(preventionAlertCount)", icon: "hand.raised.fill", color: .red)
-                    MetricBox(label: "Domains Sinkholed", value: "\(sinkholeCount)", icon: "network.slash", color: .blue)
-                    MetricBox(label: "IPs Blocked", value: "\(blockedIPCount)", icon: "shield.lefthalf.filled", color: .orange)
-                    MetricBox(label: "Packages Gated", value: "\(packagesGated)", icon: "shippingbox", color: .yellow)
+                    MetricBox(label: String(localized: "prevention.threatsBlocked", defaultValue: "Threats Blocked"), value: "\(preventionAlertCount)", icon: "hand.raised.fill", color: .red)
+                    MetricBox(label: String(localized: "prevention.domainsSinkholed", defaultValue: "Domains Sinkholed"), value: "\(sinkholeCount)", icon: "network.slash", color: .blue)
+                    MetricBox(label: String(localized: "prevention.ipsBlocked", defaultValue: "IPs Blocked"), value: "\(blockedIPCount)", icon: "shield.lefthalf.filled", color: .orange)
+                    MetricBox(label: String(localized: "prevention.packagesGated", defaultValue: "Packages Gated"), value: "\(packagesGated)", icon: "shippingbox", color: .yellow)
                 }
                 .padding(.horizontal)
 
                 // Recent prevention activity
                 if !recentBlocks.isEmpty {
-                    GroupBox("Recent Prevention Activity") {
+                    GroupBox(String(localized: "prevention.recentActivity", defaultValue: "Recent Prevention Activity")) {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(recentBlocks.prefix(5), id: \.id) { alert in
                                 HStack(spacing: 8) {
@@ -77,7 +81,7 @@ struct PreventionView: View {
 
                 Divider()
 
-                Text("Prevention Mechanisms")
+                Text(String(localized: "prevention.mechanisms", defaultValue: "Prevention Mechanisms"))
                     .font(.headline)
                     .padding(.horizontal)
 
@@ -89,7 +93,8 @@ struct PreventionView: View {
                         icon: "network.slash",
                         color: .blue,
                         isEnabled: $dnsSinkholeEnabled,
-                        status: "Threat intel domains → 127.0.0.1"
+                        status: "Threat intel domains \u{2192} 127.0.0.1",
+                        accessibilityHintText: "Enables DNS sinkhole protection"
                     )
 
                     PreventionCard(
@@ -98,7 +103,8 @@ struct PreventionView: View {
                         icon: "shield.lefthalf.filled",
                         color: .red,
                         isEnabled: $networkBlockerEnabled,
-                        status: "PF table-based bidirectional blocking"
+                        status: "PF table-based bidirectional blocking",
+                        accessibilityHintText: "Enables firewall-based IP blocking"
                     )
 
                     PreventionCard(
@@ -107,7 +113,8 @@ struct PreventionView: View {
                         icon: "lock.shield",
                         color: .orange,
                         isEnabled: $persistenceGuardEnabled,
-                        status: "chflags SF_IMMUTABLE on persistence dirs"
+                        status: "chflags SF_IMMUTABLE on persistence dirs",
+                        accessibilityHintText: "Enables persistence directory locking"
                     )
 
                     PreventionCard(
@@ -116,7 +123,8 @@ struct PreventionView: View {
                         icon: "cube.transparent",
                         color: .purple,
                         isEnabled: $sandboxAnalysisEnabled,
-                        status: "sandbox-exec with network + file-write deny"
+                        status: "sandbox-exec with network + file-write deny",
+                        accessibilityHintText: "Enables sandbox analysis for untrusted binaries"
                     )
 
                     PreventionCard(
@@ -125,7 +133,8 @@ struct PreventionView: View {
                         icon: "brain",
                         color: .green,
                         isEnabled: $aiContainmentEnabled,
-                        status: "chmod 0o400 on credential files"
+                        status: "chmod 0o400 on credential files",
+                        accessibilityHintText: "Enables credential file locking for AI tools"
                     )
 
                     PreventionCard(
@@ -134,7 +143,8 @@ struct PreventionView: View {
                         icon: "shippingbox",
                         color: .yellow,
                         isEnabled: $supplyChainGateEnabled,
-                        status: "SIGTERM → SIGKILL on critical-risk installs"
+                        status: "SIGTERM \u{2192} SIGKILL on critical-risk installs",
+                        accessibilityHintText: "Enables automatic blocking of suspicious package installs"
                     )
 
                     PreventionCard(
@@ -143,7 +153,8 @@ struct PreventionView: View {
                         icon: "hand.raised",
                         color: .pink,
                         isEnabled: $tccRevocationEnabled,
-                        status: "tccutil reset for unsigned apps"
+                        status: "tccutil reset for unsigned apps",
+                        accessibilityHintText: "Enables automatic permission revocation for unsigned apps"
                     )
                 }
                 .padding(.horizontal)
@@ -204,6 +215,7 @@ struct PreventionCard: View {
     let color: Color
     @Binding var isEnabled: Bool
     let status: String
+    var accessibilityHintText: String = ""
 
     var body: some View {
         GroupBox {
@@ -223,6 +235,8 @@ struct PreventionCard: View {
                         Toggle("", isOn: $isEnabled)
                             .toggleStyle(.switch)
                             .labelsHidden()
+                            .accessibilityLabel("\(title) toggle")
+                            .accessibilityHint(accessibilityHintText)
                     }
 
                     Text(description)
@@ -245,6 +259,7 @@ struct PreventionCard: View {
             .padding(4)
         }
         .opacity(isEnabled ? 1.0 : 0.7)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -272,5 +287,7 @@ struct MetricBox: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 4)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(value)")
     }
 }

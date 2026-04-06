@@ -132,6 +132,9 @@ struct MacCrabCtl {
     }
 
     static func printUsage() {
+        // LOCALIZE: All CLI usage/help strings below are candidates for future localization.
+        // In a CLI context without a resource bundle, NSLocalizedString is not practical.
+        // Mark strings with LOCALIZE comments for extraction tooling.
         print("""
         maccrabctl - MacCrab Detection Engine CLI
 
@@ -179,7 +182,9 @@ struct MacCrabCtl {
     }
 
     static func printVersion() {
+        // LOCALIZE: "MacCrab Detection Engine v0.5.0"
         print("MacCrab Detection Engine v0.5.0")
+        // LOCALIZE: "License: Apache 2.0 (code), DRL 1.1 (rules)"
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
         print("https://github.com/maccrab-detection/maccrab")
     }
@@ -189,12 +194,14 @@ struct MacCrabCtl {
         let dbPath = supportDir + "/events.db"
         let alertsPath = supportDir + "/alerts.jsonl"
 
+        // LOCALIZE: "MacCrab Status"
         print("MacCrab Status")
         print("══════════════════════════════════════")
 
         // Check if daemon is running
         let daemonRunning = isDaemonRunning()
-        print("Daemon:     \(daemonRunning ? "Running ✓" : "Not running ✗")")
+        // LOCALIZE: "Running", "Not running"
+        print("Daemon:     \(daemonRunning ? "Running \u{2713}" : "Not running \u{2717}")")
 
         // Database info
         if FileManager.default.fileExists(atPath: dbPath) {
@@ -648,6 +655,7 @@ struct MacCrabCtl {
     // MARK: - Watch (Live Alert Tail)
 
     static func watchAlerts() async {
+        // LOCALIZE: "Watching for new alerts... (Ctrl+C to stop)"
         print("Watching for new alerts... (Ctrl+C to stop)")
         print("══════════════════════════════════════════════════════════════")
 

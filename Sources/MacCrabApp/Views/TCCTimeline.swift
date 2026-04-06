@@ -219,6 +219,7 @@ private struct TCCEventRow: View {
                 .foregroundColor(.secondary)
         }
         .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
     }
 }
 

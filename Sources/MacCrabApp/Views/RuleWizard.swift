@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 
 struct RuleWizard: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var step: WizardStep = .metadata
     @State private var rule = RuleDraft()
     @State private var savedPath: String? = nil
@@ -70,6 +71,7 @@ struct RuleWizard: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.escape, modifiers: [])
+                .accessibilityLabel(String(localized: "wizard.close", defaultValue: "Close"))
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 8)
@@ -96,7 +98,11 @@ struct RuleWizard: View {
             HStack {
                 if step != .metadata {
                     Button("Back") {
-                        withAnimation { step = WizardStep(rawValue: step.rawValue - 1) ?? .metadata }
+                        if reduceMotion {
+                            step = WizardStep(rawValue: step.rawValue - 1) ?? .metadata
+                        } else {
+                            withAnimation { step = WizardStep(rawValue: step.rawValue - 1) ?? .metadata }
+                        }
                     }
                 }
                 Spacer()
@@ -111,7 +117,11 @@ struct RuleWizard: View {
                     }
                 } else {
                     Button("Next") {
-                        withAnimation { step = WizardStep(rawValue: step.rawValue + 1) ?? .preview }
+                        if reduceMotion {
+                            step = WizardStep(rawValue: step.rawValue + 1) ?? .preview
+                        } else {
+                            withAnimation { step = WizardStep(rawValue: step.rawValue + 1) ?? .preview }
+                        }
                     }
                     .keyboardShortcut(.return)
                     .buttonStyle(.borderedProminent)

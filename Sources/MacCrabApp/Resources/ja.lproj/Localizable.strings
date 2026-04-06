@@ -1,0 +1,210 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Japanese (ja) localization.
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "アラート";
+"tabs.events" = "イベント";
+"tabs.rules" = "ルール";
+"tabs.permissions" = "権限";
+"tabs.aiGuard" = "AIガード";
+"tabs.prevention" = "予防";
+"tabs.threatIntel" = "脅威情報";
+"tabs.integrations" = "連携";
+"tabs.docs" = "ドキュメント";
+"tabs.settings" = "設定";
+
+/* ── Connection status ── */
+"status.connected" = "接続済み";
+"status.disconnected" = "切断";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "アラート";
+"alerts.empty" = "アラートなし \u2014 すべて正常";
+"alerts.noMatch" = "フィルター条件に一致するアラートはありません";
+"alerts.clearFilters" = "フィルターをクリア";
+"alerts.suppressed" = "抑制済み";
+"alerts.active" = "アクティブ";
+"alerts.autoResponseConfigured" = "自動応答設定済み";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "説明";
+"alertDetail.processDetails" = "プロセス詳細";
+"alertDetail.mitreAttack" = "MITRE ATT&CK";
+"alertDetail.metadata" = "メタデータ";
+"alertDetail.quickActions" = "クイックアクション";
+"alertDetail.respond" = "対応";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "アラートID";
+"alertDetail.severity" = "重大度";
+"alertDetail.status" = "ステータス";
+"alertDetail.name" = "名前";
+"alertDetail.path" = "パス";
+"alertDetail.directory" = "ディレクトリ";
+
+/* ── Quick Actions ── */
+"action.suppress" = "これを抑制";
+"action.suppressAll" = "類似をすべて抑制";
+"action.kill" = "プロセスを終了";
+"action.quarantine" = "ファイルを隔離";
+"action.block" = "宛先をブロック";
+"action.copyDetails" = "詳細をコピー";
+
+/* ── Kill/Quarantine/Block feedback ── */
+"action.kill.success" = "プロセスを終了しました";
+"action.kill.failure" = "プロセスの終了に失敗しました";
+"action.quarantine.message" = "参照されたファイルを隔離場所に移動します。元の場所からはアクセスできなくなります。";
+"action.quarantine.success" = "ファイルを隔離しました";
+"action.quarantine.failure" = "ファイルの隔離に失敗しました";
+"action.block.confirm" = "ネットワーク宛先をブロックしますか？";
+"action.block.success" = "ネットワーク宛先をブロックしました";
+"action.block.failure" = "宛先のブロックに失敗しました";
+
+/* ── Event Stream ── */
+"events.title" = "イベント";
+"events.noMatch" = "現在のフィルターに一致するイベントはありません";
+"events.clearFilters" = "フィルターをクリア";
+"events.autoScroll" = "自動スクロール";
+"events.resume" = "再開";
+"events.pause" = "一時停止";
+"events.live" = "ライブ";
+"events.paused" = "一時停止中";
+"events.copyDetails" = "イベント詳細をコピー";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "プロセス";
+"eventDetail.detail" = "詳細";
+"eventDetail.metadata" = "イベントメタデータ";
+
+/* ── Rule Browser ── */
+"rules.title" = "ルール";
+"rules.tactics" = "戦術";
+"rules.allRules" = "すべてのルール";
+"rules.noMatch" = "現在のフィルターに一致するルールはありません";
+"rules.createRule" = "ルールを作成";
+"rules.enabled" = "有効";
+"rules.disabled" = "無効";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "説明";
+"ruleDetail.mitreAttack" = "MITRE ATT&CK";
+"ruleDetail.tags" = "タグ";
+"ruleDetail.metadata" = "メタデータ";
+"ruleDetail.responseActions" = "応答アクション";
+"ruleDetail.configureInActions" = "actions.jsonで設定:";
+"ruleDetail.copyDetails" = "詳細をコピー";
+"ruleDetail.openJSON" = "JSONを開く";
+"ruleDetail.copyId" = "IDをコピー";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "TCC権限タイムライン";
+"tcc.allServices" = "すべてのサービス";
+"tcc.all" = "すべて";
+"tcc.granted" = "許可";
+"tcc.denied" = "拒否";
+"tcc.emptyDefault" = "権限の変更はまだ検出されていません";
+"tcc.noMatch" = "現在のフィルターに一致するTCCイベントはありません";
+"tcc.clearFilters" = "フィルターをクリア";
+"tcc.totalEventsLabel" = "イベント合計";
+
+/* ── Settings ── */
+"settings.general" = "一般";
+"settings.notifications" = "通知";
+"settings.daemon" = "デーモン";
+"settings.responseActions" = "応答アクション";
+"settings.about" = "MacCrabについて";
+"settings.dataRetention" = "データ保持";
+"settings.keepEventsFor" = "イベントの保持期間";
+"settings.retentionHelp" = "この期間より古いイベント、アラート、ベースラインデータは自動的に削除されます。";
+"settings.uiRefresh" = "UI更新";
+"settings.pollDaemon" = "デーモンへの問い合わせ間隔";
+"settings.pollHelp" = "アプリがデーモンのデータベースを確認する頻度。";
+"settings.startup" = "起動";
+"settings.launchAtLogin" = "ログイン時にMacCrabを起動";
+"settings.autoResponse" = "自動応答";
+"settings.autoResponseDesc" = "重大な脅威に自動的に対応";
+"settings.autoQuarantine" = "悪意のあるファイルを自動隔離";
+"settings.autoKill" = "悪意のあるプロセスを自動終了";
+"settings.autoBlock" = "C2宛先を自動ブロック";
+"settings.autoResponseNote" = "これらのアクションはクリティカル重大度のアラートにのみ適用されます。ルールごとのアクションは応答アクションタブで設定してください。";
+"settings.macosNotifications" = "macOS通知";
+"settings.showNotifications" = "検出アラートの通知を表示";
+"settings.minimumSeverity" = "最低重大度:";
+"settings.severityHelp" = "この重大度以上のアラートのみmacOS通知をトリガーします。";
+"settings.informational" = "情報";
+"settings.low" = "低";
+"settings.medium" = "中";
+"settings.high" = "高";
+"settings.criticalOnly" = "クリティカルのみ";
+"settings.aboutTagline" = "ローカルファーストmacOS脅威検出エンジン";
+"settings.aboutStats" = "7イベントソース | 8検出レイヤー | 241ルール";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrabアクティブ";
+"statusBar.notRunning" = "デーモン未起動";
+"statusBar.noRecentAlerts" = "最近のアラートはありません";
+"statusBar.recentAlerts" = "最近のアラート";
+"statusBar.openDashboard" = "ダッシュボードを開く...";
+"statusBar.reloadRules" = "ルールを再読み込み";
+"statusBar.refresh" = "更新";
+"statusBar.settings" = "設定...";
+"statusBar.quit" = "MacCrabを終了";
+
+/* ── Prevention View ── */
+"prevention.title" = "予防";
+"prevention.enableAll" = "すべて有効";
+"prevention.enableAllHint" = "すべての予防メカニズムのオンオフを切り替えます";
+"prevention.description" = "アクティブな予防は、脅威が被害を与える前にブロックします。各メカニズムは個別に有効化できます。";
+"prevention.threatsBlocked" = "ブロックした脅威";
+"prevention.domainsSinkholed" = "シンクホール済みドメイン";
+"prevention.ipsBlocked" = "ブロック済みIP";
+"prevention.packagesGated" = "制御済みパッケージ";
+"prevention.recentActivity" = "最近の予防活動";
+"prevention.mechanisms" = "予防メカニズム";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "脅威インテリジェンス";
+"threatIntel.sectionPicker" = "脅威情報セクション";
+"threatIntel.importTitle" = "カスタムIOCをインポート";
+"threatIntel.importDesc" = "テキストリスト、CSVファイル、JSON配列、またはSTIX 2.1バンドルから独自の侵害指標を追加します。";
+"threatIntel.iocType" = "IOCタイプ";
+"threatIntel.pasteIOCs" = "IOCを貼り付け（1行に1つ）";
+"threatIntel.importFromText" = "テキストからインポート";
+"threatIntel.importFromTextHint" = "貼り付けたIOCを脅威インテリジェンスデータベースにインポートします";
+"threatIntel.importFromFile" = "ファイルからインポート...";
+"threatIntel.importFromFileHint" = "脅威インテリジェンスをインポートするファイル選択を開きます";
+"threatIntel.apiKeys" = "APIキー";
+"threatIntel.apiKeysDesc" = "追加の脅威インテリジェンスフィードを有効にするためにAPIキーを設定します。";
+
+/* ── Integrations View ── */
+"integrations.title" = "連携";
+"integrations.scan" = "スキャン";
+"integrations.scanHint" = "インストール済みのセキュリティツールをスキャンします";
+"integrations.description" = "MacCrabは他のmacOSセキュリティツールからのアラートを検出し相関させます。読み取り専用。";
+"integrations.clickScan" = "スキャンをクリックしてインストール済みセキュリティツールを検出";
+"integrations.available" = "利用可能な連携";
+"integrations.notInstalled" = "未インストール";
+"integrations.running" = "実行中";
+"integrations.installed" = "インストール済み";
+"integrations.export" = "他のツール用にエクスポート";
+"integrations.exportLSRules" = "Little Snitch用.lsrulesをエクスポート";
+"integrations.exportLSRulesHint" = "Little Snitch形式で脅威情報を保存します";
+"integrations.exportCSV" = "IOCをCSVとしてエクスポート";
+"integrations.exportCSVHint" = "すべての侵害指標をCSVファイルとしてエクスポートします";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "応答アクション";
+"responseActions.resetDefaults" = "デフォルトにリセット";
+"responseActions.addRuleAction" = "ルールアクションを追加";
+"responseActions.explanation" = "応答アクションは検出ルールがトリガーされると自動的に実行されます。";
+"responseActions.whenSeverity" = "重大度が以上の場合 \u2265";
+
+/* ── AI Guard ── */
+"aiGuard.title" = "AIツール活動";
+"aiGuard.subtitle" = "Claude Code、Codex、OpenClaw、Cursorとその子プロセスを監視";
+"aiGuard.noAlerts" = "AIセキュリティアラートなし";
+"aiGuard.noAlertsDesc" = "AIツールは安全な範囲内で動作しています";
+
+/* ── Components ── */
+"components.suppress" = "抑制";

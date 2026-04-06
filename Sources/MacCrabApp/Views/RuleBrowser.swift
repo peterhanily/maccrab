@@ -14,6 +14,7 @@ struct RuleBrowser: View {
     @State private var selectedTactic: String? = nil
     @State private var showRuleWizard: Bool = false
     @State private var selectedRule: RuleViewModel? = nil
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     /// Unique tactic groups derived from the loaded rules.
     private var tactics: [TacticGroup] {
@@ -126,6 +127,7 @@ struct RuleBrowser: View {
                                 .font(.caption)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(String(localized: "rules.clearTactic", defaultValue: "Clear tactic filter"))
                     }
 
                     Spacer()
@@ -176,10 +178,10 @@ struct RuleBrowser: View {
                             Divider()
                             RuleDetailPanel(rule: rule)
                                 .frame(width: 420)
-                                .transition(.move(edge: .trailing))
+                                .transition(reduceMotion ? .opacity : .move(edge: .trailing))
                         }
                     }
-                    .animation(.easeInOut(duration: 0.2), value: selectedRule)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedRule)
                 }
             }
         }

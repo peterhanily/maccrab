@@ -43,7 +43,7 @@ struct ThreatIntelView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
-                Text("Threat Intelligence")
+                Text(String(localized: "threatIntel.title", defaultValue: "Threat Intelligence"))
                     .font(.title2).fontWeight(.bold)
                 Spacer()
                 Picker("", selection: $selectedSection) {
@@ -53,6 +53,7 @@ struct ThreatIntelView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 420)
+                .accessibilityLabel(String(localized: "threatIntel.sectionPicker", defaultValue: "Threat intel section"))
             }
             .padding()
 
@@ -218,38 +219,44 @@ struct ThreatIntelView: View {
 
     private var importSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Import Custom IOCs")
+            Text(String(localized: "threatIntel.importTitle", defaultValue: "Import Custom IOCs"))
                 .font(.headline)
 
-            Text("Add your own indicators of compromise from text lists, CSV files, JSON arrays, or STIX 2.1 bundles.")
+            Text(String(localized: "threatIntel.importDesc", defaultValue: "Add your own indicators of compromise from text lists, CSV files, JSON arrays, or STIX 2.1 bundles."))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             // Format selector
-            Picker("IOC Type", selection: $importType) {
+            Picker(String(localized: "threatIntel.iocType", defaultValue: "IOC Type"), selection: $importType) {
                 ForEach(ImportType.allCases, id: \.self) { type in
                     Text(type.rawValue).tag(type)
                 }
             }
             .pickerStyle(.segmented)
+            .accessibilityLabel(String(localized: "threatIntel.iocType", defaultValue: "IOC Type"))
 
             // Text input
-            GroupBox("Paste IOCs (one per line)") {
+            GroupBox(String(localized: "threatIntel.pasteIOCs", defaultValue: "Paste IOCs (one per line)")) {
                 TextEditor(text: $importText)
                     .font(.system(.caption, design: .monospaced))
                     .frame(height: 120)
+                    .accessibilityLabel(String(localized: "threatIntel.iocTextEditor", defaultValue: "IOC text input"))
             }
 
             HStack {
-                Button("Import from Text") {
+                Button(String(localized: "threatIntel.importFromText", defaultValue: "Import from Text")) {
                     importFromText()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(importText.isEmpty)
+                .accessibilityLabel(String(localized: "threatIntel.importFromText", defaultValue: "Import from Text"))
+                .accessibilityHint(String(localized: "threatIntel.importFromTextHint", defaultValue: "Imports pasted IOCs into the threat intelligence database"))
 
-                Button("Import from File...") {
+                Button(String(localized: "threatIntel.importFromFile", defaultValue: "Import from File...")) {
                     showFileImporter = true
                 }
+                .accessibilityLabel(String(localized: "threatIntel.importFromFile", defaultValue: "Import from File"))
+                .accessibilityHint(String(localized: "threatIntel.importFromFileHint", defaultValue: "Opens file picker to import threat intelligence"))
 
                 Spacer()
 
@@ -284,10 +291,10 @@ struct ThreatIntelView: View {
 
     private var apiKeysSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("API Keys")
+            Text(String(localized: "threatIntel.apiKeys", defaultValue: "API Keys"))
                 .font(.headline)
 
-            Text("Configure API keys to enable additional threat intelligence feeds. Keys are stored securely in macOS preferences.")
+            Text(String(localized: "threatIntel.apiKeysDesc", defaultValue: "Configure API keys to enable additional threat intelligence feeds. Keys are stored securely in macOS preferences."))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -297,7 +304,8 @@ struct ThreatIntelView: View {
                     SecureField("API Key", text: $virusTotalKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                    Link("Get a free API key →", destination: URL(string: "https://www.virustotal.com/gui/join-us")!)
+                        .accessibilityLabel("VirusTotal API Key")
+                    Link("Get a free API key \u{2192}", destination: URL(string: "https://www.virustotal.com/gui/join-us")!)
                         .font(.caption2)
                 }.padding(4)
             }
@@ -308,7 +316,8 @@ struct ThreatIntelView: View {
                     SecureField("API Key", text: $abuseIPDBKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                    Link("Get a free API key →", destination: URL(string: "https://www.abuseipdb.com/register")!)
+                        .accessibilityLabel("AbuseIPDB API Key")
+                    Link("Get a free API key \u{2192}", destination: URL(string: "https://www.abuseipdb.com/register")!)
                         .font(.caption2)
                 }.padding(4)
             }
@@ -319,7 +328,8 @@ struct ThreatIntelView: View {
                     SecureField("API Key", text: $otxKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                    Link("Get a free API key →", destination: URL(string: "https://otx.alienvault.com/api")!)
+                        .accessibilityLabel("AlienVault OTX API Key")
+                    Link("Get a free API key \u{2192}", destination: URL(string: "https://otx.alienvault.com/api")!)
                         .font(.caption2)
                 }.padding(4)
             }
@@ -330,7 +340,8 @@ struct ThreatIntelView: View {
                     SecureField("API Key", text: $shodanKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                    Link("Get a free API key →", destination: URL(string: "https://account.shodan.io/register")!)
+                        .accessibilityLabel("Shodan API Key")
+                    Link("Get a free API key \u{2192}", destination: URL(string: "https://account.shodan.io/register")!)
                         .font(.caption2)
                 }.padding(4)
             }
@@ -341,29 +352,32 @@ struct ThreatIntelView: View {
                     SecureField("API Key", text: $urlscanKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                    Link("Get a free API key →", destination: URL(string: "https://urlscan.io/user/signup")!)
+                        .accessibilityLabel("URLScan.io API Key")
+                    Link("Get a free API key \u{2192}", destination: URL(string: "https://urlscan.io/user/signup")!)
                         .font(.caption2)
                 }.padding(4)
             }
 
             GroupBox("GreyNoise") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("IP noise and threat classification — identify scanners vs targeted attacks").font(.caption).foregroundColor(.secondary)
+                    Text("IP noise and threat classification \u{2014} identify scanners vs targeted attacks").font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $greynoiseKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                    Link("Get a free API key →", destination: URL(string: "https://viz.greynoise.io/signup")!)
+                        .accessibilityLabel("GreyNoise API Key")
+                    Link("Get a free API key \u{2192}", destination: URL(string: "https://viz.greynoise.io/signup")!)
                         .font(.caption2)
                 }.padding(4)
             }
 
             GroupBox("Have I Been Pwned") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Credential breach detection — check if accounts appear in known breaches").font(.caption).foregroundColor(.secondary)
+                    Text("Credential breach detection \u{2014} check if accounts appear in known breaches").font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $hibpKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                    Link("Get an API key →", destination: URL(string: "https://haveibeenpwned.com/API/Key")!)
+                        .accessibilityLabel("Have I Been Pwned API Key")
+                    Link("Get an API key \u{2192}", destination: URL(string: "https://haveibeenpwned.com/API/Key")!)
                         .font(.caption2)
                 }.padding(4)
             }
@@ -460,6 +474,8 @@ private struct IntelMetricBox: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 2)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(value)")
     }
 }
 
@@ -481,6 +497,8 @@ private struct FeedCard: View {
             Text(status).font(.caption).foregroundColor(color)
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(name), \(status)")
     }
 }
 

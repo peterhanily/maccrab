@@ -14,25 +14,29 @@ struct IntegrationsView: View {
     @ObservedObject var appState: AppState
     @State private var installedTools: [SecurityToolIntegrations.InstalledTool] = []
     @State private var isScanning = false
+    @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("Integrations")
+                    Text(String(localized: "integrations.title", defaultValue: "Integrations"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
                     Button {
                         Task { await scanTools() }
                     } label: {
-                        Label("Scan", systemImage: "arrow.triangle.2.circlepath")
+                        Label(String(localized: "integrations.scan", defaultValue: "Scan"), systemImage: "arrow.triangle.2.circlepath")
                     }
                     .disabled(isScanning)
+                    .accessibilityLabel(String(localized: "integrations.scan", defaultValue: "Scan"))
+                    .accessibilityHint(String(localized: "integrations.scanHint", defaultValue: "Scans for installed security tools"))
+                    .keyboardShortcut("r", modifiers: .command)
                 }
                 .padding(.horizontal)
                 .padding(.top)
 
-                Text("MacCrab detects and correlates alerts from other macOS security tools. Read-only — MacCrab never modifies other tools' configuration.")
+                Text(String(localized: "integrations.description", defaultValue: "MacCrab detects and correlates alerts from other macOS security tools. Read-only \u{2014} MacCrab never modifies other tools' configuration."))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.horizontal)
@@ -45,7 +49,7 @@ struct IntegrationsView: View {
                         Image(systemName: "puzzlepiece.extension")
                             .font(.system(size: 48))
                             .foregroundColor(.secondary.opacity(0.5))
-                        Text("Click Scan to detect installed security tools")
+                        Text(String(localized: "integrations.clickScan", defaultValue: "Click Scan to detect installed security tools"))
                             .font(.headline)
                             .foregroundColor(.secondary)
                         Spacer()
@@ -61,7 +65,7 @@ struct IntegrationsView: View {
                     // Tools not found
                     Divider().padding(.horizontal)
 
-                    Text("Available Integrations")
+                    Text(String(localized: "integrations.available", defaultValue: "Available Integrations"))
                         .font(.headline)
                         .padding(.horizontal)
 
@@ -78,7 +82,7 @@ struct IntegrationsView: View {
                                 .font(.callout)
                                 .foregroundColor(.secondary)
                             Spacer()
-                            Text("Not installed")
+                            Text(String(localized: "integrations.notInstalled", defaultValue: "Not installed"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -89,24 +93,29 @@ struct IntegrationsView: View {
                     // Export section
                     Divider().padding(.horizontal)
 
-                    GroupBox("Export for Other Tools") {
+                    GroupBox(String(localized: "integrations.export", defaultValue: "Export for Other Tools")) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Generate threat intel in formats compatible with other tools:")
+                            Text(String(localized: "integrations.exportDesc", defaultValue: "Generate threat intel in formats compatible with other tools:"))
                                 .font(.caption).foregroundColor(.secondary)
 
                             HStack {
-                                Button("Export .lsrules for Little Snitch") {
+                                Button(String(localized: "integrations.exportLSRules", defaultValue: "Export .lsrules for Little Snitch")) {
                                     exportLSRules()
                                 }
                                 .font(.caption)
+                                .accessibilityLabel(String(localized: "integrations.exportLSRules", defaultValue: "Export .lsrules for Little Snitch"))
+                                .accessibilityHint(String(localized: "integrations.exportLSRulesHint", defaultValue: "Saves threat intel in Little Snitch format"))
+                                .keyboardShortcut("e", modifiers: .command)
 
-                                Button("Export IOCs as CSV") {
+                                Button(String(localized: "integrations.exportCSV", defaultValue: "Export IOCs as CSV")) {
                                     exportCSV()
                                 }
                                 .font(.caption)
+                                .accessibilityLabel(String(localized: "integrations.exportCSV", defaultValue: "Export IOCs as CSV"))
+                                .accessibilityHint(String(localized: "integrations.exportCSVHint", defaultValue: "Exports all indicators of compromise as a CSV file"))
                             }
 
-                            Text("Exported files can be manually imported into each tool. MacCrab never modifies other tools' configuration.")
+                            Text(String(localized: "integrations.exportNote", defaultValue: "Exported files can be manually imported into each tool. MacCrab never modifies other tools' configuration."))
                                 .font(.caption2).foregroundColor(.secondary)
                         }
                         .padding(4)
@@ -178,7 +187,9 @@ struct ToolCard: View {
                             Circle()
                                 .fill(tool.isRunning ? Color.green : Color.secondary)
                                 .frame(width: 6, height: 6)
-                            Text(tool.isRunning ? "Running" : "Installed")
+                            Text(tool.isRunning
+                                ? String(localized: "integrations.running", defaultValue: "Running")
+                                : String(localized: "integrations.installed", defaultValue: "Installed"))
                                 .font(.caption)
                                 .foregroundColor(tool.isRunning ? .green : .secondary)
                         }
@@ -204,5 +215,7 @@ struct ToolCard: View {
             }
             .padding(4)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(tool.name), \(tool.isRunning ? "running" : "installed")")
     }
 }

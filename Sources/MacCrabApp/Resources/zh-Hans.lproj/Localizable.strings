@@ -1,0 +1,210 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Simplified Chinese (zh-Hans) localization.
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "警报";
+"tabs.events" = "事件";
+"tabs.rules" = "规则";
+"tabs.permissions" = "权限";
+"tabs.aiGuard" = "AI守卫";
+"tabs.prevention" = "预防";
+"tabs.threatIntel" = "威胁情报";
+"tabs.integrations" = "集成";
+"tabs.docs" = "文档";
+"tabs.settings" = "设置";
+
+/* ── Connection status ── */
+"status.connected" = "已连接";
+"status.disconnected" = "已断开";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "警报";
+"alerts.empty" = "无警报 \u2014 一切正常";
+"alerts.noMatch" = "没有匹配筛选条件的警报";
+"alerts.clearFilters" = "清除筛选";
+"alerts.suppressed" = "已抑制";
+"alerts.active" = "活跃";
+"alerts.autoResponseConfigured" = "已配置自动响应";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "描述";
+"alertDetail.processDetails" = "进程详情";
+"alertDetail.mitreAttack" = "MITRE ATT&CK";
+"alertDetail.metadata" = "元数据";
+"alertDetail.quickActions" = "快捷操作";
+"alertDetail.respond" = "响应";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "警报ID";
+"alertDetail.severity" = "严重度";
+"alertDetail.status" = "状态";
+"alertDetail.name" = "名称";
+"alertDetail.path" = "路径";
+"alertDetail.directory" = "目录";
+
+/* ── Quick Actions ── */
+"action.suppress" = "抑制此项";
+"action.suppressAll" = "抑制所有类似项";
+"action.kill" = "终止进程";
+"action.quarantine" = "隔离文件";
+"action.block" = "阻止目标";
+"action.copyDetails" = "复制详情";
+
+/* ── Kill/Quarantine/Block feedback ── */
+"action.kill.success" = "进程已终止";
+"action.kill.failure" = "终止进程失败";
+"action.quarantine.message" = "这将把引用的文件移到隔离区。该文件将无法在原始位置访问。";
+"action.quarantine.success" = "文件已隔离";
+"action.quarantine.failure" = "隔离失败";
+"action.block.confirm" = "阻止网络目标？";
+"action.block.success" = "网络目标已阻止";
+"action.block.failure" = "阻止目标失败";
+
+/* ── Event Stream ── */
+"events.title" = "事件";
+"events.noMatch" = "没有匹配当前筛选条件的事件";
+"events.clearFilters" = "清除筛选";
+"events.autoScroll" = "自动滚动";
+"events.resume" = "恢复";
+"events.pause" = "暂停";
+"events.live" = "实时";
+"events.paused" = "已暂停";
+"events.copyDetails" = "复制事件详情";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "进程";
+"eventDetail.detail" = "详情";
+"eventDetail.metadata" = "事件元数据";
+
+/* ── Rule Browser ── */
+"rules.title" = "规则";
+"rules.tactics" = "战术";
+"rules.allRules" = "所有规则";
+"rules.noMatch" = "没有匹配当前筛选条件的规则";
+"rules.createRule" = "创建规则";
+"rules.enabled" = "已启用";
+"rules.disabled" = "已禁用";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "描述";
+"ruleDetail.mitreAttack" = "MITRE ATT&CK";
+"ruleDetail.tags" = "标签";
+"ruleDetail.metadata" = "元数据";
+"ruleDetail.responseActions" = "响应操作";
+"ruleDetail.configureInActions" = "在actions.json中配置:";
+"ruleDetail.copyDetails" = "复制详情";
+"ruleDetail.openJSON" = "打开JSON";
+"ruleDetail.copyId" = "复制ID";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "TCC权限时间线";
+"tcc.allServices" = "所有服务";
+"tcc.all" = "全部";
+"tcc.granted" = "已授权";
+"tcc.denied" = "已拒绝";
+"tcc.emptyDefault" = "尚未检测到权限变更";
+"tcc.noMatch" = "没有匹配当前筛选条件的TCC事件";
+"tcc.clearFilters" = "清除筛选";
+"tcc.totalEventsLabel" = "事件总数";
+
+/* ── Settings ── */
+"settings.general" = "通用";
+"settings.notifications" = "通知";
+"settings.daemon" = "守护进程";
+"settings.responseActions" = "响应操作";
+"settings.about" = "关于";
+"settings.dataRetention" = "数据保留";
+"settings.keepEventsFor" = "保留事件";
+"settings.retentionHelp" = "超过此时间的事件、警报和基线数据将被自动清理。";
+"settings.uiRefresh" = "界面刷新";
+"settings.pollDaemon" = "轮询守护进程间隔";
+"settings.pollHelp" = "应用检查守护进程数据库中新事件和警报的频率。";
+"settings.startup" = "启动";
+"settings.launchAtLogin" = "登录时启动MacCrab";
+"settings.autoResponse" = "自动响应";
+"settings.autoResponseDesc" = "自动响应严重威胁";
+"settings.autoQuarantine" = "自动隔离恶意文件";
+"settings.autoKill" = "自动终止恶意进程";
+"settings.autoBlock" = "自动阻止C2目标";
+"settings.autoResponseNote" = "这些操作仅适用于严重级别的警报。请在响应操作标签页中配置每条规则的操作。";
+"settings.macosNotifications" = "macOS通知";
+"settings.showNotifications" = "显示检测警报通知";
+"settings.minimumSeverity" = "最低严重度:";
+"settings.severityHelp" = "只有达到或超过此严重度的警报才会触发macOS通知。";
+"settings.informational" = "信息";
+"settings.low" = "低";
+"settings.medium" = "中";
+"settings.high" = "高";
+"settings.criticalOnly" = "仅严重";
+"settings.aboutTagline" = "本地优先macOS威胁检测引擎";
+"settings.aboutStats" = "7个事件源 | 8个检测层 | 241条规则";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrab已激活";
+"statusBar.notRunning" = "守护进程未运行";
+"statusBar.noRecentAlerts" = "无近期警报";
+"statusBar.recentAlerts" = "近期警报";
+"statusBar.openDashboard" = "打开仪表盘...";
+"statusBar.reloadRules" = "重新加载规则";
+"statusBar.refresh" = "刷新";
+"statusBar.settings" = "设置...";
+"statusBar.quit" = "退出MacCrab";
+
+/* ── Prevention View ── */
+"prevention.title" = "预防";
+"prevention.enableAll" = "全部启用";
+"prevention.enableAllHint" = "切换所有预防机制的开关";
+"prevention.description" = "主动预防在威胁造成损害之前将其阻止。每个机制可单独启用或禁用。";
+"prevention.threatsBlocked" = "已阻止威胁";
+"prevention.domainsSinkholed" = "已沉洞域名";
+"prevention.ipsBlocked" = "已阻止IP";
+"prevention.packagesGated" = "已管控包";
+"prevention.recentActivity" = "近期预防活动";
+"prevention.mechanisms" = "预防机制";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "威胁情报";
+"threatIntel.sectionPicker" = "威胁情报部分";
+"threatIntel.importTitle" = "导入自定义IOC";
+"threatIntel.importDesc" = "从文本列表、CSV文件、JSON数组或STIX 2.1包中添加您自己的入侵指标。";
+"threatIntel.iocType" = "IOC类型";
+"threatIntel.pasteIOCs" = "粘贴IOC（每行一个）";
+"threatIntel.importFromText" = "从文本导入";
+"threatIntel.importFromTextHint" = "将粘贴的IOC导入威胁情报数据库";
+"threatIntel.importFromFile" = "从文件导入...";
+"threatIntel.importFromFileHint" = "打开文件选择器以导入威胁情报";
+"threatIntel.apiKeys" = "API密钥";
+"threatIntel.apiKeysDesc" = "配置API密钥以启用额外的威胁情报源。";
+
+/* ── Integrations View ── */
+"integrations.title" = "集成";
+"integrations.scan" = "扫描";
+"integrations.scanHint" = "扫描已安装的安全工具";
+"integrations.description" = "MacCrab检测并关联来自其他macOS安全工具的警报。只读模式。";
+"integrations.clickScan" = "点击扫描以检测已安装的安全工具";
+"integrations.available" = "可用集成";
+"integrations.notInstalled" = "未安装";
+"integrations.running" = "运行中";
+"integrations.installed" = "已安装";
+"integrations.export" = "为其他工具导出";
+"integrations.exportLSRules" = "为Little Snitch导出.lsrules";
+"integrations.exportLSRulesHint" = "以Little Snitch格式保存威胁情报";
+"integrations.exportCSV" = "将IOC导出为CSV";
+"integrations.exportCSVHint" = "将所有入侵指标导出为CSV文件";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "响应操作";
+"responseActions.resetDefaults" = "恢复默认设置";
+"responseActions.addRuleAction" = "添加规则操作";
+"responseActions.explanation" = "响应操作在检测规则触发时自动执行。";
+"responseActions.whenSeverity" = "当严重度 \u2265";
+
+/* ── AI Guard ── */
+"aiGuard.title" = "AI工具活动";
+"aiGuard.subtitle" = "监控Claude Code、Codex、OpenClaw、Cursor及其子进程";
+"aiGuard.noAlerts" = "无AI安全警报";
+"aiGuard.noAlertsDesc" = "AI工具在安全范围内运行";
+
+/* ── Components ── */
+"components.suppress" = "抑制";

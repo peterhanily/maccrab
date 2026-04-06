@@ -15,6 +15,7 @@ struct EventStream: View {
     @State private var isPaused: Bool = false
     @State private var autoScroll: Bool = true
     @State private var selectedEventID: EventViewModel.ID? = nil
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     /// Events filtered by the current category and text filters.
     private var filteredEvents: [EventViewModel] {
@@ -160,10 +161,10 @@ struct EventStream: View {
                         Divider()
                         EventDetailPanel(event: event)
                             .frame(minWidth: 280, idealWidth: 350, maxWidth: 450)
-                            .transition(.move(edge: .trailing))
+                            .transition(reduceMotion ? .opacity : .move(edge: .trailing))
                     }
                 }
-                .animation(.easeInOut(duration: 0.2), value: selectedEventID)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedEventID)
             }
 
             // Status bar

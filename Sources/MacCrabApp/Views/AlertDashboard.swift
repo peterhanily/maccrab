@@ -13,6 +13,7 @@ struct AlertDashboard: View {
     @State private var selectedAlert: AlertViewModel? = nil
     @State private var suppressedAlertName: String?
     @State private var showUndoToast = false
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     private var filteredAlerts: [AlertViewModel] {
         var results = appState.dashboardAlerts
@@ -138,10 +139,10 @@ struct AlertDashboard: View {
                             selectedAlert = nil
                         })
                         .frame(minWidth: 300, idealWidth: 400, maxWidth: 500)
-                        .transition(.move(edge: .trailing))
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing))
                     }
                 }
-                .animation(.easeInOut(duration: 0.2), value: selectedAlert)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedAlert)
             }
             if showUndoToast, let name = suppressedAlertName {
                 HStack {
@@ -158,7 +159,7 @@ struct AlertDashboard: View {
                 .padding(.horizontal)
                 .padding(.vertical, 8)
                 .background(Color(nsColor: .controlBackgroundColor))
-                .transition(.move(edge: .bottom))
+                .transition(reduceMotion ? .opacity : .move(edge: .bottom))
             }
         }
         .task {
