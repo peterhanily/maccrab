@@ -16,7 +16,7 @@ struct MainView: View {
     @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
 
     private var hasCriticalAlerts: Bool {
-        appState.dashboardAlerts.contains { $0.severity == .critical && !$0.suppressed }
+        appState.dashboardAlerts.contains { $0.severity == .critical && !$0.suppressed && !appState.isPatternSuppressed($0) }
     }
 
     enum SidebarSection: String, CaseIterable, Hashable {

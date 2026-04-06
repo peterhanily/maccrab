@@ -172,18 +172,22 @@ struct OverviewDashboard: View {
         .navigationTitle("Overview")
     }
 
-    // Computed properties
+    // Computed properties — must check BOTH .suppressed flag AND pattern suppression
+    private func isEffectivelySuppressed(_ alert: AlertViewModel) -> Bool {
+        alert.suppressed || appState.isPatternSuppressed(alert)
+    }
+
     private var criticalCount: Int {
-        appState.dashboardAlerts.filter { $0.severity == .critical && !$0.suppressed }.count
+        appState.dashboardAlerts.filter { $0.severity == .critical && !isEffectivelySuppressed($0) }.count
     }
     private var highCount: Int {
-        appState.dashboardAlerts.filter { $0.severity == .high && !$0.suppressed }.count
+        appState.dashboardAlerts.filter { $0.severity == .high && !isEffectivelySuppressed($0) }.count
     }
     private var mediumCount: Int {
-        appState.dashboardAlerts.filter { $0.severity == .medium && !$0.suppressed }.count
+        appState.dashboardAlerts.filter { $0.severity == .medium && !isEffectivelySuppressed($0) }.count
     }
     private var lowCount: Int {
-        appState.dashboardAlerts.filter { $0.severity == .low && !$0.suppressed }.count
+        appState.dashboardAlerts.filter { $0.severity == .low && !isEffectivelySuppressed($0) }.count
     }
 }
 
