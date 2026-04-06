@@ -92,27 +92,41 @@ struct OverviewDashboard: View {
                     .padding(.horizontal)
 
                     // === Prevention Status ===
-                    HStack(spacing: 8) {
-                        Image(systemName: "hand.raised.fill")
-                            .foregroundColor(preventionActive ? .green : .secondary)
-                        Text(preventionActive ? "Prevention Active" : "Prevention Standby")
-                            .font(.subheadline)
-                            .foregroundColor(preventionActive ? .primary : .secondary)
-                        Spacer()
+                    Button { selectedSection = .prevention } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: preventionActive ? "shield.checkered" : "shield")
+                                .font(.title3)
+                                .foregroundColor(preventionActive ? .green : .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(preventionActive ? "Prevention Active" : "Prevention Off")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.primary)
+                                Text(preventionActive ? "DNS sinkhole, network blocker, and more enabled" : "Enable prevention in the Prevention tab")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(10)
+                        .background(Color.secondary.opacity(0.06))
+                        .cornerRadius(8)
                     }
+                    .buttonStyle(.plain)
                     .padding(.horizontal)
 
-                    // === Severity Distribution ===
+                    // === Severity Breakdown ===
                     GroupBox("Alert Severity") {
-                        HStack(spacing: 2) {
-                            SeverityBar(label: "Critical", count: criticalCount, color: .red, total: max(appState.totalAlerts, 1))
-                            SeverityBar(label: "High", count: highCount, color: .orange, total: max(appState.totalAlerts, 1))
-                            SeverityBar(label: "Medium", count: mediumCount, color: .yellow, total: max(appState.totalAlerts, 1))
-                            SeverityBar(label: "Low", count: lowCount, color: .blue, total: max(appState.totalAlerts, 1))
+                        HStack(spacing: 20) {
+                            SeverityCount(label: "Critical", count: criticalCount, color: criticalColor)
+                            SeverityCount(label: "High", count: highCount, color: highColor)
+                            SeverityCount(label: "Medium", count: mediumCount, color: .yellow)
+                            SeverityCount(label: "Low", count: lowCount, color: .blue)
                         }
-                        .frame(height: 32)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .padding(4)
+                        .padding(8)
                     }
                     .padding(.horizontal)
 
@@ -219,6 +233,31 @@ struct StatCard: View {
     }
 }
 
+struct SeverityCount: View {
+    let label: String
+    let count: Int
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(count)")
+                    .font(.system(.title3, design: .rounded, weight: .bold))
+                Text(label)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(count) \(label)")
+    }
+}
+
+// Kept for backward compatibility but no longer used in Overview
 struct SeverityBar: View {
     let label: String
     let count: Int
