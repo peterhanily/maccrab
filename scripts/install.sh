@@ -28,6 +28,59 @@ fi
 
 cd "$PROJECT_DIR"
 
+# Language selection
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║         🦀 MacCrab Installation                  ║"
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+echo "Select your language / Seleccione su idioma:"
+echo ""
+echo "  1) English"
+echo "  2) Español (Spanish)"
+echo "  3) Français (French)"
+echo "  4) Deutsch (German)"
+echo "  5) 日本語 (Japanese)"
+echo "  6) 简体中文 (Simplified Chinese)"
+echo "  7) 한국어 (Korean)"
+echo "  8) Português (Brazilian Portuguese)"
+echo "  9) Italiano (Italian)"
+echo " 10) Nederlands (Dutch)"
+echo " 11) 繁體中文 (Traditional Chinese)"
+echo " 12) Русский (Russian)"
+echo " 13) Svenska (Swedish)"
+echo " 14) Polski (Polish)"
+echo ""
+read -p "Language [1]: " LANG_CHOICE
+LANG_CHOICE="${LANG_CHOICE:-1}"
+
+LANG_CODE="en"
+LANG_NAME="English"
+case "$LANG_CHOICE" in
+    1)  LANG_CODE="en";      LANG_NAME="English" ;;
+    2)  LANG_CODE="es";      LANG_NAME="Español" ;;
+    3)  LANG_CODE="fr";      LANG_NAME="Français" ;;
+    4)  LANG_CODE="de";      LANG_NAME="Deutsch" ;;
+    5)  LANG_CODE="ja";      LANG_NAME="日本語" ;;
+    6)  LANG_CODE="zh-Hans"; LANG_NAME="简体中文" ;;
+    7)  LANG_CODE="ko";      LANG_NAME="한국어" ;;
+    8)  LANG_CODE="pt-BR";   LANG_NAME="Português" ;;
+    9)  LANG_CODE="it";      LANG_NAME="Italiano" ;;
+    10) LANG_CODE="nl";      LANG_NAME="Nederlands" ;;
+    11) LANG_CODE="zh-Hant"; LANG_NAME="繁體中文" ;;
+    12) LANG_CODE="ru";      LANG_NAME="Русский" ;;
+    13) LANG_CODE="sv";      LANG_NAME="Svenska" ;;
+    14) LANG_CODE="pl";      LANG_NAME="Polski" ;;
+esac
+
+info "Language: $LANG_NAME ($LANG_CODE)"
+
+# Set preferred language for MacCrab app
+defaults write com.maccrab.app AppleLanguages -array "$LANG_CODE"
+info "Set MacCrab dashboard language to $LANG_NAME"
+
+echo ""
+
 # Build
 info "Building MacCrab (release mode)..."
 swift build -c release 2>&1 | tail -3

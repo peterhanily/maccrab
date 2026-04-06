@@ -8,6 +8,8 @@ import AppKit
 struct MacCrabApp: App {
     @StateObject private var appState = AppState()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @AppStorage("hasCompletedSetup") private var hasCompletedSetup = false
+    @State private var showWelcome = false
 
     var body: some Scene {
         // Main dashboard window — opens on launch.
@@ -16,6 +18,12 @@ struct MacCrabApp: App {
                 .frame(minWidth: 900, minHeight: 600)
                 .onAppear {
                     appDelegate.setupStatusBar(appState: appState)
+                    if !hasCompletedSetup {
+                        showWelcome = true
+                    }
+                }
+                .sheet(isPresented: $showWelcome) {
+                    WelcomeView(isPresented: $showWelcome)
                 }
         }
 
