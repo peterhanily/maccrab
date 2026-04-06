@@ -14,11 +14,24 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection:
+    selection_env:
+        CommandLine|startswith:
+            - 'DYLD_INSERT_LIBRARIES='
+            - 'DYLD_FRAMEWORK_PATH='
+            - 'DYLD_LIBRARY_PATH='
+    selection_combined:
         CommandLine|contains:
-            - 'DYLD_INSERT_LIBRARIES'
+            - ' DYLD_INSERT_LIBRARIES='
+            - ' DYLD_FRAMEWORK_PATH='
+            - ' DYLD_LIBRARY_PATH='
             - '__XPC_DYLD_INSERT_LIBRARIES'
-    condition: selection
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: (selection_env or selection_combined) and not filter_system and not filter_apple_signed
 falsepositives:
     - Debugging tools injecting diagnostic libraries
     - Some legitimate application frameworks

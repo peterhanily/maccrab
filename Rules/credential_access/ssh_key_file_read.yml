@@ -1,0 +1,47 @@
+title: SSH Private Key File Accessed
+id: d1a2b3c4-0450-4000-a000-000000000450
+status: experimental
+description: >
+    Detects any process reading SSH private key files, regardless of the
+    tool used. Catches cat, dd, strings, xxd, cp, and any other method
+    of accessing private keys.
+author: MacCrab Community
+date: 2026/04/06
+references:
+    - https://attack.mitre.org/techniques/T1552/004/
+tags:
+    - attack.credential_access
+    - attack.t1552.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|endswith:
+            - '/.ssh/id_rsa'
+            - '/.ssh/id_ed25519'
+            - '/.ssh/id_ecdsa'
+            - '/.ssh/id_dsa'
+            - '/.ssh/id_ecdsa_sk'
+            - '/.ssh/id_ed25519_sk'
+    filter_ssh:
+        Image|endswith:
+            - '/ssh'
+            - '/ssh-agent'
+            - '/ssh-add'
+            - '/sshd'
+            - '/ssh-keygen'
+            - '/git'
+            - '/git-remote-ssh'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_ssh and not filter_system and not filter_apple_signed
+falsepositives:
+    - Backup tools copying SSH directory
+    - IDE SSH integrations
+level: high

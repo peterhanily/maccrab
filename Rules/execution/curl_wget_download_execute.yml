@@ -25,6 +25,9 @@ detection:
         CommandLine|contains:
             - 'curl '
             - 'wget '
+            - '/dev/tcp/'
+            - 'URLSession'
+            - 'NSURLConnection'
     selection_execute:
         CommandLine|contains:
             - '| sh'

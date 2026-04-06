@@ -1,0 +1,35 @@
+title: System Extension Loaded (Modern Persistence)
+id: d1a2b3c4-0455-4000-a000-000000000455
+status: experimental
+description: >
+    Detects loading of system extensions, the modern replacement for
+    kernel extensions on macOS 11+. System extensions run in user space
+    but with elevated privileges and can persist across reboots.
+author: MacCrab Community
+date: 2026/04/06
+references:
+    - https://attack.mitre.org/techniques/T1547/006/
+tags:
+    - attack.persistence
+    - attack.t1547.006
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/systemextensionsctl'
+        CommandLine|contains:
+            - 'install'
+            - 'activate'
+            - 'enable'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Legitimate security software installation (CrowdStrike, SentinelOne)
+    - VPN clients installing network extensions
+level: high

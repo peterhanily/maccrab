@@ -32,6 +32,12 @@ detection:
             - "echo * | base64 -d | /bin/"
             - "echo * | base64 --decode | /bin/"
             - "printf * | base64 -d | /bin/"
+    selection_alt_decode:
+        CommandLine|contains:
+            - 'openssl enc -base64'
+            - 'python3 -c "import base64'
+            - 'perl -MMIME::Base64'
+            - "ruby -e \"require 'base64'"
     filter_system:
         ParentImage|startswith:
             - '/System/'
@@ -39,7 +45,7 @@ detection:
             - '/usr/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: (selection_base64_pipe or selection_echo_decode) and not filter_system and not filter_apple_signed
+    condition: (selection_base64_pipe or selection_echo_decode or selection_alt_decode) and not filter_system and not filter_apple_signed
 falsepositives:
     - CI/CD pipeline scripts decoding configuration
     - Legitimate build scripts

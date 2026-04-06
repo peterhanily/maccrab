@@ -1,0 +1,42 @@
+title: Shell History Clearing or Disabling
+id: d1a2b3c4-0453-4000-a000-000000000453
+status: stable
+description: >
+    Detects attempts to clear or disable shell command history, indicating
+    an attacker covering their tracks after compromise.
+author: MacCrab Community
+date: 2026/04/06
+references:
+    - https://attack.mitre.org/techniques/T1070/003/
+tags:
+    - attack.defense_evasion
+    - attack.t1070.003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'unset HISTFILE'
+            - 'HISTSIZE=0'
+            - 'HISTFILESIZE=0'
+            - 'history -c'
+            - 'history -w /dev/null'
+            - 'rm -f ~/.bash_history'
+            - 'rm -f ~/.zsh_history'
+            - '> ~/.bash_history'
+            - '> ~/.zsh_history'
+            - 'ln -sf /dev/null ~/.bash_history'
+            - 'ln -sf /dev/null ~/.zsh_history'
+            - 'export HISTFILE=/dev/null'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Privacy-conscious users clearing history manually
+    - Automated cleanup scripts
+level: high

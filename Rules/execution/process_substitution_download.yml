@@ -1,0 +1,40 @@
+title: Download and Execute via Process Substitution
+id: d1a2b3c4-0451-4000-a000-000000000451
+status: experimental
+description: >
+    Detects use of bash/zsh process substitution to download and execute
+    code in a single command, bypassing pipe-based detection rules.
+    Pattern: bash <(curl ...) or source <(wget ...)
+author: MacCrab Community
+date: 2026/04/06
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - '<(curl '
+            - '<(wget '
+            - '<(fetch '
+            - 'source <('
+            - 'bash <('
+            - 'zsh <('
+            - 'sh <('
+            - '=(curl '
+            - '=(wget '
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Legitimate installation scripts using process substitution
+    - Homebrew formula installation
+level: high

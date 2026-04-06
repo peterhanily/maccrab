@@ -1,3 +1,5 @@
+# NOTE: This rule is a subset of gatekeeper_override.yml. Both are kept
+# for backward compatibility. gatekeeper_override.yml is the comprehensive rule.
 title: Gatekeeper Disabled via spctl
 id: d1a2b3c4-0020-4000-a000-000000000020
 status: stable

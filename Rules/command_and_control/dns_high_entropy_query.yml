@@ -1,9 +1,13 @@
-title: DNS Query to High-Entropy Domain
-id: d1a2b3c4-0040-4000-a000-000000000040
+title: High-Entropy DNS Query (Possible DGA or Tunneling)
+id: d1a2b3c4-0052-4000-a000-000000000052
 status: experimental
-description: Detects DNS resolution of domains with high character entropy, indicative of Domain Generation Algorithm (DGA) usage by malware C2.
+description: >
+    Detects DNS queries with high-entropy domain names, indicating DGA
+    (domain generation algorithm) malware or DNS tunneling for data
+    exfiltration. Normal domains have low entropy; randomly generated
+    C2 domains have high entropy.
 author: MacCrab Community
-date: 2026/03/31
+date: 2026/04/06
 references:
     - https://attack.mitre.org/techniques/T1568/002/
 tags:
@@ -15,11 +19,15 @@ logsource:
 detection:
     selection:
         DestinationPort: 53
-    selection_process:
-        Image|endswith:
-            - '/mDNSResponder'
-    condition: selection and selection_process
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
 falsepositives:
-    - CDN domains with random-looking subdomains
-    - Cloud service endpoints
+    - CDN domains with hash-based subdomains
+    - Cloud services using UUID-based hostnames
 level: medium

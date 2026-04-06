@@ -37,7 +37,22 @@ detection:
             - 'Sublime'
             - 'TextEdit'
             - 'BBEdit'
-    condition: selection and not filter_shells and not filter_editors
+    filter_package_managers:
+        Image|endswith:
+            - '/brew'
+            - '/nvm'
+            - '/pyenv'
+            - '/rbenv'
+            - '/sdkman'
+            - '/nodenv'
+            - '/conda'
+            - '/rustup'
+            - '/cargo'
+        ParentImage|endswith:
+            - '/brew'
+            - '/installer'
+            - '/softwareupdate'
+    condition: selection and not filter_shells and not filter_editors and not filter_package_managers
 falsepositives:
     - Package managers (Homebrew, nvm) modifying shell profiles
     - IDE configuration

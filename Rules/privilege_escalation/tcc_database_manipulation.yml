@@ -1,0 +1,36 @@
+title: TCC Database Direct SQLite Manipulation
+id: d1a2b3c4-0452-4000-a000-000000000452
+status: experimental
+description: >
+    Detects direct SQLite access to the TCC database to grant permissions
+    without user consent. Attackers can bypass TCC prompts by directly
+    modifying the SQLite database.
+author: MacCrab Community
+date: 2026/04/06
+references:
+    - https://attack.mitre.org/techniques/T1548/
+tags:
+    - attack.privilege_escalation
+    - attack.defense_evasion
+    - attack.t1548
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/sqlite3'
+        CommandLine|contains:
+            - 'TCC.db'
+            - 'TCC/TCC'
+            - 'com.apple.TCC'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_apple_signed
+falsepositives:
+    - Security researchers examining TCC state
+    - MDM tools managing permissions
+level: critical
