@@ -96,6 +96,30 @@ struct MacCrabCtl {
             }
         case "watch":
             await watchAlerts()
+        case "hunt":
+            if args.count >= 3 {
+                let query = args[2...].joined(separator: " ")
+                await huntThreats(query: query)
+            } else {
+                print("Usage: maccrabctl hunt <natural language query>")
+                print("Examples:")
+                print("  maccrabctl hunt \"show critical alerts from last hour\"")
+                print("  maccrabctl hunt \"find unsigned processes with network connections\"")
+            }
+        case "report":
+            await generateReport(args: Array(args.dropFirst(2)))
+        case "cdhash":
+            if args.count >= 3 {
+                if args[2] == "--all" {
+                    await extractAllCDHashes()
+                } else if let pid = Int32(args[2]) {
+                    await extractCDHash(pid: pid)
+                } else {
+                    print("Usage: maccrabctl cdhash <PID> | --all")
+                }
+            } else {
+                print("Usage: maccrabctl cdhash <PID> | --all")
+            }
         case "version":
             printVersion()
         case "help", "-h", "--help":
@@ -131,6 +155,12 @@ struct MacCrabCtl {
           suppress <rule> <path>  Allowlist a process for a rule
           export [format] [N]     Export alerts (json|csv, default: json)
 
+        Forensics:
+          hunt <query>            Natural language threat hunting
+          report [--hours N] [--output file]  Generate HTML incident report
+          cdhash <PID>            Extract CDHash for a process
+          cdhash --all            Extract CDHashes for all processes
+
         Other:
           version             Show version information
           help                Show this help message
@@ -142,6 +172,9 @@ struct MacCrabCtl {
           maccrabctl export csv 500
           maccrabctl rule create network_connection
           maccrabctl suppress my-rule-id /usr/bin/safe-process
+          maccrabctl hunt "show critical alerts from last hour"
+          maccrabctl report --hours 48 --output incident.html
+          maccrabctl cdhash 1234
         """)
     }
 
@@ -688,6 +721,160 @@ struct MacCrabCtl {
         } catch {
             print("Error saving suppression: \(error)")
         }
+    }
+
+    // MARK: - Hunt (Natural Language Threat Hunting)
+
+    static func huntThreats(query: String) async {
+        let supportDir = maccrabDataDir()
+        let dbPath = supportDir + "/events.db"
+
+        guard FileManager.default.fileExists(atPath: dbPath) else {
+            print("No event database found at \(dbPath)")
+            print("The daemon must run first to collect events.")
+            return
+        }
+
+        let hunter = ThreatHunter(databasePath: dbPath)
+        guard let result = await hunter.hunt(query) else {
+            print("Hunt returned no result.")
+            return
+        }
+
+        print("Threat Hunt Results")
+        print("══════════════════════════════════════════════════════════════")
+        print("Query:          \(result.query)")
+        print("Interpretation: \(result.interpretation)")
+        print("Results:        \(result.resultCount)")
+        print("Execution:      \(String(format: "%.3f", result.executionTime))s")
+
+        if !result.sqlQuery.isEmpty {
+            print("SQL:            \(result.sqlQuery)")
+        }
+        print(String(repeating: "─", count: 80))
+
+        if result.results.isEmpty {
+            print("No matching results found.")
+            print("\nSuggested queries:")
+            let suggestions = await hunter.suggestions()
+            for suggestion in suggestions {
+                print("  - \(suggestion)")
+            }
+        } else {
+            for (i, row) in result.results.enumerated() {
+                print("\n[\(i + 1)]")
+                for (key, value) in row.sorted(by: { $0.key < $1.key }) {
+                    if !value.isEmpty {
+                        print("  \(key): \(value)")
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Report (HTML Incident Report)
+
+    static func generateReport(args: [String]) async {
+        // Parse arguments
+        var hours: Double = 24
+        var outputPath: String? = nil
+
+        var i = 0
+        while i < args.count {
+            if args[i] == "--hours" && i + 1 < args.count {
+                hours = Double(args[i + 1]) ?? 24
+                i += 2
+            } else if args[i] == "--output" && i + 1 < args.count {
+                outputPath = args[i + 1]
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+
+        let supportDir = maccrabDataDir()
+        let store: AlertStore
+        do {
+            store = try AlertStore(directory: supportDir)
+        } catch {
+            print("Error opening alert store: \(error)")
+            return
+        }
+
+        let since = Date().addingTimeInterval(-hours * 3600)
+        let alerts: [Alert]
+        do {
+            alerts = try await store.alerts(since: since)
+        } catch {
+            print("Error reading alerts: \(error)")
+            return
+        }
+
+        let generator = ReportGenerator()
+        let reportData = await generator.buildReportData(
+            alerts: alerts,
+            title: "MacCrab Incident Report",
+            timeRange: (start: since, end: Date())
+        )
+        let html = await generator.generateHTML(from: reportData)
+
+        if let outputPath = outputPath {
+            do {
+                try await generator.writeReport(html: html, to: outputPath)
+                print("Report written to \(outputPath)")
+                print("  Time range: last \(Int(hours)) hours")
+                print("  Alerts:     \(alerts.count)")
+            } catch {
+                print("Error writing report: \(error)")
+            }
+        } else {
+            // Write to stdout
+            print(html)
+        }
+    }
+
+    // MARK: - CDHash Extraction
+
+    static func extractCDHash(pid: Int32) async {
+        let extractor = CDHashExtractor()
+        if let hash = await extractor.extractCDHash(pid: pid) {
+            print("PID \(pid): \(hash)")
+        } else {
+            print("PID \(pid): no CDHash available (process may not exist or may be unsigned)")
+        }
+    }
+
+    static func extractAllCDHashes() async {
+        print("Extracting CDHashes for all running processes...")
+        print("══════════════════════════════════════════════════════════════")
+        print(String(format: "%-8s %s", "PID", "CDHash"))
+        print(String(repeating: "─", count: 60))
+
+        // Get all PIDs using proc_listallpids
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else {
+            print("Failed to enumerate processes.")
+            return
+        }
+        var pids = [Int32](repeating: 0, count: Int(count) + 100)
+        let actual = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<Int32>.size))
+        guard actual > 0 else {
+            print("Failed to enumerate processes.")
+            return
+        }
+
+        let validPids = pids.prefix(Int(actual)).filter { $0 > 0 }.sorted()
+        let extractor = CDHashExtractor()
+        let results = await extractor.extractBatch(pids: Array(validPids))
+
+        for pid in validPids {
+            if let hash = results[pid] {
+                print(String(format: "%-8d %@", pid, hash))
+            }
+        }
+
+        print(String(repeating: "─", count: 60))
+        print("\(results.count) of \(validPids.count) processes have CDHashes")
     }
 
     // MARK: - Helpers

@@ -38,6 +38,10 @@ Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- b
 - Auto rule generation from observed attacks
 - Encrypted database (AES-256)
 - HTML incident reports
+- Rootkit detection via cross-referenced process enumeration
+- Crash report mining for exploitation indicators
+- Power/thermal anomaly detection (crypto mining, C2 beacons)
+- CDHash extraction for process integrity verification
 
 ---
 
@@ -56,7 +60,8 @@ Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- b
  | DNS Collector ----------> Cert Transparency    |     | Statistical Anomaly  |
  | Event Tap     ----------> YARA Scanner         |     | Behavioral Scoring   |
  | System Policy ----------> Entropy Analysis     |     | AI Guard             |
- | FSEvents      --------->                       |     |                      |
+ | FSEvents      ----------> CDHash Extraction    |     | Rootkit Detector     |
+ | Crash Reports --------->                       |     | Power Anomaly        |
  +--------------------+     +---------------------+     +----------+-----------+
                                                                    |
                                                                    v
@@ -112,6 +117,9 @@ MacCrab ingests from eight real-time event sources, covering kernel-level proces
 | **Behavioral scoring** | Accumulates weighted suspicion indicators per process with time-decay; fires composite alerts when score crosses configurable thresholds, even if no single rule matched at critical severity |
 | **Incident grouper** | Clusters related alerts into attack timelines by process lineage, time proximity, and MITRE tactic progression; generates narrative summaries |
 | **Entropy analysis** | Shannon entropy calculation for command lines, domain names, and payloads to detect obfuscation, DGA domains, and DNS tunneling |
+| **Rootkit detector** | Cross-references `proc_listallpids()` and `sysctl(KERN_PROC_ALL)` to find hidden processes indicating userland rootkit activity |
+| **Crash report miner** | Scans DiagnosticReports for exploitation indicators (EXC_BAD_ACCESS, buffer overflows, ASan faults, use-after-free) |
+| **Power anomaly detector** | Monitors power assertions and thermal pressure to detect crypto mining and sustained C2 beaconing |
 
 ### AI Guard
 
@@ -272,6 +280,9 @@ sudo .build/debug/maccrabd
 .build/debug/maccrabctl events tail 20  # Live event stream
 .build/debug/maccrabctl watch           # Streaming alert tail
 .build/debug/maccrabctl rules list      # Loaded rules
+.build/debug/maccrabctl hunt "show critical alerts"  # Threat hunting
+.build/debug/maccrabctl report --hours 48            # Incident report
+.build/debug/maccrabctl cdhash 1234                  # CDHash lookup
 ```
 
 ### Open the dashboard
@@ -340,6 +351,7 @@ Test files:
 | `Tests/MacCrabCoreTests/DeepMacOSTests.swift` | macOS-specific integration tests |
 | `Tests/MacCrabCoreTests/AIGuardTests.swift` | AI Guard subsystem tests |
 | `Tests/MacCrabCoreTests/SuppressionTests.swift` | Suppression manager tests |
+| `Tests/MacCrabCoreTests/ForensicTests.swift` | Forensic component tests (rootkit, crash, power, CDHash, threat hunter) |
 | `scripts/false-positive-test.sh` | FP regression tests against real system events |
 | `scripts/detection-test.sh` | Safe trigger tests for every detection category |
 | `scripts/rule-lint.sh` | YAML validation, UUID uniqueness, ATT&CK tag checks |
@@ -629,7 +641,8 @@ maccrab/
 │   │   │   ├── QuarantineEnricher.swift #   Download provenance
 │   │   │   ├── CertTransparency.swift   #   CT log monitoring
 │   │   │   ├── ThreatIntelFeed.swift    #   abuse.ch IOC feeds
-│   │   │   └── YARAEnricher.swift       #   YARA file scanning
+│   │   │   ├── YARAEnricher.swift       #   YARA file scanning
+│   │   │   └── CDHashExtractor.swift    #   Process CDHash extraction
 │   │   ├── Detection/                   # Rule evaluation and analysis
 │   │   │   ├── RuleEngine.swift         #   Single-event Sigma engine
 │   │   │   ├── SequenceEngine.swift     #   Temporal sequence engine
@@ -641,7 +654,11 @@ maccrab/
 │   │   │   ├── AlertDeduplicator.swift  #   Dedup and rate limiting
 │   │   │   ├── SuppressionManager.swift #   Per-rule process allowlists
 │   │   │   ├── ResponseAction.swift     #   Kill, quarantine, script, etc.
-│   │   │   └── SelfDefense.swift        #   8-layer tamper protection
+│   │   │   ├── SelfDefense.swift        #   8-layer tamper protection
+│   │   │   ├── RootkitDetector.swift    #   Hidden process detection
+│   │   │   ├── CrashReportMiner.swift   #   Exploitation indicator mining
+│   │   │   ├── PowerAnomalyDetector.swift # Power/thermal anomaly detection
+│   │   │   └── ThreatHunter.swift       #   Natural language threat hunting
 │   │   ├── AIGuard/                     # AI coding tool safety
 │   │   │   ├── AIToolRegistry.swift     #   Tool identification
 │   │   │   ├── AIProcessTracker.swift   #   Process tree tracking
@@ -658,6 +675,8 @@ maccrab/
 │   │   │   ├── NotificationOutput.swift #   macOS notification delivery
 │   │   │   ├── WebhookOutput.swift      #   JSON POST webhook
 │   │   │   └── SyslogOutput.swift       #   RFC 5424 syslog sender
+│   │   ├── Output/                      # Report generation
+│   │   │   └── ReportGenerator.swift    #   HTML incident reports
 │   │   └── Models/
 │   │       └── Alert.swift              #   Alert model
 │   │
@@ -728,7 +747,8 @@ maccrab/
         ├── PipelineTests.swift          # Pipeline integration tests
         ├── DeepMacOSTests.swift         # macOS-specific tests
         ├── AIGuardTests.swift           # AI Guard tests
-        └── SuppressionTests.swift       # Suppression manager tests
+        ├── SuppressionTests.swift       # Suppression manager tests
+        └── ForensicTests.swift          # Forensic component tests
 ```
 
 ---
