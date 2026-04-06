@@ -16,9 +16,19 @@ struct AlertDashboard: View {
 
     private var filteredAlerts: [AlertViewModel] {
         var results = appState.dashboardAlerts
-        // Always hide pattern-suppressed alerts (unless showing suppressed)
+
+        // Mark pattern-suppressed alerts so they display with suppressed styling
+        results = results.map { alert in
+            var a = alert
+            if !a.suppressed && appState.isPatternSuppressed(a) {
+                a.suppressed = true
+            }
+            return a
+        }
+
+        // Hide suppressed alerts unless the checkbox is checked
         if !showSuppressed {
-            results = results.filter { !$0.suppressed && !appState.isPatternSuppressed($0) }
+            results = results.filter { !$0.suppressed }
         }
         if let severity = selectedSeverity {
             results = results.filter { $0.severity == severity }
