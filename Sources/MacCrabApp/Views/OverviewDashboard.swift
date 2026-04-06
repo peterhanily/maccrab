@@ -9,66 +9,56 @@ import SwiftUI
 
 struct OverviewDashboard: View {
     @ObservedObject var appState: AppState
+    @Binding var selectedSection: MainView.SidebarSection?
+
+    // Muted colors for a professional look
+    private let criticalColor = Color(red: 0.75, green: 0.22, blue: 0.22)
+    private let highColor = Color(red: 0.80, green: 0.52, blue: 0.20)
+    private let allClearColor = Color(red: 0.25, green: 0.60, blue: 0.35)
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // === Call to Action Banner ===
-                if criticalCount > 0 {
+            VStack(alignment: .leading, spacing: 20) {
+                // === Call to Action Banner (clickable → navigates to Alerts) ===
+                Button { selectedSection = .alerts } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.title2)
+                        Image(systemName: criticalCount > 0 ? "exclamationmark.triangle.fill" : highCount > 0 ? "exclamationmark.circle.fill" : "checkmark.shield.fill")
+                            .font(.title)
                             .foregroundColor(.white)
-                        VStack(alignment: .leading) {
-                            Text("\(criticalCount) critical alert\(criticalCount == 1 ? "" : "s") need\(criticalCount == 1 ? "s" : "") investigation")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            Text("Review immediately in the Alerts section")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.8))
+                        VStack(alignment: .leading, spacing: 4) {
+                            if criticalCount > 0 {
+                                Text("\(criticalCount) critical alert\(criticalCount == 1 ? "" : "s") need\(criticalCount == 1 ? "s" : "") investigation")
+                                    .font(.system(.body, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text("Click to review in Alerts")
+                                    .font(.subheadline)
+                                    .foregroundColor(.white.opacity(0.8))
+                            } else if highCount > 0 {
+                                Text("\(highCount) high-severity alert\(highCount == 1 ? "" : "s") to review")
+                                    .font(.system(.body, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text("Click to review in Alerts")
+                                    .font(.subheadline)
+                                    .foregroundColor(.white.opacity(0.8))
+                            } else {
+                                Text("All clear — no critical alerts")
+                                    .font(.system(.body, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text("\(appState.eventsPerSecond) events/sec monitored")
+                                    .font(.subheadline)
+                                    .foregroundColor(.white.opacity(0.8))
+                            }
                         }
                         Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundColor(.white.opacity(0.6))
                     }
                     .padding()
-                    .background(Color.red)
+                    .background(criticalCount > 0 ? criticalColor : highCount > 0 ? highColor : allClearColor)
                     .cornerRadius(12)
-                    .padding(.horizontal)
-                } else if highCount > 0 {
-                    HStack(spacing: 12) {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(.white)
-                        VStack(alignment: .leading) {
-                            Text("\(highCount) high-severity alert\(highCount == 1 ? "" : "s") to review")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                        }
-                        Spacer()
-                    }
-                    .padding()
-                    .background(Color.orange)
-                    .cornerRadius(12)
-                    .padding(.horizontal)
-                } else {
-                    HStack(spacing: 12) {
-                        Image(systemName: "checkmark.shield.fill")
-                            .font(.title2)
-                            .foregroundColor(.white)
-                        VStack(alignment: .leading) {
-                            Text("All clear — no critical alerts")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            Text("\(appState.eventsPerSecond) events/sec monitored")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.8))
-                        }
-                        Spacer()
-                    }
-                    .padding()
-                    .background(Color.green)
-                    .cornerRadius(12)
-                    .padding(.horizontal)
                 }
+                .buttonStyle(.plain)
+                .padding(.horizontal)
 
                 // === Stats Row ===
                 HStack(spacing: 16) {
@@ -98,25 +88,31 @@ struct OverviewDashboard: View {
                     GroupBox("Recent Alerts") {
                         if appState.recentAlerts.isEmpty {
                             Text("No recent alerts")
-                                .font(.caption)
+                                .font(.subheadline)
                                 .foregroundColor(.secondary)
                                 .frame(maxWidth: .infinity)
                                 .padding()
                         } else {
-                            VStack(alignment: .leading, spacing: 6) {
+                            VStack(alignment: .leading, spacing: 8) {
                                 ForEach(appState.recentAlerts.prefix(5), id: \.id) { alert in
-                                    HStack(spacing: 8) {
-                                        Circle()
-                                            .fill(alert.severityColor)
-                                            .frame(width: 8, height: 8)
-                                        Text(alert.ruleTitle)
-                                            .font(.caption)
-                                            .lineLimit(1)
-                                        Spacer()
-                                        Text(alert.timeAgoString)
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
+                                    Button { selectedSection = .alerts } label: {
+                                        HStack(spacing: 8) {
+                                            Circle()
+                                                .fill(alert.severityColor)
+                                                .frame(width: 8, height: 8)
+                                            Text(alert.ruleTitle)
+                                                .font(.subheadline)
+                                                .lineLimit(1)
+                                            Spacer()
+                                            Text(alert.timeAgoString)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                            Image(systemName: "chevron.right")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
                                     }
+                                    .buttonStyle(.plain)
                                 }
                             }
                             .padding(4)
@@ -167,18 +163,18 @@ struct StatCard: View {
 
     var body: some View {
         GroupBox {
-            VStack(spacing: 4) {
+            VStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.title3)
+                    .font(.title2)
                     .foregroundColor(color)
                 Text(value)
-                    .font(.system(.title2, design: .rounded, weight: .bold))
+                    .font(.system(.title, design: .rounded, weight: .bold))
                 Text(title)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundColor(.secondary)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
+            .padding(.vertical, 6)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title): \(value)")
@@ -213,16 +209,16 @@ struct HealthRow: View {
     let detail: String
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: status ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundColor(status ? .green : .red)
-                .font(.caption)
+                .font(.subheadline)
             Text(label)
-                .font(.caption)
+                .font(.subheadline)
                 .fontWeight(.medium)
             Spacer()
             Text(detail)
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundColor(.secondary)
         }
     }

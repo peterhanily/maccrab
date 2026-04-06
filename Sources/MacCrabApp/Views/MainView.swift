@@ -73,7 +73,7 @@ struct MainView: View {
         } detail: {
             switch selectedSection {
             case .overview:
-                OverviewDashboard(appState: appState)
+                OverviewDashboard(appState: appState, selectedSection: $selectedSection)
             case .alerts:
                 AlertDashboard(appState: appState)
             case .events:
@@ -93,7 +93,7 @@ struct MainView: View {
             case .docs:
                 DocsView()
             case nil:
-                OverviewDashboard(appState: appState)
+                OverviewDashboard(appState: appState, selectedSection: $selectedSection)
             }
         }
         .frame(minWidth: 950, minHeight: 600)
