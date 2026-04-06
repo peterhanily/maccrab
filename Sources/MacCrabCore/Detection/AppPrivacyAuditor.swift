@@ -4,6 +4,7 @@ import os.log
 /// Audits application network behavior to identify privacy risks.
 /// Tracks which apps contact which domains, how often, and how much data.
 public actor AppPrivacyAuditor {
+    public init() {}
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "privacy-audit")
 
     public struct AppProfile: Sendable {

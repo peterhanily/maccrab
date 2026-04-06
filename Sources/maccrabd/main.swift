@@ -353,6 +353,55 @@ struct MacCrabDaemon {
             print("Prevention layer: STANDBY (set MACCRAB_PREVENTION=1 to enable)")
         }
 
+        // === USER SECURITY FEATURES ===
+
+        // Security scorer — 0-100 system security posture score
+        let securityScorer = SecurityScorer()
+        let initialScore = await securityScorer.calculate()
+        print("Security score: \(initialScore.totalScore)/100 (\(initialScore.grade))\(initialScore.recommendations.isEmpty ? "" : " — \(initialScore.recommendations.first ?? "")")")
+
+        // App privacy auditor — tracks which apps phone home
+        let appPrivacyAuditor = AppPrivacyAuditor()
+
+        // Vulnerability scanner — checks installed apps against CVE database
+        let vulnScanner = VulnerabilityScanner()
+
+        // Panic button — one-click emergency containment
+        let panicButton = PanicButton()
+
+        // Travel mode — heightened security for untrusted networks
+        let travelMode = TravelMode()
+
+        // Daily security digest generator
+        let securityDigest = SecurityDigest()
+
+        // Notification integrations (Slack, Teams, Discord, PagerDuty)
+        let notificationIntegrations = NotificationIntegrations(configPath: supportDir + "/notifications.json")
+        let configuredNotifs = await notificationIntegrations.configuredServices()
+        if !configuredNotifs.isEmpty {
+            print("Notification integrations: \(configuredNotifs.joined(separator: ", "))")
+        }
+
+        // MISP threat intel integration
+        let mispClient = MISPClient()
+        if await mispClient.isConfigured {
+            print("MISP integration: configured")
+            // Fetch IOCs from MISP and feed into threat intel
+            let mispIOCs = await mispClient.fetchCategorized(lastDays: 7)
+            if !mispIOCs.ips.isEmpty || !mispIOCs.domains.isEmpty || !mispIOCs.hashes.isEmpty {
+                await threatIntel.addCustomIOCs(hashes: mispIOCs.hashes, ips: mispIOCs.ips, domains: mispIOCs.domains)
+                print("  MISP import: \(mispIOCs.ips.count) IPs, \(mispIOCs.domains.count) domains, \(mispIOCs.hashes.count) hashes")
+            }
+        }
+
+        // Security tool integrations (read-only detection of other tools)
+        let toolIntegrations = SecurityToolIntegrations()
+        let installedTools = await toolIntegrations.detectInstalledTools()
+        if !installedTools.isEmpty {
+            let running = installedTools.filter(\.isRunning).map(\.name)
+            print("Security tools detected: \(installedTools.map(\.name).joined(separator: ", "))\(running.isEmpty ? "" : " (running: \(running.joined(separator: ", ")))")")
+        }
+
         // Notarization checker — verifies notarization status of executed binaries
         let notarizationChecker = NotarizationChecker()
 
@@ -1039,8 +1088,44 @@ struct MacCrabDaemon {
         }
         forensicTimer.resume()
 
-        // Use CDHash extractor to enrich process info for already-running processes
-        _ = cdhashExtractor  // Available for on-demand enrichment via maccrabctl
+        // Hourly: security score refresh, vuln scan, privacy audit purge, digest
+        let hourlyTimer = DispatchSource.makeTimerSource(queue: .global())
+        hourlyTimer.schedule(deadline: .now() + 3600, repeating: 3600)
+        hourlyTimer.setEventHandler {
+            Task {
+                // Refresh security score
+                let score = await securityScorer.calculate()
+                logger.info("Security score: \(score.totalScore)/100 (\(score.grade))")
+
+                // Vulnerability scan
+                let vulns = await vulnScanner.scanInstalledApps()
+                for vuln in vulns {
+                    for v in vuln.vulnerabilities where v.severity == "critical" || v.severity == "high" {
+                        logger.warning("Vulnerable app: \(vuln.appName) v\(vuln.installedVersion) — \(v.cveId)")
+                    }
+                }
+
+                // Purge old privacy audit data
+                await appPrivacyAuditor.purge(olderThan: 86400)
+
+                // MISP sync (if configured)
+                if await mispClient.isConfigured {
+                    let iocs = await mispClient.fetchCategorized(lastDays: 1)
+                    if !iocs.ips.isEmpty || !iocs.domains.isEmpty {
+                        await threatIntel.addCustomIOCs(hashes: iocs.hashes, ips: iocs.ips, domains: iocs.domains)
+                    }
+                }
+            }
+        }
+        hourlyTimer.resume()
+
+        // Keep references alive for on-demand use
+        _ = cdhashExtractor
+        _ = panicButton
+        _ = travelMode
+        _ = securityDigest
+        _ = vulnScanner
+        _ = toolIntegrations
 
         // DNS event processing task
         Task {
@@ -1622,6 +1707,17 @@ struct MacCrabDaemon {
                 }
             }
 
+            // === App privacy audit: track network connections per process ===
+            if let net = enrichedEvent.network {
+                await appPrivacyAuditor.recordConnection(
+                    processName: enrichedEvent.process.name,
+                    processPath: enrichedEvent.process.executable,
+                    domain: net.destinationHostname,
+                    ip: net.destinationIp,
+                    port: net.destinationPort
+                )
+            }
+
             // Check process hash, network IPs, and domains against known-bad IOCs
             if let net = enrichedEvent.network {
                 if await threatIntel.isIPMalicious(net.destinationIp) {
@@ -1870,6 +1966,16 @@ struct MacCrabDaemon {
                     try? await alertStore.insert(alert: alert)
                     await notifier.notify(alert: alert)
                     await responseEngine.execute(alert: alert, event: enrichedEvent)
+
+                    // Send to external notification integrations (Slack, Teams, etc.)
+                    await notificationIntegrations.sendAlert(
+                        ruleTitle: alert.ruleTitle,
+                        severity: match.severity.rawValue,
+                        processName: alert.processName,
+                        processPath: alert.processPath,
+                        description: alert.description ?? "",
+                        mitreTechniques: alert.mitreTechniques
+                    )
 
                     // Buffer for fleet telemetry
                     if let fleet = fleetClient {

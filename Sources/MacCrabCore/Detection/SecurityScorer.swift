@@ -5,6 +5,7 @@ import os.log
 /// Calculates a real-time security score (0-100) for the system.
 /// Higher is better. Factors in system config, runtime behavior, and hygiene.
 public actor SecurityScorer {
+    public init() {}
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "security-score")
 
     public struct ScoreResult: Sendable {
