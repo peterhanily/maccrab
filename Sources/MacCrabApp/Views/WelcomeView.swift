@@ -99,40 +99,20 @@ struct WelcomeView: View {
                 .font(.headline)
                 .foregroundColor(.secondary)
 
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    ForEach(languages, id: \.code) { lang in
-                        Button {
-                            selectedLanguage = lang.code
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(lang.native)
-                                        .font(.callout).fontWeight(.medium)
-                                    Text(lang.name)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                if selectedLanguage == lang.code {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.accentColor)
-                                }
-                            }
-                            .padding(8)
-                            .background(selectedLanguage == lang.code ? Color.accentColor.opacity(0.1) : Color.clear)
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(selectedLanguage == lang.code ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
+            List(languages, id: \.code, selection: $selectedLanguage) { lang in
+                HStack {
+                    Text(lang.native)
+                        .font(.callout).fontWeight(.medium)
+                    Spacer()
+                    Text(lang.name)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .padding(.horizontal)
+                .tag(lang.code)
+                .contentShape(Rectangle())
             }
-            .frame(height: 220)
+            .listStyle(.bordered)
+            .frame(height: 240)
         }
         .padding(.horizontal, 20)
     }
