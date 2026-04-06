@@ -99,30 +99,25 @@ struct MainView: View {
         .frame(minWidth: 950, minHeight: 600)
         .toolbar {
             ToolbarItem(placement: .automatic) {
-                HStack(spacing: 12) {
-                    // Connection status
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(appState.isConnected ? Color.green : Color.red)
-                            .frame(width: 8, height: 8)
-                        Text(appState.isConnected ? "Connected" : "Disconnected")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    // Events per second
-                    Text("\(appState.eventsPerSecond) events/sec")
-                        .font(.caption)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(appState.isConnected ? Color.green : Color.red)
+                        .frame(width: 7, height: 7)
+                    Text(appState.isConnected ? "\(appState.eventsPerSecond) ev/s" : "Offline")
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)
-
-                    Button {
-                        Task { await appState.refresh() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .accessibilityLabel("Refresh")
-                    .keyboardShortcut("r", modifiers: .command)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    Task { await appState.refresh() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .accessibilityLabel("Refresh")
+                .keyboardShortcut("r", modifiers: .command)
             }
         }
     }
