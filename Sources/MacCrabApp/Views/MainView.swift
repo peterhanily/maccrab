@@ -91,12 +91,19 @@ struct MainView: View {
                     .tag(AppState.Tab.threatIntel)
                     .keyboardShortcut("7", modifiers: .command)
 
+                IntegrationsView(appState: appState)
+                    .tabItem {
+                        Label("Integrations", systemImage: "puzzlepiece.extension")
+                    }
+                    .tag(AppState.Tab.integrations)
+                    .keyboardShortcut("8", modifiers: .command)
+
                 DocsView()
                     .tabItem {
                         Label(String(localized: "tabs.docs", defaultValue: "Docs"), systemImage: "book")
                     }
                     .tag(AppState.Tab.docs)
-                    .keyboardShortcut("8", modifiers: .command)
+                    .keyboardShortcut("9", modifiers: .command)
             }
         }
         .frame(minWidth: 900, minHeight: 600)

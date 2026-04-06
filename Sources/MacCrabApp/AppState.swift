@@ -25,7 +25,7 @@ final class AppState: ObservableObject {
     @Published var rules: [RuleViewModel] = []
     @Published var tccEvents: [TCCEventViewModel] = []
 
-    enum Tab: String, CaseIterable { case alerts, events, rules, tcc, aiGuard, prevention, threatIntel, docs, settings }
+    enum Tab: String, CaseIterable { case alerts, events, rules, tcc, aiGuard, prevention, threatIntel, integrations, docs, settings }
 
     /// Threat intel stats for the dashboard
     struct ThreatIntelStats {
