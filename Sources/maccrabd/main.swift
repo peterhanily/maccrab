@@ -387,6 +387,16 @@ struct MacCrabDaemon {
             print("Notification integrations: \(configuredNotifs.joined(separator: ", "))")
         }
 
+        // Alert exporter — multi-format export (SARIF, CEF, CSV, JSON, STIX)
+        let alertExporter = AlertExporter()
+
+        // Scheduled reports — daily digest + weekly HTML report
+        let scheduledReports = ScheduledReports(supportDir: supportDir)
+        let reportSchedule = await scheduledReports.getSchedule()
+        if reportSchedule.dailyDigestEnabled || reportSchedule.weeklyReportEnabled {
+            print("Scheduled reports: daily=\(reportSchedule.dailyDigestEnabled), weekly=\(reportSchedule.weeklyReportEnabled)")
+        }
+
         // MISP threat intel integration
         let mispClient = MISPClient()
         if await mispClient.isConfigured {
@@ -1120,6 +1130,25 @@ struct MacCrabDaemon {
                         await threatIntel.addCustomIOCs(hashes: iocs.hashes, ips: iocs.ips, domains: iocs.domains)
                     }
                 }
+
+                // Scheduled reports — daily digest + weekly HTML report
+                let recentAlerts = (try? await alertStore.alerts(
+                    since: Date().addingTimeInterval(-7 * 86400),
+                    limit: 10000
+                )) ?? []
+                let alertTuples = recentAlerts.map { a in
+                    (ruleTitle: a.ruleTitle, severity: a.severity.rawValue,
+                     processName: a.processName ?? "unknown", timestamp: a.timestamp)
+                }
+                let alertTotal = (try? await alertStore.count()) ?? 0
+                await scheduledReports.checkAndGenerate(
+                    alerts: alertTuples,
+                    eventCount: alertTotal,
+                    securityScore: score.totalScore,
+                    reportGenerator: reportGenerator,
+                    digestGenerator: securityDigest,
+                    notificationIntegrations: notificationIntegrations
+                )
             }
         }
         hourlyTimer.resume()
@@ -1131,6 +1160,8 @@ struct MacCrabDaemon {
         _ = securityDigest
         _ = vulnScanner
         _ = toolIntegrations
+        _ = alertExporter
+        _ = scheduledReports
 
         // DNS event processing task
         Task {

@@ -2,6 +2,7 @@
 // MacCrabApp
 
 import SwiftUI
+import MacCrabCore
 
 // MARK: - AlertDashboard
 
@@ -13,6 +14,7 @@ struct AlertDashboard: View {
     @State private var selectedAlert: AlertViewModel? = nil
     @State private var suppressedAlertName: String?
     @State private var showUndoToast = false
+    @State private var exportInProgress = false
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     private var filteredAlerts: [AlertViewModel] {
@@ -79,6 +81,23 @@ struct AlertDashboard: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(minWidth: 150, idealWidth: 200, maxWidth: 300)
                     .accessibilityLabel("Search alerts")
+
+                Menu {
+                    Button("JSON") { exportAlerts(format: .json) }
+                    Button("CSV") { exportAlerts(format: .csv) }
+                    Button("SARIF (GitHub)") { exportAlerts(format: .sarif) }
+                    Button("CEF (ArcSight)") { exportAlerts(format: .cef) }
+                    Button("LEEF (QRadar)") { exportAlerts(format: .leef) }
+                    Button("STIX 2.1") { exportAlerts(format: .stix) }
+                    Divider()
+                    Button("HTML Report") { exportHTMLReport() }
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 80)
+                .disabled(filteredAlerts.isEmpty || exportInProgress)
+                .accessibilityLabel("Export alerts")
             }
             .padding()
 
@@ -164,6 +183,80 @@ struct AlertDashboard: View {
         }
         .task {
             await appState.loadAlerts()
+        }
+    }
+
+    // MARK: - Export Functions
+
+    private func exportAlerts(format: AlertExporter.ExportFormat) {
+        exportInProgress = true
+        Task {
+            let exporter = AlertExporter()
+            let exportable = filteredAlerts.map { alert in
+                AlertExporter.ExportableAlert(
+                    id: alert.id,
+                    timestamp: alert.timestamp,
+                    ruleId: alert.id, // Use alert id as ruleId fallback
+                    ruleTitle: alert.ruleTitle,
+                    severity: alert.severity.rawValue,
+                    processName: alert.processName,
+                    processPath: alert.processPath,
+                    description: alert.description,
+                    mitreTactics: "",
+                    mitreTechniques: alert.mitreTechniques
+                )
+            }
+            let content = await exporter.export(alerts: exportable, format: format)
+            let ext = format.fileExtension
+
+            await MainActor.run {
+                let panel = NSSavePanel()
+                panel.title = "Export Alerts"
+                panel.nameFieldStringValue = "maccrab-alerts.\(ext)"
+                panel.allowedContentTypes = [.data]
+                panel.canCreateDirectories = true
+
+                if panel.runModal() == .OK, let url = panel.url {
+                    try? content.write(to: url, atomically: true, encoding: .utf8)
+                }
+                exportInProgress = false
+            }
+        }
+    }
+
+    private func exportHTMLReport() {
+        exportInProgress = true
+        Task {
+            let generator = ReportGenerator()
+            let alertData = filteredAlerts.map { alert in
+                Alert(
+                    id: alert.id,
+                    timestamp: alert.timestamp,
+                    ruleId: alert.id,
+                    ruleTitle: alert.ruleTitle,
+                    severity: MacCrabCore.Severity(rawValue: alert.severity.rawValue) ?? .medium,
+                    eventId: UUID().uuidString,
+                    processPath: alert.processPath,
+                    processName: alert.processName,
+                    description: alert.description,
+                    mitreTechniques: alert.mitreTechniques
+                )
+            }
+            let reportData = await generator.buildReportData(alerts: alertData)
+            let html = await generator.generateHTML(from: reportData)
+
+            await MainActor.run {
+                let panel = NSSavePanel()
+                panel.title = "Export HTML Report"
+                panel.nameFieldStringValue = "maccrab-report.html"
+                panel.allowedContentTypes = [.html]
+                panel.canCreateDirectories = true
+
+                if panel.runModal() == .OK, let url = panel.url {
+                    try? html.write(to: url, atomically: true, encoding: .utf8)
+                }
+                exportInProgress = false
+            }
         }
     }
 }
