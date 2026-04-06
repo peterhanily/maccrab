@@ -184,6 +184,11 @@ struct MacCrabDaemon {
         // Threat intelligence feed
         let threatIntel = ThreatIntelFeed(cacheDir: supportDir + "/threat_intel")
         await threatIntel.start()
+
+        // Load bundled threat intel for immediate protection (before any event collection)
+        await BundledThreatIntel.loadInto(threatIntel)
+        let bundledStats = BundledThreatIntel.stats
+        print("Bundled threat intel loaded: \(bundledStats.hashes) hashes, \(bundledStats.ips) IPs, \(bundledStats.domains) domains")
         print("Threat intel feed active (abuse.ch Feodo, URLhaus, MalwareBazaar)")
 
         // Behavioral scoring engine
