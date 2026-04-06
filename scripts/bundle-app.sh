@@ -23,6 +23,29 @@ if [ -f "$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
+# Copy localization resource bundle (SPM builds it as MacCrab_MacCrabApp.bundle)
+RESOURCE_BUNDLE=""
+for candidate in \
+    "$PROJECT_DIR/.build/arm64-apple-macosx/debug/MacCrab_MacCrabApp.bundle" \
+    "$PROJECT_DIR/.build/debug/MacCrab_MacCrabApp.bundle" \
+    "$PROJECT_DIR/.build/arm64-apple-macosx/release/MacCrab_MacCrabApp.bundle" \
+    "$PROJECT_DIR/.build/release/MacCrab_MacCrabApp.bundle"; do
+    if [ -d "$candidate" ]; then
+        RESOURCE_BUNDLE="$candidate"
+        break
+    fi
+done
+
+if [ -n "$RESOURCE_BUNDLE" ]; then
+    cp -r "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/MacCrab_MacCrabApp.bundle"
+    # Also copy lproj dirs directly into Resources for fallback
+    for lproj in "$RESOURCE_BUNDLE"/*.lproj; do
+        if [ -d "$lproj" ]; then
+            cp -r "$lproj" "$APP_BUNDLE/Contents/Resources/"
+        fi
+    done
+fi
+
 # Create Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

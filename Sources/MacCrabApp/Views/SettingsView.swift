@@ -124,6 +124,12 @@ struct SettingsView: View {
                         .accessibilityLabel("Display language")
                         .onChange(of: selectedLanguage) { newValue in
                             UserDefaults.standard.set([newValue], forKey: "AppleLanguages")
+                            UserDefaults.standard.synchronize()
+                            // Also set for the specific bundle ID
+                            if let bundleId = Bundle.main.bundleIdentifier {
+                                UserDefaults(suiteName: bundleId)?.set([newValue], forKey: "AppleLanguages")
+                                UserDefaults(suiteName: bundleId)?.synchronize()
+                            }
                         }
 
                         if languageChanged {

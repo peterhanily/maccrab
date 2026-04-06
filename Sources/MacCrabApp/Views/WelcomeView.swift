@@ -172,6 +172,11 @@ struct WelcomeView: View {
     private func applyLanguage() {
         UserDefaults.standard.set([selectedLanguage], forKey: "AppleLanguages")
         UserDefaults.standard.set(true, forKey: "hasCompletedSetup")
+        UserDefaults.standard.synchronize()
+        if let bundleId = Bundle.main.bundleIdentifier {
+            UserDefaults(suiteName: bundleId)?.set([selectedLanguage], forKey: "AppleLanguages")
+            UserDefaults(suiteName: bundleId)?.synchronize()
+        }
     }
 }
 
