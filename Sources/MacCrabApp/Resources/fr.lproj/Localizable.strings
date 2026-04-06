@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Supprimer";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Accès Initial";
+"mitre.execution" = "Exécution";
+"mitre.persistence" = "Persistance";
+"mitre.privilege_escalation" = "Élévation de Privilèges";
+"mitre.defense_evasion" = "Évasion de Défense";
+"mitre.credential_access" = "Accès aux Identifiants";
+"mitre.discovery" = "Découverte";
+"mitre.lateral_movement" = "Mouvement Latéral";
+"mitre.collection" = "Collecte";
+"mitre.command_and_control" = "Commande et Contrôle";
+"mitre.exfiltration" = "Exfiltration";
+
+/* ── Rule Categories ── */
+"category.execution" = "Exécution";
+"category.persistence" = "Persistance";
+"category.defense_evasion" = "Évasion de Défense";
+"category.credential_access" = "Accès aux Identifiants";
+"category.command_and_control" = "Commande et Contrôle";
+"category.discovery" = "Découverte";
+"category.collection" = "Collecte";
+"category.privilege_escalation" = "Élévation de Privilèges";
+"category.exfiltration" = "Exfiltration";
+"category.initial_access" = "Accès Initial";
+"category.lateral_movement" = "Mouvement Latéral";
+"category.tcc" = "Permissions TCC";
+"category.ai_safety" = "Sécurité IA";
+"category.supply_chain" = "Chaîne d'Approvisionnement";
+"category.sequences" = "Séquences d'Attaque";
+
+/* ── Event Actions ── */
+"action.exec" = "Processus Exécuté";
+"action.fork" = "Processus Dupliqué";
+"action.exit" = "Processus Terminé";
+"action.create" = "Fichier Créé";
+"action.write" = "Fichier Écrit";
+"action.rename" = "Fichier Renommé";
+"action.unlink" = "Fichier Supprimé";
+"action.connect" = "Connexion Réseau";
+"action.close_modified" = "Fichier Modifié";
+"action.kextload" = "Extension Noyau Chargée";
+"action.mmap_wx" = "Mémoire Écriture+Exécution";
+"action.setowner" = "Propriétaire Modifié";
+"action.setmode" = "Permissions Modifiées";
+"action.signal" = "Signal Envoyé";

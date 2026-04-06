@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "抑制";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "初始访问";
+"mitre.execution" = "执行";
+"mitre.persistence" = "持久化";
+"mitre.privilege_escalation" = "权限提升";
+"mitre.defense_evasion" = "防御规避";
+"mitre.credential_access" = "凭据访问";
+"mitre.discovery" = "发现";
+"mitre.lateral_movement" = "横向移动";
+"mitre.collection" = "收集";
+"mitre.command_and_control" = "命令与控制";
+"mitre.exfiltration" = "数据外泄";
+
+/* ── Rule Categories ── */
+"category.execution" = "执行";
+"category.persistence" = "持久化";
+"category.defense_evasion" = "防御规避";
+"category.credential_access" = "凭据访问";
+"category.command_and_control" = "命令与控制";
+"category.discovery" = "发现";
+"category.collection" = "收集";
+"category.privilege_escalation" = "权限提升";
+"category.exfiltration" = "数据外泄";
+"category.initial_access" = "初始访问";
+"category.lateral_movement" = "横向移动";
+"category.tcc" = "TCC权限";
+"category.ai_safety" = "AI安全";
+"category.supply_chain" = "供应链";
+"category.sequences" = "攻击序列";
+
+/* ── Event Actions ── */
+"action.exec" = "进程执行";
+"action.fork" = "进程分叉";
+"action.exit" = "进程退出";
+"action.create" = "文件创建";
+"action.write" = "文件写入";
+"action.rename" = "文件重命名";
+"action.unlink" = "文件删除";
+"action.connect" = "网络连接";
+"action.close_modified" = "文件修改";
+"action.kextload" = "内核扩展加载";
+"action.mmap_wx" = "可写+可执行内存";
+"action.setowner" = "所有权更改";
+"action.setmode" = "权限更改";
+"action.signal" = "信号发送";

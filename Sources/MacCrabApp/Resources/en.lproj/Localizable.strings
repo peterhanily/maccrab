@@ -335,3 +335,49 @@
 "settings.pagerdutyKey" = "PagerDuty Routing Key";
 "settings.noWebhooksConfigured" = "No webhook integrations configured";
 "settings.webhooksActive" = "Active: %@";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Initial Access";
+"mitre.execution" = "Execution";
+"mitre.persistence" = "Persistence";
+"mitre.privilege_escalation" = "Privilege Escalation";
+"mitre.defense_evasion" = "Defense Evasion";
+"mitre.credential_access" = "Credential Access";
+"mitre.discovery" = "Discovery";
+"mitre.lateral_movement" = "Lateral Movement";
+"mitre.collection" = "Collection";
+"mitre.command_and_control" = "Command & Control";
+"mitre.exfiltration" = "Exfiltration";
+
+/* ── Rule Categories ── */
+"category.execution" = "Execution";
+"category.persistence" = "Persistence";
+"category.defense_evasion" = "Defense Evasion";
+"category.credential_access" = "Credential Access";
+"category.command_and_control" = "Command & Control";
+"category.discovery" = "Discovery";
+"category.collection" = "Collection";
+"category.privilege_escalation" = "Privilege Escalation";
+"category.exfiltration" = "Exfiltration";
+"category.initial_access" = "Initial Access";
+"category.lateral_movement" = "Lateral Movement";
+"category.tcc" = "TCC Permissions";
+"category.ai_safety" = "AI Safety";
+"category.supply_chain" = "Supply Chain";
+"category.sequences" = "Attack Sequences";
+
+/* ── Event Actions ── */
+"action.exec" = "Process Executed";
+"action.fork" = "Process Forked";
+"action.exit" = "Process Exited";
+"action.create" = "File Created";
+"action.write" = "File Written";
+"action.rename" = "File Renamed";
+"action.unlink" = "File Deleted";
+"action.connect" = "Network Connection";
+"action.close_modified" = "File Modified";
+"action.kextload" = "Kernel Extension Loaded";
+"action.mmap_wx" = "Writable+Executable Memory";
+"action.setowner" = "Ownership Changed";
+"action.setmode" = "Permissions Changed";
+"action.signal" = "Signal Sent";

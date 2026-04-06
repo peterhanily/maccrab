@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Wycisz";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Dostęp Początkowy";
+"mitre.execution" = "Wykonanie";
+"mitre.persistence" = "Utrwalenie";
+"mitre.privilege_escalation" = "Eskalacja Uprawnień";
+"mitre.defense_evasion" = "Unikanie Obrony";
+"mitre.credential_access" = "Dostęp do Poświadczeń";
+"mitre.discovery" = "Rozpoznanie";
+"mitre.lateral_movement" = "Ruch Boczny";
+"mitre.collection" = "Zbieranie";
+"mitre.command_and_control" = "Dowodzenie i Kontrola";
+"mitre.exfiltration" = "Eksfiltracja";
+
+/* ── Rule Categories ── */
+"category.execution" = "Wykonanie";
+"category.persistence" = "Utrwalenie";
+"category.defense_evasion" = "Unikanie Obrony";
+"category.credential_access" = "Dostęp do Poświadczeń";
+"category.command_and_control" = "Dowodzenie i Kontrola";
+"category.discovery" = "Rozpoznanie";
+"category.collection" = "Zbieranie";
+"category.privilege_escalation" = "Eskalacja Uprawnień";
+"category.exfiltration" = "Eksfiltracja";
+"category.initial_access" = "Dostęp Początkowy";
+"category.lateral_movement" = "Ruch Boczny";
+"category.tcc" = "Uprawnienia TCC";
+"category.ai_safety" = "Bezpieczeństwo AI";
+"category.supply_chain" = "Łańcuch Dostaw";
+"category.sequences" = "Sekwencje Ataków";
+
+/* ── Event Actions ── */
+"action.exec" = "Proces wykonany";
+"action.fork" = "Proces rozgałęziony";
+"action.exit" = "Proces zakończony";
+"action.create" = "Plik utworzony";
+"action.write" = "Plik zapisany";
+"action.rename" = "Plik przemianowany";
+"action.unlink" = "Plik usunięty";
+"action.connect" = "Połączenie sieciowe";
+"action.close_modified" = "Plik zmodyfikowany";
+"action.kextload" = "Rozszerzenie jądra załadowane";
+"action.mmap_wx" = "Pamięć zapisywalna+wykonywalna";
+"action.setowner" = "Właściciel zmieniony";
+"action.setmode" = "Uprawnienia zmienione";
+"action.signal" = "Sygnał wysłany";

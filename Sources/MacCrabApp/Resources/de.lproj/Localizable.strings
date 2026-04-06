@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Unterdrücken";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Erstzugang";
+"mitre.execution" = "Ausführung";
+"mitre.persistence" = "Persistenz";
+"mitre.privilege_escalation" = "Rechteausweitung";
+"mitre.defense_evasion" = "Verteidigungsumgehung";
+"mitre.credential_access" = "Zugriff auf Anmeldedaten";
+"mitre.discovery" = "Erkundung";
+"mitre.lateral_movement" = "Laterale Bewegung";
+"mitre.collection" = "Sammlung";
+"mitre.command_and_control" = "Steuerung und Kontrolle";
+"mitre.exfiltration" = "Exfiltration";
+
+/* ── Rule Categories ── */
+"category.execution" = "Ausführung";
+"category.persistence" = "Persistenz";
+"category.defense_evasion" = "Verteidigungsumgehung";
+"category.credential_access" = "Zugriff auf Anmeldedaten";
+"category.command_and_control" = "Steuerung und Kontrolle";
+"category.discovery" = "Erkundung";
+"category.collection" = "Sammlung";
+"category.privilege_escalation" = "Rechteausweitung";
+"category.exfiltration" = "Exfiltration";
+"category.initial_access" = "Erstzugang";
+"category.lateral_movement" = "Laterale Bewegung";
+"category.tcc" = "TCC-Berechtigungen";
+"category.ai_safety" = "KI-Sicherheit";
+"category.supply_chain" = "Lieferkette";
+"category.sequences" = "Angriffssequenzen";
+
+/* ── Event Actions ── */
+"action.exec" = "Prozess ausgeführt";
+"action.fork" = "Prozess gegabelt";
+"action.exit" = "Prozess beendet";
+"action.create" = "Datei erstellt";
+"action.write" = "Datei geschrieben";
+"action.rename" = "Datei umbenannt";
+"action.unlink" = "Datei gelöscht";
+"action.connect" = "Netzwerkverbindung";
+"action.close_modified" = "Datei geändert";
+"action.kextload" = "Kernel-Erweiterung geladen";
+"action.mmap_wx" = "Schreib- und ausführbarer Speicher";
+"action.setowner" = "Eigentümer geändert";
+"action.setmode" = "Berechtigungen geändert";
+"action.signal" = "Signal gesendet";

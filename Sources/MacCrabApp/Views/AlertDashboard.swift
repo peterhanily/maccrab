@@ -280,7 +280,7 @@ struct AlertDetailView: View {
                 HStack {
                     HStack(spacing: 6) {
                         Circle().fill(alert.severityColor).frame(width: 10, height: 10)
-                        Text(alert.severity.label).font(.caption).fontWeight(.bold).foregroundColor(alert.severityColor)
+                        Text(RuleTranslations.translateSeverity(alert.severity.label)).font(.caption).fontWeight(.bold).foregroundColor(alert.severityColor)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(alert.severityColor.opacity(0.1))
@@ -348,7 +348,7 @@ struct AlertDetailView: View {
                 GroupBox(String(localized: "alertDetail.metadata", defaultValue: "Metadata")) {
                     VStack(alignment: .leading, spacing: 6) {
                         DetailRow(label: String(localized: "alertDetail.alertId", defaultValue: "Alert ID"), value: alert.id)
-                        DetailRow(label: String(localized: "alertDetail.severity", defaultValue: "Severity"), value: alert.severity.label)
+                        DetailRow(label: String(localized: "alertDetail.severity", defaultValue: "Severity"), value: RuleTranslations.translateSeverity(alert.severity.label))
                         DetailRow(label: String(localized: "alertDetail.status", defaultValue: "Status"), value: alert.suppressed
                             ? String(localized: "alerts.suppressed", defaultValue: "Suppressed")
                             : String(localized: "alerts.active", defaultValue: "Active"))

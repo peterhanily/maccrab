@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Подавить";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Первичный доступ";
+"mitre.execution" = "Выполнение";
+"mitre.persistence" = "Закрепление";
+"mitre.privilege_escalation" = "Повышение привилегий";
+"mitre.defense_evasion" = "Обход защиты";
+"mitre.credential_access" = "Доступ к учётным данным";
+"mitre.discovery" = "Разведка";
+"mitre.lateral_movement" = "Горизонтальное перемещение";
+"mitre.collection" = "Сбор данных";
+"mitre.command_and_control" = "Управление и контроль";
+"mitre.exfiltration" = "Эксфильтрация";
+
+/* ── Rule Categories ── */
+"category.execution" = "Выполнение";
+"category.persistence" = "Закрепление";
+"category.defense_evasion" = "Обход защиты";
+"category.credential_access" = "Доступ к учётным данным";
+"category.command_and_control" = "Управление и контроль";
+"category.discovery" = "Разведка";
+"category.collection" = "Сбор данных";
+"category.privilege_escalation" = "Повышение привилегий";
+"category.exfiltration" = "Эксфильтрация";
+"category.initial_access" = "Первичный доступ";
+"category.lateral_movement" = "Горизонтальное перемещение";
+"category.tcc" = "Разрешения TCC";
+"category.ai_safety" = "Безопасность ИИ";
+"category.supply_chain" = "Цепочка поставок";
+"category.sequences" = "Последовательности атак";
+
+/* ── Event Actions ── */
+"action.exec" = "Процесс запущен";
+"action.fork" = "Процесс разветвлён";
+"action.exit" = "Процесс завершён";
+"action.create" = "Файл создан";
+"action.write" = "Файл записан";
+"action.rename" = "Файл переименован";
+"action.unlink" = "Файл удалён";
+"action.connect" = "Сетевое соединение";
+"action.close_modified" = "Файл изменён";
+"action.kextload" = "Расширение ядра загружено";
+"action.mmap_wx" = "Записываемая+исполняемая память";
+"action.setowner" = "Владелец изменён";
+"action.setmode" = "Права изменены";
+"action.signal" = "Сигнал отправлен";

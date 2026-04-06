@@ -84,14 +84,14 @@ struct RuleBrowser: View {
                             Image(systemName: tacticIcon(for: tactic.name))
                                 .foregroundColor(.accentColor)
                                 .frame(width: 16)
-                            Text(tactic.name)
+                            Text(RuleTranslations.translateTactic(tactic.name))
                             Spacer()
                             Text("\(tactic.ruleCount)")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                         .tag(tactic.name as String?)
-                        .accessibilityLabel("\(tactic.name), \(tactic.ruleCount) rules")
+                        .accessibilityLabel("\(RuleTranslations.translateTactic(tactic.name)), \(tactic.ruleCount) rules")
                     }
                 }
             }
@@ -112,7 +112,7 @@ struct RuleBrowser: View {
                         .clipShape(Capsule())
 
                     if let tactic = selectedTactic {
-                        Text(tactic)
+                        Text(RuleTranslations.translateTactic(tactic))
                             .font(.caption)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 2)
@@ -258,7 +258,7 @@ private struct RuleDetailPanel: View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Image(systemName: "shield.fill").foregroundColor(.purple).font(.caption)
-                                Text("Tactic: \(rule.tacticName)").font(.subheadline)
+                                Text("Tactic: \(RuleTranslations.translateTactic(rule.tacticName))").font(.subheadline)
                             }
                             ForEach(rule.techniqueIds, id: \.self) { tech in
                                 HStack {
@@ -278,7 +278,7 @@ private struct RuleDetailPanel: View {
                     GroupBox(String(localized: "ruleDetail.tags", defaultValue: "Tags")) {
                         FlowLayout(spacing: 4) {
                             ForEach(rule.tags, id: \.self) { tag in
-                                Text(tag)
+                                Text(RuleTranslations.translateCategory(tag))
                                     .font(.caption2)
                                     .padding(.horizontal, 6).padding(.vertical, 2)
                                     .background(Color.accentColor.opacity(0.1))
@@ -292,7 +292,7 @@ private struct RuleDetailPanel: View {
                 GroupBox(String(localized: "ruleDetail.metadata", defaultValue: "Metadata")) {
                     VStack(alignment: .leading, spacing: 6) {
                         RuleDetailRow(label: String(localized: "ruleDetail.ruleId", defaultValue: "Rule ID"), value: rule.id)
-                        RuleDetailRow(label: String(localized: "ruleDetail.severity", defaultValue: "Severity"), value: rule.level.capitalized)
+                        RuleDetailRow(label: String(localized: "ruleDetail.severity", defaultValue: "Severity"), value: RuleTranslations.translateSeverity(rule.level))
                         RuleDetailRow(label: String(localized: "ruleDetail.status", defaultValue: "Status"), value: rule.enabled
                             ? String(localized: "rules.enabled", defaultValue: "Enabled")
                             : String(localized: "rules.disabled", defaultValue: "Disabled"))
@@ -384,7 +384,7 @@ private struct SeverityLabel: View {
         }
     }
     var body: some View {
-        Text(level.capitalized)
+        Text(RuleTranslations.translateSeverity(level))
             .font(.caption).fontWeight(.bold)
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(color.opacity(0.15))

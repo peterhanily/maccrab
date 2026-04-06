@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "抑制";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "初期アクセス";
+"mitre.execution" = "実行";
+"mitre.persistence" = "永続化";
+"mitre.privilege_escalation" = "権限昇格";
+"mitre.defense_evasion" = "防御回避";
+"mitre.credential_access" = "認証情報アクセス";
+"mitre.discovery" = "探索";
+"mitre.lateral_movement" = "横移動";
+"mitre.collection" = "収集";
+"mitre.command_and_control" = "コマンド＆コントロール";
+"mitre.exfiltration" = "持ち出し";
+
+/* ── Rule Categories ── */
+"category.execution" = "実行";
+"category.persistence" = "永続化";
+"category.defense_evasion" = "防御回避";
+"category.credential_access" = "認証情報アクセス";
+"category.command_and_control" = "コマンド＆コントロール";
+"category.discovery" = "探索";
+"category.collection" = "収集";
+"category.privilege_escalation" = "権限昇格";
+"category.exfiltration" = "持ち出し";
+"category.initial_access" = "初期アクセス";
+"category.lateral_movement" = "横移動";
+"category.tcc" = "TCC権限";
+"category.ai_safety" = "AI安全性";
+"category.supply_chain" = "サプライチェーン";
+"category.sequences" = "攻撃シーケンス";
+
+/* ── Event Actions ── */
+"action.exec" = "プロセス実行";
+"action.fork" = "プロセスフォーク";
+"action.exit" = "プロセス終了";
+"action.create" = "ファイル作成";
+"action.write" = "ファイル書き込み";
+"action.rename" = "ファイル名変更";
+"action.unlink" = "ファイル削除";
+"action.connect" = "ネットワーク接続";
+"action.close_modified" = "ファイル変更";
+"action.kextload" = "カーネル拡張読み込み";
+"action.mmap_wx" = "書き込み+実行可能メモリ";
+"action.setowner" = "所有者変更";
+"action.setmode" = "権限変更";
+"action.signal" = "シグナル送信";

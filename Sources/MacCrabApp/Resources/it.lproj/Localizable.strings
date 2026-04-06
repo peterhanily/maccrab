@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Sopprimi";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Accesso Iniziale";
+"mitre.execution" = "Esecuzione";
+"mitre.persistence" = "Persistenza";
+"mitre.privilege_escalation" = "Escalation dei Privilegi";
+"mitre.defense_evasion" = "Evasione della Difesa";
+"mitre.credential_access" = "Accesso alle Credenziali";
+"mitre.discovery" = "Scoperta";
+"mitre.lateral_movement" = "Movimento Laterale";
+"mitre.collection" = "Raccolta";
+"mitre.command_and_control" = "Comando e Controllo";
+"mitre.exfiltration" = "Esfiltrazione";
+
+/* ── Rule Categories ── */
+"category.execution" = "Esecuzione";
+"category.persistence" = "Persistenza";
+"category.defense_evasion" = "Evasione della Difesa";
+"category.credential_access" = "Accesso alle Credenziali";
+"category.command_and_control" = "Comando e Controllo";
+"category.discovery" = "Scoperta";
+"category.collection" = "Raccolta";
+"category.privilege_escalation" = "Escalation dei Privilegi";
+"category.exfiltration" = "Esfiltrazione";
+"category.initial_access" = "Accesso Iniziale";
+"category.lateral_movement" = "Movimento Laterale";
+"category.tcc" = "Permessi TCC";
+"category.ai_safety" = "Sicurezza IA";
+"category.supply_chain" = "Catena di Fornitura";
+"category.sequences" = "Sequenze di Attacco";
+
+/* ── Event Actions ── */
+"action.exec" = "Processo Eseguito";
+"action.fork" = "Processo Duplicato";
+"action.exit" = "Processo Terminato";
+"action.create" = "File Creato";
+"action.write" = "File Scritto";
+"action.rename" = "File Rinominato";
+"action.unlink" = "File Eliminato";
+"action.connect" = "Connessione di Rete";
+"action.close_modified" = "File Modificato";
+"action.kextload" = "Estensione Kernel Caricata";
+"action.mmap_wx" = "Memoria Scrivibile+Eseguibile";
+"action.setowner" = "Proprietario Modificato";
+"action.setmode" = "Permessi Modificati";
+"action.signal" = "Segnale Inviato";

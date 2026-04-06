@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Onderdrukken";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Eerste Toegang";
+"mitre.execution" = "Uitvoering";
+"mitre.persistence" = "Persistentie";
+"mitre.privilege_escalation" = "Rechtenescalatie";
+"mitre.defense_evasion" = "Verdedigingsontwijking";
+"mitre.credential_access" = "Toegang tot Referenties";
+"mitre.discovery" = "Verkenning";
+"mitre.lateral_movement" = "Laterale Beweging";
+"mitre.collection" = "Verzameling";
+"mitre.command_and_control" = "Commando en Controle";
+"mitre.exfiltration" = "Exfiltratie";
+
+/* ── Rule Categories ── */
+"category.execution" = "Uitvoering";
+"category.persistence" = "Persistentie";
+"category.defense_evasion" = "Verdedigingsontwijking";
+"category.credential_access" = "Toegang tot Referenties";
+"category.command_and_control" = "Commando en Controle";
+"category.discovery" = "Verkenning";
+"category.collection" = "Verzameling";
+"category.privilege_escalation" = "Rechtenescalatie";
+"category.exfiltration" = "Exfiltratie";
+"category.initial_access" = "Eerste Toegang";
+"category.lateral_movement" = "Laterale Beweging";
+"category.tcc" = "TCC-rechten";
+"category.ai_safety" = "AI-veiligheid";
+"category.supply_chain" = "Toeleveringsketen";
+"category.sequences" = "Aanvalssequenties";
+
+/* ── Event Actions ── */
+"action.exec" = "Proces uitgevoerd";
+"action.fork" = "Proces gevorkt";
+"action.exit" = "Proces beëindigd";
+"action.create" = "Bestand aangemaakt";
+"action.write" = "Bestand geschreven";
+"action.rename" = "Bestand hernoemd";
+"action.unlink" = "Bestand verwijderd";
+"action.connect" = "Netwerkverbinding";
+"action.close_modified" = "Bestand gewijzigd";
+"action.kextload" = "Kernelextensie geladen";
+"action.mmap_wx" = "Schrijfbaar+uitvoerbaar geheugen";
+"action.setowner" = "Eigenaar gewijzigd";
+"action.setmode" = "Rechten gewijzigd";
+"action.signal" = "Signaal verzonden";

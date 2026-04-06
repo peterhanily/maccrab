@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "抑制";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "初始存取";
+"mitre.execution" = "執行";
+"mitre.persistence" = "持久化";
+"mitre.privilege_escalation" = "權限提升";
+"mitre.defense_evasion" = "防禦規避";
+"mitre.credential_access" = "憑證存取";
+"mitre.discovery" = "探索";
+"mitre.lateral_movement" = "橫向移動";
+"mitre.collection" = "收集";
+"mitre.command_and_control" = "命令與控制";
+"mitre.exfiltration" = "資料外洩";
+
+/* ── Rule Categories ── */
+"category.execution" = "執行";
+"category.persistence" = "持久化";
+"category.defense_evasion" = "防禦規避";
+"category.credential_access" = "憑證存取";
+"category.command_and_control" = "命令與控制";
+"category.discovery" = "探索";
+"category.collection" = "收集";
+"category.privilege_escalation" = "權限提升";
+"category.exfiltration" = "資料外洩";
+"category.initial_access" = "初始存取";
+"category.lateral_movement" = "橫向移動";
+"category.tcc" = "TCC 權限";
+"category.ai_safety" = "AI 安全";
+"category.supply_chain" = "供應鏈";
+"category.sequences" = "攻擊序列";
+
+/* ── Event Actions ── */
+"action.exec" = "程序已執行";
+"action.fork" = "程序已分叉";
+"action.exit" = "程序已結束";
+"action.create" = "檔案已建立";
+"action.write" = "檔案已寫入";
+"action.rename" = "檔案已重新命名";
+"action.unlink" = "檔案已刪除";
+"action.connect" = "網路連線";
+"action.close_modified" = "檔案已修改";
+"action.kextload" = "核心延伸已載入";
+"action.mmap_wx" = "可寫入+可執行記憶體";
+"action.setowner" = "擁有者已變更";
+"action.setmode" = "權限已變更";
+"action.signal" = "訊號已傳送";

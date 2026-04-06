@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "억제";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "초기 접근";
+"mitre.execution" = "실행";
+"mitre.persistence" = "지속성";
+"mitre.privilege_escalation" = "권한 상승";
+"mitre.defense_evasion" = "방어 회피";
+"mitre.credential_access" = "자격 증명 접근";
+"mitre.discovery" = "탐색";
+"mitre.lateral_movement" = "측면 이동";
+"mitre.collection" = "수집";
+"mitre.command_and_control" = "명령 및 제어";
+"mitre.exfiltration" = "유출";
+
+/* ── Rule Categories ── */
+"category.execution" = "실행";
+"category.persistence" = "지속성";
+"category.defense_evasion" = "방어 회피";
+"category.credential_access" = "자격 증명 접근";
+"category.command_and_control" = "명령 및 제어";
+"category.discovery" = "탐색";
+"category.collection" = "수집";
+"category.privilege_escalation" = "권한 상승";
+"category.exfiltration" = "유출";
+"category.initial_access" = "초기 접근";
+"category.lateral_movement" = "측면 이동";
+"category.tcc" = "TCC 권한";
+"category.ai_safety" = "AI 안전";
+"category.supply_chain" = "공급망";
+"category.sequences" = "공격 시퀀스";
+
+/* ── Event Actions ── */
+"action.exec" = "프로세스 실행됨";
+"action.fork" = "프로세스 포크됨";
+"action.exit" = "프로세스 종료됨";
+"action.create" = "파일 생성됨";
+"action.write" = "파일 기록됨";
+"action.rename" = "파일 이름 변경됨";
+"action.unlink" = "파일 삭제됨";
+"action.connect" = "네트워크 연결";
+"action.close_modified" = "파일 수정됨";
+"action.kextload" = "커널 확장 로드됨";
+"action.mmap_wx" = "쓰기+실행 가능 메모리";
+"action.setowner" = "소유권 변경됨";
+"action.setmode" = "권한 변경됨";
+"action.signal" = "시그널 전송됨";

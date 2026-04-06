@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Dölj";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Första åtkomst";
+"mitre.execution" = "Exekvering";
+"mitre.persistence" = "Persistens";
+"mitre.privilege_escalation" = "Behörighetseskalering";
+"mitre.defense_evasion" = "Försvarsundvikande";
+"mitre.credential_access" = "Åtkomst till autentiseringsuppgifter";
+"mitre.discovery" = "Upptäckt";
+"mitre.lateral_movement" = "Lateral förflyttning";
+"mitre.collection" = "Insamling";
+"mitre.command_and_control" = "Kommando och kontroll";
+"mitre.exfiltration" = "Exfiltrering";
+
+/* ── Rule Categories ── */
+"category.execution" = "Exekvering";
+"category.persistence" = "Persistens";
+"category.defense_evasion" = "Försvarsundvikande";
+"category.credential_access" = "Åtkomst till autentiseringsuppgifter";
+"category.command_and_control" = "Kommando och kontroll";
+"category.discovery" = "Upptäckt";
+"category.collection" = "Insamling";
+"category.privilege_escalation" = "Behörighetseskalering";
+"category.exfiltration" = "Exfiltrering";
+"category.initial_access" = "Första åtkomst";
+"category.lateral_movement" = "Lateral förflyttning";
+"category.tcc" = "TCC-behörigheter";
+"category.ai_safety" = "AI-säkerhet";
+"category.supply_chain" = "Leveranskedja";
+"category.sequences" = "Attacksekvenser";
+
+/* ── Event Actions ── */
+"action.exec" = "Process exekverad";
+"action.fork" = "Process förgrenad";
+"action.exit" = "Process avslutad";
+"action.create" = "Fil skapad";
+"action.write" = "Fil skriven";
+"action.rename" = "Fil omdöpt";
+"action.unlink" = "Fil raderad";
+"action.connect" = "Nätverksanslutning";
+"action.close_modified" = "Fil ändrad";
+"action.kextload" = "Kärntillägg laddat";
+"action.mmap_wx" = "Skrivbart+exekverbart minne";
+"action.setowner" = "Ägare ändrad";
+"action.setmode" = "Behörigheter ändrade";
+"action.signal" = "Signal skickad";

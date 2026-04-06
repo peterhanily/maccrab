@@ -127,7 +127,7 @@ struct EventStream: View {
                         .width(min: 120, ideal: 150, max: 180)
 
                         TableColumn("Action") { event in
-                            Text(event.action)
+                            Text(RuleTranslations.translateAction(event.action))
                                 .fontWeight(.medium)
                                 .foregroundColor(event.actionColor)
                         }
@@ -234,7 +234,7 @@ private struct EventDetailPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text(event.action)
+                    Text(RuleTranslations.translateAction(event.action))
                         .font(.headline)
                         .foregroundColor(event.actionColor)
                     CategoryBadge(category: event.category)
@@ -267,7 +267,7 @@ private struct EventDetailPanel: View {
                     VStack(alignment: .leading, spacing: 6) {
                         EventDetailRow(label: "ID", value: event.id.uuidString)
                         EventDetailRow(label: "Category", value: event.category.rawValue)
-                        EventDetailRow(label: "Action", value: event.action)
+                        EventDetailRow(label: "Action", value: RuleTranslations.translateAction(event.action))
                     }.padding(4)
                 }
 

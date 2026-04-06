@@ -208,3 +208,49 @@
 
 /* ── Components ── */
 "components.suppress" = "Suprimir";
+
+/* ── MITRE ATT&CK Tactics ── */
+"mitre.initial_access" = "Acceso Inicial";
+"mitre.execution" = "Ejecución";
+"mitre.persistence" = "Persistencia";
+"mitre.privilege_escalation" = "Escalada de Privilegios";
+"mitre.defense_evasion" = "Evasión de Defensa";
+"mitre.credential_access" = "Acceso a Credenciales";
+"mitre.discovery" = "Descubrimiento";
+"mitre.lateral_movement" = "Movimiento Lateral";
+"mitre.collection" = "Recolección";
+"mitre.command_and_control" = "Comando y Control";
+"mitre.exfiltration" = "Exfiltración";
+
+/* ── Rule Categories ── */
+"category.execution" = "Ejecución";
+"category.persistence" = "Persistencia";
+"category.defense_evasion" = "Evasión de Defensa";
+"category.credential_access" = "Acceso a Credenciales";
+"category.command_and_control" = "Comando y Control";
+"category.discovery" = "Descubrimiento";
+"category.collection" = "Recolección";
+"category.privilege_escalation" = "Escalada de Privilegios";
+"category.exfiltration" = "Exfiltración";
+"category.initial_access" = "Acceso Inicial";
+"category.lateral_movement" = "Movimiento Lateral";
+"category.tcc" = "Permisos TCC";
+"category.ai_safety" = "Seguridad IA";
+"category.supply_chain" = "Cadena de Suministro";
+"category.sequences" = "Secuencias de Ataque";
+
+/* ── Event Actions ── */
+"action.exec" = "Proceso Ejecutado";
+"action.fork" = "Proceso Bifurcado";
+"action.exit" = "Proceso Finalizado";
+"action.create" = "Archivo Creado";
+"action.write" = "Archivo Escrito";
+"action.rename" = "Archivo Renombrado";
+"action.unlink" = "Archivo Eliminado";
+"action.connect" = "Conexión de Red";
+"action.close_modified" = "Archivo Modificado";
+"action.kextload" = "Extensión del Kernel Cargada";
+"action.mmap_wx" = "Memoria Escribible+Ejecutable";
+"action.setowner" = "Propietario Cambiado";
+"action.setmode" = "Permisos Cambiados";
+"action.signal" = "Señal Enviada";
