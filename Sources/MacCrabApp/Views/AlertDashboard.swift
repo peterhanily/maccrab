@@ -15,6 +15,7 @@ struct AlertDashboard: View {
     @State private var suppressedAlertName: String?
     @State private var showUndoToast = false
     @State private var exportInProgress = false
+    @State private var showSuppressionManager = false
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     private var filteredAlerts: [AlertViewModel] {
@@ -76,6 +77,18 @@ struct AlertDashboard: View {
                     .toggleStyle(.checkbox)
                     .font(.caption)
                     .accessibilityLabel("Show suppressed alerts")
+
+                if !appState.suppressionPatterns.isEmpty {
+                    Button {
+                        showSuppressionManager = true
+                    } label: {
+                        Label("Manage (\(appState.suppressionPatterns.count))", systemImage: "eye.slash.circle")
+                    }
+                    .font(.caption)
+                    .popover(isPresented: $showSuppressionManager) {
+                        SuppressionManagerView(appState: appState)
+                    }
+                }
 
                 TextField("Search...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
