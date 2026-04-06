@@ -1,0 +1,210 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Russian (ru) localization.
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "Оповещения";
+"tabs.events" = "События";
+"tabs.rules" = "Правила";
+"tabs.permissions" = "Разрешения";
+"tabs.aiGuard" = "ИИ-защита";
+"tabs.prevention" = "Предотвращение";
+"tabs.threatIntel" = "Разведка угроз";
+"tabs.integrations" = "Интеграции";
+"tabs.docs" = "Документация";
+"tabs.settings" = "Настройки";
+
+/* ── Connection status ── */
+"status.connected" = "Подключено";
+"status.disconnected" = "Отключено";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "Оповещения";
+"alerts.empty" = "Нет оповещений — всё в порядке";
+"alerts.noMatch" = "Нет оповещений, соответствующих фильтрам";
+"alerts.clearFilters" = "Сбросить фильтры";
+"alerts.suppressed" = "Подавлено";
+"alerts.active" = "Активно";
+"alerts.autoResponseConfigured" = "Автоответ настроен";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "Описание";
+"alertDetail.processDetails" = "Сведения о процессе";
+"alertDetail.mitreAttack" = "MITRE ATT&CK";
+"alertDetail.metadata" = "Метаданные";
+"alertDetail.quickActions" = "Быстрые действия";
+"alertDetail.respond" = "Реагировать";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "ID оповещения";
+"alertDetail.severity" = "Критичность";
+"alertDetail.status" = "Статус";
+"alertDetail.name" = "Имя";
+"alertDetail.path" = "Путь";
+"alertDetail.directory" = "Каталог";
+
+/* ── Quick Actions ── */
+"action.suppress" = "Подавить это";
+"action.suppressAll" = "Подавить все подобные";
+"action.kill" = "Завершить процесс";
+"action.quarantine" = "Изолировать файл";
+"action.block" = "Заблокировать назначение";
+"action.copyDetails" = "Копировать подробности";
+
+/* ── Kill/Quarantine/Block feedback ── */
+"action.kill.success" = "Процесс завершён";
+"action.kill.failure" = "Не удалось завершить процесс";
+"action.quarantine.message" = "Указанный файл будет перемещён в карантин. Файл больше не будет доступен в исходном расположении.";
+"action.quarantine.success" = "Файл помещён в карантин";
+"action.quarantine.failure" = "Не удалось изолировать файл";
+"action.block.confirm" = "Заблокировать сетевое назначение?";
+"action.block.success" = "Сетевое назначение заблокировано";
+"action.block.failure" = "Не удалось заблокировать назначение";
+
+/* ── Event Stream ── */
+"events.title" = "События";
+"events.noMatch" = "Нет событий, соответствующих текущим фильтрам";
+"events.clearFilters" = "Сбросить фильтры";
+"events.autoScroll" = "Автопрокрутка";
+"events.resume" = "Возобновить";
+"events.pause" = "Пауза";
+"events.live" = "В реальном времени";
+"events.paused" = "На паузе";
+"events.copyDetails" = "Копировать сведения о событии";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "Процесс";
+"eventDetail.detail" = "Подробности";
+"eventDetail.metadata" = "Метаданные события";
+
+/* ── Rule Browser ── */
+"rules.title" = "Правила";
+"rules.tactics" = "Тактики";
+"rules.allRules" = "Все правила";
+"rules.noMatch" = "Нет правил, соответствующих текущим фильтрам";
+"rules.createRule" = "Создать правило";
+"rules.enabled" = "Включено";
+"rules.disabled" = "Отключено";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "Описание";
+"ruleDetail.mitreAttack" = "MITRE ATT&CK";
+"ruleDetail.tags" = "Теги";
+"ruleDetail.metadata" = "Метаданные";
+"ruleDetail.responseActions" = "Действия реагирования";
+"ruleDetail.configureInActions" = "Настроить в actions.json:";
+"ruleDetail.copyDetails" = "Копировать подробности";
+"ruleDetail.openJSON" = "Открыть JSON";
+"ruleDetail.copyId" = "Копировать ID";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "Хронология разрешений TCC";
+"tcc.allServices" = "Все службы";
+"tcc.all" = "Все";
+"tcc.granted" = "Разрешено";
+"tcc.denied" = "Отказано";
+"tcc.emptyDefault" = "Изменения разрешений ещё не обнаружены";
+"tcc.noMatch" = "Нет событий TCC, соответствующих текущим фильтрам";
+"tcc.clearFilters" = "Сбросить фильтры";
+"tcc.totalEventsLabel" = "всего событий";
+
+/* ── Settings ── */
+"settings.general" = "Основные";
+"settings.notifications" = "Уведомления";
+"settings.daemon" = "Демон";
+"settings.responseActions" = "Действия реагирования";
+"settings.about" = "О программе";
+"settings.dataRetention" = "Хранение данных";
+"settings.keepEventsFor" = "Хранить события";
+"settings.retentionHelp" = "События, оповещения и базовые данные старше этого срока будут автоматически удалены.";
+"settings.uiRefresh" = "Обновление интерфейса";
+"settings.pollDaemon" = "Опрос демона каждые";
+"settings.pollHelp" = "Как часто приложение проверяет базу данных демона на наличие новых событий и оповещений.";
+"settings.startup" = "Запуск";
+"settings.launchAtLogin" = "Запускать MacCrab при входе";
+"settings.autoResponse" = "Автоответ";
+"settings.autoResponseDesc" = "Автоматически реагировать на критические угрозы";
+"settings.autoQuarantine" = "Автоизоляция вредоносных файлов";
+"settings.autoKill" = "Автозавершение вредоносных процессов";
+"settings.autoBlock" = "Автоблокировка C2-назначений";
+"settings.autoResponseNote" = "Эти действия применяются только к оповещениям КРИТИЧЕСКОЙ степени. Настройте действия для отдельных правил на вкладке «Действия реагирования».";
+"settings.macosNotifications" = "Уведомления macOS";
+"settings.showNotifications" = "Показывать уведомления об обнаруженных угрозах";
+"settings.minimumSeverity" = "Минимальная критичность:";
+"settings.severityHelp" = "Только оповещения с данной или более высокой критичностью будут вызывать уведомления macOS.";
+"settings.informational" = "Информационное";
+"settings.low" = "Низкое";
+"settings.medium" = "Среднее";
+"settings.high" = "Высокое";
+"settings.criticalOnly" = "Только критическое";
+"settings.aboutTagline" = "Локальный движок обнаружения угроз для macOS";
+"settings.aboutStats" = "7 источников событий | 8 уровней обнаружения | 241 правило";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrab активен";
+"statusBar.notRunning" = "Демон не запущен";
+"statusBar.noRecentAlerts" = "Нет недавних оповещений";
+"statusBar.recentAlerts" = "Недавние оповещения";
+"statusBar.openDashboard" = "Открыть панель...";
+"statusBar.reloadRules" = "Перезагрузить правила";
+"statusBar.refresh" = "Обновить";
+"statusBar.settings" = "Настройки...";
+"statusBar.quit" = "Завершить MacCrab";
+
+/* ── Prevention View ── */
+"prevention.title" = "Предотвращение";
+"prevention.enableAll" = "Включить все";
+"prevention.enableAllHint" = "Включает или отключает все механизмы предотвращения";
+"prevention.description" = "Активное предотвращение блокирует угрозы до нанесения ущерба. Каждый механизм можно включать и отключать отдельно.";
+"prevention.threatsBlocked" = "Угроз заблокировано";
+"prevention.domainsSinkholed" = "Доменов перенаправлено";
+"prevention.ipsBlocked" = "IP заблокировано";
+"prevention.packagesGated" = "Пакетов проверено";
+"prevention.recentActivity" = "Недавняя активность предотвращения";
+"prevention.mechanisms" = "Механизмы предотвращения";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "Разведка угроз";
+"threatIntel.sectionPicker" = "Раздел разведки угроз";
+"threatIntel.importTitle" = "Импорт пользовательских IOC";
+"threatIntel.importDesc" = "Добавьте собственные индикаторы компрометации из текстовых списков, CSV-файлов, JSON-массивов или бандлов STIX 2.1.";
+"threatIntel.iocType" = "Тип IOC";
+"threatIntel.pasteIOCs" = "Вставить IOC (по одному на строку)";
+"threatIntel.importFromText" = "Импорт из текста";
+"threatIntel.importFromTextHint" = "Импортирует вставленные IOC в базу разведки угроз";
+"threatIntel.importFromFile" = "Импорт из файла...";
+"threatIntel.importFromFileHint" = "Открывает выбор файла для импорта разведки угроз";
+"threatIntel.apiKeys" = "API-ключи";
+"threatIntel.apiKeysDesc" = "Настройте API-ключи для подключения дополнительных потоков разведки угроз.";
+
+/* ── Integrations View ── */
+"integrations.title" = "Интеграции";
+"integrations.scan" = "Сканировать";
+"integrations.scanHint" = "Поиск установленных средств защиты";
+"integrations.description" = "MacCrab обнаруживает и сопоставляет оповещения от других средств защиты macOS. Только чтение.";
+"integrations.clickScan" = "Нажмите «Сканировать» для обнаружения установленных средств защиты";
+"integrations.available" = "Доступные интеграции";
+"integrations.notInstalled" = "Не установлено";
+"integrations.running" = "Работает";
+"integrations.installed" = "Установлено";
+"integrations.export" = "Экспорт для других инструментов";
+"integrations.exportLSRules" = "Экспорт .lsrules для Little Snitch";
+"integrations.exportLSRulesHint" = "Сохраняет разведку угроз в формате Little Snitch";
+"integrations.exportCSV" = "Экспорт IOC в CSV";
+"integrations.exportCSVHint" = "Экспортирует все индикаторы компрометации в CSV-файл";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "Действия реагирования";
+"responseActions.resetDefaults" = "Сбросить по умолчанию";
+"responseActions.addRuleAction" = "Добавить действие правила";
+"responseActions.explanation" = "Действия реагирования выполняются автоматически при срабатывании правил обнаружения.";
+"responseActions.whenSeverity" = "при критичности ≥";
+
+/* ── AI Guard ── */
+"aiGuard.title" = "Активность ИИ-инструментов";
+"aiGuard.subtitle" = "Отслеживает Claude Code, Codex, OpenClaw, Cursor и их дочерние процессы";
+"aiGuard.noAlerts" = "Нет оповещений безопасности ИИ";
+"aiGuard.noAlertsDesc" = "ИИ-инструменты работают в безопасных границах";
+
+/* ── Components ── */
+"components.suppress" = "Подавить";

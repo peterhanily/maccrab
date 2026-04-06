@@ -1,0 +1,210 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Polish (pl) localization.
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "Alerty";
+"tabs.events" = "Zdarzenia";
+"tabs.rules" = "Reguły";
+"tabs.permissions" = "Uprawnienia";
+"tabs.aiGuard" = "Straż AI";
+"tabs.prevention" = "Zapobieganie";
+"tabs.threatIntel" = "Wywiad zagrożeń";
+"tabs.integrations" = "Integracje";
+"tabs.docs" = "Dokumentacja";
+"tabs.settings" = "Ustawienia";
+
+/* ── Connection status ── */
+"status.connected" = "Połączono";
+"status.disconnected" = "Rozłączono";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "Alerty";
+"alerts.empty" = "Brak alertów — wszystko w porządku";
+"alerts.noMatch" = "Brak alertów pasujących do filtrów";
+"alerts.clearFilters" = "Wyczyść filtry";
+"alerts.suppressed" = "Wyciszony";
+"alerts.active" = "Aktywny";
+"alerts.autoResponseConfigured" = "Automatyczna odpowiedź skonfigurowana";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "Opis";
+"alertDetail.processDetails" = "Szczegóły procesu";
+"alertDetail.mitreAttack" = "MITRE ATT&CK";
+"alertDetail.metadata" = "Metadane";
+"alertDetail.quickActions" = "Szybkie działania";
+"alertDetail.respond" = "Reaguj";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "ID alertu";
+"alertDetail.severity" = "Ważność";
+"alertDetail.status" = "Status";
+"alertDetail.name" = "Nazwa";
+"alertDetail.path" = "Ścieżka";
+"alertDetail.directory" = "Katalog";
+
+/* ── Quick Actions ── */
+"action.suppress" = "Wycisz ten";
+"action.suppressAll" = "Wycisz wszystkie podobne";
+"action.kill" = "Zakończ proces";
+"action.quarantine" = "Kwarantanna pliku";
+"action.block" = "Zablokuj cel";
+"action.copyDetails" = "Kopiuj szczegóły";
+
+/* ── Kill/Quarantine/Block feedback ── */
+"action.kill.success" = "Proces zakończony";
+"action.kill.failure" = "Nie udało się zakończyć procesu";
+"action.quarantine.message" = "Wskazany plik zostanie przeniesiony do kwarantanny. Plik nie będzie już dostępny w oryginalnej lokalizacji.";
+"action.quarantine.success" = "Plik poddany kwarantannie";
+"action.quarantine.failure" = "Kwarantanna nie powiodła się";
+"action.block.confirm" = "Zablokować cel sieciowy?";
+"action.block.success" = "Cel sieciowy zablokowany";
+"action.block.failure" = "Nie udało się zablokować celu";
+
+/* ── Event Stream ── */
+"events.title" = "Zdarzenia";
+"events.noMatch" = "Brak zdarzeń pasujących do bieżących filtrów";
+"events.clearFilters" = "Wyczyść filtry";
+"events.autoScroll" = "Automatyczne przewijanie";
+"events.resume" = "Wznów";
+"events.pause" = "Wstrzymaj";
+"events.live" = "Na żywo";
+"events.paused" = "Wstrzymano";
+"events.copyDetails" = "Kopiuj szczegóły zdarzenia";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "Proces";
+"eventDetail.detail" = "Szczegóły";
+"eventDetail.metadata" = "Metadane zdarzenia";
+
+/* ── Rule Browser ── */
+"rules.title" = "Reguły";
+"rules.tactics" = "Taktyki";
+"rules.allRules" = "Wszystkie reguły";
+"rules.noMatch" = "Brak reguł pasujących do bieżących filtrów";
+"rules.createRule" = "Utwórz regułę";
+"rules.enabled" = "Włączona";
+"rules.disabled" = "Wyłączona";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "Opis";
+"ruleDetail.mitreAttack" = "MITRE ATT&CK";
+"ruleDetail.tags" = "Tagi";
+"ruleDetail.metadata" = "Metadane";
+"ruleDetail.responseActions" = "Działania odpowiedzi";
+"ruleDetail.configureInActions" = "Skonfiguruj w actions.json:";
+"ruleDetail.copyDetails" = "Kopiuj szczegóły";
+"ruleDetail.openJSON" = "Otwórz JSON";
+"ruleDetail.copyId" = "Kopiuj ID";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "Oś czasu uprawnień TCC";
+"tcc.allServices" = "Wszystkie usługi";
+"tcc.all" = "Wszystkie";
+"tcc.granted" = "Przyznano";
+"tcc.denied" = "Odmówiono";
+"tcc.emptyDefault" = "Nie wykryto jeszcze zmian uprawnień";
+"tcc.noMatch" = "Brak zdarzeń TCC pasujących do bieżących filtrów";
+"tcc.clearFilters" = "Wyczyść filtry";
+"tcc.totalEventsLabel" = "łączna liczba zdarzeń";
+
+/* ── Settings ── */
+"settings.general" = "Ogólne";
+"settings.notifications" = "Powiadomienia";
+"settings.daemon" = "Demon";
+"settings.responseActions" = "Działania odpowiedzi";
+"settings.about" = "O programie";
+"settings.dataRetention" = "Przechowywanie danych";
+"settings.keepEventsFor" = "Przechowuj zdarzenia przez";
+"settings.retentionHelp" = "Zdarzenia, alerty i dane bazowe starsze niż ten okres zostaną automatycznie usunięte.";
+"settings.uiRefresh" = "Odświeżanie interfejsu";
+"settings.pollDaemon" = "Odpytuj demona co";
+"settings.pollHelp" = "Jak często aplikacja sprawdza bazę danych demona pod kątem nowych zdarzeń i alertów.";
+"settings.startup" = "Uruchamianie";
+"settings.launchAtLogin" = "Uruchom MacCrab przy logowaniu";
+"settings.autoResponse" = "Automatyczna odpowiedź";
+"settings.autoResponseDesc" = "Automatycznie reaguj na krytyczne zagrożenia";
+"settings.autoQuarantine" = "Automatyczna kwarantanna złośliwych plików";
+"settings.autoKill" = "Automatyczne kończenie złośliwych procesów";
+"settings.autoBlock" = "Automatyczne blokowanie celów C2";
+"settings.autoResponseNote" = "Te działania dotyczą tylko alertów o KRYTYCZNEJ ważności. Skonfiguruj działania dla poszczególnych reguł w zakładce Działania odpowiedzi.";
+"settings.macosNotifications" = "Powiadomienia macOS";
+"settings.showNotifications" = "Pokaż powiadomienia o wykryciu zagrożeń";
+"settings.minimumSeverity" = "Minimalna ważność:";
+"settings.severityHelp" = "Tylko alerty o tej lub wyższej ważności wywołają powiadomienie macOS.";
+"settings.informational" = "Informacyjny";
+"settings.low" = "Niski";
+"settings.medium" = "Średni";
+"settings.high" = "Wysoki";
+"settings.criticalOnly" = "Tylko krytyczny";
+"settings.aboutTagline" = "Lokalny silnik wykrywania zagrożeń macOS";
+"settings.aboutStats" = "7 źródeł zdarzeń | 8 warstw wykrywania | 241 reguł";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrab aktywny";
+"statusBar.notRunning" = "Demon nie działa";
+"statusBar.noRecentAlerts" = "Brak ostatnich alertów";
+"statusBar.recentAlerts" = "Ostatnie alerty";
+"statusBar.openDashboard" = "Otwórz panel...";
+"statusBar.reloadRules" = "Przeładuj reguły";
+"statusBar.refresh" = "Odśwież";
+"statusBar.settings" = "Ustawienia...";
+"statusBar.quit" = "Zakończ MacCrab";
+
+/* ── Prevention View ── */
+"prevention.title" = "Zapobieganie";
+"prevention.enableAll" = "Włącz wszystkie";
+"prevention.enableAllHint" = "Włącza lub wyłącza wszystkie mechanizmy zapobiegania";
+"prevention.description" = "Aktywne zapobieganie blokuje zagrożenia zanim wyrządzą szkody. Każdy mechanizm można włączać i wyłączać indywidualnie.";
+"prevention.threatsBlocked" = "Zagrożenia zablokowane";
+"prevention.domainsSinkholed" = "Domeny przekierowane";
+"prevention.ipsBlocked" = "Adresy IP zablokowane";
+"prevention.packagesGated" = "Pakiety skontrolowane";
+"prevention.recentActivity" = "Ostatnia aktywność zapobiegania";
+"prevention.mechanisms" = "Mechanizmy zapobiegania";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "Wywiad zagrożeń";
+"threatIntel.sectionPicker" = "Sekcja wywiadu zagrożeń";
+"threatIntel.importTitle" = "Importuj niestandardowe IOC";
+"threatIntel.importDesc" = "Dodaj własne wskaźniki kompromitacji z list tekstowych, plików CSV, tablic JSON lub pakietów STIX 2.1.";
+"threatIntel.iocType" = "Typ IOC";
+"threatIntel.pasteIOCs" = "Wklej IOC (jeden na linię)";
+"threatIntel.importFromText" = "Importuj z tekstu";
+"threatIntel.importFromTextHint" = "Importuje wklejone IOC do bazy wywiadu zagrożeń";
+"threatIntel.importFromFile" = "Importuj z pliku...";
+"threatIntel.importFromFileHint" = "Otwiera wybór pliku do importu wywiadu zagrożeń";
+"threatIntel.apiKeys" = "Klucze API";
+"threatIntel.apiKeysDesc" = "Skonfiguruj klucze API, aby włączyć dodatkowe źródła wywiadu zagrożeń.";
+
+/* ── Integrations View ── */
+"integrations.title" = "Integracje";
+"integrations.scan" = "Skanuj";
+"integrations.scanHint" = "Skanuje w poszukiwaniu zainstalowanych narzędzi bezpieczeństwa";
+"integrations.description" = "MacCrab wykrywa i koreluje alerty z innych narzędzi bezpieczeństwa macOS. Tylko do odczytu.";
+"integrations.clickScan" = "Kliknij Skanuj, aby wykryć zainstalowane narzędzia bezpieczeństwa";
+"integrations.available" = "Dostępne integracje";
+"integrations.notInstalled" = "Nie zainstalowane";
+"integrations.running" = "Działa";
+"integrations.installed" = "Zainstalowane";
+"integrations.export" = "Eksportuj dla innych narzędzi";
+"integrations.exportLSRules" = "Eksportuj .lsrules dla Little Snitch";
+"integrations.exportLSRulesHint" = "Zapisuje wywiad zagrożeń w formacie Little Snitch";
+"integrations.exportCSV" = "Eksportuj IOC jako CSV";
+"integrations.exportCSVHint" = "Eksportuje wszystkie wskaźniki kompromitacji jako plik CSV";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "Działania odpowiedzi";
+"responseActions.resetDefaults" = "Przywróć domyślne";
+"responseActions.addRuleAction" = "Dodaj działanie reguły";
+"responseActions.explanation" = "Działania odpowiedzi wykonują się automatycznie po wyzwoleniu reguł wykrywania.";
+"responseActions.whenSeverity" = "przy ważności ≥";
+
+/* ── AI Guard ── */
+"aiGuard.title" = "Aktywność narzędzi AI";
+"aiGuard.subtitle" = "Monitoruje Claude Code, Codex, OpenClaw, Cursor i ich procesy potomne";
+"aiGuard.noAlerts" = "Brak alertów bezpieczeństwa AI";
+"aiGuard.noAlertsDesc" = "Narzędzia AI działają w bezpiecznych granicach";
+
+/* ── Components ── */
+"components.suppress" = "Wycisz";

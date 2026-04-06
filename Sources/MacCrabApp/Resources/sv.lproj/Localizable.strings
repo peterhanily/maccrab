@@ -1,0 +1,210 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Swedish (sv) localization.
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "Varningar";
+"tabs.events" = "Händelser";
+"tabs.rules" = "Regler";
+"tabs.permissions" = "Behörigheter";
+"tabs.aiGuard" = "AI-vakt";
+"tabs.prevention" = "Förebyggande";
+"tabs.threatIntel" = "Hotinfo";
+"tabs.integrations" = "Integrationer";
+"tabs.docs" = "Dokument";
+"tabs.settings" = "Inställningar";
+
+/* ── Connection status ── */
+"status.connected" = "Ansluten";
+"status.disconnected" = "Frånkopplad";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "Varningar";
+"alerts.empty" = "Inga varningar — allt är lugnt";
+"alerts.noMatch" = "Inga varningar matchar filtren";
+"alerts.clearFilters" = "Rensa filter";
+"alerts.suppressed" = "Dold";
+"alerts.active" = "Aktiv";
+"alerts.autoResponseConfigured" = "Autosvar konfigurerat";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "Beskrivning";
+"alertDetail.processDetails" = "Processdetaljer";
+"alertDetail.mitreAttack" = "MITRE ATT&CK";
+"alertDetail.metadata" = "Metadata";
+"alertDetail.quickActions" = "Snabbåtgärder";
+"alertDetail.respond" = "Svara";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "Varnings-ID";
+"alertDetail.severity" = "Allvarlighetsgrad";
+"alertDetail.status" = "Status";
+"alertDetail.name" = "Namn";
+"alertDetail.path" = "Sökväg";
+"alertDetail.directory" = "Katalog";
+
+/* ── Quick Actions ── */
+"action.suppress" = "Dölj denna";
+"action.suppressAll" = "Dölj alla liknande";
+"action.kill" = "Avsluta process";
+"action.quarantine" = "Sätt fil i karantän";
+"action.block" = "Blockera destination";
+"action.copyDetails" = "Kopiera detaljer";
+
+/* ── Kill/Quarantine/Block feedback ── */
+"action.kill.success" = "Processen avslutad";
+"action.kill.failure" = "Kunde inte avsluta processen";
+"action.quarantine.message" = "Filen flyttas till karantän. Filen kommer inte längre vara tillgänglig på sin ursprungliga plats.";
+"action.quarantine.success" = "Filen är i karantän";
+"action.quarantine.failure" = "Karantän misslyckades";
+"action.block.confirm" = "Blockera nätverksdestination?";
+"action.block.success" = "Nätverksdestination blockerad";
+"action.block.failure" = "Blockering misslyckades";
+
+/* ── Event Stream ── */
+"events.title" = "Händelser";
+"events.noMatch" = "Inga händelser matchar aktuella filter";
+"events.clearFilters" = "Rensa filter";
+"events.autoScroll" = "Autoscroll";
+"events.resume" = "Återuppta";
+"events.pause" = "Pausa";
+"events.live" = "Live";
+"events.paused" = "Pausad";
+"events.copyDetails" = "Kopiera händelsedetaljer";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "Process";
+"eventDetail.detail" = "Detalj";
+"eventDetail.metadata" = "Händelsemetadata";
+
+/* ── Rule Browser ── */
+"rules.title" = "Regler";
+"rules.tactics" = "Taktiker";
+"rules.allRules" = "Alla regler";
+"rules.noMatch" = "Inga regler matchar aktuella filter";
+"rules.createRule" = "Skapa regel";
+"rules.enabled" = "Aktiverad";
+"rules.disabled" = "Inaktiverad";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "Beskrivning";
+"ruleDetail.mitreAttack" = "MITRE ATT&CK";
+"ruleDetail.tags" = "Taggar";
+"ruleDetail.metadata" = "Metadata";
+"ruleDetail.responseActions" = "Svarsåtgärder";
+"ruleDetail.configureInActions" = "Konfigurera i actions.json:";
+"ruleDetail.copyDetails" = "Kopiera detaljer";
+"ruleDetail.openJSON" = "Öppna JSON";
+"ruleDetail.copyId" = "Kopiera ID";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "TCC-behörighetstidslinje";
+"tcc.allServices" = "Alla tjänster";
+"tcc.all" = "Alla";
+"tcc.granted" = "Beviljad";
+"tcc.denied" = "Nekad";
+"tcc.emptyDefault" = "Inga behörighetsändringar upptäckta ännu";
+"tcc.noMatch" = "Inga TCC-händelser matchar aktuella filter";
+"tcc.clearFilters" = "Rensa filter";
+"tcc.totalEventsLabel" = "händelser totalt";
+
+/* ── Settings ── */
+"settings.general" = "Allmänt";
+"settings.notifications" = "Aviseringar";
+"settings.daemon" = "Daemon";
+"settings.responseActions" = "Svarsåtgärder";
+"settings.about" = "Om";
+"settings.dataRetention" = "Datalagring";
+"settings.keepEventsFor" = "Behåll händelser i";
+"settings.retentionHelp" = "Händelser, varningar och baslinjedata äldre än detta raderas automatiskt.";
+"settings.uiRefresh" = "UI-uppdatering";
+"settings.pollDaemon" = "Fråga daemon var";
+"settings.pollHelp" = "Hur ofta appen kontrollerar daemonens databas efter nya händelser och varningar.";
+"settings.startup" = "Uppstart";
+"settings.launchAtLogin" = "Starta MacCrab vid inloggning";
+"settings.autoResponse" = "Autosvar";
+"settings.autoResponseDesc" = "Svara automatiskt på kritiska hot";
+"settings.autoQuarantine" = "Automatisk karantän av skadliga filer";
+"settings.autoKill" = "Automatisk avslutning av skadliga processer";
+"settings.autoBlock" = "Automatisk blockering av C2-destinationer";
+"settings.autoResponseNote" = "Dessa åtgärder gäller bara varningar med KRITISK allvarlighetsgrad. Konfigurera regelspecifika åtgärder i fliken Svarsåtgärder.";
+"settings.macosNotifications" = "macOS-aviseringar";
+"settings.showNotifications" = "Visa aviseringar för detekteringsvarningar";
+"settings.minimumSeverity" = "Minsta allvarlighetsgrad:";
+"settings.severityHelp" = "Bara varningar med denna eller högre allvarlighetsgrad utlöser en macOS-avisering.";
+"settings.informational" = "Information";
+"settings.low" = "Låg";
+"settings.medium" = "Medel";
+"settings.high" = "Hög";
+"settings.criticalOnly" = "Bara kritisk";
+"settings.aboutTagline" = "Lokal macOS-hotdetekteringsmotor";
+"settings.aboutStats" = "7 händelsekällor | 8 detekteringslager | 241 regler";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrab aktiv";
+"statusBar.notRunning" = "Daemon körs inte";
+"statusBar.noRecentAlerts" = "Inga senaste varningar";
+"statusBar.recentAlerts" = "Senaste varningar";
+"statusBar.openDashboard" = "Öppna instrumentpanel...";
+"statusBar.reloadRules" = "Ladda om regler";
+"statusBar.refresh" = "Uppdatera";
+"statusBar.settings" = "Inställningar...";
+"statusBar.quit" = "Avsluta MacCrab";
+
+/* ── Prevention View ── */
+"prevention.title" = "Förebyggande";
+"prevention.enableAll" = "Aktivera alla";
+"prevention.enableAllHint" = "Slår på eller av alla förebyggande mekanismer";
+"prevention.description" = "Aktivt förebyggande blockerar hot innan de orsakar skada. Varje mekanism kan aktiveras eller inaktiveras individuellt.";
+"prevention.threatsBlocked" = "Hot blockerade";
+"prevention.domainsSinkholed" = "Domäner omdirigerade";
+"prevention.ipsBlocked" = "IP:er blockerade";
+"prevention.packagesGated" = "Paket kontrollerade";
+"prevention.recentActivity" = "Senaste förebyggande aktivitet";
+"prevention.mechanisms" = "Förebyggande mekanismer";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "Hotunderrättelser";
+"threatIntel.sectionPicker" = "Avsnitt hotinfo";
+"threatIntel.importTitle" = "Importera anpassade IOC:er";
+"threatIntel.importDesc" = "Lägg till egna indikatorer på kompromiss från textlistor, CSV-filer, JSON-arrayer eller STIX 2.1-paket.";
+"threatIntel.iocType" = "IOC-typ";
+"threatIntel.pasteIOCs" = "Klistra in IOC:er (en per rad)";
+"threatIntel.importFromText" = "Importera från text";
+"threatIntel.importFromTextHint" = "Importerar inklistrade IOC:er till hotunderrättelsedatabasen";
+"threatIntel.importFromFile" = "Importera från fil...";
+"threatIntel.importFromFileHint" = "Öppnar filväljaren för att importera hotunderrättelser";
+"threatIntel.apiKeys" = "API-nycklar";
+"threatIntel.apiKeysDesc" = "Konfigurera API-nycklar för att aktivera ytterligare hotunderrättelseflöden.";
+
+/* ── Integrations View ── */
+"integrations.title" = "Integrationer";
+"integrations.scan" = "Skanna";
+"integrations.scanHint" = "Söker efter installerade säkerhetsverktyg";
+"integrations.description" = "MacCrab upptäcker och korrelerar varningar från andra macOS-säkerhetsverktyg. Skrivskyddad.";
+"integrations.clickScan" = "Klicka på Skanna för att upptäcka installerade säkerhetsverktyg";
+"integrations.available" = "Tillgängliga integrationer";
+"integrations.notInstalled" = "Inte installerad";
+"integrations.running" = "Körs";
+"integrations.installed" = "Installerad";
+"integrations.export" = "Exportera för andra verktyg";
+"integrations.exportLSRules" = "Exportera .lsrules för Little Snitch";
+"integrations.exportLSRulesHint" = "Sparar hotinfo i Little Snitch-format";
+"integrations.exportCSV" = "Exportera IOC:er som CSV";
+"integrations.exportCSVHint" = "Exporterar alla indikatorer på kompromiss som CSV-fil";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "Svarsåtgärder";
+"responseActions.resetDefaults" = "Återställ standardvärden";
+"responseActions.addRuleAction" = "Lägg till regelåtgärd";
+"responseActions.explanation" = "Svarsåtgärder körs automatiskt när detekteringsregler utlöses.";
+"responseActions.whenSeverity" = "vid allvarlighetsgrad ≥";
+
+/* ── AI Guard ── */
+"aiGuard.title" = "AI-verktygaktivitet";
+"aiGuard.subtitle" = "Övervakar Claude Code, Codex, OpenClaw, Cursor och deras barnprocesser";
+"aiGuard.noAlerts" = "Inga AI-säkerhetsvarningar";
+"aiGuard.noAlertsDesc" = "AI-verktyg arbetar inom säkra gränser";
+
+/* ── Components ── */
+"components.suppress" = "Dölj";

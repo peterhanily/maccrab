@@ -1,0 +1,210 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Dutch (nl) localization.
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "Waarschuwingen";
+"tabs.events" = "Gebeurtenissen";
+"tabs.rules" = "Regels";
+"tabs.permissions" = "Rechten";
+"tabs.aiGuard" = "AI-bewaking";
+"tabs.prevention" = "Preventie";
+"tabs.threatIntel" = "Dreigingsinfo";
+"tabs.integrations" = "Integraties";
+"tabs.docs" = "Documenten";
+"tabs.settings" = "Instellingen";
+
+/* ── Connection status ── */
+"status.connected" = "Verbonden";
+"status.disconnected" = "Niet verbonden";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "Waarschuwingen";
+"alerts.empty" = "Geen waarschuwingen — alles veilig";
+"alerts.noMatch" = "Geen waarschuwingen die overeenkomen met filters";
+"alerts.clearFilters" = "Filters wissen";
+"alerts.suppressed" = "Onderdrukt";
+"alerts.active" = "Actief";
+"alerts.autoResponseConfigured" = "Automatische reactie geconfigureerd";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "Beschrijving";
+"alertDetail.processDetails" = "Procesdetails";
+"alertDetail.mitreAttack" = "MITRE ATT&CK";
+"alertDetail.metadata" = "Metadata";
+"alertDetail.quickActions" = "Snelle acties";
+"alertDetail.respond" = "Reageren";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "Waarschuwings-ID";
+"alertDetail.severity" = "Ernst";
+"alertDetail.status" = "Status";
+"alertDetail.name" = "Naam";
+"alertDetail.path" = "Pad";
+"alertDetail.directory" = "Map";
+
+/* ── Quick Actions ── */
+"action.suppress" = "Deze onderdrukken";
+"action.suppressAll" = "Alle vergelijkbare onderdrukken";
+"action.kill" = "Proces beëindigen";
+"action.quarantine" = "Bestand isoleren";
+"action.block" = "Bestemming blokkeren";
+"action.copyDetails" = "Details kopiëren";
+
+/* ── Kill/Quarantine/Block feedback ── */
+"action.kill.success" = "Proces beëindigd";
+"action.kill.failure" = "Kon proces niet beëindigen";
+"action.quarantine.message" = "Het bestand wordt naar quarantaine verplaatst. Het bestand is niet meer toegankelijk op de oorspronkelijke locatie.";
+"action.quarantine.success" = "Bestand geïsoleerd";
+"action.quarantine.failure" = "Isolatie mislukt";
+"action.block.confirm" = "Netwerkbestemming blokkeren?";
+"action.block.success" = "Netwerkbestemming geblokkeerd";
+"action.block.failure" = "Blokkering mislukt";
+
+/* ── Event Stream ── */
+"events.title" = "Gebeurtenissen";
+"events.noMatch" = "Geen gebeurtenissen die overeenkomen met huidige filters";
+"events.clearFilters" = "Filters wissen";
+"events.autoScroll" = "Auto-scrollen";
+"events.resume" = "Hervatten";
+"events.pause" = "Pauzeren";
+"events.live" = "Live";
+"events.paused" = "Gepauzeerd";
+"events.copyDetails" = "Gebeurtenisdetails kopiëren";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "Proces";
+"eventDetail.detail" = "Detail";
+"eventDetail.metadata" = "Gebeurtenismetadata";
+
+/* ── Rule Browser ── */
+"rules.title" = "Regels";
+"rules.tactics" = "Tactieken";
+"rules.allRules" = "Alle regels";
+"rules.noMatch" = "Geen regels die overeenkomen met huidige filters";
+"rules.createRule" = "Regel aanmaken";
+"rules.enabled" = "Ingeschakeld";
+"rules.disabled" = "Uitgeschakeld";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "Beschrijving";
+"ruleDetail.mitreAttack" = "MITRE ATT&CK";
+"ruleDetail.tags" = "Tags";
+"ruleDetail.metadata" = "Metadata";
+"ruleDetail.responseActions" = "Reactieacties";
+"ruleDetail.configureInActions" = "Configureer in actions.json:";
+"ruleDetail.copyDetails" = "Details kopiëren";
+"ruleDetail.openJSON" = "JSON openen";
+"ruleDetail.copyId" = "ID kopiëren";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "TCC-rechtentijdlijn";
+"tcc.allServices" = "Alle diensten";
+"tcc.all" = "Alle";
+"tcc.granted" = "Toegestaan";
+"tcc.denied" = "Geweigerd";
+"tcc.emptyDefault" = "Nog geen rechtenwijzigingen gedetecteerd";
+"tcc.noMatch" = "Geen TCC-gebeurtenissen die overeenkomen met huidige filters";
+"tcc.clearFilters" = "Filters wissen";
+"tcc.totalEventsLabel" = "totaal gebeurtenissen";
+
+/* ── Settings ── */
+"settings.general" = "Algemeen";
+"settings.notifications" = "Meldingen";
+"settings.daemon" = "Daemon";
+"settings.responseActions" = "Reactieacties";
+"settings.about" = "Over";
+"settings.dataRetention" = "Gegevensbewaring";
+"settings.keepEventsFor" = "Gebeurtenissen bewaren voor";
+"settings.retentionHelp" = "Gebeurtenissen, waarschuwingen en referentiegegevens ouder dan deze periode worden automatisch verwijderd.";
+"settings.uiRefresh" = "UI-verversing";
+"settings.pollDaemon" = "Daemon opvragen elke";
+"settings.pollHelp" = "Hoe vaak de app de database van de daemon controleert op nieuwe gebeurtenissen en waarschuwingen.";
+"settings.startup" = "Opstarten";
+"settings.launchAtLogin" = "MacCrab starten bij inloggen";
+"settings.autoResponse" = "Automatische reactie";
+"settings.autoResponseDesc" = "Automatisch reageren op kritieke bedreigingen";
+"settings.autoQuarantine" = "Schadelijke bestanden automatisch isoleren";
+"settings.autoKill" = "Schadelijke processen automatisch beëindigen";
+"settings.autoBlock" = "C2-bestemmingen automatisch blokkeren";
+"settings.autoResponseNote" = "Deze acties zijn alleen van toepassing op waarschuwingen met KRITIEKE ernst. Configureer acties per regel in het tabblad Reactieacties.";
+"settings.macosNotifications" = "macOS-meldingen";
+"settings.showNotifications" = "Meldingen tonen voor detectiewaarschuwingen";
+"settings.minimumSeverity" = "Minimale ernst:";
+"settings.severityHelp" = "Alleen waarschuwingen met deze of hogere ernst activeren een macOS-melding.";
+"settings.informational" = "Informatief";
+"settings.low" = "Laag";
+"settings.medium" = "Gemiddeld";
+"settings.high" = "Hoog";
+"settings.criticalOnly" = "Alleen kritiek";
+"settings.aboutTagline" = "Lokale macOS-bedreigingsdetectie-engine";
+"settings.aboutStats" = "7 gebeurtenisbronnen | 8 detectielagen | 241 regels";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrab actief";
+"statusBar.notRunning" = "Daemon niet actief";
+"statusBar.noRecentAlerts" = "Geen recente waarschuwingen";
+"statusBar.recentAlerts" = "Recente waarschuwingen";
+"statusBar.openDashboard" = "Dashboard openen...";
+"statusBar.reloadRules" = "Regels herladen";
+"statusBar.refresh" = "Vernieuwen";
+"statusBar.settings" = "Instellingen...";
+"statusBar.quit" = "MacCrab stoppen";
+
+/* ── Prevention View ── */
+"prevention.title" = "Preventie";
+"prevention.enableAll" = "Alles inschakelen";
+"prevention.enableAllHint" = "Schakelt alle preventiemechanismen in of uit";
+"prevention.description" = "Actieve preventie blokkeert bedreigingen voordat ze schade aanrichten. Elk mechanisme kan afzonderlijk worden in- of uitgeschakeld.";
+"prevention.threatsBlocked" = "Bedreigingen geblokkeerd";
+"prevention.domainsSinkholed" = "Domeinen omgeleid";
+"prevention.ipsBlocked" = "IP's geblokkeerd";
+"prevention.packagesGated" = "Pakketten gecontroleerd";
+"prevention.recentActivity" = "Recente preventieactiviteit";
+"prevention.mechanisms" = "Preventiemechanismen";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "Dreigingsinformatie";
+"threatIntel.sectionPicker" = "Sectie dreigingsinfo";
+"threatIntel.importTitle" = "Aangepaste IOC's importeren";
+"threatIntel.importDesc" = "Voeg uw eigen indicatoren van compromittering toe vanuit tekstlijsten, CSV-bestanden, JSON-arrays of STIX 2.1-bundels.";
+"threatIntel.iocType" = "IOC-type";
+"threatIntel.pasteIOCs" = "IOC's plakken (één per regel)";
+"threatIntel.importFromText" = "Importeren uit tekst";
+"threatIntel.importFromTextHint" = "Importeert geplakte IOC's in de dreigingsinformatiedatabase";
+"threatIntel.importFromFile" = "Importeren uit bestand...";
+"threatIntel.importFromFileHint" = "Opent de bestandskiezer om dreigingsinformatie te importeren";
+"threatIntel.apiKeys" = "API-sleutels";
+"threatIntel.apiKeysDesc" = "Configureer API-sleutels om aanvullende dreigingsinformatiefeeds in te schakelen.";
+
+/* ── Integrations View ── */
+"integrations.title" = "Integraties";
+"integrations.scan" = "Scannen";
+"integrations.scanHint" = "Zoekt naar geïnstalleerde beveiligingstools";
+"integrations.description" = "MacCrab detecteert en correleert waarschuwingen van andere macOS-beveiligingstools. Alleen-lezen.";
+"integrations.clickScan" = "Klik op Scannen om geïnstalleerde beveiligingstools te detecteren";
+"integrations.available" = "Beschikbare integraties";
+"integrations.notInstalled" = "Niet geïnstalleerd";
+"integrations.running" = "Actief";
+"integrations.installed" = "Geïnstalleerd";
+"integrations.export" = "Exporteren voor andere tools";
+"integrations.exportLSRules" = ".lsrules exporteren voor Little Snitch";
+"integrations.exportLSRulesHint" = "Slaat dreigingsinfo op in Little Snitch-formaat";
+"integrations.exportCSV" = "IOC's exporteren als CSV";
+"integrations.exportCSVHint" = "Exporteert alle indicatoren van compromittering als CSV-bestand";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "Reactieacties";
+"responseActions.resetDefaults" = "Standaardwaarden herstellen";
+"responseActions.addRuleAction" = "Regelactie toevoegen";
+"responseActions.explanation" = "Reactieacties worden automatisch uitgevoerd wanneer detectieregels worden geactiveerd.";
+"responseActions.whenSeverity" = "bij ernst ≥";
+
+/* ── AI Guard ── */
+"aiGuard.title" = "AI-toolactiviteit";
+"aiGuard.subtitle" = "Bewaakt Claude Code, Codex, OpenClaw, Cursor en hun onderliggende processen";
+"aiGuard.noAlerts" = "Geen AI-beveiligingswaarschuwingen";
+"aiGuard.noAlertsDesc" = "AI-tools werken binnen veilige grenzen";
+
+/* ── Components ── */
+"components.suppress" = "Onderdrukken";

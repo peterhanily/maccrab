@@ -1,0 +1,210 @@
+/* Localizable.strings — MacCrab Detection Engine
+   Korean (ko) localization.
+*/
+
+/* ── Main View (tabs) ── */
+"tabs.alerts" = "알림";
+"tabs.events" = "이벤트";
+"tabs.rules" = "규칙";
+"tabs.permissions" = "권한";
+"tabs.aiGuard" = "AI 가드";
+"tabs.prevention" = "예방";
+"tabs.threatIntel" = "위협 인텔";
+"tabs.integrations" = "연동";
+"tabs.docs" = "문서";
+"tabs.settings" = "설정";
+
+/* ── Connection status ── */
+"status.connected" = "연결됨";
+"status.disconnected" = "연결 끊김";
+
+/* ── Alert Dashboard ── */
+"alerts.title" = "알림";
+"alerts.empty" = "알림 없음 — 이상 없습니다";
+"alerts.noMatch" = "필터와 일치하는 알림이 없습니다";
+"alerts.clearFilters" = "필터 초기화";
+"alerts.suppressed" = "억제됨";
+"alerts.active" = "활성";
+"alerts.autoResponseConfigured" = "자동 대응 구성됨";
+
+/* ── Alert Detail sections ── */
+"alertDetail.description" = "설명";
+"alertDetail.processDetails" = "프로세스 세부 정보";
+"alertDetail.mitreAttack" = "MITRE ATT&CK";
+"alertDetail.metadata" = "메타데이터";
+"alertDetail.quickActions" = "빠른 작업";
+"alertDetail.respond" = "대응";
+
+/* ── Alert Detail fields ── */
+"alertDetail.alertId" = "알림 ID";
+"alertDetail.severity" = "심각도";
+"alertDetail.status" = "상태";
+"alertDetail.name" = "이름";
+"alertDetail.path" = "경로";
+"alertDetail.directory" = "디렉토리";
+
+/* ── Quick Actions ── */
+"action.suppress" = "이 항목 억제";
+"action.suppressAll" = "유사 항목 모두 억제";
+"action.kill" = "프로세스 종료";
+"action.quarantine" = "파일 격리";
+"action.block" = "대상 차단";
+"action.copyDetails" = "세부 정보 복사";
+
+/* ── Kill/Quarantine/Block feedback ── */
+"action.kill.success" = "프로세스가 종료되었습니다";
+"action.kill.failure" = "프로세스 종료 실패";
+"action.quarantine.message" = "참조된 파일이 격리 공간으로 이동됩니다. 원래 위치에서 더 이상 접근할 수 없습니다.";
+"action.quarantine.success" = "파일이 격리되었습니다";
+"action.quarantine.failure" = "파일 격리 실패";
+"action.block.confirm" = "네트워크 대상을 차단하시겠습니까?";
+"action.block.success" = "네트워크 대상이 차단되었습니다";
+"action.block.failure" = "대상 차단 실패";
+
+/* ── Event Stream ── */
+"events.title" = "이벤트";
+"events.noMatch" = "현재 필터와 일치하는 이벤트가 없습니다";
+"events.clearFilters" = "필터 초기화";
+"events.autoScroll" = "자동 스크롤";
+"events.resume" = "재개";
+"events.pause" = "일시 정지";
+"events.live" = "실시간";
+"events.paused" = "일시 정지됨";
+"events.copyDetails" = "이벤트 세부 정보 복사";
+
+/* ── Event Detail sections ── */
+"eventDetail.process" = "프로세스";
+"eventDetail.detail" = "세부 정보";
+"eventDetail.metadata" = "이벤트 메타데이터";
+
+/* ── Rule Browser ── */
+"rules.title" = "규칙";
+"rules.tactics" = "전술";
+"rules.allRules" = "모든 규칙";
+"rules.noMatch" = "현재 필터와 일치하는 규칙이 없습니다";
+"rules.createRule" = "규칙 만들기";
+"rules.enabled" = "활성화됨";
+"rules.disabled" = "비활성화됨";
+
+/* ── Rule Detail sections ── */
+"ruleDetail.description" = "설명";
+"ruleDetail.mitreAttack" = "MITRE ATT&CK";
+"ruleDetail.tags" = "태그";
+"ruleDetail.metadata" = "메타데이터";
+"ruleDetail.responseActions" = "대응 조치";
+"ruleDetail.configureInActions" = "actions.json에서 설정:";
+"ruleDetail.copyDetails" = "세부 정보 복사";
+"ruleDetail.openJSON" = "JSON 열기";
+"ruleDetail.copyId" = "ID 복사";
+
+/* ── TCC Timeline ── */
+"tcc.title" = "TCC 권한 타임라인";
+"tcc.allServices" = "모든 서비스";
+"tcc.all" = "전체";
+"tcc.granted" = "허용됨";
+"tcc.denied" = "거부됨";
+"tcc.emptyDefault" = "아직 감지된 권한 변경이 없습니다";
+"tcc.noMatch" = "현재 필터와 일치하는 TCC 이벤트가 없습니다";
+"tcc.clearFilters" = "필터 초기화";
+"tcc.totalEventsLabel" = "전체 이벤트";
+
+/* ── Settings ── */
+"settings.general" = "일반";
+"settings.notifications" = "알림";
+"settings.daemon" = "데몬";
+"settings.responseActions" = "대응 조치";
+"settings.about" = "정보";
+"settings.dataRetention" = "데이터 보존";
+"settings.keepEventsFor" = "이벤트 보존 기간";
+"settings.retentionHelp" = "이 기간보다 오래된 이벤트, 알림, 기준 데이터가 자동으로 삭제됩니다.";
+"settings.uiRefresh" = "UI 새로고침";
+"settings.pollDaemon" = "데몬 폴링 간격";
+"settings.pollHelp" = "앱이 데몬 데이터베이스에서 새로운 이벤트와 알림을 확인하는 주기입니다.";
+"settings.startup" = "시작";
+"settings.launchAtLogin" = "로그인 시 MacCrab 시작";
+"settings.autoResponse" = "자동 대응";
+"settings.autoResponseDesc" = "치명적 위협에 자동으로 대응";
+"settings.autoQuarantine" = "악성 파일 자동 격리";
+"settings.autoKill" = "악성 프로세스 자동 종료";
+"settings.autoBlock" = "C2 대상 자동 차단";
+"settings.autoResponseNote" = "이러한 조치는 심각 등급 알림에만 적용됩니다. 규칙별 조치는 대응 조치 탭에서 설정하세요.";
+"settings.macosNotifications" = "macOS 알림";
+"settings.showNotifications" = "탐지 알림에 대한 알림 표시";
+"settings.minimumSeverity" = "최소 심각도:";
+"settings.severityHelp" = "이 심각도 이상의 알림만 macOS 알림을 트리거합니다.";
+"settings.informational" = "정보";
+"settings.low" = "낮음";
+"settings.medium" = "보통";
+"settings.high" = "높음";
+"settings.criticalOnly" = "심각만";
+"settings.aboutTagline" = "로컬 우선 macOS 위협 탐지 엔진";
+"settings.aboutStats" = "7개 이벤트 소스 | 8개 탐지 레이어 | 241개 규칙";
+
+/* ── Status Bar Menu ── */
+"statusBar.active" = "MacCrab 활성";
+"statusBar.notRunning" = "데몬 미실행";
+"statusBar.noRecentAlerts" = "최근 알림 없음";
+"statusBar.recentAlerts" = "최근 알림";
+"statusBar.openDashboard" = "대시보드 열기...";
+"statusBar.reloadRules" = "규칙 다시 로드";
+"statusBar.refresh" = "새로고침";
+"statusBar.settings" = "설정...";
+"statusBar.quit" = "MacCrab 종료";
+
+/* ── Prevention View ── */
+"prevention.title" = "예방";
+"prevention.enableAll" = "모두 활성화";
+"prevention.enableAllHint" = "모든 예방 메커니즘을 켜거나 끕니다";
+"prevention.description" = "능동 예방은 위협이 피해를 주기 전에 차단합니다. 각 메커니즘은 개별적으로 활성화할 수 있습니다.";
+"prevention.threatsBlocked" = "차단된 위협";
+"prevention.domainsSinkholed" = "싱크홀된 도메인";
+"prevention.ipsBlocked" = "차단된 IP";
+"prevention.packagesGated" = "게이트된 패키지";
+"prevention.recentActivity" = "최근 예방 활동";
+"prevention.mechanisms" = "예방 메커니즘";
+
+/* ── Threat Intel View ── */
+"threatIntel.title" = "위협 인텔리전스";
+"threatIntel.sectionPicker" = "위협 인텔 섹션";
+"threatIntel.importTitle" = "사용자 정의 IOC 가져오기";
+"threatIntel.importDesc" = "텍스트 목록, CSV 파일, JSON 배열 또는 STIX 2.1 번들에서 자체 침해 지표를 추가합니다.";
+"threatIntel.iocType" = "IOC 유형";
+"threatIntel.pasteIOCs" = "IOC 붙여넣기 (줄당 하나씩)";
+"threatIntel.importFromText" = "텍스트에서 가져오기";
+"threatIntel.importFromTextHint" = "붙여넣은 IOC를 위협 인텔리전스 데이터베이스로 가져옵니다";
+"threatIntel.importFromFile" = "파일에서 가져오기...";
+"threatIntel.importFromFileHint" = "위협 인텔리전스를 가져올 파일 선택기를 엽니다";
+"threatIntel.apiKeys" = "API 키";
+"threatIntel.apiKeysDesc" = "추가 위협 인텔리전스 피드를 활성화하려면 API 키를 구성하세요.";
+
+/* ── Integrations View ── */
+"integrations.title" = "연동";
+"integrations.scan" = "스캔";
+"integrations.scanHint" = "설치된 보안 도구를 스캔합니다";
+"integrations.description" = "MacCrab은 다른 macOS 보안 도구의 알림을 감지하고 상관 분석합니다. 읽기 전용.";
+"integrations.clickScan" = "스캔을 클릭하여 설치된 보안 도구를 감지하세요";
+"integrations.available" = "사용 가능한 연동";
+"integrations.notInstalled" = "설치되지 않음";
+"integrations.running" = "실행 중";
+"integrations.installed" = "설치됨";
+"integrations.export" = "다른 도구용으로 내보내기";
+"integrations.exportLSRules" = "Little Snitch용 .lsrules 내보내기";
+"integrations.exportLSRulesHint" = "Little Snitch 형식으로 위협 인텔을 저장합니다";
+"integrations.exportCSV" = "IOC를 CSV로 내보내기";
+"integrations.exportCSVHint" = "모든 침해 지표를 CSV 파일로 내보냅니다";
+
+/* ── Response Actions View ── */
+"responseActions.title" = "대응 조치";
+"responseActions.resetDefaults" = "기본값으로 재설정";
+"responseActions.addRuleAction" = "규칙 조치 추가";
+"responseActions.explanation" = "대응 조치는 탐지 규칙이 트리거될 때 자동으로 실행됩니다.";
+"responseActions.whenSeverity" = "심각도 이상일 때 ≥";
+
+/* ── AI Guard ── */
+"aiGuard.title" = "AI 도구 활동";
+"aiGuard.subtitle" = "Claude Code, Codex, OpenClaw, Cursor 및 하위 프로세스를 모니터링합니다";
+"aiGuard.noAlerts" = "AI 보안 알림 없음";
+"aiGuard.noAlertsDesc" = "AI 도구가 안전한 범위 내에서 작동 중입니다";
+
+/* ── Components ── */
+"components.suppress" = "억제";
