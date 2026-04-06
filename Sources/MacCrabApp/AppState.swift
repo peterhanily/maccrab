@@ -238,8 +238,12 @@ final class AppState: ObservableObject {
             }
         } catch {}
 
-        // Remove from display
-        dashboardAlerts.removeAll { $0.ruleTitle == ruleTitle && $0.processName == processName }
+        // Mark as suppressed in display (keep in array so "show suppressed" works)
+        for i in dashboardAlerts.indices {
+            if dashboardAlerts[i].ruleTitle == ruleTitle && dashboardAlerts[i].processName == processName {
+                dashboardAlerts[i].suppressed = true
+            }
+        }
         recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed }.prefix(5))
         totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
     }
