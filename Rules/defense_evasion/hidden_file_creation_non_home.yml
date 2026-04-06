@@ -1,0 +1,49 @@
+title: Hidden File Created Outside Home Directory
+id: d1a2b3c4-0441-4000-a000-000000000441
+status: experimental
+description: >
+    Detects creation of hidden files (dot-prefixed) in system directories
+    outside of user home folders. Hidden files in system paths like /tmp,
+    /var, /usr/local, or /Library are commonly used by malware for staging
+    payloads, storing configuration, or establishing persistence.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1564/001/
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.t1564.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|re: '^/(tmp|var|usr|opt|Library)/.*\/\.[^/]+$'
+        EventType: 'create'
+    filter_apple:
+        SignerType: 'apple'
+    filter_system:
+        Image|startswith:
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/System/'
+            - '/Library/Apple/'
+    filter_common_hidden:
+        TargetFilename|contains:
+            - '/.git/'
+            - '/.DS_Store'
+            - '/.localized'
+            - '/.cache/'
+            - '/.npm/'
+            - '/.docker/'
+    filter_package_managers:
+        Image|contains:
+            - '/Homebrew/'
+            - '/MacPorts/'
+    condition: selection and not filter_apple and not filter_system and not filter_common_hidden and not filter_package_managers
+falsepositives:
+    - Package managers creating hidden metadata files
+    - Build systems using hidden directories for caches
+    - Version control systems creating .git directories
+level: medium

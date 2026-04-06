@@ -1,0 +1,36 @@
+title: Docker Container Mounts Sensitive Host Path
+id: d1a2b3c4-0422-4000-a000-000000000422
+status: experimental
+description: >
+    Detects a container mounting sensitive host paths such as root filesystem,
+    /etc, /var, ~/.ssh, or ~/.aws. Mounting these paths allows a container to
+    read or modify critical host configurations and credentials.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1611/
+    - https://attack.mitre.org/techniques/T1552/001/
+tags:
+    - attack.privilege_escalation
+    - attack.credential_access
+    - attack.t1611
+    - attack.t1552.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains:
+            - ' run '
+            - ' create '
+    selection_mount:
+        CommandLine|re: '-v\s+(/:|/etc[:/]|/var[:/]|/Users/[^/]+/\.ssh[:/]|/Users/[^/]+/\.aws[:/]|--mount.*source=[/](etc|var)\b)'
+    condition: selection and selection_mount
+falsepositives:
+    - Development containers mounting project directories under /var
+    - Containers requiring access to host certificate stores
+level: high

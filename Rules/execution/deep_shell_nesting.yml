@@ -1,0 +1,60 @@
+title: Deep Shell Nesting Detected
+id: d1a2b3c4-0435-4000-a000-000000000435
+status: experimental
+description: >
+    Detects three or more levels of shell process nesting (e.g. sh spawns
+    bash spawns zsh). Deep shell nesting is uncommon in normal usage and
+    often indicates exploitation chains, post-exploitation frameworks, or
+    obfuscated command execution attempting to evade detection.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_shell:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/dash'
+            - '/fish'
+            - '/tcsh'
+            - '/csh'
+    selection_parent_shell:
+        ParentImage|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/dash'
+            - '/fish'
+            - '/tcsh'
+            - '/csh'
+    selection_grandparent_shell:
+        GrandparentImage|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/dash'
+            - '/fish'
+            - '/tcsh'
+            - '/csh'
+    filter_terminal:
+        GrandparentImage|endswith:
+            - '/Terminal'
+            - '/iTerm2'
+            - '/login'
+            - '/sshd'
+            - '/tmux'
+            - '/screen'
+    condition: selection_shell and selection_parent_shell and selection_grandparent_shell and not filter_terminal
+falsepositives:
+    - Complex shell scripts calling sub-shells
+    - Build systems with nested script invocations
+    - Terminal multiplexers (tmux, screen) with nested sessions
+level: medium

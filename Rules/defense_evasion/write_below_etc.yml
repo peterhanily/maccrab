@@ -1,0 +1,47 @@
+title: Non-System Process Writes to /etc Directory
+id: d1a2b3c4-0437-4000-a000-000000000437
+status: experimental
+description: >
+    Detects non-system processes writing files under /etc/ or /private/etc/.
+    The /etc directory contains critical system configuration files. Writes
+    by non-system processes may indicate configuration tampering, backdoor
+    installation, or persistence mechanisms.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1565/001/
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.t1565.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith:
+            - '/etc/'
+            - '/private/etc/'
+        EventType: 'write'
+    filter_apple:
+        SignerType: 'apple'
+    filter_system_processes:
+        Image|startswith:
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/System/'
+            - '/Library/Apple/'
+    filter_package_managers:
+        Image|endswith:
+            - '/brew'
+            - '/port'
+            - '/installer'
+        Image|contains:
+            - '/Homebrew/'
+            - '/MacPorts/'
+    condition: selection and not filter_apple and not filter_system_processes and not filter_package_managers
+falsepositives:
+    - Package managers (Homebrew, MacPorts) modifying /etc
+    - Configuration management tools (Ansible, Puppet, Chef)
+    - VPN software modifying /etc/resolv.conf
+level: medium

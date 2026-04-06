@@ -1,0 +1,49 @@
+title: Web Server Spawns Grandchild Shell Process
+id: d1a2b3c4-0436-4000-a000-000000000436
+status: experimental
+description: >
+    Detects a web server process (httpd, nginx, apache) whose grandchild
+    process is a shell. This pattern indicates potential web shell activity
+    or command injection exploitation where the web server spawns an
+    intermediary process that in turn spawns a shell.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://attack.mitre.org/techniques/T1505/003/
+tags:
+    - attack.execution
+    - attack.persistence
+    - attack.t1059.004
+    - attack.t1505.003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_shell:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/dash'
+    selection_web_ancestor:
+        GrandparentImage|endswith:
+            - '/httpd'
+            - '/nginx'
+            - '/apache2'
+            - '/apache'
+            - '/lighttpd'
+            - '/caddy'
+    filter_cgi:
+        ParentImage|endswith:
+            - '/php'
+            - '/php-fpm'
+            - '/php-cgi'
+            - '/perl'
+            - '/python'
+            - '/ruby'
+    condition: selection_shell and selection_web_ancestor and not filter_cgi
+falsepositives:
+    - CGI scripts that legitimately spawn shell processes
+    - Web-based administration panels
+level: high

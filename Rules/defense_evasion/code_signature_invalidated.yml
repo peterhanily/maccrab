@@ -1,0 +1,34 @@
+title: Code Signature Invalidated at Runtime
+id: d1a2b3c4-0430-4000-a000-000000000430
+status: experimental
+description: >
+    Detects NOTIFY_CS_INVALIDATED events indicating a binary's code signature
+    has become invalid at runtime. This can indicate runtime tampering,
+    self-modifying code, or an attacker patching a signed binary in memory
+    to bypass code signing enforcement.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1553/002/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.002
+logsource:
+    category: es_event
+    product: macos
+    service: cs_invalidated
+detection:
+    selection:
+        EventType: 'NOTIFY_CS_INVALIDATED'
+    filter_known_tools:
+        Image|endswith:
+            - '/Electron'
+            - '/electron'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_known_tools and not filter_apple
+falsepositives:
+    - Electron-based applications with JIT compilation
+    - Java applications with dynamic class loading
+    - Development builds with incomplete signing
+level: high

@@ -1,0 +1,32 @@
+title: Symlink in Tmp Directory Pointing Outside Tmp
+id: d1a2b3c4-0428-4000-a000-000000000428
+status: experimental
+description: >
+    Detects symlink creation in /tmp or /private/tmp where the target points
+    outside the temporary directory. This is a classic TOCTOU (time-of-check
+    to time-of-use) race condition attack pattern used to redirect privileged
+    file operations to attacker-controlled targets.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1548/
+    - https://capec.mitre.org/data/definitions/27.html
+tags:
+    - attack.privilege_escalation
+    - attack.t1548
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_ln:
+        Image|endswith: '/ln'
+        CommandLine|contains: '-s'
+    selection_tmp_path:
+        CommandLine|re: '(/tmp/|/private/tmp/)[^\s]+'
+    filter_tmp_target:
+        CommandLine|re: '-s\s+(/tmp/|/private/tmp/)\S+\s+(/tmp/|/private/tmp/)'
+    condition: selection_ln and selection_tmp_path and not filter_tmp_target
+falsepositives:
+    - Build systems using /tmp for intermediate artifacts
+    - Package managers creating temporary symlinks
+level: medium

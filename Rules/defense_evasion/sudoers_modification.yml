@@ -1,0 +1,34 @@
+title: Sudoers File Modified
+id: d1a2b3c4-0439-4000-a000-000000000439
+status: experimental
+description: >
+    Detects any modification to /etc/sudoers or files under /etc/sudoers.d/.
+    Attackers modify sudoers to grant themselves passwordless sudo access,
+    establishing persistent privilege escalation without needing to exploit
+    a vulnerability.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1548/003/
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1548.003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_file:
+        TargetFilename|startswith:
+            - '/etc/sudoers'
+            - '/private/etc/sudoers'
+        EventType: 'write'
+    selection_visudo:
+        Image|endswith: '/visudo'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection_file or (selection_visudo and not filter_apple)
+falsepositives:
+    - Legitimate system administration via visudo
+    - MDM or configuration management tools adjusting sudo policies
+level: critical

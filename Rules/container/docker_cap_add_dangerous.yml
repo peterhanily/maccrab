@@ -1,0 +1,48 @@
+title: Docker Container Granted Dangerous Linux Capabilities
+id: d1a2b3c4-0444-4000-a000-000000000444
+status: experimental
+description: >
+    Detects docker run with --cap-add granting dangerous capabilities such
+    as SYS_ADMIN, SYS_PTRACE, or ALL. SYS_ADMIN is nearly equivalent to
+    root and enables container escape via mount namespace manipulation.
+    SYS_PTRACE allows debugging and injecting into other processes.
+    Granting ALL capabilities removes all security boundaries.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1611/
+    - https://attack.mitre.org/techniques/T1610/
+tags:
+    - attack.privilege_escalation
+    - attack.execution
+    - attack.t1611
+    - attack.t1610
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains:
+            - ' run '
+            - ' create '
+    selection_caps:
+        CommandLine|contains:
+            - '--cap-add SYS_ADMIN'
+            - '--cap-add=SYS_ADMIN'
+            - '--cap-add SYS_PTRACE'
+            - '--cap-add=SYS_PTRACE'
+            - '--cap-add ALL'
+            - '--cap-add=ALL'
+            - '--cap-add DAC_READ_SEARCH'
+            - '--cap-add=DAC_READ_SEARCH'
+            - '--cap-add SYS_MODULE'
+            - '--cap-add=SYS_MODULE'
+    condition: selection and selection_caps
+falsepositives:
+    - Containers requiring ptrace for debugging (e.g., strace, gdb)
+    - System containers managing host resources
+level: high

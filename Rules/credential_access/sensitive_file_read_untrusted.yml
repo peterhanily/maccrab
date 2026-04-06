@@ -1,0 +1,44 @@
+title: Untrusted Process Reads macOS Local Directory Service Data
+id: d1a2b3c4-0438-4000-a000-000000000438
+status: experimental
+description: >
+    Detects untrusted processes reading from /var/db/dslocal/, which contains
+    the macOS equivalent of /etc/shadow -- local user account data including
+    password hashes. Unauthorized access to these files enables offline
+    password cracking attacks.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1003/
+tags:
+    - attack.credential_access
+    - attack.t1003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith:
+            - '/var/db/dslocal/'
+            - '/private/var/db/dslocal/'
+    filter_apple:
+        SignerType: 'apple'
+    filter_system:
+        Image|startswith:
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/System/'
+            - '/Library/Apple/'
+    filter_opendirectory:
+        Image|endswith:
+            - '/opendirectoryd'
+            - '/DirectoryService'
+            - '/dscl'
+            - '/dscacheutil'
+            - '/dsimport'
+            - '/dsexport'
+    condition: selection and not filter_apple and not filter_system and not filter_opendirectory
+falsepositives:
+    - Directory service administration tools
+    - Backup software reading system databases
+level: critical

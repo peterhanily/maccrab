@@ -1,0 +1,39 @@
+title: Remote Thread Created in Another Process
+id: d1a2b3c4-0429-4000-a000-000000000429
+status: experimental
+description: >
+    Detects NOTIFY_REMOTE_THREAD_CREATE events where a process creates a
+    thread inside another process's address space. This is a strong indicator
+    of code injection, used for defense evasion, privilege escalation, or
+    credential theft on macOS.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1055/
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1055
+logsource:
+    category: es_event
+    product: macos
+    service: remote_thread_create
+detection:
+    selection:
+        EventType: 'NOTIFY_REMOTE_THREAD_CREATE'
+    filter_apple:
+        SignerType: 'apple'
+    filter_debugger:
+        Image|endswith:
+            - '/lldb'
+            - '/debugserver'
+            - '/DTServiceHub'
+            - '/Xcode'
+    filter_same_signer:
+        SigningID|fieldref: 'TargetSigningID'
+    condition: selection and not filter_apple and not filter_debugger and not filter_same_signer
+falsepositives:
+    - Debugging and profiling tools (lldb, Instruments)
+    - Accessibility frameworks injecting into apps
+    - Antivirus or endpoint security products
+level: high

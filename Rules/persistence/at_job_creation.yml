@@ -1,0 +1,36 @@
+title: At Job Created for Scheduled Execution
+id: d1a2b3c4-0440-4000-a000-000000000440
+status: experimental
+description: >
+    Detects creation of at(1) jobs which schedule commands for one-time
+    future execution. While less common than cron or launchd, the at
+    scheduler can be abused as an alternative persistence mechanism that
+    may evade detection focused on more common scheduling methods.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1053/002/
+tags:
+    - attack.persistence
+    - attack.execution
+    - attack.t1053.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_at:
+        Image|endswith:
+            - '/at'
+            - '/batch'
+            - '/atq'
+    filter_list:
+        CommandLine|contains:
+            - 'atq'
+            - '-l'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection_at and not filter_list and not filter_apple
+falsepositives:
+    - System administrators scheduling one-time maintenance tasks
+    - Backup scripts using at for delayed execution
+level: medium

@@ -1,0 +1,36 @@
+title: Docker Socket Mounted Into Container
+id: d1a2b3c4-0421-4000-a000-000000000421
+status: experimental
+description: >
+    Detects a container being launched with /var/run/docker.sock mounted as
+    a volume. This grants the container full control over the Docker daemon,
+    enabling container escape and host compromise.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1611/
+tags:
+    - attack.privilege_escalation
+    - attack.t1611
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains:
+            - ' run '
+            - ' create '
+    selection_socket:
+        CommandLine|contains:
+            - '/var/run/docker.sock'
+            - '/run/docker.sock'
+            - 'docker.sock:'
+    condition: selection and selection_socket
+falsepositives:
+    - Docker-in-Docker CI/CD pipelines
+    - Container management tools like Portainer
+level: high

@@ -1,0 +1,41 @@
+title: Unsigned Process Connects to Privileged XPC Service
+id: d1a2b3c4-0431-4000-a000-000000000431
+status: experimental
+description: >
+    Detects NOTIFY_XPC_CONNECT events where an unsigned or ad-hoc signed
+    process attempts to connect to a privileged XPC service. Attackers may
+    abuse XPC services to escalate privileges or interact with system
+    daemons that perform privileged operations.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1559/
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1559
+logsource:
+    category: es_event
+    product: macos
+    service: xpc_connect
+detection:
+    selection:
+        EventType: 'NOTIFY_XPC_CONNECT'
+    selection_unsigned:
+        SignerType:
+            - 'unsigned'
+            - 'adhoc'
+    selection_privileged_service:
+        XPCServiceName|contains:
+            - 'com.apple.security'
+            - 'com.apple.authd'
+            - 'com.apple.opendirectoryd'
+            - 'com.apple.coreservicesd'
+            - 'com.apple.systemadministration'
+            - 'com.apple.installd'
+            - 'com.apple.configurationprofiles'
+    condition: selection and selection_unsigned and selection_privileged_service
+falsepositives:
+    - Locally compiled development tools
+    - Open-source system utilities compiled from source
+level: high

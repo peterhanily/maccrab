@@ -1,0 +1,39 @@
+title: Symlink Created Targeting Sensitive System File
+id: d1a2b3c4-0427-4000-a000-000000000427
+status: experimental
+description: >
+    Detects symbolic link creation targeting sensitive files such as sudoers,
+    authorized_keys, PAM configuration, shell configs, or /etc/shells.
+    Symlink attacks can be used to hijack privileged file writes to modify
+    security-critical configurations.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1548/
+    - https://capec.mitre.org/data/definitions/132.html
+tags:
+    - attack.privilege_escalation
+    - attack.persistence
+    - attack.t1548
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_ln:
+        Image|endswith: '/ln'
+        CommandLine|contains: '-s'
+    selection_target:
+        CommandLine|contains:
+            - '/etc/sudoers'
+            - '/etc/pam.d/'
+            - '/etc/shells'
+            - '/.ssh/authorized_keys'
+            - '/.bashrc'
+            - '/.zshrc'
+            - '/.bash_profile'
+            - '/.zprofile'
+    condition: selection_ln and selection_target
+falsepositives:
+    - Dotfile management tools (stow, rcm, yadm)
+    - System provisioning scripts
+level: high

@@ -1,0 +1,31 @@
+title: Stratum Mining Protocol in Command Line
+id: d1a2b3c4-0426-4000-a000-000000000426
+status: experimental
+description: >
+    Detects command lines containing stratum:// protocol URIs, which are used
+    to connect to cryptocurrency mining pools. The presence of stratum protocol
+    references strongly indicates cryptomining activity regardless of the
+    binary name used.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1496/
+tags:
+    - attack.execution
+    - attack.impact
+    - attack.t1496
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'stratum://'
+            - 'stratum+tcp://'
+            - 'stratum+ssl://'
+            - 'stratum2+tcp://'
+            - 'stratum2+ssl://'
+    condition: selection
+falsepositives:
+    - Legitimate cryptocurrency mining by the system owner
+level: critical

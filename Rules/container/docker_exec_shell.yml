@@ -1,0 +1,39 @@
+title: Docker Exec Spawns Interactive Shell
+id: d1a2b3c4-0423-4000-a000-000000000423
+status: experimental
+description: >
+    Detects docker exec being used to spawn a shell inside a running container.
+    Attackers use this technique to interact with compromised containers or to
+    escalate from Docker access to container-level code execution.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1609/
+tags:
+    - attack.execution
+    - attack.t1609
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains: ' exec '
+    selection_shell:
+        CommandLine|contains:
+            - '/bin/sh'
+            - '/bin/bash'
+            - '/bin/zsh'
+            - '/bin/ash'
+            - '/bin/dash'
+            - ' sh '
+            - ' bash '
+            - ' zsh '
+    condition: selection and selection_shell
+falsepositives:
+    - Developers debugging containers during development
+    - Automated health check scripts
+level: medium

@@ -1,0 +1,30 @@
+title: User Bypassed Gatekeeper for Blocked Application
+id: d1a2b3c4-0433-4000-a000-000000000433
+status: experimental
+description: >
+    Detects NOTIFY_GATEKEEPER_USER_OVERRIDE events indicating a user clicked
+    "Open Anyway" on an application that Gatekeeper blocked. While this may
+    be intentional, it can also indicate social engineering where a user was
+    tricked into running malware that lacks proper code signing or notarization.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1553/001/
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.defense_evasion
+    - attack.execution
+    - attack.t1553.001
+    - attack.t1204.002
+logsource:
+    category: es_event
+    product: macos
+    service: gatekeeper_user_override
+detection:
+    selection:
+        EventType: 'NOTIFY_GATEKEEPER_USER_OVERRIDE'
+    condition: selection
+falsepositives:
+    - Developers running their own unsigned builds
+    - Users intentionally running open-source software without notarization
+level: medium

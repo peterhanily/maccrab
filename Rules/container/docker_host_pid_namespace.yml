@@ -1,0 +1,34 @@
+title: Docker Container Uses Host PID Namespace
+id: d1a2b3c4-0442-4000-a000-000000000442
+status: experimental
+description: >
+    Detects docker run with --pid=host flag, which shares the host's process
+    namespace with the container. This allows the container to see and
+    interact with all host processes, enabling container escape via process
+    injection or debugging host processes.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1611/
+tags:
+    - attack.privilege_escalation
+    - attack.t1611
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains:
+            - ' run '
+            - ' create '
+    selection_pid:
+        CommandLine|contains: '--pid=host'
+    condition: selection and selection_pid
+falsepositives:
+    - Monitoring containers that legitimately need host process visibility
+    - Debugging containers during development
+level: high

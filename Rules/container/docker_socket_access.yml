@@ -1,0 +1,40 @@
+title: Non-Docker Process Accesses Docker Socket
+id: d1a2b3c4-0424-4000-a000-000000000424
+status: experimental
+description: >
+    Detects non-Docker processes accessing /var/run/docker.sock. The Docker
+    socket provides full control over the Docker daemon. Access by unexpected
+    processes may indicate lateral movement or privilege escalation attempts.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1611/
+tags:
+    - attack.privilege_escalation
+    - attack.t1611
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/var/run/docker.sock'
+            - '/run/docker.sock'
+    filter_docker:
+        Image|endswith:
+            - '/docker'
+            - '/dockerd'
+            - '/Docker Desktop'
+            - '/com.docker.backend'
+            - '/com.docker.supervisor'
+            - '/vpnkit-bridge'
+    filter_docker_path:
+        Image|contains:
+            - '/Docker.app/'
+            - '/docker/'
+    condition: selection and not filter_docker and not filter_docker_path
+falsepositives:
+    - Container orchestration tools (Portainer, Rancher)
+    - Docker management GUIs
+    - Docker Compose
+level: high

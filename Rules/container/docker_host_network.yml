@@ -1,0 +1,38 @@
+title: Docker Container Uses Host Network Namespace
+id: d1a2b3c4-0443-4000-a000-000000000443
+status: experimental
+description: >
+    Detects docker run with --network=host flag, which gives the container
+    full access to the host's network stack. This bypasses Docker's network
+    isolation, allowing the container to sniff host traffic, bind to host
+    ports, and access services listening on localhost.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1611/
+tags:
+    - attack.privilege_escalation
+    - attack.t1611
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains:
+            - ' run '
+            - ' create '
+    selection_network:
+        CommandLine|contains:
+            - '--network=host'
+            - '--net=host'
+            - '--network host'
+            - '--net host'
+    condition: selection and selection_network
+falsepositives:
+    - Performance-sensitive containers requiring low network latency
+    - Network debugging and monitoring containers
+level: medium

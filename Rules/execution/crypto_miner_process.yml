@@ -1,0 +1,51 @@
+title: Cryptocurrency Miner Process Detected
+id: d1a2b3c4-0425-4000-a000-000000000425
+status: experimental
+description: >
+    Detects execution of known cryptocurrency mining software. Cryptominers
+    are commonly deployed by attackers after initial compromise to monetize
+    access through unauthorized resource usage (cryptojacking).
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1496/
+tags:
+    - attack.execution
+    - attack.impact
+    - attack.t1496
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_name:
+        Image|endswith:
+            - '/xmrig'
+            - '/minerd'
+            - '/cpuminer'
+            - '/cgminer'
+            - '/bfgminer'
+            - '/ethminer'
+            - '/phoenixminer'
+            - '/t-rex'
+            - '/nbminer'
+            - '/gminer'
+            - '/lolminer'
+            - '/ccminer'
+    selection_cmdline:
+        CommandLine|contains:
+            - 'xmrig'
+            - 'minerd'
+            - 'cpuminer'
+            - 'cgminer'
+            - 'bfgminer'
+            - 'ethminer'
+            - 'phoenixminer'
+            - 'nbminer'
+            - 'gminer'
+            - 'lolminer'
+            - 'ccminer'
+    condition: selection_name or selection_cmdline
+falsepositives:
+    - Legitimate cryptocurrency mining by the system owner
+    - Security research and testing
+level: critical

@@ -1,0 +1,38 @@
+title: Unsigned Process Opens IOKit Device
+id: d1a2b3c4-0432-4000-a000-000000000432
+status: experimental
+description: >
+    Detects AUTH_IOKIT_OPEN events where an unsigned process opens an IOKit
+    device. IOKit provides direct access to hardware and kernel drivers.
+    Unsigned processes accessing IOKit devices may be attempting to interact
+    with hardware for keylogging, network sniffing, or kernel exploitation.
+author: MacCrab Community
+date: 2026/04/05
+references:
+    - https://attack.mitre.org/techniques/T1082/
+tags:
+    - attack.defense_evasion
+    - attack.discovery
+    - attack.t1082
+logsource:
+    category: es_event
+    product: macos
+    service: iokit_open
+detection:
+    selection:
+        EventType: 'AUTH_IOKIT_OPEN'
+    selection_unsigned:
+        SignerType:
+            - 'unsigned'
+            - 'adhoc'
+    filter_known_paths:
+        Image|contains:
+            - '/usr/libexec/'
+            - '/System/'
+            - '/Library/Apple/'
+    condition: selection and selection_unsigned and not filter_known_paths
+falsepositives:
+    - Custom hardware monitoring tools compiled from source
+    - Homebrew-installed system utilities
+    - Hardware diagnostic tools
+level: medium
