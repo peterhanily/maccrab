@@ -102,17 +102,21 @@ final class AppState: ObservableObject {
         Task { await refresh() }
     }
 
-    /// Get or create cached alert store (avoids reopening SQLite on every poll)
+    /// Get or create cached alert store.
+    /// Reopens every 30 seconds to pick up new WAL data from the daemon.
     private func alertStore() throws -> AlertStore {
-        if let store = cachedAlertStore { return store }
+        if let store = cachedAlertStore,
+           Date().timeIntervalSince(dbLastChecked) < 30 { return store }
         let store = try AlertStore(directory: dataDir)
         cachedAlertStore = store
+        dbLastChecked = Date()
         return store
     }
 
     /// Get or create cached event store
     private func eventStore() throws -> EventStore {
-        if let store = cachedEventStore { return store }
+        if let store = cachedEventStore,
+           Date().timeIntervalSince(dbLastChecked) < 30 { return store }
         let store = try EventStore(directory: dataDir)
         cachedEventStore = store
         return store
