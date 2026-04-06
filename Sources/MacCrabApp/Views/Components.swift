@@ -86,12 +86,12 @@ struct AlertRow: View {
                         .foregroundColor(alert.suppressed ? .secondary : alert.severityColor)
 
                     Label(alert.processName, systemImage: "gearshape")
-                        .font(.caption)
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
 
                     if !alert.mitreTechniques.isEmpty {
                         Label(alert.mitreTechniques, systemImage: "shield")
-                            .font(.caption)
+                            .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
 

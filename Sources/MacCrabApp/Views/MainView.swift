@@ -15,6 +15,10 @@ struct MainView: View {
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
 
+    private var hasCriticalAlerts: Bool {
+        appState.dashboardAlerts.contains { $0.severity == .critical && !$0.suppressed }
+    }
+
     enum SidebarSection: String, CaseIterable, Hashable {
         case overview = "Overview"
         case alerts = "Alerts"
@@ -38,7 +42,8 @@ struct MainView: View {
                     Label("Overview", systemImage: "gauge.with.dots.needle.33percent")
                         .tag(SidebarSection.overview)
                     Label("Alerts", systemImage: "exclamationmark.triangle")
-                        .badge(appState.totalAlerts > 0 ? appState.totalAlerts : 0)
+                        .badge(appState.totalAlerts)
+                        .foregroundColor(hasCriticalAlerts ? .red : nil)
                         .tag(SidebarSection.alerts)
                     Label("Events", systemImage: "list.bullet.rectangle")
                         .tag(SidebarSection.events)

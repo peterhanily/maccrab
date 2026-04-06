@@ -399,7 +399,7 @@ private struct RuleDetailRow: View {
     var body: some View {
         HStack(alignment: .top) {
             Text(label).font(.caption).foregroundColor(.secondary).frame(width: 60, alignment: .trailing)
-            Text(value).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+            Text(value).font(.system(.subheadline, design: .monospaced)).textSelection(.enabled)
         }
     }
 }
