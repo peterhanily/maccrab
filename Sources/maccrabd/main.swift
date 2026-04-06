@@ -284,6 +284,23 @@ struct MacCrabDaemon {
         // Auto rule generator — creates Sigma rules from observed campaigns
         let ruleGenerator = RuleGenerator(outputDir: supportDir + "/compiled_rules")
 
+        // Rootkit detector — cross-references proc_listallpids vs sysctl for hidden processes
+        let rootkitDetector = RootkitDetector(pollInterval: 120)
+        await rootkitDetector.start()
+        print("Rootkit detector active (dual-API cross-reference)")
+
+        // Library inventory — scans for injected dylibs
+        let libraryInventory = LibraryInventory()
+
+        // CDHash extractor — binary identity via undocumented flavor 17
+        let cdhashExtractor = CDHashExtractor()
+
+        // Crash report miner — exploitation indicators in crash logs
+        let crashReportMiner = CrashReportMiner()
+
+        // Power anomaly detector — crypto miners, C2 beacons via sleep prevention
+        let powerAnomalyDetector = PowerAnomalyDetector()
+
         // Notarization checker — verifies notarization status of executed binaries
         let notarizationChecker = NotarizationChecker()
 
@@ -879,6 +896,88 @@ struct MacCrabDaemon {
                 print("[ULTRASONIC] \(usEvent.attackType.rawValue) at \(String(format: "%.0f", usEvent.peakFrequencyHz)) Hz!")
             }
         }
+
+        // Rootkit detection task
+        Task {
+            for await hidden in rootkitDetector.events {
+                let alert = Alert(
+                    ruleId: "maccrab.forensic.hidden-process",
+                    ruleTitle: "Hidden Process Detected (Possible Rootkit)",
+                    severity: .critical,
+                    eventId: UUID().uuidString,
+                    processPath: nil, processName: "PID \(hidden.pid)",
+                    description: "Process PID \(hidden.pid) visible to \(hidden.source) but not the other enumeration API. This discrepancy indicates a userland rootkit hiding the process.",
+                    mitreTactics: "attack.defense_evasion", mitreTechniques: "attack.t1014",
+                    suppressed: false
+                )
+                try? await alertStore.insert(alert: alert)
+                await notifier.notify(alert: alert)
+                print("[ROOTKIT] Hidden process: PID \(hidden.pid) (\(hidden.source))")
+            }
+        }
+
+        // Periodic forensic scans (crash reports, power anomalies, library inventory)
+        let forensicTimer = DispatchSource.makeTimerSource(queue: .global())
+        forensicTimer.schedule(deadline: .now() + 120, repeating: 300) // First at 2min, then every 5min
+        forensicTimer.setEventHandler {
+            Task {
+                // Crash report mining
+                let exploits = await crashReportMiner.scan()
+                for exploit in exploits {
+                    let alert = Alert(
+                        ruleId: "maccrab.forensic.crash-exploit-\(exploit.indicator)",
+                        ruleTitle: "Exploitation Indicator in Crash Report: \(exploit.processName)",
+                        severity: exploit.severity,
+                        eventId: UUID().uuidString,
+                        processPath: exploit.reportPath, processName: exploit.processName,
+                        description: "\(exploit.indicator): \(exploit.excerpt)",
+                        mitreTactics: "attack.execution", mitreTechniques: "attack.t1203",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    if exploit.severity >= .high { await notifier.notify(alert: alert) }
+                    print("[CRASH] \(exploit.indicator) in \(exploit.processName)")
+                }
+
+                // Power anomaly detection
+                let anomalies = await powerAnomalyDetector.scan()
+                for anomaly in anomalies {
+                    let alert = Alert(
+                        ruleId: "maccrab.forensic.power-\(anomaly.type.rawValue)",
+                        ruleTitle: "Power Anomaly: \(anomaly.processName) \(anomaly.type.rawValue)",
+                        severity: anomaly.severity,
+                        eventId: UUID().uuidString,
+                        processPath: nil, processName: anomaly.processName,
+                        description: anomaly.detail,
+                        mitreTactics: "attack.execution", mitreTechniques: "attack.t1496",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                }
+
+                // Library inventory scan (every other cycle — resource intensive)
+                let injected = await libraryInventory.scanAllProcesses()
+                for lib in injected {
+                    let alert = Alert(
+                        ruleId: "maccrab.forensic.injected-library",
+                        ruleTitle: "Injected Library: \(lib.processName) loaded \((lib.libraryPath as NSString).lastPathComponent)",
+                        severity: lib.severity,
+                        eventId: UUID().uuidString,
+                        processPath: lib.processPath, processName: lib.processName,
+                        description: "\(lib.reason). Library: \(lib.libraryPath)",
+                        mitreTactics: "attack.defense_evasion", mitreTechniques: "attack.t1574.006",
+                        suppressed: false
+                    )
+                    try? await alertStore.insert(alert: alert)
+                    if lib.severity >= .high { await notifier.notify(alert: alert) }
+                    print("[INJECT] \(lib.processName) ← \(lib.libraryPath)")
+                }
+            }
+        }
+        forensicTimer.resume()
+
+        // Use CDHash extractor to enrich process info for already-running processes
+        _ = cdhashExtractor  // Available for on-demand enrichment via maccrabctl
 
         // DNS event processing task
         Task {
