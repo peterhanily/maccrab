@@ -18,6 +18,13 @@ struct SettingsView: View {
     @AppStorage("autoKill") private var autoKill = false
     @AppStorage("autoBlock") private var autoBlock = false
 
+    // Webhook notification settings
+    @AppStorage("webhookSlackURL") private var webhookSlackURL: String = ""
+    @AppStorage("webhookTeamsURL") private var webhookTeamsURL: String = ""
+    @AppStorage("webhookDiscordURL") private var webhookDiscordURL: String = ""
+    @AppStorage("webhookPagerDutyKey") private var webhookPagerDutyKey: String = ""
+    @AppStorage("webhookMinSeverity") private var webhookMinSeverity: String = "high"
+
     var body: some View {
         TabView {
             generalTab
@@ -150,9 +157,94 @@ struct SettingsView: View {
                     .padding(8)
                 }
 
+                GroupBox(String(localized: "settings.webhookIntegrations", defaultValue: "Webhook Integrations")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(String(localized: "settings.webhookDesc", defaultValue: "Send alerts to external services. Leave blank to disable."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack {
+                            Text(String(localized: "settings.webhookMinSeverity", defaultValue: "Minimum severity:"))
+                            Picker("", selection: $webhookMinSeverity) {
+                                Text(String(localized: "settings.low", defaultValue: "Low")).tag("low")
+                                Text(String(localized: "settings.medium", defaultValue: "Medium")).tag("medium")
+                                Text(String(localized: "settings.high", defaultValue: "High")).tag("high")
+                                Text(String(localized: "settings.criticalOnly", defaultValue: "Critical only")).tag("critical")
+                            }
+                            .labelsHidden()
+                            .frame(width: 160)
+                        }
+
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(localized: "settings.slackWebhook", defaultValue: "Slack Webhook URL"))
+                                .font(.caption).fontWeight(.medium)
+                            TextField("https://hooks.slack.com/services/...", text: $webhookSlackURL)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.caption)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(localized: "settings.teamsWebhook", defaultValue: "Microsoft Teams Webhook URL"))
+                                .font(.caption).fontWeight(.medium)
+                            TextField("https://outlook.office.com/webhook/...", text: $webhookTeamsURL)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.caption)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(localized: "settings.discordWebhook", defaultValue: "Discord Webhook URL"))
+                                .font(.caption).fontWeight(.medium)
+                            TextField("https://discord.com/api/webhooks/...", text: $webhookDiscordURL)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.caption)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(localized: "settings.pagerdutyKey", defaultValue: "PagerDuty Routing Key"))
+                                .font(.caption).fontWeight(.medium)
+                            TextField("e93facc04764012d7bfb002500d5d1a6...", text: $webhookPagerDutyKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.caption)
+                        }
+
+                        webhookStatusView
+                    }
+                    .padding(8)
+                }
+
                 Spacer()
             }
             .padding(4)
+        }
+    }
+
+    // MARK: - Webhook Status
+
+    private var webhookStatusView: some View {
+        let configured = [
+            (!webhookSlackURL.isEmpty, "Slack"),
+            (!webhookTeamsURL.isEmpty, "Teams"),
+            (!webhookDiscordURL.isEmpty, "Discord"),
+            (!webhookPagerDutyKey.isEmpty, "PagerDuty"),
+        ].filter(\.0).map(\.1)
+
+        return Group {
+            if configured.isEmpty {
+                Text(String(localized: "settings.noWebhooksConfigured", defaultValue: "No webhook integrations configured"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text(String(localized: "settings.webhooksActive", defaultValue: "Active: \(configured.joined(separator: ", "))"))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
         }
     }
 
