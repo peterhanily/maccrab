@@ -25,7 +25,17 @@ final class AppState: ObservableObject {
     @Published var rules: [RuleViewModel] = []
     @Published var tccEvents: [TCCEventViewModel] = []
 
-    enum Tab: String, CaseIterable { case alerts, events, rules, tcc, aiGuard, prevention, docs, settings }
+    enum Tab: String, CaseIterable { case alerts, events, rules, tcc, aiGuard, prevention, threatIntel, docs, settings }
+
+    /// Threat intel stats for the dashboard
+    struct ThreatIntelStats {
+        var hashes: Int = 0
+        var ips: Int = 0
+        var domains: Int = 0
+        var urls: Int = 0
+        var lastUpdate: Date?
+    }
+    @Published var threatIntelStats = ThreatIntelStats()
     @Published var selectedTab: Tab = .alerts
 
     // MARK: Private

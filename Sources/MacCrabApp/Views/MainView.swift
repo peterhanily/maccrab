@@ -84,12 +84,19 @@ struct MainView: View {
                     .tag(AppState.Tab.prevention)
                     .keyboardShortcut("6", modifiers: .command)
 
+                ThreatIntelView(appState: appState)
+                    .tabItem {
+                        Label("Threat Intel", systemImage: "binoculars")
+                    }
+                    .tag(AppState.Tab.threatIntel)
+                    .keyboardShortcut("7", modifiers: .command)
+
                 DocsView()
                     .tabItem {
                         Label(String(localized: "tabs.docs", defaultValue: "Docs"), systemImage: "book")
                     }
                     .tag(AppState.Tab.docs)
-                    .keyboardShortcut("7", modifiers: .command)
+                    .keyboardShortcut("8", modifiers: .command)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
