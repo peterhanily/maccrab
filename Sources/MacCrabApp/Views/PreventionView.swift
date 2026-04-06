@@ -35,7 +35,51 @@ struct PreventionView: View {
                     .foregroundColor(.secondary)
                     .padding(.horizontal)
 
+                // === Metrics Dashboard ===
+                HStack(spacing: 16) {
+                    MetricBox(label: "Threats Blocked", value: "\(preventionAlertCount)", icon: "hand.raised.fill", color: .red)
+                    MetricBox(label: "Domains Sinkholed", value: "\(sinkholeCount)", icon: "network.slash", color: .blue)
+                    MetricBox(label: "IPs Blocked", value: "\(blockedIPCount)", icon: "shield.lefthalf.filled", color: .orange)
+                    MetricBox(label: "Packages Gated", value: "\(packagesGated)", icon: "shippingbox", color: .yellow)
+                }
+                .padding(.horizontal)
+
+                // Recent prevention activity
+                if !recentBlocks.isEmpty {
+                    GroupBox("Recent Prevention Activity") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(recentBlocks.prefix(5), id: \.id) { alert in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "xmark.shield.fill")
+                                        .foregroundColor(.red)
+                                        .font(.caption)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(alert.ruleTitle)
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                            .lineLimit(1)
+                                        Text(alert.description)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Text(alert.timeAgoString)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .padding(4)
+                    }
+                    .padding(.horizontal)
+                }
+
                 Divider()
+
+                Text("Prevention Mechanisms")
+                    .font(.headline)
+                    .padding(.horizontal)
 
                 // Prevention mechanisms
                 VStack(spacing: 12) {
@@ -109,6 +153,32 @@ struct PreventionView: View {
         }
     }
 
+    // === Metrics computed from alert database ===
+
+    private var preventionAlertCount: Int {
+        appState.dashboardAlerts.filter { $0.ruleTitle.contains("BLOCKED") || $0.ruleTitle.contains("Prevention") || $0.ruleTitle.lowercased().contains("sinkhole") }.count
+    }
+
+    private var sinkholeCount: Int {
+        appState.dashboardAlerts.filter { $0.ruleTitle.lowercased().contains("sinkhole") || $0.ruleTitle.lowercased().contains("dns") && $0.ruleTitle.contains("blocked") }.count
+    }
+
+    private var blockedIPCount: Int {
+        appState.dashboardAlerts.filter { $0.ruleTitle.lowercased().contains("network") && $0.ruleTitle.contains("BLOCKED") }.count
+    }
+
+    private var packagesGated: Int {
+        appState.dashboardAlerts.filter { $0.ruleTitle.contains("supply-chain-blocked") || $0.ruleTitle.contains("Package Install Killed") }.count
+    }
+
+    private var recentBlocks: [AlertViewModel] {
+        appState.dashboardAlerts.filter {
+            $0.ruleTitle.contains("BLOCKED") || $0.ruleTitle.contains("Prevention") ||
+            $0.ruleTitle.contains("Sandbox") || $0.ruleTitle.contains("sinkhole") ||
+            $0.ruleTitle.contains("Revoked") || $0.ruleTitle.contains("supply-chain")
+        }.prefix(5).map { $0 }
+    }
+
     private var allEnabled: Bool {
         dnsSinkholeEnabled && networkBlockerEnabled && persistenceGuardEnabled &&
         sandboxAnalysisEnabled && aiContainmentEnabled && supplyChainGateEnabled && tccRevocationEnabled
@@ -175,5 +245,32 @@ struct PreventionCard: View {
             .padding(4)
         }
         .opacity(isEnabled ? 1.0 : 0.7)
+    }
+}
+
+// MARK: - Metric Box
+
+struct MetricBox: View {
+    let label: String
+    let value: String
+    let icon: String
+    let color: Color
+
+    var body: some View {
+        GroupBox {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundColor(color)
+                Text(value)
+                    .font(.system(.title2, design: .rounded, weight: .bold))
+                Text(label)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+        }
     }
 }
