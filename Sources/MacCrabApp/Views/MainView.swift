@@ -77,12 +77,19 @@ struct MainView: View {
                     .tag(AppState.Tab.aiGuard)
                     .keyboardShortcut("5", modifiers: .command)
 
+                PreventionView(appState: appState)
+                    .tabItem {
+                        Label(String(localized: "tabs.prevention", defaultValue: "Prevention"), systemImage: "shield.checkered")
+                    }
+                    .tag(AppState.Tab.prevention)
+                    .keyboardShortcut("6", modifiers: .command)
+
                 DocsView()
                     .tabItem {
                         Label(String(localized: "tabs.docs", defaultValue: "Docs"), systemImage: "book")
                     }
                     .tag(AppState.Tab.docs)
-                    .keyboardShortcut("5", modifiers: .command)
+                    .keyboardShortcut("7", modifiers: .command)
             }
         }
         .frame(minWidth: 900, minHeight: 600)

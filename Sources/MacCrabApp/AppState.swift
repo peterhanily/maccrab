@@ -25,7 +25,7 @@ final class AppState: ObservableObject {
     @Published var rules: [RuleViewModel] = []
     @Published var tccEvents: [TCCEventViewModel] = []
 
-    enum Tab: String, CaseIterable { case alerts, events, rules, tcc, aiGuard, docs, settings }
+    enum Tab: String, CaseIterable { case alerts, events, rules, tcc, aiGuard, prevention, docs, settings }
     @Published var selectedTab: Tab = .alerts
 
     // MARK: Private
