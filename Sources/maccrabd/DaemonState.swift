@@ -130,6 +130,9 @@ final class DaemonState {
     let toolIntegrations: SecurityToolIntegrations
     let fleetClient: FleetClient?
 
+    // MARK: - LLM
+    let llmService: LLMService?
+
     init(
         isRoot: Bool,
         supportDir: String,
@@ -219,7 +222,8 @@ final class DaemonState {
         reportGenerator: ReportGenerator,
         threatHunter: ThreatHunter,
         toolIntegrations: SecurityToolIntegrations,
-        fleetClient: FleetClient?
+        fleetClient: FleetClient?,
+        llmService: LLMService?
     ) {
         self.isRoot = isRoot
         self.supportDir = supportDir
@@ -310,6 +314,7 @@ final class DaemonState {
         self.threatHunter = threatHunter
         self.toolIntegrations = toolIntegrations
         self.fleetClient = fleetClient
+        self.llmService = llmService
     }
 
     /// Merges all event sources into a single async stream.

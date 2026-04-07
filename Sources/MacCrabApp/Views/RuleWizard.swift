@@ -26,11 +26,11 @@ struct RuleWizard: View {
 
         var title: String {
             switch self {
-            case .metadata:  return "Rule Info"
-            case .detection: return "Detection"
-            case .filters:   return "Filters"
-            case .options:    return "Options"
-            case .preview:    return "Preview & Save"
+            case .metadata:  return String(localized: "ruleWizard.stepInfo", defaultValue: "Rule Info")
+            case .detection: return String(localized: "ruleWizard.stepDetection", defaultValue: "Detection")
+            case .filters:   return String(localized: "ruleWizard.stepFilters", defaultValue: "Filters")
+            case .options:    return String(localized: "ruleWizard.stepOptions", defaultValue: "Options")
+            case .preview:    return String(localized: "ruleWizard.stepPreview", defaultValue: "Preview & Save")
             }
         }
     }

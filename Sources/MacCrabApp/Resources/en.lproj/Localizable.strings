@@ -183,7 +183,7 @@
 
 /* ── Settings: About ── */
 "settings.aboutTagline" = "Local-first macOS threat detection engine";
-"settings.aboutStats" = "7 event sources | 8 detection layers | 241 rules";
+"settings.aboutStats" = "7 event sources | 8 detection layers | 304 rules";
 "settings.aboutLicense" = "Apache 2.0 (code)  |  DRL 1.1 (rules)";
 
 /* ── Status Bar Menu ── */

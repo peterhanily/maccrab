@@ -33,7 +33,7 @@ enum DaemonTimers {
                         mitreTactics: "attack.execution", mitreTechniques: "attack.t1203",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     if exploit.severity >= .high { await state.notifier.notify(alert: alert) }
                     print("[CRASH] \(exploit.indicator) in \(exploit.processName)")
                 }
@@ -51,7 +51,7 @@ enum DaemonTimers {
                         mitreTactics: "attack.execution", mitreTechniques: "attack.t1496",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
                 // Library inventory scan (every other cycle -- resource intensive)
@@ -67,7 +67,7 @@ enum DaemonTimers {
                         mitreTactics: "attack.defense_evasion", mitreTechniques: "attack.t1574.006",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     if lib.severity >= .high { await state.notifier.notify(alert: alert) }
                     print("[INJECT] \(lib.processName) <- \(lib.libraryPath)")
                 }

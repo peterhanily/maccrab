@@ -66,11 +66,11 @@ public actor ThreatIntelFeed {
     public func start() {
         isRunning = true
 
-        // Load cached data first (instant, no network)
-        loadCachedFeeds()
-
         // Then update from network
         Task {
+            // Load cached data first (instant, no network)
+            await loadCachedFeeds()
+
             await updateAllFeeds()
 
             // Schedule periodic updates
@@ -121,6 +121,25 @@ public actor ThreatIntelFeed {
         (maliciousHashes.count, maliciousIPs.count, maliciousDomains.count, maliciousURLs.count, lastUpdate)
     }
 
+    /// Get all known-malicious IPs for bulk blocking.
+    public func maliciousIPSet() -> Set<String> {
+        maliciousIPs
+    }
+
+    /// Get all known-malicious domains for DNS sinkholing.
+    public func maliciousDomainSet() -> Set<String> {
+        maliciousDomains
+    }
+
+    /// Callback invoked after each feed update with (malicious IPs, malicious domains).
+    public typealias FeedUpdateHandler = @Sendable (Set<String>, Set<String>) async -> Void
+    private var onFeedUpdate: FeedUpdateHandler?
+
+    /// Register a callback to be invoked after each threat intel feed update.
+    public func onUpdate(_ handler: @escaping FeedUpdateHandler) {
+        self.onFeedUpdate = handler
+    }
+
     /// Add custom IOCs (user-provided).
     public func addCustomIOCs(hashes: [String] = [], ips: [String] = [], domains: [String] = []) {
         for h in hashes { maliciousHashes.insert(h.lowercased()) }
@@ -167,6 +186,9 @@ public actor ThreatIntelFeed {
 
         logger.info("Threat intel update complete: \(totalNew) new IOCs. Total: \(self.maliciousHashes.count) hashes, \(self.maliciousIPs.count) IPs, \(self.maliciousDomains.count) domains")
         print("Threat intel: \(maliciousHashes.count) hashes, \(maliciousIPs.count) IPs, \(maliciousDomains.count) domains (updated \(totalNew) new)")
+
+        // Notify subscribers (e.g. prevention modules) of updated IOC sets
+        await onFeedUpdate?(maliciousIPs, maliciousDomains)
     }
 
     /// Feodo Tracker — C2 botnet IP addresses.
@@ -258,7 +280,7 @@ public actor ThreatIntelFeed {
         }
     }
 
-    private func loadCachedFeeds() {
+    private func loadCachedFeeds() async {
         let path = cacheDir + "/feed_cache.json"
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let cache = try? JSONDecoder().decode(CacheData.self, from: data) else {
@@ -272,6 +294,11 @@ public actor ThreatIntelFeed {
         lastUpdate = cache.lastUpdate
 
         logger.info("Loaded cached threat intel: \(self.maliciousHashes.count) hashes, \(self.maliciousIPs.count) IPs, \(self.maliciousDomains.count) domains")
+
+        // Notify subscribers with cached data for immediate protection
+        if !maliciousIPs.isEmpty || !maliciousDomains.isEmpty {
+            await onFeedUpdate?(maliciousIPs, maliciousDomains)
+        }
     }
 
     private func loadCustomIOCFiles() {

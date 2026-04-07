@@ -80,6 +80,9 @@ enum DaemonSetup {
         logger.info("Rules directory: \(rulesDir)")
         logger.info("Support directory: \(supportDir)")
 
+        // Load daemon configuration (optional JSON file with tuning overrides)
+        let config = DaemonConfig.load(from: supportDir)
+
         // Create support directories with restrictive permissions
         try? fm.createDirectory(
             atPath: supportDir,
@@ -94,7 +97,7 @@ enum DaemonSetup {
             atPath: compiledRulesDir,
             withIntermediateDirectories: true
         )
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: compiledRulesDir)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: compiledRulesDir)
 
         // Initialize components
         let eventStore: EventStore
@@ -144,7 +147,7 @@ enum DaemonSetup {
         print("Self-defense active (binary integrity, file monitoring, anti-debug)")
 
         // ES infrastructure health monitor
-        let esHealthMonitor = ESClientMonitor(pollInterval: 60)
+        let esHealthMonitor = ESClientMonitor(pollInterval: config.esHealthPollInterval)
         await esHealthMonitor.start()
         let esHealth = await esHealthMonitor.currentStatus()
         if esHealth.isHealthy {
@@ -185,13 +188,13 @@ enum DaemonSetup {
         print("Threat intel feed active (abuse.ch Feodo, URLhaus, MalwareBazaar)")
 
         // Behavioral scoring engine
-        let behaviorScoring = BehaviorScoring(alertThreshold: 10.0, criticalThreshold: 20.0)
+        let behaviorScoring = BehaviorScoring(alertThreshold: config.behaviorAlertThreshold, criticalThreshold: config.behaviorCriticalThreshold)
 
         // Certificate Transparency monitor
         let ctMonitor = CertTransparency()
 
         // Incident grouper -- clusters related alerts into attack timelines
-        let incidentGrouper = IncidentGrouper(correlationWindow: 300, staleWindow: 600)
+        let incidentGrouper = IncidentGrouper(correlationWindow: config.incidentCorrelationWindow, staleWindow: config.incidentStaleWindow)
 
         // Campaign detector -- meta-alert engine: chains alerts into kill chains,
         // alert storms, AI compromise patterns, and coordinated attacks
@@ -215,14 +218,14 @@ enum DaemonSetup {
         let aiTracker = AIProcessTracker(lineage: lineageRef, registry: aiRegistry)
         let credentialFence = CredentialFence()
         let projectBoundary = ProjectBoundary()
-        let injectionScanner = PromptInjectionScanner(confidenceThreshold: 40)
+        let injectionScanner = PromptInjectionScanner(confidenceThreshold: config.promptInjectionConfidence)
         let scannerStatus = await injectionScanner.isAvailable ? "active" : "unavailable (pip install forensicate)"
         print("AI Guard active (monitoring Claude Code, Codex, OpenClaw, Cursor)")
         print("  Credential fence: \(CredentialFence.defaultPaths.count) sensitive paths")
         print("  Prompt injection scanner: \(scannerStatus)")
 
         // Statistical anomaly detector
-        let statisticalDetector = StatisticalAnomalyDetector(zThreshold: 3.0, minSamples: 50)
+        let statisticalDetector = StatisticalAnomalyDetector(zThreshold: config.statisticalZThreshold, minSamples: config.statisticalMinSamples)
 
         // MCP server monitor -- watches AI tool configs for suspicious MCP server registrations
         let mcpMonitor = MCPMonitor()
@@ -230,7 +233,7 @@ enum DaemonSetup {
         print("MCP server monitor active (watching Claude, Cursor, Continue, VS Code, Windsurf configs)")
 
         // USB device monitor -- detects mass storage, HID keyboard emulation
-        let usbMonitor = USBMonitor(pollInterval: 10)
+        let usbMonitor = USBMonitor(pollInterval: config.usbPollInterval)
         await usbMonitor.start()
         print("USB device monitor active")
 
@@ -246,18 +249,18 @@ enum DaemonSetup {
         let reportGenerator = ReportGenerator()
 
         // Clipboard monitor -- detects sensitive data and injection on clipboard
-        let clipboardMonitor = ClipboardMonitor(pollInterval: 3)
+        let clipboardMonitor = ClipboardMonitor(pollInterval: config.clipboardPollInterval)
         await clipboardMonitor.start()
         let clipboardInjectionDetector = ClipboardInjectionDetector()
         print("Clipboard monitor active (sensitive data + injection detection)")
 
         // Browser extension monitor -- scans Chrome/Firefox/Brave/Edge/Arc
-        let browserExtMonitor = BrowserExtensionMonitor(pollInterval: 120)
+        let browserExtMonitor = BrowserExtensionMonitor(pollInterval: config.browserExtensionPollInterval)
         await browserExtMonitor.start()
         print("Browser extension monitor active")
 
         // Ultrasonic attack monitor -- FFT mic sampling for DolphinAttack/NUIT
-        let ultrasonicMonitor = UltrasonicMonitor(pollInterval: 60)
+        let ultrasonicMonitor = UltrasonicMonitor(pollInterval: config.ultrasonicPollInterval)
         await ultrasonicMonitor.start()
         print("Ultrasonic attack monitor active (DolphinAttack, NUIT, SurfingAttack)")
 
@@ -283,7 +286,7 @@ enum DaemonSetup {
         let ruleGenerator = RuleGenerator(outputDir: supportDir + "/compiled_rules")
 
         // Rootkit detector -- cross-references proc_listallpids vs sysctl for hidden processes
-        let rootkitDetector = RootkitDetector(pollInterval: 120)
+        let rootkitDetector = RootkitDetector(pollInterval: config.rootkitPollInterval)
         await rootkitDetector.start()
         print("Rootkit detector active (dual-API cross-reference)")
 
@@ -335,15 +338,21 @@ enum DaemonSetup {
         let tccRevocation = TCCRevocation()
 
         if preventionEnabled {
-            // Populate DNS sinkhole from threat intel
-            let tiStats = await threatIntel.stats()
-            if tiStats.domains > 0 {
-                // Get malicious domains from threat intel (access via the feed's domain check)
-                await dnsSinkhole.enable(domains: [])  // Populated below after first feed update
+            // Register threat intel update callback to populate prevention modules
+            await threatIntel.onUpdate { [dnsSinkhole, networkBlocker] ips, domains in
+                await dnsSinkhole.enable(domains: domains)
+                await networkBlocker.enable(ips: ips)
             }
 
-            // Enable network blocker with threat intel IPs
-            await networkBlocker.enable(ips: [])  // Populated below
+            // Initial population from any cached threat intel
+            let cachedIPs = await threatIntel.maliciousIPSet()
+            let cachedDomains = await threatIntel.maliciousDomainSet()
+            if !cachedDomains.isEmpty {
+                await dnsSinkhole.enable(domains: cachedDomains)
+            }
+            if !cachedIPs.isEmpty {
+                await networkBlocker.enable(ips: cachedIPs)
+            }
 
             // Lock persistence directories
             await persistenceGuard.enable()
@@ -462,18 +471,67 @@ enum DaemonSetup {
             print("Fleet client active: \(ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] ?? "")")
         }
 
+        // === LLM REASONING BACKEND (optional) ===
+        let llmService: LLMService? = await {
+            var llmConfig = config.llm
+            let env = ProcessInfo.processInfo.environment
+            if let p = env["MACCRAB_LLM_PROVIDER"] { llmConfig.provider = LLMProvider(rawValue: p) ?? llmConfig.provider }
+            if let v = env["MACCRAB_LLM_OLLAMA_URL"] { llmConfig.ollamaURL = v }
+            if let v = env["MACCRAB_LLM_OLLAMA_MODEL"] { llmConfig.ollamaModel = v }
+            if let v = env["MACCRAB_LLM_CLAUDE_KEY"] { llmConfig.claudeAPIKey = v }
+            if let v = env["MACCRAB_LLM_CLAUDE_MODEL"] { llmConfig.claudeModel = v }
+            if let v = env["MACCRAB_LLM_OPENAI_URL"] { llmConfig.openaiURL = v }
+            if let v = env["MACCRAB_LLM_OPENAI_KEY"] { llmConfig.openaiAPIKey = v }
+            if let v = env["MACCRAB_LLM_OPENAI_MODEL"] { llmConfig.openaiModel = v }
+
+            guard llmConfig.enabled else { return nil }
+
+            let backend: any LLMBackend
+            switch llmConfig.provider {
+            case .ollama:
+                backend = OllamaBackend(baseURL: llmConfig.ollamaURL, model: llmConfig.ollamaModel)
+            case .claude:
+                guard let key = llmConfig.claudeAPIKey, !key.isEmpty else {
+                    print("LLM backend: Claude requires MACCRAB_LLM_CLAUDE_KEY")
+                    return nil
+                }
+                backend = ClaudeBackend(apiKey: key, model: llmConfig.claudeModel)
+            case .openai:
+                guard let key = llmConfig.openaiAPIKey, !key.isEmpty else {
+                    print("LLM backend: OpenAI requires MACCRAB_LLM_OPENAI_KEY")
+                    return nil
+                }
+                backend = OpenAIBackend(baseURL: llmConfig.openaiURL, apiKey: key, model: llmConfig.openaiModel)
+            }
+
+            let service = LLMService(backend: backend, config: llmConfig)
+            if await service.isAvailable() {
+                let model: String
+                switch llmConfig.provider {
+                case .ollama: model = llmConfig.ollamaModel
+                case .claude: model = llmConfig.claudeModel
+                case .openai: model = llmConfig.openaiModel
+                }
+                print("LLM backend: \(llmConfig.provider.rawValue) (\(model))")
+                return service
+            } else {
+                print("LLM backend: \(llmConfig.provider.rawValue) configured but not reachable")
+                return nil
+            }
+        }()
+
         // DNS collector (BPF capture or passive mode)
         let dnsCollector = DNSCollector()
         await dnsCollector.start()
         print("DNS collector active")
 
         // Event tap monitor (keylogger detection)
-        let eventTapMonitor = EventTapMonitor(pollInterval: 30)
+        let eventTapMonitor = EventTapMonitor(pollInterval: config.eventTapPollInterval)
         await eventTapMonitor.start()
         print("Event tap monitor active (keylogger detection)")
 
         // System policy monitor (SIP, auth plugins, quarantine, XProtect)
-        let systemPolicyMonitor = SystemPolicyMonitor(pollInterval: 300)
+        let systemPolicyMonitor = SystemPolicyMonitor(pollInterval: config.systemPolicyPollInterval)
         await systemPolicyMonitor.start()
         print("System policy monitor active (SIP, plugins, quarantine, XProtect, XPC, MDM)")
 
@@ -746,7 +804,8 @@ enum DaemonSetup {
             reportGenerator: reportGenerator,
             threatHunter: threatHunter,
             toolIntegrations: toolIntegrations,
-            fleetClient: fleetClient
+            fleetClient: fleetClient,
+            llmService: llmService
         )
     }
 }

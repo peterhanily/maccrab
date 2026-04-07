@@ -123,6 +123,36 @@ struct IntegrationsView: View {
                     .padding(.horizontal)
                 }
 
+                // Fleet Telemetry
+                Divider().padding(.horizontal)
+
+                GroupBox(String(localized: "integrations.fleet", defaultValue: "Fleet Telemetry")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Circle()
+                                .fill(appState.fleetStatus.isConfigured ? Color.green : Color.secondary)
+                                .frame(width: 8, height: 8)
+                            Text(appState.fleetStatus.isConfigured
+                                ? String(localized: "integrations.fleetConnected", defaultValue: "Configured")
+                                : String(localized: "integrations.fleetNotConfigured", defaultValue: "Not configured"))
+                                .font(.callout)
+                            Spacer()
+                        }
+
+                        if appState.fleetStatus.isConfigured {
+                            Text(appState.fleetStatus.fleetURL)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Text(String(localized: "integrations.fleetHelp", defaultValue: "Fleet telemetry shares threat intel across multiple Macs. Set MACCRAB_FLEET_URL and optionally MACCRAB_FLEET_KEY before starting the daemon."))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(4)
+                }
+                .padding(.horizontal)
+
                 Spacer()
             }
         }

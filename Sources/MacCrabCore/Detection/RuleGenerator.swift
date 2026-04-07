@@ -26,9 +26,56 @@ public actor RuleGenerator {
 
     private let outputDir: String
     private var generatedCount: Int = 0
+    private let llmService: LLMService?
 
-    public init(outputDir: String) {
+    public init(outputDir: String, llmService: LLMService? = nil) {
         self.outputDir = outputDir
+        self.llmService = llmService
+    }
+
+    /// Generate a rule using LLM enhancement, falling back to template-based generation.
+    public func generateFromCampaignEnhanced(
+        campaignType: String,
+        alerts: [(ruleId: String, ruleTitle: String, processPath: String?, tactics: Set<String>, timestamp: Date)]
+    ) async -> GeneratedRule? {
+        guard alerts.count >= 2 else { return nil }
+
+        if let llm = llmService {
+            let processInfo = alerts.compactMap { $0.processPath }.map { "  - \($0)" }.joined(separator: "\n")
+            let tactics = alerts.flatMap { $0.tactics }.joined(separator: ", ")
+            if let enhancement = await llm.query(
+                systemPrompt: LLMPrompts.ruleGenerationSystem,
+                userPrompt: LLMPrompts.ruleGenerationUser(
+                    campaignType: campaignType, processInfo: processInfo, tactics: tactics
+                ),
+                maxTokens: 1024, temperature: 0.4
+            ) {
+                let yaml = enhancement.response
+                // Validate basic Sigma structure
+                if yaml.contains("title:") && yaml.contains("detection:") &&
+                   yaml.contains("condition:") && yaml.contains("logsource:") {
+                    generatedCount += 1
+                    let filename = "auto_llm_\(campaignType)_\(generatedCount).yml"
+                    let path = outputDir + "/auto_generated/" + filename
+                    try? FileManager.default.createDirectory(
+                        atPath: outputDir + "/auto_generated",
+                        withIntermediateDirectories: true
+                    )
+                    try? yaml.write(toFile: path, atomically: true, encoding: .utf8)
+                    let title = yaml.components(separatedBy: "\n")
+                        .first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("title:") }?
+                        .replacingOccurrences(of: "title:", with: "")
+                        .trimmingCharacters(in: .whitespaces) ?? "LLM-generated rule"
+                    return GeneratedRule(
+                        yaml: yaml, filename: filename, title: title,
+                        description: "LLM-generated from \(campaignType) campaign (\(enhancement.provider))",
+                        severity: "high", generatedAt: Date()
+                    )
+                }
+            }
+        }
+        // Fall back to template-based
+        return generateFromCampaign(campaignType: campaignType, alerts: alerts)
     }
 
     /// Generate a rule from a campaign detection.

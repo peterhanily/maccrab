@@ -5,13 +5,13 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey)]()
-[![Rules](https://img.shields.io/badge/detection%20rules-273-orange)]()
+[![Rules](https://img.shields.io/badge/detection%20rules-304-orange)]()
 [![Version](https://img.shields.io/badge/version-v1.0.0-blue)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
 ---
 
-MacCrab is an on-device security detection engine for macOS. It evaluates 273 Sigma-compatible detection rules against real-time kernel events, Unified Log streams, TCC permission changes, DNS queries, and network connections -- entirely on your machine, with no SIEM, no cloud infrastructure, and no telemetry leaving the host.
+MacCrab is an on-device security detection engine for macOS. It evaluates 304 Sigma-compatible detection rules against real-time kernel events, Unified Log streams, TCC permission changes, DNS queries, and network connections -- entirely on your machine, with no SIEM, no cloud infrastructure, and no telemetry leaving the host.
 
 What sets it apart from other open-source macOS tools:
 
@@ -26,7 +26,7 @@ Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- b
 
 ## What's New in v1.0.0
 
-- 273 Sigma-compatible detection rules
+- 304 Sigma-compatible detection rules
 - 5-tier detection hierarchy (rules, sequences, ML, campaigns, cross-process)
 - AI Guard monitoring 8 coding tools + MCP servers
 - Zero-entitlement kernel events via eslogger proxy
@@ -54,8 +54,8 @@ Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- b
  |   Event Sources    |     |    Enrichment       |     |     Detection        |
  |                    |     |                     |     |                      |
  | ES Framework  ----------> Process Lineage DAG  |     | Single-Event Rules   |
- | Unified Log   ----------> Code Signing Cache   |     |   (221 Sigma YAML)   |
- | TCC Monitor   ----------> Quarantine Origin    +---->| Sequence Rules (20)  |
+ | Unified Log   ----------> Code Signing Cache   |     |   (282 Sigma YAML)   |
+ | TCC Monitor   ----------> Quarantine Origin    +---->| Sequence Rules (22)  |
  | Network Coll. ----------> Threat Intel Feeds   |     | Baseline Anomaly     |
  | DNS Collector ----------> Cert Transparency    |     | Statistical Anomaly  |
  | Event Tap     ----------> YARA Scanner         |     | Behavioral Scoring   |
@@ -101,7 +101,7 @@ MacCrab ingests from eight real-time event sources, covering kernel-level proces
 
 ## Detection Stack
 
-### Rules (273 compiled)
+### Rules (304 compiled)
 
 | Layer | Count | Description |
 |-------|:-----:|-------------|
@@ -703,7 +703,7 @@ maccrab/
 │       └── ViewModels/
 │           └── ViewModels.swift
 │
-├── Rules/                               # 273 Sigma-compatible detection rules
+├── Rules/                               # 304 Sigma-compatible detection rules
 │   ├── execution/          (22)
 │   ├── persistence/        (28)
 │   ├── defense_evasion/    (32)

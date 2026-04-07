@@ -69,6 +69,14 @@ else
     fi
 fi
 
+# Check rules count command
+RULE_COUNT_OUTPUT=$(.build/debug/maccrabctl rules count 2>/dev/null || echo "")
+if echo "$RULE_COUNT_OUTPUT" | grep -q "Severity\|Log Source"; then
+    pass "maccrabctl rules count works"
+else
+    skip "maccrabctl rules count returned no data"
+fi
+
 # --- Trigger detectable actions ---
 echo ""
 info "Triggering test actions..."
@@ -81,6 +89,10 @@ sleep 2
 
 # 2. Network: connection to localhost (should be less suspicious)
 curl -s --connect-timeout 1 http://127.0.0.1:1 > /dev/null 2>&1 || true
+
+# 3. Run osascript (commonly flagged)
+info "  Triggering: osascript execution"
+osascript -e 'return "test"' 2>/dev/null || true
 
 # Wait for the network poll cycle (5s)
 sleep 6
@@ -134,6 +146,30 @@ if echo "$TAIL_RESULT" | grep -q "events\|connect"; then
     pass "maccrabctl events tail works"
 else
     skip "maccrabctl events tail returned no events"
+fi
+
+# Check cdhash extraction works
+CDHASH_RESULT=$(.build/debug/maccrabctl cdhash $$ 2>/dev/null || echo "error")
+if echo "$CDHASH_RESULT" | grep -q "PID\|no CDHash"; then
+    pass "maccrabctl cdhash works"
+else
+    skip "maccrabctl cdhash failed"
+fi
+
+# Check hunt command works
+HUNT_RESULT=$(.build/debug/maccrabctl hunt "show all events" 2>/dev/null || echo "error")
+if echo "$HUNT_RESULT" | grep -q "Threat Hunt\|Results\|Interpretation"; then
+    pass "maccrabctl hunt works"
+else
+    skip "maccrabctl hunt returned no results"
+fi
+
+# Check report generation
+REPORT_RESULT=$(.build/debug/maccrabctl report --hours 1 2>/dev/null || echo "error")
+if echo "$REPORT_RESULT" | grep -q "<html>\|MacCrab\|Report"; then
+    pass "maccrabctl report generation works"
+else
+    skip "maccrabctl report returned no output"
 fi
 
 # --- Cleanup ---

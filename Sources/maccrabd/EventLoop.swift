@@ -102,7 +102,7 @@ enum EventLoop {
                                 mitreTechniques: "attack.t1552.001",
                                 suppressed: false
                             )
-                            try? await state.alertStore.insert(alert: alert)
+                            do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                             await state.notifier.notify(alert: alert)
                             await state.behaviorScoring.addIndicator(
                                 named: "ai_tool_credential_access",
@@ -133,7 +133,7 @@ enum EventLoop {
                                     mitreTechniques: "attack.t1036",
                                     suppressed: false
                                 )
-                                try? await state.alertStore.insert(alert: alert)
+                                do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                                 await state.notifier.notify(alert: alert)
                                 await state.behaviorScoring.addIndicator(
                                     named: "ai_tool_boundary_violation",
@@ -162,7 +162,7 @@ enum EventLoop {
                                     mitreTechniques: "attack.t1195.001",
                                     suppressed: false
                                 )
-                                try? await state.alertStore.insert(alert: alert)
+                                do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                                 await state.notifier.notify(alert: alert)
                                 await state.behaviorScoring.addIndicator(
                                     named: indicator, detail: detail,
@@ -194,7 +194,7 @@ enum EventLoop {
                             mitreTechniques: "attack.t1195.002",
                             suppressed: false
                         )
-                        try? await state.alertStore.insert(alert: alert)
+                        do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                         await state.notifier.notify(alert: alert)
                         await state.behaviorScoring.addIndicator(
                             named: "fresh_package_install",
@@ -226,7 +226,7 @@ enum EventLoop {
                                     mitreTechniques: "attack.t1195.002",
                                     suppressed: false
                                 )
-                                try? await state.alertStore.insert(alert: blockAlert)
+                                do { try await state.alertStore.insert(alert: blockAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                                 await state.notifier.notify(alert: blockAlert)
                                 print("[BLOCKED] Supply chain gate killed PID \(blocked.installerPid): \(blocked.packageName)")
                             }
@@ -268,7 +268,7 @@ enum EventLoop {
                                         mitreTechniques: "attack.t1204",
                                         suppressed: false
                                     )
-                                    try? await state.alertStore.insert(alert: alert)
+                                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                                     await state.notifier.notify(alert: alert)
                                     print("[SANDBOX] Suspicious: \(execPath) -- \(analysis.blockedOperations.count) blocked ops")
                                 }
@@ -302,7 +302,7 @@ enum EventLoop {
                         mitreTechniques: "attack.t1041",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.notifier.notify(alert: alert)
                     await state.behaviorScoring.addIndicator(
                         named: "ai_tool_unapproved_network",
@@ -335,7 +335,7 @@ enum EventLoop {
                         mitreTechniques: "attack.t1204",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.notifier.notify(alert: alert)
                     print("[XPROC] \(chain.description)")
                 }
@@ -362,7 +362,7 @@ enum EventLoop {
                         mitreTechniques: "attack.t1071",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.notifier.notify(alert: alert)
                 }
             }
@@ -509,7 +509,7 @@ enum EventLoop {
                     mitreTechniques: "attack.t1204",
                     suppressed: false
                 )
-                try? await state.alertStore.insert(alert: alert)
+                do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 await state.notifier.notify(alert: alert)
                 await state.behaviorScoring.addIndicator(
                     named: "known_malicious_hash",
@@ -549,7 +549,7 @@ enum EventLoop {
                         mitreTactics: "attack.command_and_control", mitreTechniques: "attack.t1071.004",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.notifier.notify(alert: alert)
                 }
 
@@ -571,7 +571,7 @@ enum EventLoop {
                         mitreTactics: "attack.command_and_control", mitreTechniques: "attack.t1071.001",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     if tlsAlert.severity >= .high { await state.notifier.notify(alert: alert) }
                 }
             }
@@ -596,7 +596,7 @@ enum EventLoop {
                         mitreTactics: "attack.credential_access", mitreTechniques: "attack.t1555",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     if gitEvent.severity >= .high { await state.notifier.notify(alert: alert) }
                 }
             }
@@ -616,7 +616,7 @@ enum EventLoop {
                         mitreTactics: "attack.initial_access", mitreTechniques: "attack.t1195.002",
                         suppressed: false
                     )
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.notifier.notify(alert: alert)
                     print("[FILE-INJECT] \(filePath): \(scanResult.threats.first ?? "injection detected")")
                 }
@@ -652,7 +652,7 @@ enum EventLoop {
             }
 
             // Store event
-            try? await state.eventStore.insert(event: enrichedEvent)
+            do { try await state.eventStore.insert(event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordEventError(error) }
 
             // === Detection: 3 layers ===
 
@@ -719,7 +719,7 @@ enum EventLoop {
                         suppressed: false
                     )
 
-                    try? await state.alertStore.insert(alert: alert)
+                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.notifier.notify(alert: alert)
                     await state.responseEngine.execute(alert: alert, event: enrichedEvent)
 
@@ -782,7 +782,7 @@ enum EventLoop {
                             mitreTechniques: "",
                             suppressed: false
                         )
-                        try? await state.alertStore.insert(alert: campaignAlert)
+                        do { try await state.alertStore.insert(alert: campaignAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                         await state.notifier.notify(alert: campaignAlert)
                         print("[CAMPAIGN] \(campaign.type.rawValue): \(campaign.title)")
 
@@ -790,11 +790,84 @@ enum EventLoop {
                         let campaignAlerts = campaign.alerts.map { a in
                             (ruleId: a.ruleId, ruleTitle: a.ruleTitle, processPath: a.processPath, tactics: a.tactics, timestamp: a.timestamp)
                         }
-                        if let rule = await state.ruleGenerator.generateFromCampaign(
-                            campaignType: campaign.type.rawValue,
-                            alerts: campaignAlerts
-                        ) {
+                        let rule: RuleGenerator.GeneratedRule?
+                        if state.llmService != nil {
+                            rule = await state.ruleGenerator.generateFromCampaignEnhanced(
+                                campaignType: campaign.type.rawValue,
+                                alerts: campaignAlerts
+                            )
+                        } else {
+                            rule = await state.ruleGenerator.generateFromCampaign(
+                                campaignType: campaign.type.rawValue,
+                                alerts: campaignAlerts
+                            )
+                        }
+                        if let rule {
                             print("[RULE-GEN] Auto-generated: \(rule.filename)")
+                        }
+
+                        // LLM investigation summary + defense recommendation (non-blocking)
+                        if let llm = state.llmService {
+                            let campaignTitle = campaign.title
+                            let campaignType = campaign.type.rawValue
+                            let campaignSeverity = campaign.severity
+                            let campaignId = campaign.id
+                            let campaignTactics = Array(campaign.tactics)
+                            let alertSummaries = campaign.alerts.prefix(10).map { a in
+                                (title: a.ruleTitle, process: a.processPath, severity: a.severity.rawValue)
+                            }
+
+                            Task {
+                                // Investigation summary
+                                if let enhancement = await llm.query(
+                                    systemPrompt: LLMPrompts.investigationSystem,
+                                    userPrompt: LLMPrompts.investigationUser(
+                                        campaignType: campaignType, title: campaignTitle,
+                                        severity: campaignSeverity.rawValue,
+                                        tactics: campaignTactics,
+                                        alerts: alertSummaries
+                                    ),
+                                    maxTokens: 1024, temperature: 0.3
+                                ) {
+                                    let summaryAlert = Alert(
+                                        ruleId: "maccrab.llm.investigation-summary",
+                                        ruleTitle: "Investigation Summary: \(campaignTitle)",
+                                        severity: .informational,
+                                        eventId: campaignId,
+                                        processPath: nil, processName: nil,
+                                        description: enhancement.response,
+                                        mitreTactics: nil, mitreTechniques: nil,
+                                        suppressed: false
+                                    )
+                                    do { try await state.alertStore.insert(alert: summaryAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                                    print("[LLM] Investigation summary generated for: \(campaignTitle)")
+                                }
+
+                                // Active defense recommendation (high/critical only)
+                                // NOTE: Advisory only — recommendations are stored as informational
+                                // alerts for human review. Actions are NEVER auto-executed.
+                                if campaignSeverity == .critical || campaignSeverity == .high {
+                                    let context = "Campaign: \(campaignType) — \(campaignTitle)\nSeverity: \(campaignSeverity.rawValue)\nAlerts: \(alertSummaries.map { "[\($0.severity)] \($0.title) (\($0.process ?? "?"))" }.joined(separator: "; "))"
+                                    if let rec = await llm.query(
+                                        systemPrompt: LLMPrompts.activeDefenseSystem,
+                                        userPrompt: LLMPrompts.activeDefenseUser(alertContext: context),
+                                        maxTokens: 512, temperature: 0.1
+                                    ) {
+                                        let recAlert = Alert(
+                                            ruleId: "maccrab.llm.defense-recommendation",
+                                            ruleTitle: "Defense Recommendation: \(campaignTitle)",
+                                            severity: .informational,
+                                            eventId: campaignId,
+                                            processPath: nil, processName: nil,
+                                            description: rec.response,
+                                            mitreTactics: nil, mitreTechniques: nil,
+                                            suppressed: false
+                                        )
+                                        do { try await state.alertStore.insert(alert: recAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                                        print("[LLM] Defense recommendation generated for: \(campaignTitle)")
+                                    }
+                                }
+                            }
                         }
                     }
 

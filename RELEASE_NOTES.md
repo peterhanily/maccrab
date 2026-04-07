@@ -4,7 +4,7 @@
 
 ## Highlights
 
-- 273 Sigma-compatible detection rules across 15 MITRE ATT&CK categories
+- 304 Sigma-compatible detection rules across 15 MITRE ATT&CK categories
 - 5-tier detection: rules → sequences → ML → campaigns → cross-process correlation
 - AI Guard: monitors 8 AI coding tools (Claude, Cursor, Copilot, Codex + more)
 - Zero-entitlement kernel events via eslogger proxy

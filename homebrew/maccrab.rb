@@ -4,7 +4,7 @@ cask "maccrab" do
 
   url "https://github.com/peterhanily/maccrab/releases/download/v#{version}/MacCrab-v#{version}.dmg"
   name "MacCrab"
-  desc "Local-first macOS threat detection engine with 273 Sigma-compatible rules"
+  desc "Local-first macOS threat detection engine with 304 Sigma-compatible rules"
   homepage "https://github.com/peterhanily/maccrab"
 
   depends_on macos: ">= :ventura"

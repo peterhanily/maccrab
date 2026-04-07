@@ -128,7 +128,7 @@ struct WelcomeView: View {
                 .font(.title2).fontWeight(.bold)
 
             VStack(alignment: .leading, spacing: 12) {
-                FeatureRow(icon: "shield.checkered", title: "Real-Time Detection", description: "273 detection rules monitor your Mac for threats in real time")
+                FeatureRow(icon: "shield.checkered", title: "Real-Time Detection", description: "304 detection rules monitor your Mac for threats in real time")
                 FeatureRow(icon: "brain", title: "AI Safety", description: "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access")
                 FeatureRow(icon: "hand.raised", title: "Active Prevention", description: "Blocks malicious domains, quarantines files, and gates supply chain attacks")
                 FeatureRow(icon: "lock.shield", title: "Privacy First", description: "Everything runs locally — no data ever leaves your machine")
@@ -154,7 +154,7 @@ struct WelcomeView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 SetupRow(icon: "checkmark.circle.fill", color: .green, text: "Detection engine active")
-                SetupRow(icon: "checkmark.circle.fill", color: .green, text: "273 rules loaded")
+                SetupRow(icon: "checkmark.circle.fill", color: .green, text: "304 rules loaded")
                 SetupRow(icon: "checkmark.circle.fill", color: .green, text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
                 SetupRow(icon: "info.circle", color: .blue, text: "Start the daemon: sudo maccrabd")
                 SetupRow(icon: "info.circle", color: .blue, text: "Enable prevention in the Prevention tab")

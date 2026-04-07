@@ -24,17 +24,17 @@ struct CampaignView: View {
             VStack(alignment: .leading, spacing: 16) {
                 // Header
                 HStack {
-                    Text("Campaigns & Incidents")
+                    Text(String(localized: "campaigns.title", defaultValue: "Campaigns & Incidents"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
-                    Text("\(campaigns.count) detected")
+                    Text("\(campaigns.count) \(String(localized: "campaigns.detected", defaultValue: "detected"))")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
                 .padding(.horizontal)
                 .padding(.top)
 
-                Text("Campaigns are higher-order detections that chain multiple alerts into attack patterns — kill chains, alert storms, AI compromise, and coordinated attacks.")
+                Text(String(localized: "campaigns.description", defaultValue: "Campaigns are higher-order detections that chain multiple alerts into attack patterns — kill chains, alert storms, AI compromise, and coordinated attacks."))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .padding(.horizontal)
@@ -45,10 +45,10 @@ struct CampaignView: View {
                         Image(systemName: "shield.checkered")
                             .font(.system(size: 48))
                             .foregroundColor(.secondary.opacity(0.5))
-                        Text("No campaigns detected")
+                        Text(String(localized: "campaigns.none", defaultValue: "No campaigns detected"))
                             .font(.headline)
                             .foregroundColor(.secondary)
-                        Text("This is good — no multi-stage attacks have been identified")
+                        Text(String(localized: "campaigns.noneDetail", defaultValue: "This is good — no multi-stage attacks have been identified"))
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                         Spacer()

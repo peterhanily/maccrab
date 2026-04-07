@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage("autoQuarantine") private var autoQuarantine = false
     @AppStorage("autoKill") private var autoKill = false
     @AppStorage("autoBlock") private var autoBlock = false
+    @AppStorage("maxDatabaseSizeMB") private var maxDatabaseSizeMB: Int = 500
 
     @State private var selectedLanguage: String = {
         let current = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "en"
@@ -90,6 +91,34 @@ struct SettingsView: View {
                             )
                         }
                         Text(String(localized: "settings.retentionHelp", defaultValue: "Events, alerts, and baseline data older than this will be automatically pruned."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(8)
+                }
+
+                GroupBox(String(localized: "settings.storageLimit", defaultValue: "Storage Limit")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(String(localized: "settings.maxDBSize", defaultValue: "Max database size"))
+                            Stepper(
+                                "\(maxDatabaseSizeMB) MB",
+                                value: $maxDatabaseSizeMB,
+                                in: 100...5000,
+                                step: 100
+                            )
+                        }
+
+                        HStack {
+                            Text(String(localized: "settings.currentDBSize", defaultValue: "Current size:"))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(currentDatabaseSize)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(isDatabaseNearLimit ? .orange : .secondary)
+                        }
+
+                        Text(String(localized: "settings.storageLimitHelp", defaultValue: "When the database exceeds this size, the oldest events will be pruned automatically."))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -398,7 +427,7 @@ struct SettingsView: View {
                 Text(String(localized: "settings.aboutTagline", defaultValue: "Local-first macOS threat detection engine"))
                     .foregroundColor(.secondary)
 
-                Text("v0.5.0")
+                Text("v1.0.0")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -406,7 +435,7 @@ struct SettingsView: View {
                     .frame(width: 200)
 
                 VStack(spacing: 4) {
-                    Text(String(localized: "settings.aboutStats", defaultValue: "7 event sources | 8 detection layers | 241 rules"))
+                    Text(String(localized: "settings.aboutStats", defaultValue: "7 event sources | 8 detection layers | 304 rules"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Text(String(localized: "settings.aboutLicense", defaultValue: "Apache 2.0 (code)  |  DRL 1.1 (rules)"))
@@ -421,6 +450,20 @@ struct SettingsView: View {
     }
 
     // MARK: - Private
+
+    private var currentDatabaseSize: String {
+        let path = databasePath
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? UInt64 else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+    }
+
+    private var isDatabaseNearLimit: Bool {
+        let path = databasePath
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? UInt64 else { return false }
+        return size > UInt64(maxDatabaseSizeMB) * 800_000 // warn at 80%
+    }
 
     private var databasePath: String {
         let fm = FileManager.default

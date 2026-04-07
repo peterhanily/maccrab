@@ -25,9 +25,11 @@ public actor ThreatHunter {
     }
 
     private let databasePath: String
+    private let llmService: LLMService?
 
-    public init(databasePath: String) {
+    public init(databasePath: String, llmService: LLMService? = nil) {
         self.databasePath = databasePath
+        self.llmService = llmService
     }
 
     /// Execute a natural language threat hunting query.
@@ -53,6 +55,75 @@ public actor ThreatHunter {
             query: query, sqlQuery: sql, resultCount: results.count,
             results: results, executionTime: elapsed, interpretation: interpretation
         )
+    }
+
+    /// Execute a threat hunting query with LLM enhancement.
+    /// Falls back to deterministic pattern matching if LLM is unavailable.
+    public func huntEnhanced(_ query: String) async -> HuntResult? {
+        // Try LLM first
+        if let llm = llmService {
+            let start = Date()
+            if let enhancement = await llm.query(
+                systemPrompt: LLMPrompts.threatHuntSystem,
+                userPrompt: LLMPrompts.threatHuntUser(query: query),
+                maxTokens: 512, temperature: 0.1, useCache: false
+            ) {
+                let sql = enhancement.response.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Validate: must be SELECT, no mutations, no semicolons
+                if isValidSQL(sql) {
+                    let results = executeSQL(sql)
+                    let elapsed = Date().timeIntervalSince(start)
+                    return HuntResult(
+                        query: query, sqlQuery: sql, resultCount: results.count,
+                        results: results, executionTime: elapsed,
+                        interpretation: "LLM-generated SQL (\(enhancement.provider))"
+                    )
+                }
+            }
+        }
+        // Fall back to deterministic
+        return hunt(query)
+    }
+
+    /// Validate LLM-generated SQL is safe to execute.
+    /// Whitelist approach: only allow simple SELECT queries.
+    private func isValidSQL(_ sql: String) -> Bool {
+        // Max length guard
+        guard sql.count < 2000 else { return false }
+
+        let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip SQL comments before validation
+        let noComments = trimmed
+            .replacingOccurrences(of: #"--[^\n]*"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"/\*[\s\S]*?\*/"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let upper = noComments.uppercased()
+
+        // Must start with SELECT
+        guard upper.hasPrefix("SELECT") else { return false }
+
+        // No semicolons (prevent multi-statement injection)
+        if noComments.contains(";") { return false }
+
+        // Comprehensive forbidden keyword list
+        let forbidden = [
+            "DELETE", "UPDATE", "INSERT", "DROP", "ALTER", "CREATE",
+            "ATTACH", "DETACH", "PRAGMA", "VACUUM", "ANALYZE",
+            "REINDEX", "REPLACE", "SAVEPOINT", "RELEASE", "ROLLBACK",
+            "BEGIN", "COMMIT", "GRANT", "REVOKE",
+        ]
+
+        // Check for forbidden keywords as whole words (not substrings)
+        for keyword in forbidden {
+            let pattern = "\\b\(keyword)\\b"
+            if upper.range(of: pattern, options: .regularExpression) != nil {
+                return false
+            }
+        }
+
+        return true
     }
 
     /// Translate a natural language query to SQL.

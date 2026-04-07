@@ -17,6 +17,13 @@ info()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[-]${NC} $*" >&2; exit 1; }
 
+AUTO_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) AUTO_YES=true ;;
+    esac
+done
+
 if [ "$(id -u)" -ne 0 ]; then
     error "This script must be run with sudo."
 fi
@@ -38,14 +45,19 @@ info "Removing launchd plist..."
 rm -f "$PLIST_DIR/$PLIST_NAME.plist"
 
 # Ask about data
-echo ""
-read -p "Remove MacCrab data (events.db, rules, logs)? [y/N] " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    info "Removing data directory..."
+if [ "$AUTO_YES" = true ]; then
+    info "Removing data directory (--yes)..."
     rm -rf "$SUPPORT_DIR"
 else
-    warn "Data preserved at: $SUPPORT_DIR"
+    echo ""
+    read -p "Remove MacCrab data (events.db, rules, logs)? [y/N] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        info "Removing data directory..."
+        rm -rf "$SUPPORT_DIR"
+    else
+        warn "Data preserved at: $SUPPORT_DIR"
+    fi
 fi
 
 echo ""

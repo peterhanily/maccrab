@@ -36,6 +36,24 @@ final class AppState: ObservableObject {
         var lastUpdate: Date?
     }
     @Published var threatIntelStats = ThreatIntelStats()
+
+    /// Fleet telemetry connection status
+    struct FleetStatus {
+        var isConfigured: Bool = false
+        var fleetURL: String = ""
+    }
+    @Published var fleetStatus = FleetStatus()
+
+    /// LLM backend status
+    struct LLMStatus {
+        var isConfigured: Bool = false
+        var provider: String = ""
+    }
+    @Published var llmStatus = LLMStatus()
+
+    /// AI analysis alerts (investigation summaries + defense recommendations)
+    @Published var aiAnalysisAlerts: [AlertViewModel] = []
+
     @Published var selectedTab: Tab = .overview
 
     // MARK: Private
@@ -133,6 +151,16 @@ final class AppState: ObservableObject {
         let walExists = fm.fileExists(atPath: dbPath + "-wal")
         isConnected = dbExists && (walExists || fm.fileExists(atPath: dbPath + "-shm"))
 
+        // Check fleet configuration
+        let fleetURL = ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] ?? ""
+        fleetStatus.isConfigured = !fleetURL.isEmpty
+        fleetStatus.fleetURL = fleetURL
+
+        // Check LLM configuration
+        let llmProvider = ProcessInfo.processInfo.environment["MACCRAB_LLM_PROVIDER"] ?? ""
+        llmStatus.isConfigured = !llmProvider.isEmpty
+        llmStatus.provider = llmProvider
+
         guard dbExists else {
             eventsPerSecond = 0
             return
@@ -182,6 +210,12 @@ final class AppState: ObservableObject {
         // Search for compiled rules in multiple locations
         let candidates = [
             dataDir + "/compiled_rules",
+            // User-specific directory (populated by `make compile-rules`)
+            FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first.map { $0.appendingPathComponent("MacCrab/compiled_rules").path }
+                ?? NSHomeDirectory() + "/Library/Application Support/MacCrab/compiled_rules",
             // Development: next to the maccrabd binary
             URL(fileURLWithPath: CommandLine.arguments[0])
                 .deletingLastPathComponent()
@@ -319,6 +353,12 @@ final class AppState: ObservableObject {
                    (newest.severity == .critical || newest.severity == .high),
                    !newest.suppressed, !isPatternSuppressed(newest) {
                     onCriticalAlert?(newest)
+                }
+
+                // Extract AI analysis alerts
+                aiAnalysisAlerts = dashboardAlerts.filter {
+                    $0.ruleTitle.hasPrefix("Investigation Summary:") ||
+                    $0.ruleTitle.hasPrefix("Defense Recommendation:")
                 }
             }
         } catch {}

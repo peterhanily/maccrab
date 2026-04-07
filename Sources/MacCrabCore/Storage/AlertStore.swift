@@ -165,58 +165,6 @@ public actor AlertStore {
         if let db { sqlite3_close(db) }
     }
 
-    private func createSchema() throws {
-        let createAlerts = """
-            CREATE TABLE IF NOT EXISTS alerts (
-                id TEXT PRIMARY KEY,
-                timestamp REAL NOT NULL,
-                rule_id TEXT NOT NULL,
-                rule_title TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                event_id TEXT NOT NULL,
-                process_path TEXT,
-                process_name TEXT,
-                description TEXT,
-                mitre_tactics TEXT,
-                mitre_techniques TEXT,
-                suppressed INTEGER DEFAULT 0
-            )
-            """
-
-        let createIdxTimestamp = """
-            CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)
-            """
-        let createIdxRuleId = """
-            CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id)
-            """
-        let createIdxSeverity = """
-            CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)
-            """
-        let createIdxEventId = """
-            CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts(event_id)
-            """
-
-        try execute(createAlerts)
-        try execute(createIdxTimestamp)
-        try execute(createIdxRuleId)
-        try execute(createIdxSeverity)
-        try execute(createIdxEventId)
-    }
-
-    private func prepareStatements() throws {
-        let insertSQL = """
-            INSERT OR REPLACE INTO alerts (
-                id, timestamp, rule_id, rule_title, severity,
-                event_id, process_path, process_name, description,
-                mitre_tactics, mitre_techniques, suppressed
-            ) VALUES (
-                ?1, ?2, ?3, ?4, ?5,
-                ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12
-            )
-            """
-        insertStmt = try prepare(insertSQL)
-    }
 
     // MARK: - Insert
 

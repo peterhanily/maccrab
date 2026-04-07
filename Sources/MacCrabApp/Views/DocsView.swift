@@ -73,7 +73,7 @@ struct DocsView: View {
             DocBody("""
             MacCrab is a local-first macOS security monitoring tool. It watches what \
             happens on your Mac in real time — process executions, file changes, network \
-            connections, and permission grants — and evaluates 241 detection rules against \
+            connections, and permission grants — and evaluates 304 detection rules against \
             every event to find threats.
             """)
 
@@ -160,7 +160,7 @@ struct DocsView: View {
     private var detectionsContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             DocTitle("What It Detects")
-            DocBody("241 detection rules across 12 MITRE ATT&CK tactics:")
+            DocBody("304 detection rules across 12 MITRE ATT&CK tactics:")
 
             DocTable(headers: ["Tactic", "Examples", "Rules"], rows: [
                 ["Initial Access", "Exploit payloads, phishing downloads, supply chain attacks", "15"],

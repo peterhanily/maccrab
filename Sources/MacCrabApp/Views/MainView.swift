@@ -30,6 +30,7 @@ struct MainView: View {
         case aiGuard = "AI Guard"
         // Intelligence
         case threatIntel = "Threat Intel"
+        case aiAnalysis = "AI Analysis"
         case integrations = "Integrations"
         // System
         case permissions = "Permissions"
@@ -48,41 +49,44 @@ struct MainView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedSection) {
-                Section("Monitor") {
-                    Label("Overview", systemImage: "gauge.with.dots.needle.33percent")
+                Section(String(localized: "sidebar.monitor", defaultValue: "Monitor")) {
+                    Label(String(localized: "sidebar.overview", defaultValue: "Overview"), systemImage: "gauge.with.dots.needle.33percent")
                         .tag(SidebarSection.overview)
-                    Label("Alerts", systemImage: "exclamationmark.triangle")
+                    Label(String(localized: "sidebar.alerts", defaultValue: "Alerts"), systemImage: "exclamationmark.triangle")
                         .badge(appState.totalAlerts)
                         .foregroundColor(hasCriticalAlerts ? .red : nil)
                         .tag(SidebarSection.alerts)
-                    Label("Campaigns", systemImage: "link.circle")
+                    Label(String(localized: "sidebar.campaigns", defaultValue: "Campaigns"), systemImage: "link.circle")
                         .badge(campaignCount)
                         .tag(SidebarSection.campaigns)
-                    Label("Events", systemImage: "list.bullet.rectangle")
+                    Label(String(localized: "sidebar.events", defaultValue: "Events"), systemImage: "list.bullet.rectangle")
                         .tag(SidebarSection.events)
-                    Label("Rules", systemImage: "shield.checkered")
+                    Label(String(localized: "sidebar.rules", defaultValue: "Rules"), systemImage: "shield.checkered")
                         .badge(appState.rulesLoaded)
                         .tag(SidebarSection.rules)
                 }
 
-                Section("Protection") {
-                    Label("Prevention", systemImage: "hand.raised")
+                Section(String(localized: "sidebar.protection", defaultValue: "Protection")) {
+                    Label(String(localized: "sidebar.prevention", defaultValue: "Prevention"), systemImage: "hand.raised")
                         .tag(SidebarSection.prevention)
-                    Label("AI Guard", systemImage: "brain")
+                    Label(String(localized: "sidebar.aiGuard", defaultValue: "AI Guard"), systemImage: "brain")
                         .tag(SidebarSection.aiGuard)
                 }
 
-                Section("Intelligence") {
-                    Label("Threat Intel", systemImage: "binoculars")
+                Section(String(localized: "sidebar.intelligence", defaultValue: "Intelligence")) {
+                    Label(String(localized: "sidebar.threatIntel", defaultValue: "Threat Intel"), systemImage: "binoculars")
                         .tag(SidebarSection.threatIntel)
-                    Label("Integrations", systemImage: "puzzlepiece.extension")
+                    Label(String(localized: "sidebar.aiAnalysis", defaultValue: "AI Analysis"), systemImage: "brain.head.profile")
+                        .badge(appState.aiAnalysisAlerts.count)
+                        .tag(SidebarSection.aiAnalysis)
+                    Label(String(localized: "sidebar.integrations", defaultValue: "Integrations"), systemImage: "puzzlepiece.extension")
                         .tag(SidebarSection.integrations)
                 }
 
-                Section("System") {
-                    Label("Permissions", systemImage: "lock.shield")
+                Section(String(localized: "sidebar.system", defaultValue: "System")) {
+                    Label(String(localized: "sidebar.permissions", defaultValue: "Permissions"), systemImage: "lock.shield")
                         .tag(SidebarSection.permissions)
-                    Label("Docs", systemImage: "book")
+                    Label(String(localized: "sidebar.docs", defaultValue: "Docs"), systemImage: "book")
                         .tag(SidebarSection.docs)
                 }
             }
@@ -106,6 +110,8 @@ struct MainView: View {
                 AIActivityView(appState: appState)
             case .threatIntel:
                 ThreatIntelView(appState: appState)
+            case .aiAnalysis:
+                AIAnalysisView(appState: appState)
             case .integrations:
                 IntegrationsView(appState: appState)
             case .permissions:
@@ -128,6 +134,13 @@ struct MainView: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .fixedSize()
+                    if appState.llmStatus.isConfigured {
+                        Divider().frame(height: 12)
+                        Image(systemName: "brain.head.profile")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                            .help("AI: \(appState.llmStatus.provider)")
+                    }
                 }
             }
             ToolbarItem(placement: .automatic) {
