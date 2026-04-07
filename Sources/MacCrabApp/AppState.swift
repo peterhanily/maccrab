@@ -156,10 +156,21 @@ final class AppState: ObservableObject {
         fleetStatus.isConfigured = !fleetURL.isEmpty
         fleetStatus.fleetURL = fleetURL
 
-        // Check LLM configuration
-        let llmProvider = ProcessInfo.processInfo.environment["MACCRAB_LLM_PROVIDER"] ?? ""
-        llmStatus.isConfigured = !llmProvider.isEmpty
-        llmStatus.provider = llmProvider
+        // Check LLM configuration (from config file or env vars)
+        var detectedLLMProvider = ProcessInfo.processInfo.environment["MACCRAB_LLM_PROVIDER"] ?? ""
+        var llmConfigured = !detectedLLMProvider.isEmpty
+        if !llmConfigured {
+            let llmConfigPath = dataDir + "/llm_config.json"
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: llmConfigPath)),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let enabled = json["enabled"] as? Bool, enabled,
+               let provider = json["provider"] as? String {
+                detectedLLMProvider = provider
+                llmConfigured = true
+            }
+        }
+        llmStatus.isConfigured = llmConfigured
+        llmStatus.provider = detectedLLMProvider
 
         guard dbExists else {
             eventsPerSecond = 0

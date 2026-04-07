@@ -239,9 +239,25 @@ struct AIAnalysisView: View {
             let ctlPath = paths.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "maccrabctl"
 
             process.arguments = [ctlPath, "hunt", huntQuery]
-            // Pass through LLM env vars
+            // Pass through LLM env vars + config
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+            // If not set via env, read from dashboard config
+            if env["MACCRAB_LLM_PROVIDER"] == nil {
+                let configPath = NSHomeDirectory() + "/Library/Application Support/MacCrab/llm_config.json"
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let enabled = json["enabled"] as? Bool, enabled,
+                   let provider = json["provider"] as? String {
+                    env["MACCRAB_LLM_PROVIDER"] = provider
+                    if let v = json["ollama_url"] as? String { env["MACCRAB_LLM_OLLAMA_URL"] = v }
+                    if let v = json["ollama_model"] as? String { env["MACCRAB_LLM_OLLAMA_MODEL"] = v }
+                    if let v = json["claude_api_key"] as? String { env["MACCRAB_LLM_CLAUDE_KEY"] = v }
+                    if let v = json["openai_url"] as? String { env["MACCRAB_LLM_OPENAI_URL"] = v }
+                    if let v = json["openai_api_key"] as? String { env["MACCRAB_LLM_OPENAI_KEY"] = v }
+                    if let v = json["openai_model"] as? String { env["MACCRAB_LLM_OPENAI_MODEL"] = v }
+                }
+            }
             process.environment = env
 
             let pipe = Pipe()

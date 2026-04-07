@@ -472,8 +472,28 @@ enum DaemonSetup {
         }
 
         // === LLM REASONING BACKEND (optional) ===
+        // Config sources (in priority order): env vars > llm_config.json > daemon_config.json
         let llmService: LLMService? = await {
             var llmConfig = config.llm
+
+            // Read dashboard-written llm_config.json (written by Settings > AI Backend)
+            let llmConfigPath = supportDir + "/llm_config.json"
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: llmConfigPath)),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let enabled = json["enabled"] as? Bool { llmConfig.enabled = enabled }
+                if let provider = json["provider"] as? String {
+                    llmConfig.provider = LLMProvider(rawValue: provider) ?? llmConfig.provider
+                }
+                if let v = json["ollama_url"] as? String { llmConfig.ollamaURL = v }
+                if let v = json["ollama_model"] as? String { llmConfig.ollamaModel = v }
+                if let v = json["claude_api_key"] as? String { llmConfig.claudeAPIKey = v }
+                if let v = json["claude_model"] as? String { llmConfig.claudeModel = v }
+                if let v = json["openai_url"] as? String { llmConfig.openaiURL = v }
+                if let v = json["openai_api_key"] as? String { llmConfig.openaiAPIKey = v }
+                if let v = json["openai_model"] as? String { llmConfig.openaiModel = v }
+            }
+
+            // Env vars override everything (backward compat)
             let env = ProcessInfo.processInfo.environment
             if let p = env["MACCRAB_LLM_PROVIDER"] { llmConfig.provider = LLMProvider(rawValue: p) ?? llmConfig.provider }
             if let v = env["MACCRAB_LLM_OLLAMA_URL"] { llmConfig.ollamaURL = v }

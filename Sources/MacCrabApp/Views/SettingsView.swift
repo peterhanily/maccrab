@@ -19,6 +19,15 @@ struct SettingsView: View {
     @AppStorage("autoBlock") private var autoBlock = false
     @AppStorage("maxDatabaseSizeMB") private var maxDatabaseSizeMB: Int = 500
 
+    // LLM settings (persisted to llm_config.json for daemon access)
+    @AppStorage("llm.provider") private var llmProvider: String = "ollama"
+    @AppStorage("llm.ollamaURL") private var llmOllamaURL: String = "http://localhost:11434"
+    @AppStorage("llm.ollamaModel") private var llmOllamaModel: String = "llama3.1:8b"
+    @AppStorage("llm.apiKey") private var llmAPIKey: String = ""
+    @AppStorage("llm.openaiURL") private var llmOpenAIURL: String = "https://api.openai.com/v1"
+    @AppStorage("llm.model") private var llmModel: String = ""
+    @AppStorage("llm.enabled") private var llmEnabled: Bool = false
+
     @State private var selectedLanguage: String = {
         let current = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "en"
         return current
@@ -66,6 +75,9 @@ struct SettingsView: View {
 
             ResponseActionsView()
                 .tabItem { Label(String(localized: "settings.responseActions", defaultValue: "Response Actions"), systemImage: "bolt.shield") }
+
+            llmTab
+                .tabItem { Label(String(localized: "settings.aiBackend", defaultValue: "AI Backend"), systemImage: "brain.head.profile") }
 
             aboutTab
                 .tabItem { Label(String(localized: "settings.about", defaultValue: "About"), systemImage: "info.circle") }
@@ -408,6 +420,187 @@ struct SettingsView: View {
             }
             .padding(4)
         }
+    }
+
+    // MARK: - AI Backend
+
+    private var llmTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                GroupBox(String(localized: "settings.llmEnable", defaultValue: "AI Backend")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle(String(localized: "settings.llmEnabled", defaultValue: "Enable AI-powered analysis"), isOn: $llmEnabled)
+                            .onChange(of: llmEnabled) { _ in syncLLMConfig() }
+
+                        if llmEnabled {
+                            Picker(String(localized: "settings.llmProvider", defaultValue: "Provider"), selection: $llmProvider) {
+                                Text("Ollama (Local)").tag("ollama")
+                                Text("OpenAI Compatible").tag("openai")
+                                Text("Claude (Anthropic)").tag("claude")
+                            }
+                            .onChange(of: llmProvider) { _ in syncLLMConfig() }
+
+                            Divider()
+
+                            if llmProvider == "ollama" {
+                                ollamaSettings
+                            } else if llmProvider == "openai" {
+                                openaiSettings
+                            } else if llmProvider == "claude" {
+                                claudeSettings
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+
+                if llmEnabled {
+                    GroupBox(String(localized: "settings.llmInfo", defaultValue: "How it works")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(String(localized: "settings.llmInfoDesc", defaultValue: "The AI backend powers four features: natural language threat hunting, investigation summaries, detection rule generation, and defense recommendations."))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            if llmProvider == "ollama" {
+                                Text(String(localized: "settings.llmOllamaPrivacy", defaultValue: "Ollama runs fully on-device. No data leaves your machine."))
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            } else {
+                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Cloud providers: sensitive data (usernames, private IPs, hostnames) is automatically redacted before sending."))
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+
+                            Text(String(localized: "settings.llmRestart", defaultValue: "Restart the daemon (SIGHUP) to apply changes."))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(8)
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(4)
+        }
+    }
+
+    private var ollamaSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmOllamaURL", defaultValue: "Ollama URL"))
+                    .font(.caption).fontWeight(.medium)
+                TextField("http://localhost:11434", text: $llmOllamaURL)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmOllamaURL) { _ in syncLLMConfig() }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmOllamaModel", defaultValue: "Model"))
+                    .font(.caption).fontWeight(.medium)
+                TextField("llama3.1:8b", text: $llmOllamaModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmOllamaModel) { _ in syncLLMConfig() }
+            }
+
+            Text(String(localized: "settings.llmOllamaHelp", defaultValue: "Install Ollama from ollama.com, then run: ollama pull \(llmOllamaModel)"))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var openaiSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmOpenAIURL", defaultValue: "API Base URL"))
+                    .font(.caption).fontWeight(.medium)
+                TextField("https://api.openai.com/v1", text: $llmOpenAIURL)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmOpenAIURL) { _ in syncLLMConfig() }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmAPIKey", defaultValue: "API Key"))
+                    .font(.caption).fontWeight(.medium)
+                SecureField("sk-...", text: $llmAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmAPIKey) { _ in syncLLMConfig() }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmModel", defaultValue: "Model"))
+                    .font(.caption).fontWeight(.medium)
+                TextField("gpt-4o-mini", text: $llmModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmModel) { _ in syncLLMConfig() }
+            }
+
+            Text(String(localized: "settings.llmOpenAIHelp", defaultValue: "Works with OpenAI, Azure OpenAI, or any OpenAI-compatible endpoint (LM Studio, vLLM, etc.)"))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var claudeSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmClaudeKey", defaultValue: "Anthropic API Key"))
+                    .font(.caption).fontWeight(.medium)
+                SecureField("sk-ant-...", text: $llmAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmAPIKey) { _ in syncLLMConfig() }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmClaudeModel", defaultValue: "Model"))
+                    .font(.caption).fontWeight(.medium)
+                TextField("claude-sonnet-4-20250514", text: $llmModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmModel) { _ in syncLLMConfig() }
+            }
+
+            Text(String(localized: "settings.llmClaudeHelp", defaultValue: "Get an API key from console.anthropic.com"))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Write LLM config to a JSON file the daemon can read.
+    private func syncLLMConfig() {
+        let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let configPath = configDir + "/llm_config.json"
+
+        var config: [String: Any] = [
+            "enabled": llmEnabled,
+            "provider": llmProvider,
+            "ollama_url": llmOllamaURL,
+            "ollama_model": llmOllamaModel,
+        ]
+
+        if llmProvider == "openai" {
+            config["openai_url"] = llmOpenAIURL
+            config["openai_api_key"] = llmAPIKey
+            config["openai_model"] = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
+        } else if llmProvider == "claude" {
+            config["claude_api_key"] = llmAPIKey
+            config["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-20250514" : llmModel
+        }
+
+        if let data = try? JSONSerialization.data(withJSONObject: config) {
+            try? data.write(to: URL(fileURLWithPath: configPath))
+        }
+
+        // Update AppState so UI reflects immediately
+        appState.llmStatus.isConfigured = llmEnabled
+        appState.llmStatus.provider = llmProvider
     }
 
     // MARK: - About

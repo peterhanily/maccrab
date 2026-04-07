@@ -102,22 +102,47 @@ extension MacCrabCtl {
         return formatter.string(from: date)
     }
 
-    /// Create a transient LLM service from environment variables for CLI use.
+    /// Create a transient LLM service for CLI use.
+    /// Reads from llm_config.json (dashboard settings), then env var overrides.
     static func createCLILLMService() -> LLMService? {
-        let env = ProcessInfo.processInfo.environment
-        guard let providerStr = env["MACCRAB_LLM_PROVIDER"],
-              let provider = LLMProvider(rawValue: providerStr) else { return nil }
-
         var config = LLMConfig()
-        config.provider = provider
+        var hasConfig = false
+
+        // Read dashboard-written llm_config.json
+        let supportDir = maccrabDataDir()
+        let configPath = supportDir + "/llm_config.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let enabled = json["enabled"] as? Bool { config.enabled = enabled }
+            if let provider = json["provider"] as? String {
+                config.provider = LLMProvider(rawValue: provider) ?? config.provider
+            }
+            if let v = json["ollama_url"] as? String { config.ollamaURL = v }
+            if let v = json["ollama_model"] as? String { config.ollamaModel = v }
+            if let v = json["claude_api_key"] as? String { config.claudeAPIKey = v }
+            if let v = json["claude_model"] as? String { config.claudeModel = v }
+            if let v = json["openai_url"] as? String { config.openaiURL = v }
+            if let v = json["openai_api_key"] as? String { config.openaiAPIKey = v }
+            if let v = json["openai_model"] as? String { config.openaiModel = v }
+            hasConfig = config.enabled
+        }
+
+        // Env vars override (backward compat)
+        let env = ProcessInfo.processInfo.environment
+        if let p = env["MACCRAB_LLM_PROVIDER"] {
+            config.provider = LLMProvider(rawValue: p) ?? config.provider
+            hasConfig = true
+        }
         if let v = env["MACCRAB_LLM_OLLAMA_URL"] { config.ollamaURL = v }
         if let v = env["MACCRAB_LLM_OLLAMA_MODEL"] { config.ollamaModel = v }
         if let v = env["MACCRAB_LLM_CLAUDE_KEY"] { config.claudeAPIKey = v }
         if let v = env["MACCRAB_LLM_OPENAI_URL"] { config.openaiURL = v }
         if let v = env["MACCRAB_LLM_OPENAI_KEY"] { config.openaiAPIKey = v }
 
+        guard hasConfig else { return nil }
+
         let backend: any LLMBackend
-        switch provider {
+        switch config.provider {
         case .ollama:
             backend = OllamaBackend(baseURL: config.ollamaURL, model: config.ollamaModel)
         case .claude:
