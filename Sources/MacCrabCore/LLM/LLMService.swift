@@ -34,7 +34,10 @@ public actor LLMService {
                 cache: LLMCache = LLMCache()) {
         self.backend = backend
         self.cache = cache
-        self.shouldSanitize = config.provider != .ollama && config.sanitizeForCloud
+        // Only sanitize for cloud providers; Ollama is local
+        let isLocalProvider = config.provider == .ollama
+            && config.ollamaURL.contains("localhost") || config.ollamaURL.contains("127.0.0.1")
+        self.shouldSanitize = !isLocalProvider && config.sanitizeForCloud
     }
 
     /// Check if the LLM backend is available.

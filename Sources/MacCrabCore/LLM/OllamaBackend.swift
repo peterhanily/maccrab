@@ -10,11 +10,13 @@ public actor OllamaBackend: LLMBackend {
     public let providerName = "Ollama"
     private let baseURL: URL
     private let model: String
+    private let apiKey: String?
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "ollama")
 
-    public init(baseURL: String = "http://localhost:11434", model: String = "llama3.1:8b") {
+    public init(baseURL: String = "http://localhost:11434", model: String = "llama3.1:8b", apiKey: String? = nil) {
         self.baseURL = URL(string: baseURL) ?? URL(string: "http://localhost:11434")!
         self.model = model
+        self.apiKey = apiKey?.isEmpty == true ? nil : apiKey
     }
 
     public func isAvailable() async -> Bool {
@@ -42,6 +44,7 @@ public actor OllamaBackend: LLMBackend {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         request.timeoutInterval = 120
 

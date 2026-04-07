@@ -94,60 +94,77 @@ struct AIAnalysisView: View {
     // MARK: - Components
 
     private var llmStatusBadge: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(appState.llmStatus.isConfigured ? Color.green : Color.secondary)
-                .frame(width: 8, height: 8)
-            Text(appState.llmStatus.isConfigured
-                ? appState.llmStatus.provider.capitalized
-                : String(localized: "aiAnalysis.notConfigured", defaultValue: "Not configured"))
-                .font(.caption)
-                .foregroundColor(appState.llmStatus.isConfigured ? .primary : .secondary)
+        Button {
+            openSettings()
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(appState.llmStatus.isConfigured ? Color.green : Color.secondary)
+                    .frame(width: 8, height: 8)
+                Text(appState.llmStatus.isConfigured
+                    ? appState.llmStatus.provider.capitalized
+                    : String(localized: "aiAnalysis.notConfigured", defaultValue: "Not configured"))
+                    .font(.caption)
+                    .foregroundColor(appState.llmStatus.isConfigured ? .primary : .secondary)
+                Image(systemName: "gear")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
+        .buttonStyle(.plain)
+        .help(String(localized: "aiAnalysis.configureHint", defaultValue: "Configure AI backend in Settings"))
     }
 
     private var unconfiguredBanner: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Image(systemName: "brain")
                         .font(.title2)
                         .foregroundColor(.secondary)
-                    Text(String(localized: "aiAnalysis.setupTitle", defaultValue: "AI Analysis Backend"))
-                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "aiAnalysis.setupTitle", defaultValue: "AI Analysis Backend"))
+                            .font(.headline)
+                        Text(String(localized: "aiAnalysis.setupDesc", defaultValue: "Connect an LLM to enable AI-powered threat hunting, investigation summaries, and defense recommendations."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
-
-                Text(String(localized: "aiAnalysis.setupDesc", defaultValue: "Connect an LLM backend to enable AI-powered threat hunting, investigation summaries, and defense recommendations."))
-                    .font(.callout)
-                    .foregroundColor(.secondary)
 
                 Divider()
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "aiAnalysis.setupOllama", defaultValue: "Local (recommended):"))
-                        .font(.caption).fontWeight(.medium)
-                    Text("MACCRAB_LLM_PROVIDER=ollama")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .textSelection(.enabled)
+                HStack(spacing: 8) {
+                    Image(systemName: "gear")
+                        .foregroundColor(.accentColor)
+                    Text(String(localized: "aiAnalysis.configureInSettings", defaultValue: "Configure your AI backend in Settings"))
+                        .font(.callout)
+
+                    Spacer()
+
+                    Button {
+                        openSettings()
+                    } label: {
+                        Text(String(localized: "aiAnalysis.openSettings", defaultValue: "Open Settings"))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "aiAnalysis.setupClaude", defaultValue: "Cloud (Claude API):"))
-                        .font(.caption).fontWeight(.medium)
-                    Text("MACCRAB_LLM_PROVIDER=claude MACCRAB_LLM_CLAUDE_KEY=sk-ant-...")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .textSelection(.enabled)
-                }
-
-                Text(String(localized: "aiAnalysis.setupRestart", defaultValue: "Set environment variables before starting the daemon. Ollama runs fully on-device with no data leaving your machine."))
+                Text(String(localized: "aiAnalysis.providerOptions", defaultValue: "Supports Ollama (local), OpenAI, Anthropic Claude, Mistral, and Google Gemini. Ollama runs fully on-device with no data leaving your machine."))
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
             .padding(4)
         }
         .padding(.horizontal)
+    }
+
+    private func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        if #available(macOS 14.0, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        }
+        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
     }
 
     private var threatHuntSection: some View {

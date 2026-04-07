@@ -434,20 +434,23 @@ struct SettingsView: View {
 
                         if llmEnabled {
                             Picker(String(localized: "settings.llmProvider", defaultValue: "Provider"), selection: $llmProvider) {
-                                Text("Ollama (Local)").tag("ollama")
+                                Text("Ollama (Local/Remote)").tag("ollama")
                                 Text("OpenAI Compatible").tag("openai")
-                                Text("Claude (Anthropic)").tag("claude")
+                                Text("Anthropic Claude").tag("claude")
+                                Text("Mistral AI").tag("mistral")
+                                Text("Google Gemini").tag("gemini")
                             }
                             .onChange(of: llmProvider) { _ in syncLLMConfig() }
 
                             Divider()
 
-                            if llmProvider == "ollama" {
-                                ollamaSettings
-                            } else if llmProvider == "openai" {
-                                openaiSettings
-                            } else if llmProvider == "claude" {
-                                claudeSettings
+                            switch llmProvider {
+                            case "ollama":  ollamaSettings
+                            case "openai":  openaiSettings
+                            case "claude":  claudeSettings
+                            case "mistral": mistralSettings
+                            case "gemini":  geminiSettings
+                            default:        ollamaSettings
                             }
                         }
                     }
@@ -461,12 +464,12 @@ struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
-                            if llmProvider == "ollama" {
-                                Text(String(localized: "settings.llmOllamaPrivacy", defaultValue: "Ollama runs fully on-device. No data leaves your machine."))
+                            if llmProvider == "ollama" && (llmOllamaURL.contains("localhost") || llmOllamaURL.contains("127.0.0.1")) {
+                                Text(String(localized: "settings.llmLocalPrivacy", defaultValue: "Running locally. No data leaves your machine."))
                                     .font(.caption)
                                     .foregroundColor(.green)
                             } else {
-                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Cloud providers: sensitive data (usernames, private IPs, hostnames) is automatically redacted before sending."))
+                                Text(String(localized: "settings.llmCloudPrivacy", defaultValue: "Sensitive data (usernames, private IPs, hostnames) is automatically redacted before sending."))
                                     .font(.caption)
                                     .foregroundColor(.orange)
                             }
@@ -505,7 +508,16 @@ struct SettingsView: View {
                     .onChange(of: llmOllamaModel) { _ in syncLLMConfig() }
             }
 
-            Text(String(localized: "settings.llmOllamaHelp", defaultValue: "Install Ollama from ollama.com, then run: ollama pull \(llmOllamaModel)"))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmOllamaAPIKey", defaultValue: "API Key (optional, for remote instances)"))
+                    .font(.caption).fontWeight(.medium)
+                SecureField(String(localized: "settings.llmOllamaAPIKeyPlaceholder", defaultValue: "Leave blank for local"), text: $llmAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmAPIKey) { _ in syncLLMConfig() }
+            }
+
+            Text(String(localized: "settings.llmOllamaHelp", defaultValue: "Local: install from ollama.com, run: ollama pull \(llmOllamaModel). Remote: enter the URL and API key of your Ollama server."))
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
@@ -572,6 +584,58 @@ struct SettingsView: View {
         }
     }
 
+    private var mistralSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmMistralKey", defaultValue: "Mistral API Key"))
+                    .font(.caption).fontWeight(.medium)
+                SecureField("...", text: $llmAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmAPIKey) { _ in syncLLMConfig() }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmMistralModel", defaultValue: "Model"))
+                    .font(.caption).fontWeight(.medium)
+                TextField("mistral-small-latest", text: $llmModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmModel) { _ in syncLLMConfig() }
+            }
+
+            Text(String(localized: "settings.llmMistralHelp", defaultValue: "Get an API key from console.mistral.ai"))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var geminiSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmGeminiKey", defaultValue: "Google AI API Key"))
+                    .font(.caption).fontWeight(.medium)
+                SecureField("AIza...", text: $llmAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmAPIKey) { _ in syncLLMConfig() }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.llmGeminiModel", defaultValue: "Model"))
+                    .font(.caption).fontWeight(.medium)
+                TextField("gemini-2.0-flash", text: $llmModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onChange(of: llmModel) { _ in syncLLMConfig() }
+            }
+
+            Text(String(localized: "settings.llmGeminiHelp", defaultValue: "Get an API key from aistudio.google.com"))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
     /// Write LLM config to a JSON file the daemon can read.
     private func syncLLMConfig() {
         let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
@@ -585,13 +649,23 @@ struct SettingsView: View {
             "ollama_model": llmOllamaModel,
         ]
 
-        if llmProvider == "openai" {
+        switch llmProvider {
+        case "ollama":
+            if !llmAPIKey.isEmpty { config["ollama_api_key"] = llmAPIKey }
+        case "openai":
             config["openai_url"] = llmOpenAIURL
             config["openai_api_key"] = llmAPIKey
             config["openai_model"] = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
-        } else if llmProvider == "claude" {
+        case "claude":
             config["claude_api_key"] = llmAPIKey
             config["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-20250514" : llmModel
+        case "mistral":
+            config["mistral_api_key"] = llmAPIKey
+            config["mistral_model"] = llmModel.isEmpty ? "mistral-small-latest" : llmModel
+        case "gemini":
+            config["gemini_api_key"] = llmAPIKey
+            config["gemini_model"] = llmModel.isEmpty ? "gemini-2.0-flash" : llmModel
+        default: break
         }
 
         if let data = try? JSONSerialization.data(withJSONObject: config) {

@@ -10,6 +10,8 @@ public enum LLMProvider: String, Codable, Sendable {
     case ollama
     case claude
     case openai
+    case mistral
+    case gemini
 }
 
 /// Configuration for the LLM subsystem.
@@ -17,29 +19,30 @@ public struct LLMConfig: Codable, Sendable {
     /// Which provider to use. Default: ollama (local, private).
     public var provider: LLMProvider = .ollama
 
-    /// Ollama base URL.
+    // MARK: - Ollama
     public var ollamaURL: String = "http://localhost:11434"
-
-    /// Ollama model name.
     public var ollamaModel: String = "llama3.1:8b"
+    public var ollamaAPIKey: String?
 
-    /// Claude API key (only needed if provider == .claude).
+    // MARK: - Claude (Anthropic)
     public var claudeAPIKey: String?
-
-    /// Claude model.
     public var claudeModel: String = "claude-sonnet-4-20250514"
 
-    /// OpenAI-compatible API base URL.
+    // MARK: - OpenAI Compatible
     public var openaiURL: String = "https://api.openai.com/v1"
-
-    /// OpenAI API key.
     public var openaiAPIKey: String?
-
-    /// OpenAI model name.
     public var openaiModel: String = "gpt-4o-mini"
 
+    // MARK: - Mistral
+    public var mistralAPIKey: String?
+    public var mistralModel: String = "mistral-small-latest"
+
+    // MARK: - Gemini (Google)
+    public var geminiAPIKey: String?
+    public var geminiModel: String = "gemini-2.0-flash"
+
     /// Whether to sanitize data before sending to cloud APIs.
-    /// Automatically true for cloud providers; always false for ollama.
+    /// Automatically true for cloud providers; false for local Ollama.
     public var sanitizeForCloud: Bool = true
 
     /// Enable/disable the LLM subsystem entirely.
@@ -47,11 +50,11 @@ public struct LLMConfig: Codable, Sendable {
 
     public init() {}
 
-    // Exclude API keys from serialization to prevent credential leaks in logs/debug output
+    // Exclude API keys from Codable serialization to prevent credential leaks
     private enum CodingKeys: String, CodingKey {
         case provider, ollamaURL, ollamaModel, claudeModel
-        case openaiURL, openaiModel, sanitizeForCloud, enabled
-        // claudeAPIKey and openaiAPIKey intentionally excluded
+        case openaiURL, openaiModel, mistralModel, geminiModel
+        case sanitizeForCloud, enabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -62,9 +65,10 @@ public struct LLMConfig: Codable, Sendable {
         claudeModel = try c.decodeIfPresent(String.self, forKey: .claudeModel) ?? "claude-sonnet-4-20250514"
         openaiURL = try c.decodeIfPresent(String.self, forKey: .openaiURL) ?? "https://api.openai.com/v1"
         openaiModel = try c.decodeIfPresent(String.self, forKey: .openaiModel) ?? "gpt-4o-mini"
+        mistralModel = try c.decodeIfPresent(String.self, forKey: .mistralModel) ?? "mistral-small-latest"
+        geminiModel = try c.decodeIfPresent(String.self, forKey: .geminiModel) ?? "gemini-2.0-flash"
         sanitizeForCloud = try c.decodeIfPresent(Bool.self, forKey: .sanitizeForCloud) ?? true
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        // Keys loaded only from env vars, never from JSON
     }
 }
 

@@ -119,11 +119,16 @@ extension MacCrabCtl {
             }
             if let v = json["ollama_url"] as? String { config.ollamaURL = v }
             if let v = json["ollama_model"] as? String { config.ollamaModel = v }
+            if let v = json["ollama_api_key"] as? String { config.ollamaAPIKey = v }
             if let v = json["claude_api_key"] as? String { config.claudeAPIKey = v }
             if let v = json["claude_model"] as? String { config.claudeModel = v }
             if let v = json["openai_url"] as? String { config.openaiURL = v }
             if let v = json["openai_api_key"] as? String { config.openaiAPIKey = v }
             if let v = json["openai_model"] as? String { config.openaiModel = v }
+            if let v = json["mistral_api_key"] as? String { config.mistralAPIKey = v }
+            if let v = json["mistral_model"] as? String { config.mistralModel = v }
+            if let v = json["gemini_api_key"] as? String { config.geminiAPIKey = v }
+            if let v = json["gemini_model"] as? String { config.geminiModel = v }
             hasConfig = config.enabled
         }
 
@@ -144,13 +149,19 @@ extension MacCrabCtl {
         let backend: any LLMBackend
         switch config.provider {
         case .ollama:
-            backend = OllamaBackend(baseURL: config.ollamaURL, model: config.ollamaModel)
+            backend = OllamaBackend(baseURL: config.ollamaURL, model: config.ollamaModel, apiKey: config.ollamaAPIKey)
         case .claude:
             guard let key = config.claudeAPIKey, !key.isEmpty else { return nil }
             backend = ClaudeBackend(apiKey: key, model: config.claudeModel)
         case .openai:
             guard let key = config.openaiAPIKey, !key.isEmpty else { return nil }
             backend = OpenAIBackend(baseURL: config.openaiURL, apiKey: key, model: config.openaiModel)
+        case .mistral:
+            guard let key = config.mistralAPIKey, !key.isEmpty else { return nil }
+            backend = MistralBackend(apiKey: key, model: config.mistralModel)
+        case .gemini:
+            guard let key = config.geminiAPIKey, !key.isEmpty else { return nil }
+            backend = GeminiBackend(apiKey: key, model: config.geminiModel)
         }
 
         return LLMService(backend: backend, config: config)

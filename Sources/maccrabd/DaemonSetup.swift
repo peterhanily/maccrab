@@ -486,11 +486,16 @@ enum DaemonSetup {
                 }
                 if let v = json["ollama_url"] as? String { llmConfig.ollamaURL = v }
                 if let v = json["ollama_model"] as? String { llmConfig.ollamaModel = v }
+                if let v = json["ollama_api_key"] as? String { llmConfig.ollamaAPIKey = v }
                 if let v = json["claude_api_key"] as? String { llmConfig.claudeAPIKey = v }
                 if let v = json["claude_model"] as? String { llmConfig.claudeModel = v }
                 if let v = json["openai_url"] as? String { llmConfig.openaiURL = v }
                 if let v = json["openai_api_key"] as? String { llmConfig.openaiAPIKey = v }
                 if let v = json["openai_model"] as? String { llmConfig.openaiModel = v }
+                if let v = json["mistral_api_key"] as? String { llmConfig.mistralAPIKey = v }
+                if let v = json["mistral_model"] as? String { llmConfig.mistralModel = v }
+                if let v = json["gemini_api_key"] as? String { llmConfig.geminiAPIKey = v }
+                if let v = json["gemini_model"] as? String { llmConfig.geminiModel = v }
             }
 
             // Env vars override everything (backward compat)
@@ -509,28 +514,42 @@ enum DaemonSetup {
             let backend: any LLMBackend
             switch llmConfig.provider {
             case .ollama:
-                backend = OllamaBackend(baseURL: llmConfig.ollamaURL, model: llmConfig.ollamaModel)
+                backend = OllamaBackend(baseURL: llmConfig.ollamaURL, model: llmConfig.ollamaModel, apiKey: llmConfig.ollamaAPIKey)
             case .claude:
                 guard let key = llmConfig.claudeAPIKey, !key.isEmpty else {
-                    print("LLM backend: Claude requires MACCRAB_LLM_CLAUDE_KEY")
+                    print("LLM backend: Claude requires API key")
                     return nil
                 }
                 backend = ClaudeBackend(apiKey: key, model: llmConfig.claudeModel)
             case .openai:
                 guard let key = llmConfig.openaiAPIKey, !key.isEmpty else {
-                    print("LLM backend: OpenAI requires MACCRAB_LLM_OPENAI_KEY")
+                    print("LLM backend: OpenAI requires API key")
                     return nil
                 }
                 backend = OpenAIBackend(baseURL: llmConfig.openaiURL, apiKey: key, model: llmConfig.openaiModel)
+            case .mistral:
+                guard let key = llmConfig.mistralAPIKey, !key.isEmpty else {
+                    print("LLM backend: Mistral requires API key")
+                    return nil
+                }
+                backend = MistralBackend(apiKey: key, model: llmConfig.mistralModel)
+            case .gemini:
+                guard let key = llmConfig.geminiAPIKey, !key.isEmpty else {
+                    print("LLM backend: Gemini requires API key")
+                    return nil
+                }
+                backend = GeminiBackend(apiKey: key, model: llmConfig.geminiModel)
             }
 
             let service = LLMService(backend: backend, config: llmConfig)
             if await service.isAvailable() {
                 let model: String
                 switch llmConfig.provider {
-                case .ollama: model = llmConfig.ollamaModel
-                case .claude: model = llmConfig.claudeModel
-                case .openai: model = llmConfig.openaiModel
+                case .ollama:  model = llmConfig.ollamaModel
+                case .claude:  model = llmConfig.claudeModel
+                case .openai:  model = llmConfig.openaiModel
+                case .mistral: model = llmConfig.mistralModel
+                case .gemini:  model = llmConfig.geminiModel
                 }
                 print("LLM backend: \(llmConfig.provider.rawValue) (\(model))")
                 return service
