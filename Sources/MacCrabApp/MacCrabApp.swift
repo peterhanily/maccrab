@@ -182,7 +182,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func openSettings() {
+    @objc func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
         // Try multiple approaches to open Settings
         if #available(macOS 14.0, *) {

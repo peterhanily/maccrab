@@ -14,6 +14,7 @@ struct AIAnalysisView: View {
     @State private var isHunting: Bool = false
     @State private var selectedAnalysis: AlertViewModel? = nil
 
+
     private var investigations: [AlertViewModel] {
         appState.aiAnalysisAlerts.filter { $0.ruleTitle.hasPrefix("Investigation Summary:") }
     }
@@ -161,10 +162,7 @@ struct AIAnalysisView: View {
 
     private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        if #available(macOS 14.0, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        }
-        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        (NSApp.delegate as? AppDelegate)?.openSettings()
     }
 
     private var threatHuntSection: some View {
