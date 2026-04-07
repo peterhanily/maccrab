@@ -184,17 +184,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        // Try multiple approaches to open Settings
+        // Find and trigger the Settings/Preferences menu item from the app menu
+        if let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu {
+            for item in appMenu.items {
+                let title = item.title.lowercased()
+                if title.contains("settings") || title.contains("preferences") {
+                    appMenu.performActionForItem(at: appMenu.index(of: item))
+                    return
+                }
+            }
+        }
+        // Fallback: try the standard selector
         if #available(macOS 14.0, *) {
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        }
-        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-        // Fallback: use keyboard shortcut simulation (Cmd+,)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if NSApp.windows.filter({ $0.title.lowercased().contains("settings") || $0.title.lowercased().contains("preferences") }).isEmpty {
-                let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0, context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43)
-                if let event = event { NSApp.sendEvent(event) }
-            }
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
     }
 

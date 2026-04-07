@@ -711,6 +711,11 @@ struct SettingsView: View {
                 }
 
                 Spacer()
+
+                Text("Made with love in Ireland")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 8)
             }
             .padding(4)
         }
