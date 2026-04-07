@@ -94,26 +94,29 @@ struct AIAnalysisView: View {
 
     // MARK: - Components
 
+    @ViewBuilder
     private var llmStatusBadge: some View {
-        Button {
-            openSettings()
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(appState.llmStatus.isConfigured ? Color.green : Color.secondary)
-                    .frame(width: 8, height: 8)
-                Text(appState.llmStatus.isConfigured
-                    ? appState.llmStatus.provider.capitalized
-                    : String(localized: "aiAnalysis.notConfigured", defaultValue: "Not configured"))
-                    .font(.caption)
-                    .foregroundColor(appState.llmStatus.isConfigured ? .primary : .secondary)
-                Image(systemName: "gear")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
+        let badge = HStack(spacing: 6) {
+            Circle()
+                .fill(appState.llmStatus.isConfigured ? Color.green : Color.secondary)
+                .frame(width: 8, height: 8)
+            Text(appState.llmStatus.isConfigured
+                ? appState.llmStatus.provider.capitalized
+                : String(localized: "aiAnalysis.notConfigured", defaultValue: "Not configured"))
+                .font(.caption)
+                .foregroundColor(appState.llmStatus.isConfigured ? .primary : .secondary)
+            Image(systemName: "gear")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
-        .buttonStyle(.plain)
-        .help(String(localized: "aiAnalysis.configureHint", defaultValue: "Configure AI backend in Settings"))
+
+        if #available(macOS 14.0, *) {
+            SettingsLink { badge }
+                .buttonStyle(.plain)
+                .help(String(localized: "aiAnalysis.configureHint", defaultValue: "Configure AI backend in Settings"))
+        } else {
+            badge
+        }
     }
 
     private var unconfiguredBanner: some View {
@@ -142,13 +145,19 @@ struct AIAnalysisView: View {
 
                     Spacer()
 
-                    Button {
-                        openSettings()
-                    } label: {
-                        Text(String(localized: "aiAnalysis.openSettings", defaultValue: "Open Settings"))
+                    if #available(macOS 14.0, *) {
+                        SettingsLink {
+                            Text(String(localized: "aiAnalysis.openSettings", defaultValue: "Open Settings"))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    } else {
+                        Button(String(localized: "aiAnalysis.openSettings", defaultValue: "Open Settings")) {
+                            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
                 }
 
                 Text(String(localized: "aiAnalysis.providerOptions", defaultValue: "Supports Ollama (local), OpenAI, Anthropic Claude, Mistral, and Google Gemini. Ollama runs fully on-device with no data leaving your machine."))
@@ -160,10 +169,7 @@ struct AIAnalysisView: View {
         .padding(.horizontal)
     }
 
-    private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        (NSApp.delegate as? AppDelegate)?.openSettings()
-    }
+
 
     private var threatHuntSection: some View {
         GroupBox(String(localized: "aiAnalysis.threatHunt", defaultValue: "AI Threat Hunt")) {
