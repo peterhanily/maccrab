@@ -188,6 +188,28 @@ public actor FleetClient {
         }
     }
 
+    // MARK: - Fleet Campaign Pull
+
+    /// Check for cross-endpoint campaigns (same rule on 3+ hosts).
+    public func pullFleetCampaigns() async -> [FleetCampaign] {
+        let url = collectorURL.appendingPathComponent("/api/fleet-campaigns")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = 15
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+            let result = try JSONDecoder().decode(FleetCampaignResponse.self, from: data)
+            return result.campaigns
+        } catch {
+            return []
+        }
+    }
+
     // MARK: - Utilities
 
     private static func hardwareUUID() -> String? {

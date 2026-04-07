@@ -169,6 +169,56 @@ public actor BehaviorScoring {
         "sigma_rule_match_critical":    6.0,
     ]
 
+    // MARK: - Weight Adjustment (learning from suppression feedback)
+
+    /// Adjusted weights: starts as a copy of `weights`, modified by feedback.
+    private var adjustedWeights: [String: Double] = weights
+
+    /// Per-indicator feedback counts: (alerts_fired, alerts_suppressed).
+    private var indicatorFeedback: [String: (fired: Int, suppressed: Int)] = [:]
+
+    /// Record that an alert containing these indicators was suppressed (FP signal).
+    /// Gradually decreases weights for frequently-suppressed indicators.
+    public func recordSuppression(indicatorNames: [String]) {
+        for name in indicatorNames {
+            indicatorFeedback[name, default: (fired: 0, suppressed: 0)].suppressed += 1
+            adjustWeight(name)
+        }
+    }
+
+    /// Record that an alert containing these indicators was investigated (TP signal).
+    public func recordInvestigation(indicatorNames: [String]) {
+        for name in indicatorNames {
+            indicatorFeedback[name, default: (fired: 0, suppressed: 0)].fired += 1
+            adjustWeight(name)
+        }
+    }
+
+    /// Adjust weight using EMA of suppression rate.
+    /// If >60% of alerts are suppressed for an indicator, reduce its weight.
+    /// If <20% are suppressed, slightly increase it (up to 1.5x original).
+    private func adjustWeight(_ name: String) {
+        guard let feedback = indicatorFeedback[name] else { return }
+        let total = feedback.fired + feedback.suppressed
+        guard total >= 5 else { return } // Need enough data
+
+        let suppressionRate = Double(feedback.suppressed) / Double(total)
+        let originalWeight = Self.weights[name] ?? 3.0
+
+        if suppressionRate > 0.6 {
+            // High FP rate: reduce weight (min 20% of original)
+            adjustedWeights[name] = max(originalWeight * 0.2, adjustedWeights[name, default: originalWeight] * 0.9)
+        } else if suppressionRate < 0.2 {
+            // Low FP rate: slightly boost (max 1.5x original)
+            adjustedWeights[name] = min(originalWeight * 1.5, adjustedWeights[name, default: originalWeight] * 1.05)
+        }
+    }
+
+    /// Get the effective weight for an indicator (adjusted if feedback exists).
+    public func effectiveWeight(for name: String) -> Double {
+        adjustedWeights[name] ?? Self.weights[name] ?? 3.0
+    }
+
     // MARK: - Initialization
 
     public init(
@@ -256,7 +306,7 @@ public actor BehaviorScoring {
         forProcess pid: Int32,
         path: String
     ) -> ScoringResult? {
-        let weight = Self.weights[name] ?? 1.0
+        let weight = effectiveWeight(for: name)
         return addIndicator(
             Indicator(name: name, weight: weight, detail: detail),
             forProcess: pid,

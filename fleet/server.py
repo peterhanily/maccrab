@@ -265,6 +265,32 @@ async def get_fleet_incidents(authorization: Optional[str] = Header(None)):
     return {"incidents": [dict(r) for r in alerts]}
 
 
+@app.get("/api/fleet-campaigns")
+async def get_fleet_campaigns(authorization: Optional[str] = Header(None)):
+    """Detect cross-endpoint attack campaigns: same rule firing on 3+ hosts within 1 hour."""
+    verify_auth(authorization)
+    cutoff = time.time() - 3600  # Last hour
+
+    with get_db() as db:
+        campaigns = db.execute("""
+            SELECT rule_id, rule_title, severity,
+                   COUNT(*) as alert_count,
+                   COUNT(DISTINCT host_id) as host_count,
+                   GROUP_CONCAT(DISTINCT process_path) as processes,
+                   GROUP_CONCAT(DISTINCT mitre_techniques) as techniques,
+                   MIN(timestamp) as first_seen,
+                   MAX(timestamp) as last_seen
+            FROM alerts
+            WHERE timestamp > ?
+            GROUP BY rule_id
+            HAVING host_count >= 3
+            ORDER BY host_count DESC, alert_count DESC
+            LIMIT 20
+        """, (cutoff,)).fetchall()
+
+    return {"campaigns": [dict(r) for r in campaigns], "window_seconds": 3600}
+
+
 @app.get("/api/dashboard")
 async def dashboard():
     cutoff = time.time() - 86400

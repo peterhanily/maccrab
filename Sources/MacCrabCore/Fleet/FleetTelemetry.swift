@@ -78,3 +78,39 @@ public struct FleetHotProcess: Codable, Sendable {
     public let avgScore: Double
     public let hostCount: Int
 }
+
+/// A cross-endpoint campaign: same rule firing on 3+ hosts.
+public struct FleetCampaign: Codable, Sendable {
+    public let ruleId: String
+    public let ruleTitle: String
+    public let severity: String
+    public let alertCount: Int
+    public let hostCount: Int
+    public let processes: String?
+    public let techniques: String?
+    public let firstSeen: Double
+    public let lastSeen: Double
+
+    private enum CodingKeys: String, CodingKey {
+        case ruleId = "rule_id"
+        case ruleTitle = "rule_title"
+        case severity
+        case alertCount = "alert_count"
+        case hostCount = "host_count"
+        case processes
+        case techniques
+        case firstSeen = "first_seen"
+        case lastSeen = "last_seen"
+    }
+}
+
+/// Response wrapper for /api/fleet-campaigns.
+public struct FleetCampaignResponse: Codable, Sendable {
+    public let campaigns: [FleetCampaign]
+    public let windowSeconds: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case campaigns
+        case windowSeconds = "window_seconds"
+    }
+}

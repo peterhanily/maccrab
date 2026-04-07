@@ -35,13 +35,20 @@ import os.log
 /// ```
 public actor ProcessTreeAnalyzer {
 
-    // MARK: - Markov Chain Model
+    // MARK: - Markov Chain Model (1st + 2nd order)
 
-    /// Transition counts: parent process name -> [child name: count].
+    /// First-order transition counts: parent process name -> [child name: count].
     private var transitionCounts: [String: [String: Int]] = [:]
 
     /// Total transitions observed from each parent.
     private var parentTotals: [String: Int] = [:]
+
+    /// Second-order transition counts: "grandparent>parent" -> [child name: count].
+    /// Captures multi-step patterns like Safari→bash→curl that first-order misses.
+    private var bigramCounts: [String: [String: Int]] = [:]
+
+    /// Total second-order transitions from each bigram prefix.
+    private var bigramTotals: [String: Int] = [:]
 
     /// Total number of transitions recorded across all parents.
     private var totalTransitions: Int = 0
@@ -154,16 +161,19 @@ public actor ProcessTreeAnalyzer {
     /// Record a parent-child transition observed during an exec event.
     ///
     /// In learning mode, accumulates statistics and returns nil.
-    /// In active mode, returns the log-probability of the transition.
+    /// In active mode, returns the log-probability of the transition,
+    /// using 2nd-order model when grandparent is available.
     ///
     /// - Parameters:
     ///   - parentName: Process name of the parent (basename, not full path).
     ///   - childName: Process name of the child.
+    ///   - grandparentName: Process name of the grandparent (optional, enables 2nd-order).
     /// - Returns: Log-probability if in active mode, nil in learning mode.
     @discardableResult
     public func recordTransition(
         parentName: String,
-        childName: String
+        childName: String,
+        grandparentName: String? = nil
     ) -> Double? {
         let parent = normalizeName(parentName)
         let child = normalizeName(childName)
@@ -174,10 +184,20 @@ public actor ProcessTreeAnalyzer {
         // Skip launchd -> * transitions (too common, not informative).
         guard parent != "launchd" else { return nil }
 
-        // Update counts.
+        // Update first-order counts.
         transitionCounts[parent, default: [:]][child, default: 0] += 1
         parentTotals[parent, default: 0] += 1
         totalTransitions += 1
+
+        // Update second-order counts when grandparent is available.
+        if let gp = grandparentName {
+            let grandparent = normalizeName(gp)
+            if grandparent != "launchd" && grandparent != parent {
+                let bigramKey = "\(grandparent)>\(parent)"
+                bigramCounts[bigramKey, default: [:]][child, default: 0] += 1
+                bigramTotals[bigramKey, default: 0] += 1
+            }
+        }
 
         // Prune least-frequent transitions if model exceeds size cap.
         pruneIfNeeded()
@@ -201,7 +221,13 @@ public actor ProcessTreeAnalyzer {
         }
 
         // Return log-probability in active mode.
+        // Use 2nd-order model when grandparent data is available (more precise).
         if mode == .active {
+            if let gp = grandparentName {
+                let grandparent = normalizeName(gp)
+                let bigramScore = logProbabilityBigram(grandparent: grandparent, parent: parent, child: child)
+                if bigramScore != nil { return bigramScore }
+            }
             return logProbability(parent: parent, child: child)
         }
         return nil
@@ -476,6 +502,21 @@ public actor ProcessTreeAnalyzer {
             // Parent process has never been seen at all -- very unusual.
             let totalUniqueParents = max(transitionCounts.count, 1)
             return log(1.0 / Double(totalUniqueParents))
+        }
+    }
+
+    /// Second-order log-probability: P(child | grandparent, parent).
+    /// Returns nil if no 2nd-order data exists for this bigram prefix.
+    private func logProbabilityBigram(grandparent: String, parent: String, child: String) -> Double? {
+        let bigramKey = "\(grandparent)>\(parent)"
+        guard let childCounts = bigramCounts[bigramKey] else { return nil }
+        let total = bigramTotals[bigramKey] ?? 1
+        let uniqueChildren = childCounts.count
+
+        if let edgeCount = childCounts[child], edgeCount > 0 {
+            return log(Double(edgeCount) / Double(total))
+        } else {
+            return log(1.0 / Double(total + uniqueChildren))
         }
     }
 

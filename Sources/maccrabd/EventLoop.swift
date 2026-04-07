@@ -371,8 +371,11 @@ enum EventLoop {
             if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
                 let parentName = enrichedEvent.process.ancestors.first?.name ?? "unknown"
                 let childName = enrichedEvent.process.name
+                let grandparentName = enrichedEvent.process.ancestors.count >= 2
+                    ? enrichedEvent.process.ancestors[1].name : nil
                 if let logProb = await state.processTreeAnalyzer.recordTransition(
-                    parentName: parentName, childName: childName
+                    parentName: parentName, childName: childName,
+                    grandparentName: grandparentName
                 ) {
                     if logProb < -8.0 {
                         enrichedEvent.enrichments["tree.anomaly_score"] = String(format: "%.2f", logProb)
