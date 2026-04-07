@@ -307,7 +307,18 @@ struct MacCrabDaemon {
         let powerAnomalyDetector = PowerAnomalyDetector()
 
         // === PREVENTION LAYER ===
-        let preventionEnabled = Foundation.ProcessInfo.processInfo.environment["MACCRAB_PREVENTION"] == "1"
+        let preventionEnabled: Bool = {
+            // Check env var first (backward compat)
+            if Foundation.ProcessInfo.processInfo.environment["MACCRAB_PREVENTION"] == "1" { return true }
+            // Check config file written by the dashboard app
+            let configPath = supportDir + "/prevention_config.json"
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let enabled = json["enabled"] as? Bool {
+                return enabled
+            }
+            return false
+        }()
 
         // DNS Sinkhole — redirect malicious domains to localhost
         let dnsSinkhole = DNSSinkhole()

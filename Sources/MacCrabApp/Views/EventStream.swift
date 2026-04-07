@@ -8,6 +8,22 @@ import SwiftUI
 
 // MARK: - EventStream
 
+enum TimeRange: String, CaseIterable {
+    case lastHour = "Last Hour"
+    case last24h = "Last 24 Hours"
+    case last7d = "Last 7 Days"
+    case all = "All Time"
+
+    var seconds: TimeInterval? {
+        switch self {
+        case .lastHour: return 3600
+        case .last24h: return 86400
+        case .last7d: return 604800
+        case .all: return nil
+        }
+    }
+}
+
 struct EventStream: View {
     @ObservedObject var appState: AppState
     @State private var filterText: String = ""
@@ -15,6 +31,7 @@ struct EventStream: View {
     @State private var isPaused: Bool = false
     @State private var autoScroll: Bool = true
     @State private var selectedEventID: EventViewModel.ID? = nil
+    @State private var timeRange: TimeRange = .all
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     /// Events filtered by the current category and text filters.
@@ -41,6 +58,13 @@ struct EventStream: View {
         return results
     }
 
+    /// Events filtered by both category/text and time range.
+    private var timeFilteredEvents: [EventViewModel] {
+        guard let seconds = timeRange.seconds else { return filteredEvents }
+        let cutoff = Date().addingTimeInterval(-seconds)
+        return filteredEvents.filter { $0.timestamp >= cutoff }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Toolbar
@@ -49,12 +73,20 @@ struct EventStream: View {
                     .font(.title2)
                     .fontWeight(.bold)
 
-                Text("\(filteredEvents.count)")
+                Text("\(timeFilteredEvents.count)")
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
                     .background(Color.secondary.opacity(0.2))
                     .clipShape(Capsule())
+
+                Picker("Time", selection: $timeRange) {
+                    ForEach(TimeRange.allCases, id: \.self) { range in
+                        Text(range.rawValue).tag(range)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 350)
 
                 Spacer()
 
@@ -99,7 +131,7 @@ struct EventStream: View {
             Divider()
 
             // Event table
-            if filteredEvents.isEmpty {
+            if timeFilteredEvents.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
@@ -119,7 +151,7 @@ struct EventStream: View {
                 .frame(maxWidth: .infinity)
             } else {
                 HStack(spacing: 0) {
-                    Table(filteredEvents, selection: $selectedEventID) {
+                    Table(timeFilteredEvents, selection: $selectedEventID) {
                         TableColumn("Time") { event in
                             Text(event.dateTimeString)
                                 .font(.system(.caption, design: .monospaced))
@@ -157,7 +189,7 @@ struct EventStream: View {
 
                     // Event detail panel — only when selected
                     if let selectedID = selectedEventID,
-                       let event = filteredEvents.first(where: { $0.id == selectedID }) {
+                       let event = timeFilteredEvents.first(where: { $0.id == selectedID }) {
                         Divider()
                         EventDetailPanel(event: event)
                             .frame(minWidth: 280, idealWidth: 350, maxWidth: 450)

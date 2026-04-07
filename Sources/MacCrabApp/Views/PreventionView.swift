@@ -13,6 +13,40 @@ struct PreventionView: View {
     @AppStorage("prevention.supplyChainGate") private var supplyChainGateEnabled = false
     @AppStorage("prevention.tccRevocation") private var tccRevocationEnabled = false
 
+    private var toggleHash: Int {
+        var h = 0
+        if dnsSinkholeEnabled { h |= 1 }
+        if networkBlockerEnabled { h |= 2 }
+        if persistenceGuardEnabled { h |= 4 }
+        if sandboxAnalysisEnabled { h |= 8 }
+        if aiContainmentEnabled { h |= 16 }
+        if supplyChainGateEnabled { h |= 32 }
+        if tccRevocationEnabled { h |= 64 }
+        return h
+    }
+
+    private func syncPreventionConfig() {
+        let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let configPath = configDir + "/prevention_config.json"
+        let anyEnabled = dnsSinkholeEnabled || networkBlockerEnabled || persistenceGuardEnabled ||
+            sandboxAnalysisEnabled || aiContainmentEnabled || supplyChainGateEnabled || tccRevocationEnabled
+        let config: [String: Any] = [
+            "enabled": anyEnabled,
+            "dnsSinkhole": dnsSinkholeEnabled,
+            "networkBlocker": networkBlockerEnabled,
+            "persistenceGuard": persistenceGuardEnabled,
+            "sandboxAnalysis": sandboxAnalysisEnabled,
+            "aiContainment": aiContainmentEnabled,
+            "supplyChainGate": supplyChainGateEnabled,
+            "tccRevocation": tccRevocationEnabled,
+            "updatedAt": ISO8601DateFormatter().string(from: Date())
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: config) {
+            try? data.write(to: URL(fileURLWithPath: configPath))
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -162,6 +196,8 @@ struct PreventionView: View {
                 Spacer()
             }
         }
+        .onChange(of: toggleHash) { _ in syncPreventionConfig() }
+        .onAppear { syncPreventionConfig() }
     }
 
     // === Metrics computed from alert database ===
@@ -203,6 +239,7 @@ struct PreventionView: View {
         aiContainmentEnabled = enabled
         supplyChainGateEnabled = enabled
         tccRevocationEnabled = enabled
+        syncPreventionConfig()
     }
 }
 

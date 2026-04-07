@@ -22,6 +22,7 @@ struct MainView: View {
     enum SidebarSection: String, CaseIterable, Hashable {
         case overview = "Overview"
         case alerts = "Alerts"
+        case campaigns = "Campaigns"
         case events = "Events"
         case rules = "Rules"
         // Protection
@@ -35,6 +36,15 @@ struct MainView: View {
         case docs = "Docs"
     }
 
+    private var campaignCount: Int {
+        appState.dashboardAlerts.filter { alert in
+            let title = alert.ruleTitle
+            return title.contains("Campaign") || title.contains("Kill Chain") ||
+                title.contains("Alert Storm") || title.contains("Compromise") ||
+                title.contains("Coordinated") || title.contains("Lateral")
+        }.count
+    }
+
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedSection) {
@@ -45,6 +55,9 @@ struct MainView: View {
                         .badge(appState.totalAlerts)
                         .foregroundColor(hasCriticalAlerts ? .red : nil)
                         .tag(SidebarSection.alerts)
+                    Label("Campaigns", systemImage: "link.circle")
+                        .badge(campaignCount)
+                        .tag(SidebarSection.campaigns)
                     Label("Events", systemImage: "list.bullet.rectangle")
                         .tag(SidebarSection.events)
                     Label("Rules", systemImage: "shield.checkered")
@@ -81,6 +94,8 @@ struct MainView: View {
                 OverviewDashboard(appState: appState, selectedSection: $selectedSection)
             case .alerts:
                 AlertDashboard(appState: appState)
+            case .campaigns:
+                CampaignView(appState: appState)
             case .events:
                 EventStream(appState: appState)
             case .rules:
