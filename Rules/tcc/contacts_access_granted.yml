@@ -1,0 +1,41 @@
+title: Contacts TCC Permission Granted to Unsigned Application
+id: d1a2b3c4-0129-4000-a000-000000000129
+status: experimental
+description: |
+  Detects when Contacts (Address Book) TCC permission is granted to
+  unsigned or unrecognized applications. Malware may harvest contact data
+  for phishing campaigns, spam, or to map organizational relationships.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1560/
+tags:
+    - attack.collection
+    - attack.t1560
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService|contains:
+            - 'kTCCServiceContacts'
+            - 'kTCCServiceAddressBook'
+        TCCAllowed: 'true'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_known_apps:
+        TCCClient|contains:
+            - 'com.apple.AddressBook'
+            - 'com.apple.Contacts'
+            - 'com.microsoft.Outlook'
+            - 'com.apple.mail'
+            - 'com.tinyspeck.slackmacgap'
+            - 'com.google.Chrome'
+    condition: selection and not filter_signed and not filter_known_apps
+falsepositives:
+    - CRM applications (Salesforce, HubSpot native apps)
+    - Email clients with contact sync
+    - Calendar applications with contact lookup
+level: medium

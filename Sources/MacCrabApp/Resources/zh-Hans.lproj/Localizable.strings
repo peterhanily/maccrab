@@ -431,7 +431,7 @@
 "welcome.allSet" = "You’re All Set!";
 "welcome.ready" = "MacCrab is ready to protect your Mac.";
 "welcome.feature.detection" = "Real-Time Detection";
-"welcome.feature.detectionDesc" = "343 detection rules monitor your Mac for threats in real time";
+"welcome.feature.detectionDesc" = "348 detection rules monitor your Mac for threats in real time";
 "welcome.feature.ai" = "AI Safety";
 "welcome.feature.aiDesc" = "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access";
 "welcome.feature.prevention" = "Active Prevention";
@@ -481,7 +481,7 @@
 "responseAction.quarantine" = "Quarantine File";
 "responseAction.blockNetwork" = "Block Network";
 "responseAction.runScript" = "Run Script";
-"welcome.setup.rulesLoaded" = "343 detection rules loaded";
+"welcome.setup.rulesLoaded" = "348 detection rules loaded";
 
 /* ── Severity Labels ── */
 /* TODO: translate */

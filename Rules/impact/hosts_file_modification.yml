@@ -1,0 +1,48 @@
+title: System Hosts File Modified
+id: f0e1d2c3-a007-4000-e000-00000000a007
+status: experimental
+description: |
+  Detects modification of /etc/hosts or /private/etc/hosts by non-root
+  system processes. Adversaries modify the hosts file to redirect traffic
+  to malicious servers (DNS hijacking), block security update services,
+  or neutralize endpoint protection telemetry.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1565/001/
+tags:
+    - attack.impact
+    - attack.defense_evasion
+    - attack.t1565.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/etc/hosts'
+            - '/private/etc/hosts'
+    filter_admin_tools:
+        Image|endswith:
+            - '/sudo'
+            - '/vim'
+            - '/nano'
+            - '/emacs'
+            - '/pico'
+            - '/ee'
+            - '/vi'
+            - '/ed'
+        User|contains:
+            - 'root'
+    filter_package_mgr:
+        Image|endswith:
+            - '/brew'
+            - '/port'
+            - '/pip'
+            - '/pip3'
+    condition: selection and not filter_admin_tools and not filter_package_mgr
+falsepositives:
+    - System administrators editing hosts for legitimate DNS overrides
+    - Development tools that add local hostname mappings (docker, vagrant)
+    - VPN clients that modify hosts during connection
+level: high

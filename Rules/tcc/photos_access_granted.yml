@@ -1,0 +1,43 @@
+title: Photos Library TCC Permission Granted to Unsigned Application
+id: d1a2b3c4-0130-4000-a000-000000000130
+status: experimental
+description: |
+  Detects when Photos library TCC permission is granted to unsigned or
+  developer-signed applications that are not known photo management tools.
+  Malware may exfiltrate personal photos for blackmail, identity theft,
+  or reconnaissance purposes.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1005/
+tags:
+    - attack.collection
+    - attack.t1005
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService|contains:
+            - 'kTCCServicePhotos'
+            - 'kTCCServiceMediaLibrary'
+        TCCAllowed: 'true'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_known_apps:
+        TCCClient|contains:
+            - 'com.apple.Photos'
+            - 'com.apple.iPhoto'
+            - 'com.apple.photo'
+            - 'com.google.Photos'
+            - 'com.adobe.Lightroom'
+            - 'com.skylum.luminar'
+            - 'com.apple.Image_Capture'
+    condition: selection and not filter_signed and not filter_known_apps
+falsepositives:
+    - Photo editing tools distributed outside the App Store
+    - Backup utilities that sync photo libraries
+    - Developer-signed photo management tools
+level: medium

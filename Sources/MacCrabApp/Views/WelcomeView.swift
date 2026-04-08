@@ -130,7 +130,7 @@ struct WelcomeView: View {
             VStack(alignment: .leading, spacing: 12) {
                 FeatureRow(icon: "shield.checkered",
                     title: String(localized: "welcome.feature.detection", defaultValue: "Real-Time Detection"),
-                    description: String(localized: "welcome.feature.detectionDesc", defaultValue: "343 detection rules monitor your Mac for threats in real time"))
+                    description: String(localized: "welcome.feature.detectionDesc", defaultValue: "348 detection rules monitor your Mac for threats in real time"))
                 FeatureRow(icon: "brain",
                     title: String(localized: "welcome.feature.ai", defaultValue: "AI Safety"),
                     description: String(localized: "welcome.feature.aiDesc", defaultValue: "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access"))
@@ -164,7 +164,7 @@ struct WelcomeView: View {
                 SetupRow(icon: "checkmark.circle.fill", color: .green,
                     text: String(localized: "welcome.setup.engineActive", defaultValue: "Detection engine active"))
                 SetupRow(icon: "checkmark.circle.fill", color: .green,
-                    text: String(localized: "welcome.setup.rulesLoaded", defaultValue: "343 detection rules loaded"))
+                    text: String(localized: "welcome.setup.rulesLoaded", defaultValue: "348 detection rules loaded"))
                 SetupRow(icon: "checkmark.circle.fill", color: .green,
                     text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
                 SetupRow(icon: "info.circle", color: .blue,

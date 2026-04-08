@@ -1,0 +1,48 @@
+title: Microphone TCC Permission Granted to Non-Standard Application
+id: d1a2b3c4-0128-4000-a000-000000000128
+status: experimental
+description: |
+  Detects when Microphone TCC permission is granted to applications other
+  than well-known communication and audio tools. Unauthorized microphone
+  access may indicate spyware or audio surveillance activity.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1123/
+tags:
+    - attack.collection
+    - attack.t1123
+logsource:
+    category: tcc_event
+    product: macos
+detection:
+    selection:
+        TCCService: 'kTCCServiceMicrophone'
+        TCCAllowed: 'true'
+    filter_known_apps:
+        TCCClient|contains:
+            - 'com.apple.FaceTime'
+            - 'com.apple.VoiceMemos'
+            - 'com.apple.iChat'
+            - 'com.apple.facetime'
+            - 'us.zoom.xos'
+            - 'com.microsoft.teams'
+            - 'com.tinyspeck.slackmacgap'
+            - 'com.skype.'
+            - 'com.discord'
+            - 'com.webex.'
+            - 'com.google.Chrome'
+            - 'org.mozilla.firefox'
+            - 'com.apple.Safari'
+            - 'com.apple.Logic'
+            - 'com.apple.GarageBand'
+            - 'com.adobe.Audition'
+            - 'com.loom.'
+    filter_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_known_apps and not filter_signed
+falsepositives:
+    - VoIP or conferencing tools not in the filter list
+    - Audio recording and podcast applications
+    - AI voice assistants (Siri third-party integrations)
+level: high

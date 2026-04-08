@@ -1,0 +1,46 @@
+title: macOS Security Feature Disabled via Command Line
+id: f0e1d2c3-a008-4000-e000-00000000a008
+status: experimental
+description: |
+  Detects command-line attempts to disable built-in macOS security features
+  including Gatekeeper, XProtect, Quarantine, and Application Firewall.
+  Adversaries disable these controls to lower system defenses before
+  deploying payloads or to prevent detection of running malware.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.impact
+    - attack.t1562.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    disable_gatekeeper:
+        CommandLine|contains:
+            - 'spctl --master-disable'
+            - 'spctl --disable'
+            - 'defaults write com.apple.LaunchServices LSQuarantine -bool NO'
+            - 'defaults write com.apple.LaunchServices LSQuarantine -bool false'
+    disable_firewall:
+        CommandLine|contains:
+            - 'socketfilterfw --setglobalstate off'
+            - 'socketfilterfw --setglobalstate 0'
+            - 'defaults write /Library/Preferences/com.apple.alf globalstate -int 0'
+    disable_xprotect:
+        CommandLine|contains:
+            - 'softwareupdate --background-critical'
+            - 'launchctl unload /System/Library/LaunchDaemons/com.apple.XProtect'
+            - 'launchctl disable system/com.apple.XProtect'
+    disable_sip_hint:
+        CommandLine|contains:
+            - 'csrutil disable'
+            - 'csrutil clear'
+    condition: disable_gatekeeper or disable_firewall or disable_xprotect or disable_sip_hint
+falsepositives:
+    - Security penetration testers with explicit authorization
+    - System administrators in locked-down lab or testing environments
+    - macOS Recovery Mode operations (csrutil commands only run in Recovery)
+level: critical
