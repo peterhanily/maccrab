@@ -476,8 +476,7 @@ public actor RuleEngine {
         // For the "exists" modifier we only check field presence.
         if predicate.modifier == .exists {
             let fieldValue = resolveField(predicate.field, from: event)
-            let fieldExists = fieldValue != nil && !fieldValue!.isEmpty
-            rawResult = fieldExists
+            rawResult = fieldValue?.isEmpty == false
         } else {
             guard let fieldValue = resolveField(predicate.field, from: event) else {
                 // Field not present on event -- no match (unless negated).

@@ -255,22 +255,25 @@ public actor BehaviorScoring {
         // Apply time decay to existing score
         applyDecay(for: key)
 
+        guard var entry = processScores[key] else { return nil }
+
         // If score decayed below threshold, allow re-alerting
-        if processScores[key]!.rawScore < alertThreshold * 0.5 {
+        if entry.rawScore < alertThreshold * 0.5 {
             alerted.remove(key)
         }
 
         // Add the new indicator
-        processScores[key]!.rawScore += indicator.weight
-        processScores[key]!.lastUpdate = Date()
-        processScores[key]!.indicators.append(indicator)
+        entry.rawScore += indicator.weight
+        entry.lastUpdate = Date()
+        entry.indicators.append(indicator)
 
         // Cap indicators per process
-        if processScores[key]!.indicators.count > 50 {
-            processScores[key]!.indicators.removeFirst()
+        if entry.indicators.count > 50 {
+            entry.indicators.removeFirst()
         }
 
-        let score = processScores[key]!
+        processScores[key] = entry
+        let score = entry
 
         // Check threshold (re-alert allowed after decay below 50% of threshold)
         if score.rawScore >= alertThreshold && !alerted.contains(key) {

@@ -756,7 +756,7 @@ public actor SequenceEngine {
 
         if predicate.modifier == .exists {
             let fieldValue = resolveField(predicate.field, from: event)
-            rawResult = fieldValue != nil && !fieldValue!.isEmpty
+            rawResult = fieldValue?.isEmpty == false
         } else {
             guard let fieldValue = resolveField(predicate.field, from: event) else {
                 let rawMiss = false
