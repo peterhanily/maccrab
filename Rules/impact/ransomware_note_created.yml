@@ -1,0 +1,46 @@
+title: Ransomware Note or Encrypted Extension File Created
+id: f0e1d2c3-a002-4000-e000-00000000a002
+status: experimental
+description: |
+  Detects the creation of files commonly associated with ransomware campaigns:
+  ransom note filenames and files with extensions used by known ransomware
+  families (.locked, .encrypted, .crypted, .ransom, .WNCRY, etc.). A single
+  match is suspicious; many matches in rapid succession indicate active encryption.
+  This rule catches the earliest visible indicator of ransomware activity.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1486/
+tags:
+    - attack.impact
+    - attack.t1486
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_ransom_note:
+        TargetFilename|contains:
+            - 'README_HOW_TO_DECRYPT'
+            - 'HOW_TO_RECOVER'
+            - 'DECRYPT_INSTRUCTIONS'
+            - 'RECOVERY_KEY'
+            - 'YOUR_FILES_ARE_ENCRYPTED'
+            - 'HOW_TO_UNLOCK'
+            - 'RANSOM_NOTE'
+            - '!DECRYPT'
+            - '!RECOVER'
+            - 'decrypt_my_files'
+    selection_encrypted_extension:
+        TargetFilename|endswith:
+            - '.WNCRY'
+            - '.wncryt'
+            - '.locky'
+            - '.cerber'
+            - '.zepto'
+            - '.thor'
+    condition: selection_ransom_note or selection_encrypted_extension
+falsepositives:
+    - Encryption utilities writing .enc output files legitimately
+    - Password managers or secure note apps using .encrypted extensions
+    - Test/development environments generating these filenames
+level: critical

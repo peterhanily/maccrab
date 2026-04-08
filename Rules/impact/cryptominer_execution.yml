@@ -1,0 +1,57 @@
+title: Cryptomining Software Executed
+id: f0e1d2c3-a004-4000-e000-00000000a004
+status: experimental
+description: |
+  Detects execution of known cryptocurrency mining software. Cryptominers
+  are deployed by adversaries for resource hijacking, consuming CPU/GPU
+  resources to generate cryptocurrency at the victim's expense. Detection
+  covers common open-source miners (xmrig, cpuminer, cgminer, bfgminer)
+  by process name and mining pool connection arguments.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1496/
+tags:
+    - attack.impact
+    - attack.t1496
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_miner_name:
+        Image|endswith:
+            - '/xmrig'
+            - '/xmrig-cuda'
+            - '/xmrig-amd'
+            - '/cpuminer'
+            - '/cpuminer-multi'
+            - '/cgminer'
+            - '/bfgminer'
+            - '/minerd'
+            - '/ethminer'
+            - '/t-rex'
+            - '/lolminer'
+            - '/teamredminer'
+            - '/gminer'
+            - '/nanominer'
+            - '/srbminer'
+            - '/wildrig'
+    selection_miner_args:
+        CommandLine|contains:
+            - '--donate-level'
+            - '-o stratum+'
+            - '-o stratum2+'
+            - 'monero.hashvault'
+            - 'pool.minexmr'
+            - 'xmrpool'
+            - 'mining.pool'
+            - 'nicehash.com'
+            - '--coin XMR'
+            - '--coin ETH'
+            - 'pool.supportxmr'
+    condition: selection_miner_name or selection_miner_args
+falsepositives:
+    - Security researchers running miners in controlled lab environments
+    - Legitimate cryptocurrency enthusiasts running miners on personal machines
+      (though this is increasingly rare on macOS)
+level: high

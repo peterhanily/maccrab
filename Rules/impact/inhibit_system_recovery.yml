@@ -1,0 +1,59 @@
+title: System Recovery Inhibited
+id: f0e1d2c3-a003-4000-e000-00000000a003
+status: experimental
+description: |
+  Detects attempts to prevent system recovery and backup mechanisms.
+  Adversaries disable Time Machine, SIP, Spotlight indexing, or delete
+  backup snapshots to ensure victims cannot recover encrypted or destroyed
+  files. This is a characteristic preparation step in ransomware and
+  destructive attack campaigns.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1490/
+tags:
+    - attack.impact
+    - attack.t1490
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tmutil_disable:
+        Image|endswith: '/tmutil'
+        CommandLine|contains:
+            - 'disable'
+            - 'disablelocal'
+            - 'deletelocalsnap'
+            - 'deletebackup'
+            - 'removeexclusion'
+    selection_tmutil_nuke:
+        Image|endswith: '/tmutil'
+        CommandLine|re: 'delete\s.*(Backups\.backupdb|\.backup)'
+    selection_csrutil:
+        Image|endswith: '/csrutil'
+        CommandLine|contains:
+            - 'disable'
+            - 'clear-nvram'
+    selection_spotlight_disable:
+        Image|endswith:
+            - '/mdutil'
+            - '/launchctl'
+        CommandLine|contains:
+            - 'mdutil -a -i off'
+            - 'com.apple.metadata.mds'
+    selection_snapshot_delete:
+        Image|endswith: '/diskutil'
+        CommandLine|contains:
+            - 'apfs deleteSnapshot'
+            - 'apfs deleteLocalSnapshot'
+    filter_admin_context:
+        # tmutil commands in login/admin scripts at boot are expected
+        ParentImage|endswith:
+            - '/loginwindow'
+    condition: (selection_tmutil_disable or selection_tmutil_nuke or selection_snapshot_delete
+        or selection_csrutil or selection_spotlight_disable) and not filter_admin_context
+falsepositives:
+    - System administrators legitimately disabling Time Machine on managed devices
+    - IT provisioning scripts that configure backup exclusions
+    - csrutil operations during legitimate OS recovery/reinstall
+level: high

@@ -1,0 +1,44 @@
+title: Disk Wipe or Overwrite Command
+id: f0e1d2c3-a001-4000-e000-00000000a001
+status: experimental
+description: |
+  Detects commands that can irreversibly destroy disk data or overwrite
+  entire volumes. These tools are legitimate in forensic and IT contexts
+  but are extremely rare in normal user activity and their misuse causes
+  catastrophic data loss. Covers dd writing /dev/zero or /dev/urandom to
+  a target, diskutil eraseVolume/eraseDisk, and the shred utility.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1485/
+tags:
+    - attack.impact
+    - attack.t1485
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_dd_wipe:
+        Image|endswith: '/dd'
+        CommandLine|contains:
+            - 'if=/dev/zero'
+            - 'if=/dev/urandom'
+            - 'if=/dev/random'
+    selection_dd_target_disk:
+        CommandLine|re: 'of=/dev/(r?disk|r?sd)\d'
+    selection_diskutil_erase:
+        Image|endswith: '/diskutil'
+        CommandLine|contains:
+            - 'eraseVolume'
+            - 'eraseDisk'
+            - 'secureErase'
+            - 'eraseOpticalMedia'
+    selection_shred:
+        Image|endswith: '/shred'
+        CommandLine|re: '.*(/(Users|var|tmp|Volumes|Library|private)).*'
+    condition: (selection_dd_wipe and selection_dd_target_disk) or selection_diskutil_erase or selection_shred
+falsepositives:
+    - IT administrators securely wiping drives before decommission
+    - Security researchers using dd in controlled test environments
+    - Forensic investigators acquiring disk images
+level: critical

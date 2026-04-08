@@ -1,0 +1,59 @@
+title: Mass File Deletion from Critical Directories
+id: f0e1d2c3-a005-4000-e000-00000000a005
+status: experimental
+description: |
+  Detects rm -rf targeting user home directories, the root filesystem,
+  or critical system paths. Recursive deletion of large directory trees
+  is a strong indicator of data destruction attacks. Attackers may also
+  pipe find output to rm or use similar shell constructs. This rule
+  focuses on the most impactful target paths.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1485/
+tags:
+    - attack.impact
+    - attack.t1485
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_rm_rf:
+        Image|endswith: '/rm'
+        CommandLine|contains:
+            - '-rf'
+            - '-fr'
+    selection_critical_targets:
+        CommandLine|re: '\-r[f ]|\-f[r ]'
+        CommandLine|contains:
+            - '/Users/'
+            - '/home/'
+            - '/var/'
+            - '/etc/'
+            - '/Library/'
+    selection_nuke:
+        # Catches: rm -rf / or rm -rf /* (most dangerous)
+        CommandLine|re: 'rm\s+-[rf]{1,2}\s+/\s*\*?$'
+    filter_package_managers:
+        ParentImage|endswith:
+            - '/brew'
+            - '/pip'
+            - '/pip3'
+            - '/npm'
+            - '/yarn'
+        CommandLine|contains:
+            - '/Cellar/'
+            - '/site-packages/'
+            - '/node_modules/'
+    filter_xcode:
+        CommandLine|contains:
+            - '/DerivedData/'
+            - '/.build/'
+            - '/.swiftpm/'
+    condition: (selection_rm_rf and selection_critical_targets or selection_nuke)
+        and not filter_package_managers and not filter_xcode
+falsepositives:
+    - Developers cleaning build artifacts or temporary directories
+    - IT scripts performing legitimate system cleanup
+    - Package managers removing old installations
+level: high

@@ -1,0 +1,61 @@
+title: Forced System Shutdown or Reboot from Shell
+id: f0e1d2c3-a006-4000-e000-00000000a006
+status: experimental
+description: |
+  Detects system shutdown or reboot commands executed from a shell or
+  scripting context. Adversaries trigger reboots after implanting
+  persistence, to activate staged payloads, or to disrupt availability.
+  Forced immediate shutdowns (shutdown -h now, halt, poweroff) outside
+  of normal OS workflows are rare and warrant investigation.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1529/
+tags:
+    - attack.impact
+    - attack.t1529
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_shutdown:
+        Image|endswith:
+            - '/shutdown'
+            - '/halt'
+            - '/poweroff'
+            - '/reboot'
+        CommandLine|contains:
+            - '-h now'
+            - '-h 0'
+            - '-r now'
+            - '-r 0'
+            - '-P now'
+    selection_osascript_shutdown:
+        Image|endswith: '/osascript'
+        CommandLine|contains:
+            - 'shut down'
+            - 'restart'
+        CommandLine|contains: 'System Events'
+    selection_launchctl_shutdown:
+        Image|endswith: '/launchctl'
+        CommandLine|contains:
+            - 'reboot'
+            - 'halt'
+            - 'poweroff'
+    filter_loginwindow:
+        ParentImage|endswith:
+            - '/loginwindow'
+            - '/WindowServer'
+    filter_system_daemons:
+        ParentImage|endswith:
+            - '/softwareupdated'
+            - '/installd'
+            - '/system_installd'
+        CommandLine|contains: 'reboot'
+    condition: (selection_shutdown or selection_osascript_shutdown or selection_launchctl_shutdown)
+        and not filter_loginwindow and not filter_system_daemons
+falsepositives:
+    - System administrators scheduling or performing controlled reboots
+    - Automated maintenance scripts performing patch-and-reboot workflows
+    - Software update agents rebooting after installing OS updates
+level: medium
