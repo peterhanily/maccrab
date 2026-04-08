@@ -320,3 +320,105 @@ struct DatabaseEncryptionTests {
         #expect(decryptResult == original, "With encryption disabled, decrypt should return original string")
     }
 }
+
+// MARK: - Rule Generator Tests
+
+@Suite("Rule Generator")
+struct RuleGeneratorTests {
+    let tmpDir: String = {
+        let dir = NSTemporaryDirectory() + "maccrab_ruletests_\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private func makeAlerts(count: Int) -> [(ruleId: String, ruleTitle: String, processPath: String?, tactics: Set<String>, timestamp: Date)] {
+        (0..<count).map { i in
+            (
+                ruleId: "rule.\(i)",
+                ruleTitle: "Test Rule \(i)",
+                processPath: "/usr/bin/proc\(i)",
+                tactics: Set(["attack.execution"]),
+                timestamp: Date()
+            )
+        }
+    }
+
+    @Test("Returns nil for fewer than 2 alerts")
+    func tooFewAlerts() async {
+        let gen = await RuleGenerator(outputDir: tmpDir)
+        let result = await gen.generateFromCampaign(
+            campaignType: "test",
+            alerts: makeAlerts(count: 1)
+        )
+        #expect(result == nil)
+    }
+
+    @Test("Returns nil for empty alert list")
+    func emptyAlerts() async {
+        let gen = await RuleGenerator(outputDir: tmpDir)
+        let result = await gen.generateFromCampaign(
+            campaignType: "test",
+            alerts: []
+        )
+        #expect(result == nil)
+    }
+
+    @Test("Generates valid Sigma YAML for 2+ alerts")
+    func generatesYAML() async {
+        let gen = await RuleGenerator(outputDir: tmpDir)
+        let result = await gen.generateFromCampaign(
+            campaignType: "download_execute",
+            alerts: makeAlerts(count: 3)
+        )
+        #expect(result != nil)
+        guard let rule = result else { return }
+        #expect(rule.yaml.contains("title:"))
+        #expect(rule.yaml.contains("detection:"))
+        #expect(rule.yaml.contains("condition:"))
+        #expect(rule.yaml.contains("logsource:"))
+        #expect(rule.yaml.contains("level: high"))
+    }
+
+    @Test("Filename includes campaign type")
+    func filenameContainsCampaignType() async {
+        let gen = await RuleGenerator(outputDir: tmpDir)
+        let result = await gen.generateFromCampaign(
+            campaignType: "lateral_movement",
+            alerts: makeAlerts(count: 2)
+        )
+        #expect(result?.filename.contains("lateral_movement") == true)
+    }
+
+    @Test("Title is set and non-empty")
+    func titleIsSet() async {
+        let gen = await RuleGenerator(outputDir: tmpDir)
+        let result = await gen.generateFromCampaign(
+            campaignType: "credential_dump",
+            alerts: makeAlerts(count: 2)
+        )
+        #expect(result?.title.isEmpty == false)
+    }
+
+    @Test("Stats count increments with each generation")
+    func statsIncrement() async {
+        let gen = await RuleGenerator(outputDir: tmpDir)
+        let before = await gen.stats()
+        _ = await gen.generateFromCampaign(
+            campaignType: "test_increment",
+            alerts: makeAlerts(count: 2)
+        )
+        let after = await gen.stats()
+        #expect(after == before + 1)
+    }
+
+    @Test("Process paths appear in generated YAML")
+    func processPathsInYAML() async {
+        let gen = await RuleGenerator(outputDir: tmpDir)
+        let alerts: [(ruleId: String, ruleTitle: String, processPath: String?, tactics: Set<String>, timestamp: Date)] = [
+            (ruleId: "r1", ruleTitle: "R1", processPath: "/usr/bin/curl", tactics: [], timestamp: Date()),
+            (ruleId: "r2", ruleTitle: "R2", processPath: "/bin/bash", tactics: [], timestamp: Date()),
+        ]
+        let result = await gen.generateFromCampaign(campaignType: "test_paths", alerts: alerts)
+        #expect(result?.yaml.contains("curl") == true || result?.yaml.contains("bash") == true)
+    }
+}

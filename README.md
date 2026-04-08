@@ -26,16 +26,17 @@ Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- b
 
 ## What's New in v1.0.0
 
-- 304 Sigma-compatible detection rules
-- 5-tier detection hierarchy (rules, sequences, ML, campaigns, cross-process)
+- 304 Sigma-compatible detection rules (282 single-event + 22 sequences)
+- 5-tier detection hierarchy (rules, sequences, anomaly, campaigns, cross-process)
+- LLM reasoning backends: Ollama, Claude, OpenAI-compatible, Gemini, Mistral
+- NL threat hunting, LLM investigation summaries, active defense recommendations
 - AI Guard monitoring 8 coding tools + MCP servers
 - Zero-entitlement kernel events via eslogger proxy
 - Package freshness checking (npm, PyPI, Homebrew, Cargo)
-- Ultrasonic attack detection
-- Natural language threat hunting
+- Ultrasonic attack detection (DolphinAttack, NUIT, SurfingAttack)
 - Clipboard, browser extension, USB monitoring
 - TLS fingerprinting and C2 beacon detection
-- Auto rule generation from observed attacks
+- Auto rule generation from observed attacks (template + LLM-enhanced)
 - Encrypted database (AES-256)
 - HTML incident reports
 - Rootkit detection via cross-referenced process enumeration
@@ -105,8 +106,8 @@ MacCrab ingests from eight real-time event sources, covering kernel-level proces
 
 | Layer | Count | Description |
 |-------|:-----:|-------------|
-| **Single-event Sigma rules** | 221 | Standard Sigma YAML compiled to JSON predicates, evaluated per event in real time |
-| **Temporal sequence rules** | 20 | Multi-step ordered rules with time windows, process lineage correlation, and causal chaining |
+| **Single-event Sigma rules** | 282 | Standard Sigma YAML compiled to JSON predicates, evaluated per event in real time |
+| **Temporal sequence rules** | 22 | Multi-step ordered rules with time windows, process lineage correlation, and causal chaining |
 
 ### Analysis Engines
 
@@ -132,7 +133,30 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 | **Project boundary enforcement** | Detects when AI tools read or write files outside the current project directory |
 | **Prompt injection scanner** | Scans for injection patterns in files read by AI tools |
 
-14 dedicated AI safety detection rules in `Rules/ai_safety/`.
+19 dedicated AI safety detection rules in `Rules/ai_safety/`.
+
+### LLM Reasoning Backends
+
+MacCrab integrates pluggable LLM backends for threat hunting, investigation summaries, and adaptive rule generation. All features degrade gracefully when no backend is configured. Cloud providers receive automatic privacy sanitization (usernames, private IPs, and hostnames are redacted before transmission).
+
+| Backend | Config | Use case |
+|---------|--------|----------|
+| **Ollama** (recommended) | `MACCRAB_LLM_PROVIDER=ollama` | Fully local, zero cloud dependency — best for privacy-sensitive environments |
+| **Claude API** | `MACCRAB_LLM_PROVIDER=claude` + `MACCRAB_LLM_CLAUDE_KEY` | Anthropic's Claude models via API |
+| **OpenAI-compatible** | `MACCRAB_LLM_PROVIDER=openai` + `MACCRAB_LLM_OPENAI_KEY` | OpenAI or any compatible endpoint (LM Studio, vLLM, etc.) |
+| **Gemini** | `MACCRAB_LLM_PROVIDER=gemini` | Google Gemini via API |
+| **Mistral** | `MACCRAB_LLM_PROVIDER=mistral` | Mistral AI via API |
+
+LLM-powered features:
+
+| Feature | Command / Trigger |
+|---------|-------------------|
+| **Natural language threat hunting** | `maccrabctl hunt "<query>"` or AI Analysis tab in dashboard |
+| **Investigation summaries** | Auto-generated when a campaign fires; stored as `maccrab.llm.investigation-summary` alert |
+| **Active defense recommendations** | Generated alongside campaign alerts; stored as `maccrab.llm.defense-recommendation` alert |
+| **AI-generated detection rules** | Auto-generated from observed campaigns using `RuleGenerator.generateFromCampaignEnhanced()` |
+
+All LLM settings can be configured in **Settings → AI Backend** in the dashboard, or via `daemon_config.json`.
 
 ### Threat Intelligence
 
@@ -202,22 +226,23 @@ Rules can trigger configurable response actions ranging from passive to active:
 
 | Tactic | Directory | Single-Event | Sequences | Total |
 |--------|-----------|:------------:|:---------:|:-----:|
-| Defense Evasion | `defense_evasion/` | 32 | -- | 32 |
-| Supply Chain | `supply_chain/` | 30 | -- | 30 |
-| Persistence | `persistence/` | 28 | -- | 28 |
-| Execution | `execution/` | 22 | -- | 22 |
-| Credential Access | `credential_access/` | 22 | -- | 22 |
-| Command and Control | `command_and_control/` | 15 | -- | 15 |
-| AI Safety | `ai_safety/` | 14 | -- | 14 |
+| Defense Evasion | `defense_evasion/` | 52 | -- | 52 |
+| Supply Chain | `supply_chain/` | 31 | -- | 31 |
+| Persistence | `persistence/` | 30 | -- | 30 |
+| Credential Access | `credential_access/` | 30 | -- | 30 |
+| Execution | `execution/` | 28 | -- | 28 |
+| AI Safety | `ai_safety/` | 19 | -- | 19 |
+| Command and Control | `command_and_control/` | 17 | -- | 17 |
+| Privilege Escalation | `privilege_escalation/` | 16 | -- | 16 |
+| Collection | `collection/` | 15 | -- | 15 |
 | Discovery | `discovery/` | 11 | -- | 11 |
-| Collection | `collection/` | 11 | -- | 11 |
-| Privilege Escalation | `privilege_escalation/` | 11 | -- | 11 |
 | Initial Access | `initial_access/` | 10 | -- | 10 |
-| Exfiltration | `exfiltration/` | 6 | -- | 6 |
+| Container | `container/` | 8 | -- | 8 |
 | TCC Abuse | `tcc/` | 6 | -- | 6 |
+| Exfiltration | `exfiltration/` | 6 | -- | 6 |
 | Lateral Movement | `lateral_movement/` | 3 | -- | 3 |
-| Temporal Sequences | `sequences/` | -- | 20 | 20 |
-| **Total** | | **221** | **20** | **273** |
+| Temporal Sequences | `sequences/` | -- | 22 | 22 |
+| **Total** | | **282** | **22** | **304** |
 
 ---
 
@@ -236,18 +261,27 @@ Rules can trigger configurable response actions ranging from passive to active:
 
 ## SwiftUI Dashboard
 
-A native status bar application with six tabs:
+A native status bar application with a sidebar navigation layout across 15 views:
 
-| Tab | Description |
-|-----|-------------|
-| **Alerts** | Real-time alert dashboard with severity filtering, detail panels, and incident grouping |
+| View | Description |
+|------|-------------|
+| **Overview** | At-a-glance stats: events/sec, alert counts by severity, top processes, threat intel status |
+| **Alerts** | Real-time alert dashboard with severity filtering, bulk suppression, and incident grouping |
+| **Campaigns** | Higher-order attack chain detections: kill chains, alert storms, coordinated attacks |
 | **Events** | Live event stream with search, category filters, and process ancestry drill-down |
-| **Rules** | Rule browser with enable/disable toggles, MITRE tactic grouping, and rule wizard for authoring new rules |
-| **Permissions** | TCC permission timeline visualization showing grants and revocations over time |
-| **AI Guard** | AI coding tool activity dashboard -- active tools, credential fence alerts, boundary violations |
+| **Rules** | Rule browser with enable/disable toggles, MITRE tactic grouping, and rule wizard |
+| **Prevention** | Active response actions: kill, quarantine, network block, DNS sinkhole |
+| **AI Guard** | AI coding tool activity: credential fence alerts, boundary violations, MCP server monitoring |
+| **Browser Extensions** | Installed extension inventory with dangerous-permission risk scoring |
+| **Threat Intel** | abuse.ch feed status, IOC counts, custom intel import |
+| **Package Freshness** | Manual supply-chain risk check (npm, PyPI, Homebrew, Cargo) + supply-chain alerts |
+| **AI Analysis** | LLM-powered threat hunting, investigation summaries, defense recommendations |
+| **Integrations** | MISP, webhook, syslog, fleet configuration |
+| **Permissions** | TCC permission timeline visualization |
+| **ES Health** | Daemon status, database health, collector checklist, event throughput |
 | **Docs** | Built-in documentation and reference |
 
-Additional views: Settings panel, Response Actions configuration.
+Additional views: Settings → AI Backend (LLM provider configuration), Response Actions log.
 
 ---
 
@@ -275,14 +309,17 @@ sudo .build/debug/maccrabd
 ### Control and query
 
 ```bash
-.build/debug/maccrabctl status          # Daemon status
-.build/debug/maccrabctl alerts          # Recent alerts
-.build/debug/maccrabctl events tail 20  # Live event stream
-.build/debug/maccrabctl watch           # Streaming alert tail
-.build/debug/maccrabctl rules list      # Loaded rules
-.build/debug/maccrabctl hunt "show critical alerts"  # Threat hunting
+.build/debug/maccrabctl status                       # Daemon status
+.build/debug/maccrabctl alerts                       # Recent alerts
+.build/debug/maccrabctl events tail 20               # Live event stream
+.build/debug/maccrabctl watch                        # Streaming alert tail
+.build/debug/maccrabctl rules list                   # Loaded rules
+.build/debug/maccrabctl hunt "show critical alerts"  # NL threat hunting
 .build/debug/maccrabctl report --hours 48            # Incident report
 .build/debug/maccrabctl cdhash 1234                  # CDHash lookup
+.build/debug/maccrabctl tree-score 20                # Behavioral scoring
+.build/debug/maccrabctl mcp list                     # MCP server inventory
+.build/debug/maccrabctl extensions --suspicious      # Browser extension scan
 ```
 
 ### Open the dashboard

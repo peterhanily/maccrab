@@ -28,13 +28,22 @@ struct MainView: View {
         // Protection
         case prevention = "Prevention"
         case aiGuard = "AI Guard"
+        case browserExtensions = "Browser Extensions"
         // Intelligence
         case threatIntel = "Threat Intel"
+        case packageFreshness = "Package Freshness"
         case aiAnalysis = "AI Analysis"
         case integrations = "Integrations"
         // System
         case permissions = "Permissions"
+        case esHealth = "ES Health"
         case docs = "Docs"
+    }
+
+    private var browserExtensionAlertCount: Int {
+        appState.dashboardAlerts.filter {
+            $0.ruleTitle.contains("Extension Installed") || $0.ruleTitle.contains("Extension Modified")
+        }.count
     }
 
     private var campaignCount: Int {
@@ -71,11 +80,16 @@ struct MainView: View {
                         .tag(SidebarSection.prevention)
                     Label(String(localized: "sidebar.aiGuard", defaultValue: "AI Guard"), systemImage: "brain")
                         .tag(SidebarSection.aiGuard)
+                    Label(String(localized: "sidebar.browserExtensions", defaultValue: "Browser Extensions"), systemImage: "puzzlepiece.extension.fill")
+                        .badge(browserExtensionAlertCount)
+                        .tag(SidebarSection.browserExtensions)
                 }
 
                 Section(String(localized: "sidebar.intelligence", defaultValue: "Intelligence")) {
                     Label(String(localized: "sidebar.threatIntel", defaultValue: "Threat Intel"), systemImage: "binoculars")
                         .tag(SidebarSection.threatIntel)
+                    Label(String(localized: "sidebar.packageFreshness", defaultValue: "Package Freshness"), systemImage: "shippingbox.fill")
+                        .tag(SidebarSection.packageFreshness)
                     Label(String(localized: "sidebar.aiAnalysis", defaultValue: "AI Analysis"), systemImage: "brain.head.profile")
                         .badge(appState.aiAnalysisAlerts.count)
                         .tag(SidebarSection.aiAnalysis)
@@ -86,6 +100,8 @@ struct MainView: View {
                 Section(String(localized: "sidebar.system", defaultValue: "System")) {
                     Label(String(localized: "sidebar.permissions", defaultValue: "Permissions"), systemImage: "lock.shield")
                         .tag(SidebarSection.permissions)
+                    Label(String(localized: "sidebar.esHealth", defaultValue: "ES Health"), systemImage: "waveform.path.ecg.rectangle.fill")
+                        .tag(SidebarSection.esHealth)
                     Label(String(localized: "sidebar.docs", defaultValue: "Docs"), systemImage: "book")
                         .tag(SidebarSection.docs)
                 }
@@ -108,14 +124,20 @@ struct MainView: View {
                 PreventionView(appState: appState)
             case .aiGuard:
                 AIActivityView(appState: appState)
+            case .browserExtensions:
+                BrowserExtensionsView(appState: appState)
             case .threatIntel:
                 ThreatIntelView(appState: appState)
+            case .packageFreshness:
+                PackageFreshnessView(appState: appState)
             case .aiAnalysis:
                 AIAnalysisView(appState: appState)
             case .integrations:
                 IntegrationsView(appState: appState)
             case .permissions:
                 TCCTimeline(appState: appState)
+            case .esHealth:
+                ESHealthView(appState: appState)
             case .docs:
                 DocsView()
             case nil:

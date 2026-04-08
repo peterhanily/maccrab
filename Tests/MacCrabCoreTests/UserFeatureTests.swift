@@ -135,3 +135,85 @@ struct BundledThreatIntelTests {
         #expect(BundledThreatIntel.hasSuspiciousTLD("google.com") == false)
     }
 }
+
+// MARK: - Fleet Client Tests
+
+@Suite("Fleet Client")
+struct FleetClientTests {
+    @Test("Returns nil when MACCRAB_FLEET_URL is not set")
+    func nilWithoutURL() async {
+        // Ensure the env var is not set in this process
+        // (CI and local test environments should not have it set)
+        if ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] != nil {
+            // If the var happens to be set, just skip the nil assertion
+            return
+        }
+        let client = FleetClient()
+        #expect(client == nil)
+    }
+
+    @Test("FleetAlertSummary roundtrips through JSON")
+    func alertSummaryCodable() throws {
+        let summary = FleetAlertSummary(
+            ruleId: "maccrab.test.rule",
+            ruleTitle: "Test Rule",
+            severity: "high",
+            processPath: "/usr/bin/curl",
+            mitreTechniques: "attack.t1059",
+            timestamp: Date(timeIntervalSince1970: 1000000)
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(summary)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(FleetAlertSummary.self, from: data)
+        #expect(decoded.ruleId == summary.ruleId)
+        #expect(decoded.ruleTitle == summary.ruleTitle)
+        #expect(decoded.severity == summary.severity)
+        #expect(decoded.processPath == summary.processPath)
+        #expect(decoded.mitreTechniques == summary.mitreTechniques)
+    }
+
+    @Test("FleetTelemetry encodes without crashing")
+    func telemetryCodable() throws {
+        let telemetry = FleetTelemetry(
+            hostId: "abc123",
+            timestamp: Date(),
+            version: "1.0.0",
+            alerts: [],
+            iocSightings: [],
+            behaviorScores: []
+        )
+        let data = try JSONEncoder().encode(telemetry)
+        #expect(data.count > 0)
+        let decoded = try JSONDecoder().decode(FleetTelemetry.self, from: data)
+        #expect(decoded.hostId == "abc123")
+        #expect(decoded.version == "1.0.0")
+    }
+
+    @Test("FleetAggregation decodes empty response")
+    func aggregationDecodes() throws {
+        let json = """
+        {"iocs":[],"hotProcesses":[],"fleetSize":0,"timestamp":"2026-04-08T12:00:00Z"}
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let agg = try decoder.decode(FleetAggregation.self, from: Data(json.utf8))
+        #expect(agg.iocs.isEmpty)
+        #expect(agg.hotProcesses.isEmpty)
+        #expect(agg.fleetSize == 0)
+    }
+
+    @Test("FleetCampaign decodes snake_case keys correctly")
+    func campaignDecodesSnakeCase() throws {
+        let json = """
+        {"rule_id":"r1","rule_title":"Test Campaign","severity":"high","alert_count":5,"host_count":3,"first_seen":1000000.0,"last_seen":1001000.0}
+        """
+        let campaign = try JSONDecoder().decode(FleetCampaign.self, from: Data(json.utf8))
+        #expect(campaign.ruleId == "r1")
+        #expect(campaign.ruleTitle == "Test Campaign")
+        #expect(campaign.alertCount == 5)
+        #expect(campaign.hostCount == 3)
+    }
+}

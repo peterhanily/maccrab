@@ -64,6 +64,9 @@ extension MacCrabCtl {
           report [--hours N] [--output file]  Generate HTML incident report
           cdhash <PID>            Extract CDHash for a process
           cdhash --all            Extract CDHashes for all processes
+          tree-score [N]          Top-N suspicious processes (behavioral + Markov scoring)
+          mcp list [--suspicious] List MCP server configs across all AI tools
+          extensions [--suspicious]  Scan browser extensions for dangerous permissions
 
         Other:
           version             Show version information
@@ -79,6 +82,9 @@ extension MacCrabCtl {
           maccrabctl hunt "show critical alerts from last hour"
           maccrabctl report --hours 48 --output incident.html
           maccrabctl cdhash 1234
+          maccrabctl tree-score 20
+          maccrabctl mcp list
+          maccrabctl extensions --suspicious
         """)
     }
 

@@ -90,6 +90,19 @@ struct MacCrabCtl {
             } else {
                 print("Usage: maccrabctl cdhash <PID> | --all")
             }
+        case "tree-score":
+            let limit = args.count >= 3 ? Int(args[2]) ?? 10 : 10
+            await showTreeScore(limit: limit)
+        case "mcp":
+            if args.count >= 3 && args[2] == "list" {
+                let suspiciousOnly = args.contains("--suspicious")
+                listMCPServers(suspiciousOnly: suspiciousOnly)
+            } else {
+                print("Usage: maccrabctl mcp list [--suspicious]")
+            }
+        case "extensions":
+            let suspiciousOnly = args.contains("--suspicious")
+            listExtensions(suspiciousOnly: suspiciousOnly)
         case "version":
             printVersion()
         case "help", "-h", "--help":

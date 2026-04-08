@@ -159,3 +159,51 @@ struct SecurityToolIntegrationTests {
         #expect(rules.contains("deny"))
     }
 }
+
+// MARK: - Ultrasonic Monitor Tests
+
+@Suite("Ultrasonic Monitor")
+struct UltrasonicMonitorTests {
+    @Test("Initializes without crashing")
+    func initDefault() {
+        let monitor = UltrasonicMonitor()
+        _ = monitor.events  // Access stream to confirm it exists
+    }
+
+    @Test("Custom poll interval is accepted")
+    func customPollInterval() {
+        let monitor = UltrasonicMonitor(pollInterval: 120)
+        _ = monitor.events
+    }
+
+    @Test("Attack type raw values are stable")
+    func attackTypeRawValues() {
+        #expect(UltrasonicMonitor.AttackType.dolphinAttack.rawValue == "dolphin_attack")
+        #expect(UltrasonicMonitor.AttackType.nuit.rawValue == "nuit")
+        #expect(UltrasonicMonitor.AttackType.surfingAttack.rawValue == "surfing_attack")
+        #expect(UltrasonicMonitor.AttackType.unknownUltrasonic.rawValue == "unknown_ultrasonic")
+    }
+
+    @Test("Start and stop lifecycle does not crash")
+    func lifecycle() async {
+        let monitor = UltrasonicMonitor(pollInterval: 9999)
+        await monitor.start()
+        await monitor.stop()
+    }
+
+    @Test("Double start is idempotent")
+    func doubleStart() async {
+        let monitor = UltrasonicMonitor(pollInterval: 9999)
+        await monitor.start()
+        await monitor.start()  // Should not crash or spawn extra tasks
+        await monitor.stop()
+    }
+
+    @Test("Events stream is accessible as nonisolated property")
+    func eventsStreamAccessible() {
+        let monitor = UltrasonicMonitor(pollInterval: 9999)
+        // AsyncStream should be accessible from non-isolated context
+        let stream = monitor.events
+        _ = stream  // Verify it compiles and is not nil
+    }
+}
