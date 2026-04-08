@@ -14,6 +14,11 @@ struct MainView: View {
     @State private var selectedSection: SidebarSection? = .overview
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
+    @AppStorage("pollIntervalSeconds") private var pollIntervalSeconds: Int = 5
+
+    /// Timer-driven refresh so the dashboard updates automatically when the
+    /// daemon writes new events/alerts to the database.
+    @State private var pollTimer: Timer? = nil
 
     private var hasCriticalAlerts: Bool {
         appState.dashboardAlerts.contains {
@@ -215,5 +220,27 @@ struct MainView: View {
                 .keyboardShortcut("r", modifiers: .command)
             }
         }
+        .onAppear { startPolling() }
+        .onDisappear { stopPolling() }
+        .onChange(of: pollIntervalSeconds) { _ in
+            // Restart timer when user changes the poll interval in Settings
+            stopPolling()
+            startPolling()
+        }
+    }
+
+    private func startPolling() {
+        guard pollTimer == nil else { return }
+        let interval = TimeInterval(max(pollIntervalSeconds, 1))
+        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+            Task { @MainActor in
+                await appState.refresh()
+            }
+        }
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
 }
