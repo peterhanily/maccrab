@@ -37,7 +37,7 @@ enum Severity: String, CaseIterable, Hashable, Comparable {
         switch self {
         case .informational: return .secondary
         case .low:           return .blue
-        case .medium:        return .yellow
+        case .medium:        return Color(red: 0.67, green: 0.37, blue: 0.0)  // Dark amber — WCAG AA compliant (~4.8:1 on white)
         case .high:          return .orange
         case .critical:      return .red
         }

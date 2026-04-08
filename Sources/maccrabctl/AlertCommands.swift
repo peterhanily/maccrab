@@ -17,13 +17,16 @@ extension MacCrabCtl {
 
             for alert in alerts {
                 let time = formatDate(alert.timestamp)
+                // Severity prefix provides a text fallback for screen readers and
+                // copy-paste contexts where emoji may be rendered as descriptions
+                // (e.g., "Heavy Red Circle") or stripped entirely.
                 let severityIcon: String
                 switch alert.severity {
-                case .critical: severityIcon = "🔴"
-                case .high:     severityIcon = "🟠"
-                case .medium:   severityIcon = "🟡"
-                case .low:      severityIcon = "🔵"
-                case .informational: severityIcon = "⚪"
+                case .critical:      severityIcon = "[CRITICAL] 🔴"
+                case .high:          severityIcon = "[HIGH]     🟠"
+                case .medium:        severityIcon = "[MEDIUM]   🟡"
+                case .low:           severityIcon = "[LOW]      🔵"
+                case .informational: severityIcon = "[INFO]     ⚪"
                 }
 
                 print("\(severityIcon) \(time) \(alert.ruleTitle)")
@@ -128,11 +131,11 @@ extension MacCrabCtl {
                         let time = formatDate(alert.timestamp)
                         let icon: String
                         switch alert.severity {
-                        case .critical: icon = "🔴"
-                        case .high:     icon = "🟠"
-                        case .medium:   icon = "🟡"
-                        case .low:      icon = "🔵"
-                        case .informational: icon = "⚪"
+                        case .critical:      icon = "[CRITICAL] 🔴"
+                        case .high:          icon = "[HIGH]     🟠"
+                        case .medium:        icon = "[MEDIUM]   🟡"
+                        case .low:           icon = "[LOW]      🔵"
+                        case .informational: icon = "[INFO]     ⚪"
                         }
                         print("\(icon) \(time) \(alert.ruleTitle)")
                         print("   Process: \(alert.processName ?? "?") (\(alert.processPath ?? "?"))")

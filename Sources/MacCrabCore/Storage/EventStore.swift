@@ -108,6 +108,7 @@ public actor EventStore {
             "CREATE INDEX IF NOT EXISTS idx_events_ts_severity ON events(timestamp, severity)",
             "CREATE INDEX IF NOT EXISTS idx_events_ts_category ON events(timestamp, event_category)",
             "CREATE INDEX IF NOT EXISTS idx_events_process_ts ON events(process_path, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_events_ts_sev_cat ON events(timestamp, severity, event_category)",
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
                 process_name, process_path, process_commandline,
@@ -174,7 +175,7 @@ public actor EventStore {
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o640)
+        chmod(databasePath, 0o600)
     }
 
     /// Creates an `EventStore` at a custom path (useful for testing).
@@ -429,40 +430,75 @@ public actor EventStore {
 
     /// Deletes events older than the specified date for data retention.
     ///
+    /// Deletes in batches of 100,000 rows and yields between batches so that
+    /// concurrent event inserts are not blocked for extended periods. At high
+    /// event volumes a single bulk delete can take hours; batching keeps each
+    /// individual write lock short.
+    ///
     /// Also removes corresponding FTS entries to keep the search index consistent.
     ///
     /// - Parameter date: Events with timestamps before this date will be deleted.
-    /// - Returns: The number of events deleted.
+    /// - Returns: The total number of events deleted across all batches.
     @discardableResult
-    public func prune(olderThan date: Date) throws -> Int {
-        // Delete FTS entries first (the trigger only handles INSERT, not DELETE).
+    public func prune(olderThan date: Date) async throws -> Int {
+        let batchSize: Int32 = 100_000
+        let timestamp = date.timeIntervalSince1970
+        var totalDeleted = 0
+
+        // Batch: delete FTS entries for the next batch of stale events, then delete
+        // the events themselves. Repeat until no rows remain older than `date`.
+        //
+        // Using a rowid IN (SELECT rowid … LIMIT N) subquery avoids the need for
+        // the SQLITE_ENABLE_UPDATE_DELETE_LIMIT compile-time flag, which may not
+        // be set in the system SQLite.
         let deleteFTS = """
             DELETE FROM events_fts WHERE rowid IN (
                 SELECT rowid FROM events WHERE timestamp < ?1
+                ORDER BY rowid LIMIT ?2
             )
             """
-        let deleteEvents = "DELETE FROM events WHERE timestamp < ?1"
-        let timestamp = date.timeIntervalSince1970
+        let deleteEvents = """
+            DELETE FROM events WHERE rowid IN (
+                SELECT rowid FROM events WHERE timestamp < ?1
+                ORDER BY rowid LIMIT ?2
+            )
+            """
 
-        let ftsStmt = try prepare(deleteFTS)
-        defer { sqlite3_finalize(ftsStmt) }
-        sqlite3_bind_double(ftsStmt, 1, timestamp)
-        let rc1 = sqlite3_step(ftsStmt)
-        guard rc1 == SQLITE_DONE else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-            throw EventStoreError.stepFailed("FTS prune failed: \(msg)")
+        while true {
+            // FTS batch
+            let ftsStmt = try prepare(deleteFTS)
+            sqlite3_bind_double(ftsStmt, 1, timestamp)
+            sqlite3_bind_int(ftsStmt, 2, batchSize)
+            let rc1 = sqlite3_step(ftsStmt)
+            sqlite3_finalize(ftsStmt)
+            guard rc1 == SQLITE_DONE else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                throw EventStoreError.stepFailed("FTS prune failed: \(msg)")
+            }
+
+            // Events batch
+            let evtStmt = try prepare(deleteEvents)
+            sqlite3_bind_double(evtStmt, 1, timestamp)
+            sqlite3_bind_int(evtStmt, 2, batchSize)
+            let rc2 = sqlite3_step(evtStmt)
+            sqlite3_finalize(evtStmt)
+            guard rc2 == SQLITE_DONE else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                throw EventStoreError.stepFailed("Event prune failed: \(msg)")
+            }
+
+            let rowsDeleted = Int(sqlite3_changes(db))
+            totalDeleted += rowsDeleted
+
+            // No more rows in this batch — pruning is complete.
+            if rowsDeleted == 0 { break }
+
+            // Yield to the actor's cooperative executor so concurrent inserts and
+            // queries are not starved between batches.
+            await Task.yield()
         }
 
-        let evtStmt = try prepare(deleteEvents)
-        defer { sqlite3_finalize(evtStmt) }
-        sqlite3_bind_double(evtStmt, 1, timestamp)
-        let rc2 = sqlite3_step(evtStmt)
-        guard rc2 == SQLITE_DONE else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-            throw EventStoreError.stepFailed("Event prune failed: \(msg)")
-        }
-
-        return Int(sqlite3_changes(db))
+        return totalDeleted
     }
 
     // MARK: - Private Helpers

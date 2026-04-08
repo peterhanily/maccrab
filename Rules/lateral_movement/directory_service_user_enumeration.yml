@@ -1,0 +1,49 @@
+title: Active Directory or Local User Enumeration via dscl or ldapsearch
+id: a1b2c3d4-1009-4000-b000-000000001009
+status: experimental
+description: |
+  Detects dscl or ldapsearch being used by unsigned processes to enumerate users,
+  groups, and hosts from the local Directory Services database or an LDAP/Active
+  Directory server. Attackers enumerate directory services to discover accounts
+  for lateral movement, identify privileged users to target, and map the
+  internal network topology.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1087/002/
+    - https://attack.mitre.org/techniques/T1069/002/
+tags:
+    - attack.discovery
+    - attack.lateral_movement
+    - attack.t1087.002
+    - attack.t1069.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/dscl'
+            - '/ldapsearch'
+    selection_enum:
+        CommandLine|contains:
+            - '-list'
+            - 'list'
+            - '/Users'
+            - '/Groups'
+            - '/Computers'
+            - 'uid='
+            - 'cn='
+            - 'samaccountname'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_system:
+        ParentImage|startswith: '/System/'
+    condition: selection_tool and selection_enum and not filter_apple and not filter_system
+falsepositives:
+    - IT administration tools querying directory services
+    - MDM/endpoint management agents (Jamf, Mosyle, Kandji)
+    - Login/authentication frameworks
+level: medium

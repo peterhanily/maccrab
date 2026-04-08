@@ -54,6 +54,12 @@ public actor ProcessLineage {
     /// Maximum depth when walking the ancestor chain.
     private let maxAncestorDepth: Int
 
+    /// Hard cap on the number of tracked nodes. When exceeded, the oldest
+    /// exited process is evicted (falling back to the oldest running process
+    /// if all processes are still alive). Prevents unbounded growth from
+    /// zombie PIDs accumulating during high-fork-rate workloads.
+    private let maxProcessCount: Int
+
     // MARK: Storage
 
     /// Primary index: pid -> node.
@@ -71,9 +77,10 @@ public actor ProcessLineage {
     ///     Defaults to 3600 (1 hour).
     ///   - maxAncestorDepth: Maximum number of ancestors to return when walking
     ///     the parent chain. Defaults to 20.
-    public init(retentionWindow: TimeInterval = 3600, maxAncestorDepth: Int = 20) {
+    public init(retentionWindow: TimeInterval = 3600, maxAncestorDepth: Int = 20, maxProcessCount: Int = 50_000) {
         self.retentionWindow = retentionWindow
         self.maxAncestorDepth = maxAncestorDepth
+        self.maxProcessCount = maxProcessCount
     }
 
     // MARK: Recording
@@ -116,6 +123,31 @@ public actor ProcessLineage {
 
         nodes[pid] = node
         childrenIndex[ppid, default: []].insert(pid)
+
+        if nodes.count > maxProcessCount {
+            evictLRUProcess()
+        }
+    }
+
+    /// Evict one process to stay within `maxProcessCount`.
+    /// Prefers the exited process with the oldest exit time; falls back to the
+    /// running process with the oldest start time.
+    private func evictLRUProcess() {
+        // Prefer an exited process (least valuable for lineage queries)
+        if let victim = nodes.values.filter({ $0.exitTime != nil }).min(by: { ($0.exitTime ?? .distantPast) < ($1.exitTime ?? .distantPast) }) {
+            removeNode(pid: victim.pid)
+        } else if let victim = nodes.values.min(by: { $0.startTime < $1.startTime }) {
+            removeNode(pid: victim.pid)
+        }
+    }
+
+    private func removeNode(pid: pid_t) {
+        guard let node = nodes.removeValue(forKey: pid) else { return }
+        childrenIndex[node.ppid]?.remove(pid)
+        if childrenIndex[node.ppid]?.isEmpty == true {
+            childrenIndex.removeValue(forKey: node.ppid)
+        }
+        childrenIndex.removeValue(forKey: pid)
     }
 
     /// Record that a process has exited.
@@ -227,16 +259,10 @@ public actor ProcessLineage {
         }
 
         for pid in pidsToRemove {
-            if let node = nodes.removeValue(forKey: pid) {
-                childrenIndex[node.ppid]?.remove(pid)
-                if childrenIndex[node.ppid]?.isEmpty == true {
-                    childrenIndex.removeValue(forKey: node.ppid)
-                }
-            }
             // Also remove any children index entry keyed by this pid.
             // The child nodes themselves are not removed (they remain in `nodes`
             // and will be pruned on their own schedule).
-            childrenIndex.removeValue(forKey: pid)
+            removeNode(pid: pid)
         }
     }
 

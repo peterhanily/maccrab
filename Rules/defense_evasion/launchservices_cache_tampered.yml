@@ -1,0 +1,40 @@
+title: LaunchServices Assessment Cache Modified by Non-System Process
+id: a1b2c3d4-1016-4000-b000-000000001016
+status: experimental
+description: |
+  Detects writes to the LaunchServices code-signing and notarization assessment
+  cache (.csstore files under ~/Library/Caches/ or /Library/Caches/). This cache
+  records Gatekeeper assessments — a cached "allowed" result means macOS skips the
+  Gatekeeper dialog on subsequent launches. Attackers can inject forged cache
+  entries to permanently whitelist binaries without triggering Gatekeeper UX,
+  even on systems with SIP partially relaxed. The technique is complementary to
+  quarantine-stripping and survives quarantine attribute re-addition.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1553/001/
+    - https://www.mac4n6.com/blog/2019/8/12/launch-services-database-forensics
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Caches/com.apple.LaunchServices'
+            - '.csstore'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/lsd'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_system and not filter_apple
+falsepositives:
+    - Backup software accessing caches during system backup
+    - Cache cleanup utilities with broad cache access
+level: medium

@@ -12,6 +12,7 @@ struct StatusBarMenu: View {
             Image(systemName: appState.isConnected ? "circle.fill" : "circle")
                 .font(.system(size: 6))
                 .foregroundColor(appState.isConnected ? .green : .red)
+                .accessibilityHidden(true)
             Text(appState.isConnected
                 ? String(localized: "statusBar.active", defaultValue: "MacCrab Active")
                 : String(localized: "statusBar.notRunning", defaultValue: "Daemon Not Running"))
@@ -37,6 +38,7 @@ struct StatusBarMenu: View {
                 } label: {
                     HStack(spacing: 8) {
                         Circle().fill(alert.severityColor).frame(width: 8, height: 8)
+                            .accessibilityLabel(Text("\(alert.severity.rawValue) severity"))
                         VStack(alignment: .leading, spacing: 1) {
                             Text(alert.ruleTitle).font(.body).lineLimit(1)
                             Text("\(alert.processName) -- \(alert.timeString)")

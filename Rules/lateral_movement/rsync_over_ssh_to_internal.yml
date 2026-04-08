@@ -1,0 +1,58 @@
+title: rsync File Sync to Internal Host via SSH by Unsigned Process
+id: a1b2c3d4-1011-4000-b000-000000001011
+status: experimental
+description: |
+  Detects rsync being invoked with SSH transport (-e ssh) to synchronise files to
+  an internal IP address, initiated by an unsigned or ad-hoc signed process. After
+  initial compromise attackers use rsync-over-SSH to silently copy malware,
+  exfiltration tools, or stolen data to/from other internal hosts without
+  triggering content-based network detections.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1570/
+    - https://attack.mitre.org/techniques/T1021/004/
+tags:
+    - attack.lateral_movement
+    - attack.t1570
+    - attack.t1021.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_rsync:
+        Image|endswith: '/rsync'
+    selection_ssh:
+        CommandLine|contains:
+            - '-e ssh'
+            - '-e "ssh'
+            - "--rsh=ssh"
+    selection_internal:
+        CommandLine|contains:
+            - '10.'
+            - '192.168.'
+            - '172.16.'
+            - '172.17.'
+            - '172.18.'
+            - '172.19.'
+            - '172.20.'
+            - '172.21.'
+            - '172.22.'
+            - '172.23.'
+            - '172.24.'
+            - '172.25.'
+            - '172.26.'
+            - '172.27.'
+            - '172.28.'
+            - '172.29.'
+            - '172.30.'
+            - '172.31.'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection_rsync and selection_ssh and selection_internal and not filter_apple
+falsepositives:
+    - Backup solutions using rsync (Arq, Carbon Copy Cloner, rsnapshot)
+    - Legitimate deployment pipelines
+level: medium

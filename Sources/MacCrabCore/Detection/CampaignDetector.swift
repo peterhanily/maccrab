@@ -95,6 +95,11 @@ public actor CampaignDetector {
     /// Minimum distinct MITRE tactics to declare a generic kill chain.
     private let minTacticsForKillChain: Int
 
+    /// Hard cap on `recentAlerts`. When exceeded the oldest entries are evicted
+    /// (with index decrements) before time-based purging runs. Prevents unbounded
+    /// growth during alert storms (e.g. 1k alerts/s × 600s = 600k entries).
+    private let maxRecentAlerts: Int
+
     // MARK: - State
 
     /// Rolling window of recent alerts for pattern detection.
@@ -109,6 +114,18 @@ public actor CampaignDetector {
     /// Detected campaigns (kept for `activeCampaigns` queries).
     private var detectedCampaigns: [Campaign] = []
 
+    /// Incremental tactic index: normalized tactic → count of alerts in the
+    /// current window that carry that tactic. Maintained in lock-step with
+    /// `recentAlerts` via `addToIndexes` / `removeFromIndexes`. Allows
+    /// `checkKillChain()` to run in O(T) (number of unique tactics) rather
+    /// than O(n·t) (alerts × tactics per alert).
+    private var normalizedTacticCounts: [String: Int] = [:]
+
+    /// Incremental user-ID index: user ID → count of alerts in the current
+    /// window from that user context. Allows `checkLateralMovement()` to run
+    /// in O(1) rather than O(n).
+    private var userIdCounts: [String: Int] = [:]
+
     /// Don't re-emit the same campaign type within this window.
     private let campaignDedupWindow: TimeInterval = 600 // 10 min
 
@@ -119,13 +136,15 @@ public actor CampaignDetector {
         stormThreshold: Int = 10,
         stormCriticalThreshold: Int = 50,
         stormWindow: TimeInterval = 300,
-        minTacticsForKillChain: Int = 3
+        minTacticsForKillChain: Int = 3,
+        maxRecentAlerts: Int = 50_000
     ) {
         self.campaignWindow = campaignWindow
         self.stormThreshold = stormThreshold
         self.stormCriticalThreshold = stormCriticalThreshold
         self.stormWindow = stormWindow
         self.minTacticsForKillChain = minTacticsForKillChain
+        self.maxRecentAlerts = maxRecentAlerts
     }
 
     // MARK: - Public API
@@ -134,7 +153,9 @@ public actor CampaignDetector {
     /// Returns an array of newly detected campaigns (usually 0 or 1).
     public func processAlert(_ alert: AlertSummary) -> [Campaign] {
         recentAlerts.append(alert)
+        addToIndexes(alert)
         recordForStormDetection(alert)
+        evictExcessAlerts()
         purgeStaleAlerts()
 
         var campaigns: [Campaign] = []
@@ -260,33 +281,25 @@ public actor CampaignDetector {
     }
 
     private func checkKillChain() -> Campaign? {
-        let cutoff = Date().addingTimeInterval(-campaignWindow)
-        let windowAlerts = recentAlerts.filter { $0.timestamp > cutoff }
-        guard windowAlerts.count >= 2 else { return nil }
-
-        // Collect all normalized tactics
-        var allTactics = Set<String>()
-        for alert in windowAlerts {
-            for tactic in alert.tactics {
-                allTactics.insert(normalizeTactic(tactic))
-            }
-        }
-
+        // Use the incremental tactic index — O(T) where T = unique tactic count,
+        // not O(n·t). `recentAlerts` is already trimmed to the campaign window
+        // by `purgeStaleAlerts()`, so no redundant filtering is needed.
+        let allTactics = Set(normalizedTacticCounts.keys)
         guard allTactics.count >= 2 else { return nil }
 
         // Check specific 2-tactic combos first
         for (combo, result) in Self.twoTacticCombinations {
             if combo.isSubset(of: allTactics) {
-                let description = "Detected tactics: \(allTactics.sorted().joined(separator: ", ")) across \(windowAlerts.count) alerts within \(Int(campaignWindow))s"
+                let description = "Detected tactics: \(allTactics.sorted().joined(separator: ", ")) across \(recentAlerts.count) alerts within \(Int(campaignWindow))s"
                 return Campaign(
                     id: makeCampaignId(),
                     type: .killChain,
                     severity: result.severity,
                     title: result.title,
                     description: description,
-                    alerts: windowAlerts,
+                    alerts: recentAlerts,
                     tactics: allTactics,
-                    timeSpanSeconds: timeSpan(of: windowAlerts),
+                    timeSpanSeconds: timeSpan(of: recentAlerts),
                     detectedAt: Date()
                 )
             }
@@ -294,7 +307,6 @@ public actor CampaignDetector {
 
         // Generic: 3+ distinct tactics → multi-stage attack
         if allTactics.count >= minTacticsForKillChain {
-            // Check for the specific 3-tactic combos
             let title: String
             let severity: Severity
             let hasInitialAccess = allTactics.contains("initial_access")
@@ -314,16 +326,16 @@ public actor CampaignDetector {
                 severity = .critical
             }
 
-            let description = "Detected \(allTactics.count) tactics: \(allTactics.sorted().joined(separator: ", ")) across \(windowAlerts.count) alerts within \(Int(campaignWindow))s"
+            let description = "Detected \(allTactics.count) tactics: \(allTactics.sorted().joined(separator: ", ")) across \(recentAlerts.count) alerts within \(Int(campaignWindow))s"
             return Campaign(
                 id: makeCampaignId(),
                 type: .killChain,
                 severity: severity,
                 title: title,
                 description: description,
-                alerts: windowAlerts,
+                alerts: recentAlerts,
                 tactics: allTactics,
-                timeSpanSeconds: timeSpan(of: windowAlerts),
+                timeSpanSeconds: timeSpan(of: recentAlerts),
                 detectedAt: Date()
             )
         }
@@ -510,19 +522,9 @@ public actor CampaignDetector {
     // MARK: - Lateral Movement Detection
 
     private func checkLateralMovement() -> Campaign? {
-        let cutoff = Date().addingTimeInterval(-campaignWindow)
-        let windowAlerts = recentAlerts.filter { $0.timestamp > cutoff }
-
-        // Collect distinct user IDs
-        var userIds = Set<String>()
-        for alert in windowAlerts {
-            if let userId = alert.userId {
-                userIds.insert(userId)
-            }
-        }
-
-        guard userIds.count >= 2 else { return nil }
-
+        // Use the incremental user-ID index — O(1), not O(n).
+        guard userIdCounts.count >= 2 else { return nil }
+        let userIds = Set(userIdCounts.keys)
         let description = "Alerts from \(userIds.count) user contexts (\(userIds.sorted().joined(separator: ", "))) within \(Int(campaignWindow))s — possible privilege escalation or lateral movement"
         return Campaign(
             id: makeCampaignId(),
@@ -530,9 +532,9 @@ public actor CampaignDetector {
             severity: .high,
             title: "Possible Lateral Movement",
             description: description,
-            alerts: windowAlerts,
-            tactics: aggregateTactics(windowAlerts),
-            timeSpanSeconds: timeSpan(of: windowAlerts),
+            alerts: recentAlerts,
+            tactics: aggregateTactics(recentAlerts),
+            timeSpanSeconds: timeSpan(of: recentAlerts),
             detectedAt: Date()
         )
     }
@@ -594,10 +596,59 @@ public actor CampaignDetector {
         return last.timestamp.timeIntervalSince(first.timestamp)
     }
 
+    // MARK: - Incremental Index Helpers
+
+    /// Add a newly appended alert to the tactic and user-ID indexes.
+    private func addToIndexes(_ alert: AlertSummary) {
+        for tactic in alert.tactics {
+            normalizedTacticCounts[normalizeTactic(tactic), default: 0] += 1
+        }
+        if let uid = alert.userId {
+            userIdCounts[uid, default: 0] += 1
+        }
+    }
+
+    /// Remove a stale alert from the tactic and user-ID indexes.
+    private func removeFromIndexes(_ alert: AlertSummary) {
+        for tactic in alert.tactics {
+            let n = normalizeTactic(tactic)
+            if (normalizedTacticCounts[n] ?? 0) <= 1 {
+                normalizedTacticCounts.removeValue(forKey: n)
+            } else {
+                normalizedTacticCounts[n]! -= 1
+            }
+        }
+        if let uid = alert.userId {
+            if (userIdCounts[uid] ?? 0) <= 1 {
+                userIdCounts.removeValue(forKey: uid)
+            } else {
+                userIdCounts[uid]! -= 1
+            }
+        }
+    }
+
     // MARK: - Cleanup
+
+    /// Evict the oldest alerts when the hard cap is exceeded.
+    /// Alerts are always appended, so the oldest entries are at the front.
+    private func evictExcessAlerts() {
+        guard recentAlerts.count > maxRecentAlerts else { return }
+        let evictCount = recentAlerts.count - maxRecentAlerts
+        let evicted = recentAlerts.prefix(evictCount)
+        for alert in evicted {
+            removeFromIndexes(alert)
+        }
+        recentAlerts.removeFirst(evictCount)
+        logger.warning("CampaignDetector: evicted \(evictCount) oldest alerts (cap=\(self.maxRecentAlerts))")
+    }
 
     private func purgeStaleAlerts() {
         let cutoff = Date().addingTimeInterval(-campaignWindow)
+        // Decrement indexes for stale alerts before removing them from the array,
+        // so checkKillChain() and checkLateralMovement() see accurate counts.
+        for alert in recentAlerts where alert.timestamp <= cutoff {
+            removeFromIndexes(alert)
+        }
         recentAlerts.removeAll { $0.timestamp <= cutoff }
     }
 

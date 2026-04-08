@@ -381,3 +381,36 @@
 "action.setowner" = "Ownership Changed";
 "action.setmode" = "Permissions Changed";
 "action.signal" = "Signal Sent";
+
+/* ── Suppression Manager ── */
+"suppression.title" = "Active Suppressions";
+"suppression.removeAll" = "Remove All";
+"suppression.confirmTitle" = "Remove all suppressions?";
+"suppression.confirmButton" = "Remove All Suppressions";
+"suppression.confirmMessage" = "This will unsuppress all alerts. They will reappear in the dashboard.";
+"suppression.hint" = "Suppressed patterns hide matching alerts from the dashboard. Remove a pattern to see those alerts again.";
+"suppression.noActive" = "No active suppressions";
+"suppression.process" = "Process: %@";
+"suppression.unsuppress" = "Unsuppress";
+
+/* ── Settings — LLM providers ── */
+"settings.llm.providerOllama" = "Ollama (Local/Remote)";
+"settings.llm.providerOpenAI" = "OpenAI Compatible";
+"settings.llm.providerClaude" = "Anthropic Claude";
+"settings.llm.providerMistral" = "Mistral AI";
+"settings.llm.providerGemini" = "Google Gemini";
+
+/* ── Settings — accessibility labels and tooltips ── */
+"settings.access.displayLanguage" = "Display language";
+"settings.access.launchAtLogin" = "Launch MacCrab at login";
+"settings.access.autoQuarantine" = "Auto-quarantine malicious files";
+"settings.access.criticalOnlyHint" = "Applies only to critical severity alerts";
+"settings.access.autoKill" = "Auto-kill malicious processes";
+"settings.access.autoBlock" = "Auto-block C2 destinations";
+"settings.access.notifications" = "Show notifications for detection alerts";
+"settings.help.autoQuarantine" = "Automatically move files flagged by critical-severity rules to quarantine";
+"settings.help.autoKill" = "Automatically terminate processes that trigger critical detection rules";
+"settings.help.autoBlock" = "Automatically add PF firewall rules to block command-and-control IPs";
+
+/* ── About ── */
+"about.madeWithLove" = "Made with love in Ireland";

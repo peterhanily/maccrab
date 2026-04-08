@@ -1,0 +1,39 @@
+title: Gatekeeper Policy Database Modified by Non-System Process
+id: a1b2c3d4-1015-4000-b000-000000001015
+status: experimental
+description: |
+  Detects writes to /var/db/SystemPolicy, the SQLite database that stores
+  Gatekeeper's assessment policy (allowed/blocked applications and developer
+  certificates). Direct modification of this database can permanently whitelist
+  malware without triggering spctl-based detection rules, and survives reboots.
+  Legitimate modifications are performed exclusively by the System Preferences
+  Security pane (via syspolicyd) or the security(1) command-line tool.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1553/001/
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+    - attack.t1562.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith:
+            - '/var/db/SystemPolicy'
+            - '/private/var/db/SystemPolicy'
+    filter_system:
+        Image|startswith:
+            - '/System/Library/'
+            - '/usr/libexec/syspolicyd'
+            - '/usr/bin/security'
+    filter_apple:
+        SignerType:
+            - 'apple'
+    condition: selection and not filter_system and not filter_apple
+falsepositives:
+    - System updates applying new Gatekeeper policy
+level: critical

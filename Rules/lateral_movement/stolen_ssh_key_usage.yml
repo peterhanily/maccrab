@@ -1,0 +1,38 @@
+title: SSH Key Used from Non-Standard or Temporary Location
+id: a1b2c3d4-1006-4000-b000-000000001006
+status: experimental
+description: |
+  Detects SSH invocations using an identity file (-i) from a path outside the
+  standard ~/.ssh/ directory — e.g., /tmp/, /var/folders/, or Downloads.
+  Attackers who exfiltrate SSH private keys often stage them in temporary
+  directories before using them to authenticate to remote hosts for lateral movement.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1021/004/
+    - https://attack.mitre.org/techniques/T1552/004/
+tags:
+    - attack.lateral_movement
+    - attack.credential_access
+    - attack.t1021.004
+    - attack.t1552.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_ssh:
+        Image|endswith: '/ssh'
+    selection_key:
+        CommandLine|contains: ' -i '
+    selection_suspicious_path:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/var/folders/'
+            - '/Downloads/'
+            - '/Desktop/'
+            - '/private/tmp/'
+    condition: selection_ssh and selection_key and selection_suspicious_path
+falsepositives:
+    - Developers testing with temporary key files
+    - CI/CD systems storing keys in build directories
+level: high

@@ -12,6 +12,8 @@ import os.log
 /// Each vendor can be queried independently. Results are cached.
 public actor ThreatIntelAPIs {
     private let logger = Logger(subsystem: "com.maccrab.enrichment", category: "threat-intel-apis")
+    // Shared secure session — enforces TLS 1.2+; add SPKI pins in SecureURLSession.swift.
+    private let session: URLSession = SecureURLSession.make(for: .virustotal)
 
     // API keys (set from config or environment)
     private var apiKeys: [String: String] = [:]
@@ -189,7 +191,12 @@ public actor ThreatIntelAPIs {
         }
         if let cached = checkCache("shodan:ip:\(ip)") { return cached }
 
-        let endpoint = "https://api.shodan.io/shodan/host/\(ip)?key=\(key)"
+        // Shodan's REST API v1 requires the key as a query parameter (no header auth).
+        // Use URLComponents to construct the URL safely rather than string interpolation,
+        // and pass the key via a separate parameter so it is not embedded in logged strings.
+        var components = URLComponents(string: "https://api.shodan.io/shodan/host/\(ip)")
+        components?.queryItems = [URLQueryItem(name: "key", value: key)]
+        guard let endpoint = components?.url?.absoluteString else { return nil }
         guard let json = await apiRequest(url: endpoint, headers: [:]) else {
             logger.warning("Shodan: API request failed for \(ip)")
             return nil
@@ -328,7 +335,7 @@ public actor ThreatIntelAPIs {
         let body = "url=\(url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? url)&format=json&app_key=MacCrab"
         request.httpBody = body.data(using: .utf8)
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -399,7 +406,7 @@ public actor ThreatIntelAPIs {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else { return nil }
 
@@ -415,7 +422,7 @@ public actor ThreatIntelAPIs {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else { return nil }
 

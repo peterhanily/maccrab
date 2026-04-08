@@ -254,3 +254,157 @@
 "action.setowner" = "Eigenaar gewijzigd";
 "action.setmode" = "Rechten gewijzigd";
 "action.signal" = "Signaal verzonden";
+
+/* ── Missing translations (English fallback — TODO: translate) ── */
+"action.block.message" = "This will block the network destination associated with %@. Applications will no longer be able to reach this endpoint.";
+"action.kill.confirm" = "Kill %@?";
+"action.kill.message" = "This will terminate %@ at %@. This action cannot be undone.";
+"action.quarantine.confirm" = "Quarantine file from %@?";
+"addRuleAction.add" = "Add Action";
+"addRuleAction.cancel" = "Cancel";
+"addRuleAction.ruleIdHint" = "Rule ID (paste from rule detail panel)";
+"addRuleAction.ruleIdPlaceholder" = "e.g., d1a2b3c4-2001-4000-a000-000000002001";
+"addRuleAction.title" = "Add Response Action for Rule";
+"aiGuard.aiAlerts" = "AI Alerts";
+"aiGuard.credentialAccess" = "Credential Access";
+"aiGuard.credentialAccessDesc" = "SSH keys, .env, AWS, tokens, keychains";
+"aiGuard.credentialFence" = "Credential Fence";
+"aiGuard.credentialFenceDesc" = "AI tools will trigger CRITICAL alerts if they access any of these:";
+"aiGuard.credentialFencePaths" = "30+ paths";
+"aiGuard.credentialFenceTitle" = "Credential Fence — Protected Paths";
+"aiGuard.networkActivity" = "Network Activity";
+"aiGuard.networkActivityDesc" = "Outbound connections from AI children";
+"aiGuard.packageInstalls" = "Package Installs";
+"aiGuard.packageInstallsDesc" = "npm, pip, cargo, brew from AI context";
+"aiGuard.persistence" = "Persistence";
+"aiGuard.persistenceDesc" = "LaunchAgents, cron, login items";
+"aiGuard.privilegeEscalation" = "Privilege Escalation";
+"aiGuard.privilegeEscalationDesc" = "sudo and setuid from AI processes";
+"aiGuard.projectBoundary" = "Project Boundary";
+"aiGuard.projectBoundaryDesc" = "File writes outside project directory";
+"aiGuard.promptInjection" = "Prompt Injection";
+"aiGuard.promptInjectionDesc" = "Forensicate.ai scanning of commands";
+"aiGuard.recentAlerts" = "Recent AI Safety Alerts";
+"aiGuard.shellSpawning" = "Shell Spawning";
+"aiGuard.shellSpawningDesc" = "Every shell process spawned by AI tools";
+"aiGuard.statusActive" = "Active";
+"aiGuard.supportedTools" = "Supported AI Coding Tools";
+"aiGuard.toolsMonitored" = "Tools Monitored";
+"aiGuard.whatMonitors" = "What AI Guard Monitors";
+"alerts.suppressedToast" = "Suppressed: %@";
+"alerts.undo" = "Undo";
+"components.refreshData" = "Refresh data";
+"eventColumn.action" = "Action";
+"eventColumn.category" = "Category";
+"eventColumn.detail" = "Detail";
+"eventColumn.process" = "Process";
+"eventColumn.signer" = "Signer";
+"eventColumn.time" = "Time";
+"events.allCategories" = "All Categories";
+"events.perSecond" = "%d events/sec";
+"integrations.exportDesc" = "Generate threat intel in formats compatible with other tools:";
+"integrations.exportNote" = "Exported files can be manually imported into each tool. MacCrab never modifies other tools' configuration.";
+"responseActions.activeSuppressions" = "Active Suppressions";
+"responseActions.addAction" = "Add Action";
+"responseActions.addDefault" = "Add Default Action";
+"responseActions.defaultActions" = "Default Actions (all rules)";
+"responseActions.explanationDetail" = "Configure what happens when specific rules trigger — kill processes, quarantine files, send notifications, or run custom scripts.";
+"responseActions.noDefaults" = "No default actions configured";
+"responseActions.noPerRule" = "No per-rule actions configured";
+"responseActions.noPerRuleHint" = "Click 'Add Rule Action' to configure responses for specific rules.";
+"responseActions.perRule" = "Per-Rule Actions";
+"responseActions.saved" = "Saved. Restart daemon to apply.";
+"responseActions.suppressionsDesc" = "Alerts matching these patterns are hidden from the dashboard.";
+"responseActions.suppressionsHint" = "Manage via 'Suppress All Like This' button in alert details.";
+"ruleDetail.ruleId" = "Rule ID";
+"ruleDetail.severity" = "Severity";
+"ruleDetail.status" = "Status";
+"rules.clearTactic" = "Clear tactic filter";
+"rules.searchRules" = "Search rules...";
+"settings.aboutLicense" = "Apache 2.0 (code)  |  DRL 1.1 (rules)";
+"settings.actions" = "Actions";
+"settings.daemonRunning" = "Running";
+"settings.daemonStatus" = "Status";
+"settings.daemonStopped" = "Stopped";
+"settings.database" = "Database";
+"settings.discordWebhook" = "Discord Webhook URL";
+"settings.eventsPerSec" = "Events/sec";
+"settings.noWebhooksConfigured" = "No webhook integrations configured";
+"settings.pagerdutyKey" = "PagerDuty Routing Key";
+"settings.refreshConnection" = "Refresh Connection";
+"settings.reloadRules" = "Reload Rules";
+"settings.rulesLoaded" = "Rules loaded";
+"settings.slackWebhook" = "Slack Webhook URL";
+"settings.teamsWebhook" = "Microsoft Teams Webhook URL";
+"settings.webhookDesc" = "Send alerts to external services. Leave blank to disable.";
+"settings.webhookIntegrations" = "Webhook Integrations";
+"settings.webhookMinSeverity" = "Minimum severity:";
+"settings.webhooksActive" = "Active: %@";
+"signer.adHoc" = "Ad Hoc";
+"signer.appStore" = "App Store";
+"signer.apple" = "Apple";
+"signer.devId" = "Dev ID";
+"signer.unsigned" = "Unsigned";
+"statusBar.alertsTodayLabel" = "alerts today";
+"statusBar.eventsPerSecLabel" = "events/sec";
+"statusBar.rulesLoadedLabel" = "rules loaded";
+"threatIntel.iocTextEditor" = "IOC text input";
+"wizard.close" = "Close";
+
+/* ── Suppression Manager ── */
+/* TODO: translate */
+"suppression.title" = "Active Suppressions";
+/* TODO: translate */
+"suppression.removeAll" = "Remove All";
+/* TODO: translate */
+"suppression.confirmTitle" = "Remove all suppressions?";
+/* TODO: translate */
+"suppression.confirmButton" = "Remove All Suppressions";
+/* TODO: translate */
+"suppression.confirmMessage" = "This will unsuppress all alerts. They will reappear in the dashboard.";
+/* TODO: translate */
+"suppression.hint" = "Suppressed patterns hide matching alerts from the dashboard. Remove a pattern to see those alerts again.";
+/* TODO: translate */
+"suppression.noActive" = "No active suppressions";
+/* TODO: translate */
+"suppression.process" = "Process: %@";
+/* TODO: translate */
+"suppression.unsuppress" = "Unsuppress";
+
+/* ── Settings — LLM providers ── */
+/* TODO: translate */
+"settings.llm.providerOllama" = "Ollama (Local/Remote)";
+/* TODO: translate */
+"settings.llm.providerOpenAI" = "OpenAI Compatible";
+/* TODO: translate */
+"settings.llm.providerClaude" = "Anthropic Claude";
+/* TODO: translate */
+"settings.llm.providerMistral" = "Mistral AI";
+/* TODO: translate */
+"settings.llm.providerGemini" = "Google Gemini";
+
+/* ── Settings — accessibility labels and tooltips ── */
+/* TODO: translate */
+"settings.access.displayLanguage" = "Display language";
+/* TODO: translate */
+"settings.access.launchAtLogin" = "Launch MacCrab at login";
+/* TODO: translate */
+"settings.access.autoQuarantine" = "Auto-quarantine malicious files";
+/* TODO: translate */
+"settings.access.criticalOnlyHint" = "Applies only to critical severity alerts";
+/* TODO: translate */
+"settings.access.autoKill" = "Auto-kill malicious processes";
+/* TODO: translate */
+"settings.access.autoBlock" = "Auto-block C2 destinations";
+/* TODO: translate */
+"settings.access.notifications" = "Show notifications for detection alerts";
+/* TODO: translate */
+"settings.help.autoQuarantine" = "Automatically move files flagged by critical-severity rules to quarantine";
+/* TODO: translate */
+"settings.help.autoKill" = "Automatically terminate processes that trigger critical detection rules";
+/* TODO: translate */
+"settings.help.autoBlock" = "Automatically add PF firewall rules to block command-and-control IPs";
+
+/* ── About ── */
+/* TODO: translate */
+"about.madeWithLove" = "Made with love in Ireland";

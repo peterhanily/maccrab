@@ -12,27 +12,27 @@ struct SuppressionManagerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Active Suppressions")
+                Text(String(localized: "suppression.title", defaultValue: "Active Suppressions"))
                     .font(.headline)
                 Spacer()
                 if !appState.suppressionPatterns.isEmpty {
                     Button(role: .destructive) {
                         confirmRemoveAll = true
                     } label: {
-                        Text("Remove All")
+                        Text(String(localized: "suppression.removeAll", defaultValue: "Remove All"))
                             .font(.caption)
                     }
-                    .confirmationDialog("Remove all suppressions?", isPresented: $confirmRemoveAll) {
-                        Button("Remove All Suppressions", role: .destructive) {
+                    .confirmationDialog(String(localized: "suppression.confirmTitle", defaultValue: "Remove all suppressions?"), isPresented: $confirmRemoveAll) {
+                        Button(String(localized: "suppression.confirmButton", defaultValue: "Remove All Suppressions"), role: .destructive) {
                             removeAllSuppressions()
                         }
                     } message: {
-                        Text("This will unsuppress all alerts. They will reappear in the dashboard.")
+                        Text(String(localized: "suppression.confirmMessage", defaultValue: "This will unsuppress all alerts. They will reappear in the dashboard."))
                     }
                 }
             }
 
-            Text("Suppressed patterns hide matching alerts from the dashboard. Remove a pattern to see those alerts again.")
+            Text(String(localized: "suppression.hint", defaultValue: "Suppressed patterns hide matching alerts from the dashboard. Remove a pattern to see those alerts again."))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -43,7 +43,7 @@ struct SuppressionManagerView: View {
                     Image(systemName: "eye")
                         .font(.title2)
                         .foregroundColor(.secondary.opacity(0.5))
-                    Text("No active suppressions")
+                    Text(String(localized: "suppression.noActive", defaultValue: "No active suppressions"))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -63,7 +63,7 @@ struct SuppressionManagerView: View {
                                         .font(.subheadline)
                                         .fontWeight(.medium)
                                         .lineLimit(1)
-                                    Text("Process: \(pattern.processName)")
+                                    Text(String(format: String(localized: "suppression.process", defaultValue: "Process: %@"), pattern.processName))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
@@ -73,7 +73,7 @@ struct SuppressionManagerView: View {
                                 Button {
                                     unsuppress(pattern: pattern)
                                 } label: {
-                                    Label("Unsuppress", systemImage: "eye")
+                                    Label(String(localized: "suppression.unsuppress", defaultValue: "Unsuppress"), systemImage: "eye")
                                         .font(.caption)
                                 }
                                 .buttonStyle(.bordered)

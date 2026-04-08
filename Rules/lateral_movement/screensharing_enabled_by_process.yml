@@ -1,0 +1,53 @@
+title: Screen Sharing or Remote Desktop Enabled Programmatically
+id: a1b2c3d4-1005-4000-b000-000000001005
+status: experimental
+description: |
+  Detects processes enabling macOS Screen Sharing (VNC), Remote Login (SSH),
+  or Remote Management (ARD) via launchctl, kickstart, or systemsetup. Enabling
+  these services after initial access provides persistent, GUI-level lateral
+  movement capability that survives reboots and allows an attacker to operate
+  the compromised host interactively.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1021/005/
+    - https://attack.mitre.org/techniques/T1021/001/
+tags:
+    - attack.lateral_movement
+    - attack.persistence
+    - attack.t1021.001
+    - attack.t1021.005
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/launchctl'
+            - '/systemsetup'
+    selection_service:
+        CommandLine|contains:
+            - 'com.apple.screensharing'
+            - 'com.apple.remote-desktop'
+            - 'com.apple.remotedesktop'
+            - '-setremotelogin'
+            - 'RemoteManagement'
+            - 'ScreenSharing'
+    selection_enable:
+        CommandLine|contains:
+            - 'load'
+            - 'enable'
+            - 'on'
+            - 'true'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+    condition: selection_tool and selection_service and not filter_apple and not filter_system
+falsepositives:
+    - IT management and MDM solutions (Jamf, Mosyle, Kandji)
+    - System administrators enabling remote access intentionally
+level: high

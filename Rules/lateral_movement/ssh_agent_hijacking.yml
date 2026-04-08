@@ -1,0 +1,43 @@
+title: SSH Agent Socket Access by Unexpected Process
+id: a1b2c3d4-1002-4000-b000-000000001002
+status: experimental
+description: |
+  Detects non-system processes accessing the SSH_AUTH_SOCK socket, which grants
+  the ability to use all identities loaded into the SSH agent without knowing
+  their passphrases. Attackers with access to the SSH agent socket can pivot to
+  any host the victim can SSH to, achieving silent lateral movement with no
+  additional credentials.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1563/001/
+    - https://attack.mitre.org/techniques/T1021/004/
+tags:
+    - attack.lateral_movement
+    - attack.credential_access
+    - attack.t1563.001
+    - attack.t1021.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        CommandLine|contains:
+            - 'SSH_AUTH_SOCK'
+            - '/tmp/ssh-'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_ssh:
+        Image|endswith:
+            - '/ssh'
+            - '/ssh-agent'
+            - '/ssh-add'
+            - '/scp'
+            - '/sftp'
+    condition: selection and not filter_apple and not filter_ssh
+falsepositives:
+    - Development environments forwarding SSH agent (e.g., Docker, Vagrant)
+    - Ansible, Fabric, Capistrano and other deployment tools
+level: medium

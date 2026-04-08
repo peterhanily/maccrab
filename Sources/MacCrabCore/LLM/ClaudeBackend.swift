@@ -11,6 +11,7 @@ public actor ClaudeBackend: LLMBackend {
     private let apiKey: String
     private let model: String
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "claude")
+    private let session: URLSession = SecureURLSession.make(for: .anthropic)
 
     public init(apiKey: String, model: String = "claude-sonnet-4-20250514") {
         self.apiKey = apiKey
@@ -48,7 +49,7 @@ public actor ClaudeBackend: LLMBackend {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             logger.error("Claude network error: \(error.localizedDescription)")
             return nil

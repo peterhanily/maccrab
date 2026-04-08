@@ -96,6 +96,7 @@ public actor AlertStore {
             "CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts(event_id)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_ts_severity ON alerts(timestamp, severity)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_rule_ts ON alerts(rule_id, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_ts_sev_sup ON alerts(timestamp, severity, suppressed)",
         ]
         for sql in schemaSQLs { Self.exec(handle, sql) }
 
@@ -145,7 +146,7 @@ public actor AlertStore {
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o640)
+        chmod(databasePath, 0o600)
     }
 
     /// Creates an `AlertStore` at a custom path (useful for testing).
@@ -341,21 +342,41 @@ public actor AlertStore {
 
     /// Deletes alerts older than the specified date for data retention.
     ///
+    /// Deletes in batches of 100,000 rows and yields between batches so that
+    /// concurrent alert inserts are not blocked for extended periods.
+    ///
     /// - Parameter date: Alerts with timestamps before this date will be deleted.
-    /// - Returns: The number of alerts deleted.
+    /// - Returns: The total number of alerts deleted across all batches.
     @discardableResult
-    public func prune(olderThan date: Date) throws -> Int {
-        let sql = "DELETE FROM alerts WHERE timestamp < ?1"
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_double(stmt, 1, date.timeIntervalSince1970)
+    public func prune(olderThan date: Date) async throws -> Int {
+        let batchSize: Int32 = 100_000
+        let timestamp = date.timeIntervalSince1970
+        var totalDeleted = 0
 
-        let rc = sqlite3_step(stmt)
-        guard rc == SQLITE_DONE else {
-            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
-            throw AlertStoreError.stepFailed(msg)
+        let sql = """
+            DELETE FROM alerts WHERE rowid IN (
+                SELECT rowid FROM alerts WHERE timestamp < ?1
+                ORDER BY rowid LIMIT ?2
+            )
+            """
+
+        while true {
+            let stmt = try prepare(sql)
+            sqlite3_bind_double(stmt, 1, timestamp)
+            sqlite3_bind_int(stmt, 2, batchSize)
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                throw AlertStoreError.stepFailed(msg)
+            }
+            let rowsDeleted = Int(sqlite3_changes(db))
+            totalDeleted += rowsDeleted
+            if rowsDeleted == 0 { break }
+            await Task.yield()
         }
-        return Int(sqlite3_changes(db))
+
+        return totalDeleted
     }
 
     // MARK: - Private Helpers

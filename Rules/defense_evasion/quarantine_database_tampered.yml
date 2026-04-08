@@ -1,0 +1,41 @@
+title: Quarantine Events Database Directly Modified
+id: a1b2c3d4-1014-4000-b000-000000001014
+status: experimental
+description: |
+  Detects direct write access to the macOS Quarantine Events SQLite database
+  (com.apple.LaunchServices.QuarantineEventsV2) by a non-system process.
+  Attackers can delete entries from this database to retroactively mark files
+  as "unquarantined", bypassing Gatekeeper's first-run assessment without
+  ever running xattr or spctl. This technique evades process-creation-based
+  quarantine stripping detections.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1553/001/
+    - https://objective-see.org/blog/blog_0x4B.html
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - 'QuarantineEventsV2'
+            - 'QuarantineEventsV2-shm'
+            - 'QuarantineEventsV2-wal'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/bin/'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_system and not filter_apple
+falsepositives:
+    - Backup software reading the quarantine database
+    - Privacy-focused utilities that clean quarantine history on user request
+level: high

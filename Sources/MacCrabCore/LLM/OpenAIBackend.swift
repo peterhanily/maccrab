@@ -13,6 +13,7 @@ public actor OpenAIBackend: LLMBackend {
     private let apiKey: String
     private let model: String
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "openai")
+    private let session: URLSession = SecureURLSession.make(for: .openai)
 
     public init(baseURL: String = "https://api.openai.com/v1",
                 apiKey: String, model: String = "gpt-4o-mini") {
@@ -54,7 +55,7 @@ public actor OpenAIBackend: LLMBackend {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             logger.error("OpenAI network error: \(error.localizedDescription)")
             return nil

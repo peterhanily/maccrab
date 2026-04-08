@@ -122,6 +122,7 @@ final class AppState: ObservableObject {
                 Task { @MainActor in await self.refresh() }
             }
         loadSuppressPatterns()
+        loadSuppressedIDs()
         Task { await refresh() }
     }
 
@@ -289,6 +290,7 @@ final class AppState: ObservableObject {
     func unsuppressAlert(_ alertId: String) async {
         // Update authoritative set and in-memory state immediately
         suppressedIDs.remove(alertId)
+        saveSuppressedIDs()
         if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
             dashboardAlerts[idx].suppressed = false
         }
@@ -308,6 +310,7 @@ final class AppState: ObservableObject {
         // Update authoritative set and in-memory state immediately — no loadAlerts() needed.
         // suppressedIDs survives any DB reload, so tab-switching can never undo a suppression.
         suppressedIDs.insert(alertId)
+        saveSuppressedIDs()
         if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
             dashboardAlerts[idx].suppressed = true
         }
@@ -340,6 +343,7 @@ final class AppState: ObservableObject {
                 dashboardAlerts[i].suppressed = true
             }
         }
+        saveSuppressedIDs()
         recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
         totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
     }
@@ -370,6 +374,22 @@ final class AppState: ObservableObject {
             guard let r = dict["ruleTitle"], let p = dict["processName"] else { return nil }
             return (r, p)
         }
+    }
+
+    /// Persist the current `suppressedIDs` set to disk so suppressions survive app restarts.
+    private func saveSuppressedIDs() {
+        let arr = Array(suppressedIDs)
+        if let json = try? JSONSerialization.data(withJSONObject: arr) {
+            try? json.write(to: URL(fileURLWithPath: dataDir + "/ui_suppressed_ids.json"))
+        }
+    }
+
+    /// Load previously persisted `suppressedIDs` on startup.
+    func loadSuppressedIDs() {
+        let path = dataDir + "/ui_suppressed_ids.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else { return }
+        suppressedIDs = Set(arr)
     }
 
     func reloadDaemonRules() {

@@ -1,0 +1,44 @@
+title: Remote Desktop Connection Initiated via open Command or Non-Standard App
+id: a1b2c3d4-1010-4000-b000-000000001010
+status: experimental
+description: |
+  Detects the `open` command or non-Apple processes invoking RDP (Remote Desktop
+  Protocol) or VNC connections to remote hosts via rdp://, vnc://, or by launching
+  Microsoft Remote Desktop / Screen Sharing from non-standard parent processes.
+  Attackers use GUI-based remote access to control compromised hosts and pivot to
+  additional targets without leaving command-line traces.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1021/001/
+    - https://attack.mitre.org/techniques/T1021/005/
+tags:
+    - attack.lateral_movement
+    - attack.t1021.001
+    - attack.t1021.005
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_rdp:
+        CommandLine|contains:
+            - 'rdp://'
+            - 'vnc://'
+    selection_apps:
+        Image|contains:
+            - 'Remote Desktop'
+            - 'Microsoft Remote Desktop'
+            - 'CoRD'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_user_launch:
+        ParentImage|endswith:
+            - '/Finder'
+            - '/Dock'
+    condition: (selection_rdp or selection_apps) and not filter_apple and not filter_user_launch
+falsepositives:
+    - IT help desk tools connecting to user machines
+    - Remote work software (BeyondTrust, TeamViewer, AnyDesk)
+level: medium

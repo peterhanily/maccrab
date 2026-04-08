@@ -35,8 +35,20 @@ enum DaemonSetup {
         let fm = FileManager.default
 
         /// Validate that a directory is safe to load rules from:
-        /// it must be owned by root (or the current user) and not world-writable.
+        /// it must not be a symlink, must be owned by root (or the current user),
+        /// and must not be world-writable.
         func isSecureDirectory(_ path: String) -> Bool {
+            // Reject symlinks: an attacker could point /Library/MacCrab/rules at
+            // a world-writable directory they control. Use URL resource values
+            // which operate on the path itself (lstat semantics) rather than
+            // following the symlink (stat semantics).
+            let url = URL(fileURLWithPath: path)
+            if let resourceValues = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+               resourceValues.isSymbolicLink == true {
+                logger.warning("Rules directory \(path) is a symlink. Refusing to load rules to prevent symlink injection attacks.")
+                return false
+            }
+
             guard let attrs = try? fm.attributesOfItem(atPath: path) else {
                 return false
             }

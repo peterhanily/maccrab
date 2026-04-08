@@ -299,17 +299,36 @@ public actor RuleEngine {
 
     /// Reload rules, replacing all existing rules. Intended as a SIGHUP handler.
     ///
+    /// The reload is safe-to-fail: if `loadRules` throws (e.g. the rules
+    /// directory is missing or corrupt), the previous rule set is fully
+    /// restored so the daemon continues evaluating events without a gap.
+    ///
     /// Returns the number of rules loaded after the reload.
     @discardableResult
     public func reloadRules(from directory: URL) throws -> Int {
         // Preserve enabled/disabled state for rules that still exist after reload.
         let previousEnabledState = allRules.mapValues { $0.enabled }
 
+        // Snapshot current state so we can roll back if the load fails.
+        let snapshotIndex  = ruleIndex
+        let snapshotRules  = allRules
+        let snapshotRegex  = regexCache
+
         ruleIndex.removeAll()
         allRules.removeAll()
         regexCache.removeAll()
 
-        let count = try loadRules(from: directory)
+        let count: Int
+        do {
+            count = try loadRules(from: directory)
+        } catch {
+            // Restore previous state — engine must never be left empty.
+            ruleIndex  = snapshotIndex
+            allRules   = snapshotRules
+            regexCache = snapshotRegex
+            logger.error("Rule reload failed, previous rules restored: \(error)")
+            throw error
+        }
 
         // Restore enabled state for rules that were previously disabled.
         for (ruleId, wasEnabled) in previousEnabledState {

@@ -11,6 +11,7 @@ public actor MistralBackend: LLMBackend {
     private let apiKey: String
     private let model: String
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "mistral")
+    private let session: URLSession = SecureURLSession.make(for: .mistral)
 
     public init(apiKey: String, model: String = "mistral-small-latest") {
         self.apiKey = apiKey
@@ -50,7 +51,7 @@ public actor MistralBackend: LLMBackend {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             logger.error("Mistral network error: \(error.localizedDescription)")
             return nil

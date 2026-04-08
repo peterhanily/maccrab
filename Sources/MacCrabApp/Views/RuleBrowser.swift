@@ -262,7 +262,7 @@ private struct RuleDetailPanel: View {
                             }
                             ForEach(rule.techniqueIds, id: \.self) { tech in
                                 HStack {
-                                    Image(systemName: "chevron.right").font(.caption2).foregroundColor(.secondary)
+                                    Image(systemName: "chevron.right").font(.caption2).foregroundColor(.secondary).flipsForRightToLeftLayoutDirection(true)
                                     Text(tech).font(.system(.body, design: .monospaced))
                                     Spacer()
                                     Link("MITRE", destination: URL(string: "https://attack.mitre.org/techniques/\(tech.replacingOccurrences(of: ".", with: "/"))/")!)

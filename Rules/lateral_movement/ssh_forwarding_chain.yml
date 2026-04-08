@@ -1,0 +1,40 @@
+title: SSH Port Forwarding or ProxyJump from Unsigned Process
+id: a1b2c3d4-1001-4000-b000-000000001001
+status: experimental
+description: |
+  Detects SSH invocations that establish port-forward tunnels (-L, -R, -D) or multi-hop
+  ProxyJump chains (-J) from processes that are not Apple-signed or App-Store-signed.
+  Attackers use SSH tunneling for lateral movement after initial access, proxying C2
+  traffic or pivoting to otherwise-inaccessible internal hosts.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1021/004/
+    - https://attack.mitre.org/techniques/T1572/
+tags:
+    - attack.lateral_movement
+    - attack.command_and_control
+    - attack.t1021.004
+    - attack.t1572
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_ssh:
+        Image|endswith: '/ssh'
+    selection_tunnel:
+        CommandLine|contains:
+            - ' -L '
+            - ' -R '
+            - ' -D '
+            - ' -J '
+            - ' -w '
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection_ssh and selection_tunnel and not filter_apple
+falsepositives:
+    - VPN clients using SSH tunnels
+    - Legitimate development/devops tools (iTerm2 SSH profiles, VS Code Remote)
+level: medium

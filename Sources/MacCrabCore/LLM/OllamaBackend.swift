@@ -12,6 +12,7 @@ public actor OllamaBackend: LLMBackend {
     private let model: String
     private let apiKey: String?
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "ollama")
+    private let session: URLSession = SecureURLSession.make(for: .ollama)
 
     public init(baseURL: String = "http://localhost:11434", model: String = "llama3.1:8b", apiKey: String? = nil) {
         self.baseURL = URL(string: baseURL) ?? URL(string: "http://localhost:11434")!
@@ -21,7 +22,7 @@ public actor OllamaBackend: LLMBackend {
 
     public func isAvailable() async -> Bool {
         let url = baseURL.appendingPathComponent("api/tags")
-        guard let (_, response) = try? await URLSession.shared.data(from: url),
+        guard let (_, response) = try? await session.data(from: url),
               let http = response as? HTTPURLResponse,
               http.statusCode == 200 else { return false }
         return true
@@ -51,7 +52,7 @@ public actor OllamaBackend: LLMBackend {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             logger.error("Ollama network error: \(error.localizedDescription)")
             return nil

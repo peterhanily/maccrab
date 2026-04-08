@@ -162,7 +162,6 @@ struct SettingsView: View {
                                 Text("\(lang.native) (\(lang.name))").tag(lang.code)
                             }
                         }
-                        .accessibilityLabel("Display language")
                         .onChange(of: selectedLanguage) { newValue in
                             UserDefaults.standard.set([newValue], forKey: "AppleLanguages")
                             UserDefaults.standard.synchronize()
@@ -189,7 +188,6 @@ struct SettingsView: View {
 
                 GroupBox(String(localized: "settings.startup", defaultValue: "Startup")) {
                     Toggle(String(localized: "settings.launchAtLogin", defaultValue: "Launch MacCrab at login"), isOn: $launchAtLogin)
-                        .accessibilityLabel("Launch MacCrab at login")
                         .padding(8)
                 }
 
@@ -200,19 +198,16 @@ struct SettingsView: View {
                             .font(.callout)
 
                         Toggle(String(localized: "settings.autoQuarantine", defaultValue: "Auto-quarantine malicious files"), isOn: $autoQuarantine)
-                            .accessibilityLabel("Auto-quarantine malicious files")
-                            .accessibilityHint("Applies only to critical severity alerts")
-                            .help("Automatically move files flagged by critical-severity rules to quarantine")
+                            .accessibilityHint(String(localized: "settings.access.criticalOnlyHint", defaultValue: "Applies only to critical severity alerts"))
+                            .help(String(localized: "settings.help.autoQuarantine", defaultValue: "Automatically move files flagged by critical-severity rules to quarantine"))
 
                         Toggle(String(localized: "settings.autoKill", defaultValue: "Auto-kill malicious processes"), isOn: $autoKill)
-                            .accessibilityLabel("Auto-kill malicious processes")
-                            .accessibilityHint("Applies only to critical severity alerts")
-                            .help("Automatically terminate processes that trigger critical detection rules")
+                            .accessibilityHint(String(localized: "settings.access.criticalOnlyHint", defaultValue: "Applies only to critical severity alerts"))
+                            .help(String(localized: "settings.help.autoKill", defaultValue: "Automatically terminate processes that trigger critical detection rules"))
 
                         Toggle(String(localized: "settings.autoBlock", defaultValue: "Auto-block C2 destinations"), isOn: $autoBlock)
-                            .accessibilityLabel("Auto-block C2 destinations")
-                            .accessibilityHint("Applies only to critical severity alerts")
-                            .help("Automatically add PF firewall rules to block command-and-control IPs")
+                            .accessibilityHint(String(localized: "settings.access.criticalOnlyHint", defaultValue: "Applies only to critical severity alerts"))
+                            .help(String(localized: "settings.help.autoBlock", defaultValue: "Automatically add PF firewall rules to block command-and-control IPs"))
 
                         Text(String(localized: "settings.autoResponseNote", defaultValue: "These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab."))
                             .font(.caption).foregroundColor(.secondary)
@@ -233,7 +228,6 @@ struct SettingsView: View {
                 GroupBox(String(localized: "settings.macosNotifications", defaultValue: "macOS Notifications")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(String(localized: "settings.showNotifications", defaultValue: "Show notifications for detection alerts"), isOn: $alertNotifications)
-                            .accessibilityLabel("Show notifications for detection alerts")
 
                         if alertNotifications {
                             HStack {
@@ -434,11 +428,11 @@ struct SettingsView: View {
 
                         if llmEnabled {
                             Picker(String(localized: "settings.llmProvider", defaultValue: "Provider"), selection: $llmProvider) {
-                                Text("Ollama (Local/Remote)").tag("ollama")
-                                Text("OpenAI Compatible").tag("openai")
-                                Text("Anthropic Claude").tag("claude")
-                                Text("Mistral AI").tag("mistral")
-                                Text("Google Gemini").tag("gemini")
+                                Text(String(localized: "settings.llm.providerOllama", defaultValue: "Ollama (Local/Remote)")).tag("ollama")
+                                Text(String(localized: "settings.llm.providerOpenAI", defaultValue: "OpenAI Compatible")).tag("openai")
+                                Text(String(localized: "settings.llm.providerClaude", defaultValue: "Anthropic Claude")).tag("claude")
+                                Text(String(localized: "settings.llm.providerMistral", defaultValue: "Mistral AI")).tag("mistral")
+                                Text(String(localized: "settings.llm.providerGemini", defaultValue: "Google Gemini")).tag("gemini")
                             }
                             .onChange(of: llmProvider) { _ in syncLLMConfig() }
 
@@ -712,7 +706,7 @@ struct SettingsView: View {
 
                 Spacer()
 
-                Text("Made with love in Ireland")
+                Text(String(localized: "about.madeWithLove", defaultValue: "Made with love in Ireland"))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.bottom, 8)

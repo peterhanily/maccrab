@@ -1,0 +1,34 @@
+title: Insecure Remote Protocol Usage (telnet, rsh, rlogin, rexec)
+id: a1b2c3d4-1008-4000-b000-000000001008
+status: experimental
+description: |
+  Detects use of legacy unencrypted remote access protocols — telnet, rsh, rlogin,
+  and rexec. These protocols transmit credentials and session data in plaintext
+  and have no place in modern environments. Their presence indicates either very
+  old infrastructure being pivoted through, or an attacker deliberately choosing
+  them to avoid SSH logging and monitoring. All traffic is visible to any on-path
+  observer, making them ideal for attacker use in environments without network
+  monitoring.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1021/
+tags:
+    - attack.lateral_movement
+    - attack.t1021
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/telnet'
+            - '/rsh'
+            - '/rlogin'
+            - '/rexec'
+            - '/rcp'
+    condition: selection
+falsepositives:
+    - Legacy network device management (Cisco IOS, old switches without SSH)
+    - Network diagnostic testing in isolated labs
+level: high

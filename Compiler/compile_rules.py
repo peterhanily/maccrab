@@ -34,6 +34,11 @@ except ImportError:
 # Sigma field-name to ECS dot-path mapping
 # ---------------------------------------------------------------------------
 
+# Module-level variable set by compile_rule() so that warnings from helper
+# functions (parse_field_modifiers, etc.) can include the rule title without
+# needing to thread it through every call stack frame.
+_current_compile_rule_title: str = ""
+
 SIGMA_FIELD_MAP = {
     "Image": "process.executable",
     "OriginalFileName": "process.name",
@@ -79,7 +84,7 @@ MODIFIER_MAP = {
 }
 
 
-def parse_field_modifiers(raw_key: str):
+def parse_field_modifiers(raw_key: str, rule_title: str = ""):
     """
     Parse a Sigma field key like  "Image|startswith"  or  "CommandLine|contains|all".
 
@@ -99,7 +104,17 @@ def parse_field_modifiers(raw_key: str):
             is_all = True
         elif mod_lower in MODIFIER_MAP and MODIFIER_MAP[mod_lower] is not None:
             modifier = MODIFIER_MAP[mod_lower]
-        # Unknown modifiers are silently ignored.
+        elif mod_lower not in MODIFIER_MAP:
+            # Unknown modifier — warn so rule authors know the predicate logic
+            # may not behave as intended. This prevents silent underdetection.
+            effective_title = rule_title or _current_compile_rule_title
+            rule_ctx = f" in rule '{effective_title}'" if effective_title else ""
+            print(
+                f"WARNING: Unsupported Sigma modifier '|{mod}' on field '{raw_key}'{rule_ctx} "
+                f"— modifier will be IGNORED. The predicate may underdetect.",
+                file=sys.stderr,
+            )
+        # Known-None modifiers (e.g. "all" already handled above) are not warned.
 
     return field_name, modifier, is_all
 
@@ -185,6 +200,20 @@ def parse_detection_block(detection: dict):
         - condition_tree: dict (hierarchical condition) or None
     """
     condition_str = detection.get("condition", "selection")
+
+    # Aggregation expressions (count(), near(), equalsfield(), etc.) appear after
+    # a pipe character and are NOT supported by the compiler. Warn immediately so
+    # rule authors know the aggregation logic will be silently dropped, potentially
+    # causing the rule to fire on fewer (or more) events than intended.
+    if "|" in condition_str:
+        rule_ctx = f" in rule '{_current_compile_rule_title}'" if _current_compile_rule_title else ""
+        agg_part = condition_str.split("|", 1)[1].strip()
+        print(
+            f"WARNING: Aggregation expression '| {agg_part}'{rule_ctx} is NOT supported "
+            f"and will be IGNORED. The condition will be compiled without the aggregation "
+            f"(condition string: '{condition_str}'). Rule may under- or over-detect.",
+            file=sys.stderr,
+        )
 
     # Gather named sections (selection_*, filter_*, etc.)
     sections = {}
@@ -950,6 +979,10 @@ def compile_rule(rule_data: dict, source_file: str):
     # --- Basic metadata ---
     rule_id = rule_data.get("id", str(uuid.uuid4()))
     title = rule_data.get("title", "Untitled Rule")
+
+    # Set the module-level title so helper functions can include it in warnings.
+    global _current_compile_rule_title
+    _current_compile_rule_title = title
     description = rule_data.get("description", "")
     level = rule_data.get("level", "medium").lower()
     tags = rule_data.get("tags", [])

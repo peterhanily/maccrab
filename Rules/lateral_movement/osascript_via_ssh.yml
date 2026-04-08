@@ -1,0 +1,40 @@
+title: Remote AppleScript/JXA Execution via SSH
+id: a1b2c3d4-1003-4000-b000-000000001003
+status: experimental
+description: |
+  Detects osascript (AppleScript/JXA) spawned as a descendant of sshd, which
+  indicates an attacker is running remote automation on the target host via SSH.
+  This technique is used for lateral movement and remote execution — the attacker
+  gains interactive access through an SSH session and then uses osascript to
+  control the GUI, exfiltrate credentials from keychains, or move laterally.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1059/002/
+    - https://attack.mitre.org/techniques/T1021/004/
+tags:
+    - attack.lateral_movement
+    - attack.execution
+    - attack.t1059.002
+    - attack.t1021.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_target:
+        Image|endswith: '/osascript'
+    selection_parent:
+        ParentImage|contains:
+            - '/sshd'
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection_target and selection_parent and not filter_apple
+falsepositives:
+    - Legitimate remote administration scripts via SSH
+    - IT automation tools (Ansible, Chef, Puppet) using SSH + osascript
+level: high

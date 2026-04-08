@@ -11,6 +11,7 @@ public actor GeminiBackend: LLMBackend {
     private let apiKey: String
     private let model: String
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "gemini")
+    private let session: URLSession = SecureURLSession.make(for: .gemini)
 
     public init(apiKey: String, model: String = "gemini-2.0-flash") {
         self.apiKey = apiKey
@@ -24,7 +25,9 @@ public actor GeminiBackend: LLMBackend {
     public func complete(systemPrompt: String, userPrompt: String,
                          maxTokens: Int, temperature: Double) async -> String? {
         // Gemini API: POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-        let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)"
+        // The API key is sent via the x-goog-api-key header rather than a query parameter
+        // to prevent exposure in HTTP access logs and proxy logs.
+        let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"
         guard let url = URL(string: urlStr) else { return nil }
 
         // Gemini uses a different request format than OpenAI
@@ -40,13 +43,14 @@ public actor GeminiBackend: LLMBackend {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         request.timeoutInterval = 60
 
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             logger.error("Gemini network error: \(error.localizedDescription)")
             return nil

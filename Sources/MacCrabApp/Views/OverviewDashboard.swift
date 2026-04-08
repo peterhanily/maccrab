@@ -46,6 +46,7 @@ struct OverviewDashboard: View {
                             Image(systemName: criticalCount > 0 ? "exclamationmark.triangle.fill" : highCount > 0 ? "exclamationmark.circle.fill" : "checkmark.shield.fill")
                                 .font(.title)
                                 .foregroundColor(.white)
+                                .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 4) {
                                 if criticalCount > 0 {
                                     Text("\(criticalCount) critical alert\(criticalCount == 1 ? "" : "s") need\(criticalCount == 1 ? "s" : "") investigation")
@@ -73,6 +74,7 @@ struct OverviewDashboard: View {
                             Spacer()
                             Image(systemName: "chevron.right")
                                 .foregroundColor(.white.opacity(0.6))
+                                .flipsForRightToLeftLayoutDirection(true)
                         }
                         .padding()
                         .background(criticalCount > 0 ? criticalColor : highCount > 0 ? highColor : allClearColor)
@@ -110,6 +112,7 @@ struct OverviewDashboard: View {
                             Image(systemName: "chevron.right")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                                .flipsForRightToLeftLayoutDirection(true)
                         }
                         .padding(10)
                         .background(Color.secondary.opacity(0.06))
@@ -157,6 +160,7 @@ struct OverviewDashboard: View {
                                                 Image(systemName: "chevron.right")
                                                     .font(.caption2)
                                                     .foregroundColor(.secondary)
+                                                    .flipsForRightToLeftLayoutDirection(true)
                                             }
                                         }
                                         .buttonStyle(.plain)

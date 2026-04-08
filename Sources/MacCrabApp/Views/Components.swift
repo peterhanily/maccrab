@@ -19,6 +19,8 @@ struct SeverityChip: View {
             Text(severity.label)
                 .font(.caption)
                 .fontWeight(isSelected ? .bold : .regular)
+                .minimumScaleFactor(0.8)
+                .lineLimit(1)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(isSelected ? severity.color.opacity(0.25) : Color.clear)
@@ -48,6 +50,7 @@ struct AlertRow: View {
                 .fill(alert.suppressed ? Color.secondary.opacity(0.3) : alert.severityColor)
                 .frame(width: 4)
                 .padding(.vertical, 2)
+                .accessibilityLabel(Text(alert.suppressed ? "Suppressed" : "\(alert.severity.rawValue) severity"))
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -58,7 +61,8 @@ struct AlertRow: View {
                     }
                     Text(alert.ruleTitle)
                         .font(.headline)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         .foregroundColor(alert.suppressed ? .secondary : .primary)
                     if alert.suppressed {
                         Text(String(localized: "alerts.suppressed", defaultValue: "Suppressed"))
@@ -78,7 +82,8 @@ struct AlertRow: View {
                 Text(alert.description)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(3)
+                    .minimumScaleFactor(0.85)
 
                 HStack(spacing: 12) {
                     Label(alert.severity.label, systemImage: "exclamationmark.triangle.fill")
@@ -130,6 +135,7 @@ struct AlertMenuItem: View {
                 Circle()
                     .fill(alert.severityColor)
                     .frame(width: 8, height: 8)
+                    .accessibilityLabel(Text("\(alert.severity.rawValue) severity"))
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(alert.ruleTitle)
@@ -249,7 +255,7 @@ struct RuleRow: View {
         switch rule.level.lowercased() {
         case "critical":      return .red
         case "high":          return .orange
-        case "medium":        return .yellow
+        case "medium":        return Color(red: 0.67, green: 0.37, blue: 0.0)  // Dark amber — WCAG AA compliant (~4.8:1 on white)
         case "low":           return .blue
         case "informational": return .secondary
         default:              return .secondary

@@ -145,12 +145,41 @@ struct MainView: View {
             }
         }
         .frame(minWidth: 950, minHeight: 600)
+        // Daemon-disconnect banner — shown when connection is lost after initial
+        // data load. The overview tab has its own connecting spinner for the
+        // "never connected" case, so this targets the subsequent-disconnect case.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if !appState.isConnected && appState.rulesLoaded > 0 {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.yellow)
+                        .accessibilityHidden(true)
+                    Text("Daemon offline — data may be stale")
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Button("Retry") {
+                        Task { await appState.refresh() }
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.regularMaterial)
+                .overlay(alignment: .bottom) {
+                    Divider()
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Daemon offline. Data may be stale.")
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(appState.isConnected ? Color.green : Color.red)
                         .frame(width: 7, height: 7)
+                        .accessibilityHidden(true)
                     Text(appState.isConnected ? "\(appState.eventsPerSecond) ev/s" : "Offline")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)

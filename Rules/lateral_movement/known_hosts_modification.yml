@@ -1,0 +1,42 @@
+title: SSH known_hosts File Modified by Non-SSH Process
+id: a1b2c3d4-1013-4000-b000-000000001013
+status: experimental
+description: |
+  Detects modification of ~/.ssh/known_hosts or /etc/ssh/ssh_known_hosts by a
+  process that is not ssh, ssh-keyscan, or an Apple-signed binary. Attackers
+  modify known_hosts to add forged host keys (enabling MITM) or remove existing
+  host keys (preventing host verification failures when connecting to a rogue host
+  they control). This is a key enabler of SSH-based lateral movement that bypasses
+  strict host verification.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1557/
+    - https://attack.mitre.org/techniques/T1021/004/
+tags:
+    - attack.lateral_movement
+    - attack.credential_access
+    - attack.t1557
+    - attack.t1021.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/.ssh/known_hosts'
+            - '/ssh/ssh_known_hosts'
+    filter_ssh:
+        Image|endswith:
+            - '/ssh'
+            - '/ssh-keyscan'
+            - '/git'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: selection and not filter_ssh and not filter_apple
+falsepositives:
+    - SSH configuration management tools (Ansible, Puppet, Chef)
+    - Dev environment bootstrap scripts
+level: medium
