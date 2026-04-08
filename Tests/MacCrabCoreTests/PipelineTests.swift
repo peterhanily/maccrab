@@ -447,3 +447,109 @@ struct CoverageTests {
         #expect(!matches.isEmpty, "Unsigned process writing LaunchAgent should trigger rules")
     }
 }
+
+// MARK: - Impact Rule Tests
+
+@Suite("Pipeline: Impact Rules")
+struct ImpactPipelineTests {
+
+    @Test("Detects disk wipe: dd if=/dev/zero to disk")
+    func ddDiskWipe() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "dd", path: "/bin/dd",
+            commandLine: "dd if=/dev/zero of=/dev/disk1 bs=1m"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("wipe") || $0.ruleName.lowercased().contains("destruction") || $0.ruleName.lowercased().contains("disk") },
+                "Expected disk wipe rule to fire, got: \(matches.map(\.ruleName))")
+    }
+
+    @Test("Detects diskutil eraseDisk command")
+    func diskutilErase() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "diskutil", path: "/usr/sbin/diskutil",
+            commandLine: "diskutil eraseDisk JHFS+ Untitled disk1"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("wipe") || $0.ruleName.lowercased().contains("disk") || $0.ruleName.lowercased().contains("erase") },
+                "Expected disk erase rule to fire, got: \(matches.map(\.ruleName))")
+    }
+
+    @Test("Detects ransomware note file creation")
+    func ransomwareNote() async throws {
+        let engine = try await loadAllRules()
+        let event = fileEvent(
+            filePath: "/Users/victim/Documents/README_HOW_TO_DECRYPT.txt",
+            action: .create,
+            processPath: "/tmp/ransomware",
+            processName: "ransomware",
+            signer: .unsigned
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("ransom") || $0.ruleName.lowercased().contains("encrypt") },
+                "Expected ransomware note rule to fire, got: \(matches.map(\.ruleName))")
+    }
+
+    @Test("Detects Time Machine disabled via tmutil")
+    func tmutilDisable() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "tmutil", path: "/usr/bin/tmutil",
+            commandLine: "tmutil disable"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("recovery") || $0.ruleName.lowercased().contains("backup") || $0.ruleName.lowercased().contains("tmutil") },
+                "Expected inhibit-recovery rule to fire, got: \(matches.map(\.ruleName))")
+    }
+
+    @Test("Detects cryptominer by process name (xmrig)")
+    func xmrigExecution() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "xmrig", path: "/tmp/xmrig",
+            commandLine: "/tmp/xmrig -o stratum+tcp://pool.minexmr.com:4444 --donate-level 0"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(!matches.isEmpty, "Expected cryptominer rule to fire for xmrig, got none")
+    }
+
+    @Test("Detects mass file deletion targeting /Users")
+    func massFileDeletion() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "rm", path: "/bin/rm",
+            commandLine: "rm -rf /Users/victim/Documents"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("deletion") || $0.ruleName.lowercased().contains("destroy") || $0.ruleName.lowercased().contains("mass") },
+                "Expected mass deletion rule to fire, got: \(matches.map(\.ruleName))")
+    }
+
+    @Test("Does NOT flag normal rm of temp files")
+    func normalRmNotFlagged() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "rm", path: "/bin/rm",
+            commandLine: "rm /tmp/build_output.log",
+            parentPath: "/usr/bin/make", parentName: "make"
+        )
+        let matches = await engine.evaluate(event)
+        let impactMatches = matches.filter { $0.ruleName.lowercased().contains("mass") || $0.ruleName.lowercased().contains("deletion") }
+        #expect(impactMatches.isEmpty, "Normal rm should not trigger mass deletion, got: \(impactMatches.map(\.ruleName))")
+    }
+
+    @Test("Detects forced shutdown (shutdown -h now)")
+    func forcedShutdown() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "shutdown", path: "/sbin/shutdown",
+            commandLine: "shutdown -h now",
+            parentPath: "/bin/bash", parentName: "bash"
+        )
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("shutdown") || $0.ruleName.lowercased().contains("reboot") },
+                "Expected shutdown rule to fire, got: \(matches.map(\.ruleName))")
+    }
+}
