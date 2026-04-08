@@ -150,7 +150,7 @@ struct AIActivityView: View {
                     // Credential fence info
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(String(localized: "aiGuard.credentialFenceTitle", defaultValue: "Credential Fence \u{2014} Protected Paths"))
+                            Text(String(localized: "aiGuard.credentialFenceTitle", defaultValue: "Credential Fence — Protected Paths"))
                                 .font(.headline)
                             Text(String(localized: "aiGuard.credentialFenceDesc", defaultValue: "AI tools will trigger CRITICAL alerts if they access any of these:"))
                                 .font(.caption)

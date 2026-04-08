@@ -32,6 +32,7 @@ struct EventStream: View {
     @State private var autoScroll: Bool = true
     @State private var selectedEventID: EventViewModel.ID? = nil
     @State private var timeRange: TimeRange = .all
+    @State private var sortOrder = [KeyPathComparator(\EventViewModel.timestamp, order: .reverse)]
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     /// Events filtered by the current category and text filters.
@@ -58,11 +59,14 @@ struct EventStream: View {
         return results
     }
 
-    /// Events filtered by both category/text and time range.
+    /// Events filtered by both category/text and time range, then sorted.
     private var timeFilteredEvents: [EventViewModel] {
-        guard let seconds = timeRange.seconds else { return filteredEvents }
-        let cutoff = Date().addingTimeInterval(-seconds)
-        return filteredEvents.filter { $0.timestamp >= cutoff }
+        var results = filteredEvents
+        if let seconds = timeRange.seconds {
+            let cutoff = Date().addingTimeInterval(-seconds)
+            results = results.filter { $0.timestamp >= cutoff }
+        }
+        return results.sorted(using: sortOrder)
     }
 
     var body: some View {
@@ -104,6 +108,15 @@ struct EventStream: View {
                 TextField("Filter...", text: $filterText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
+
+                Button {
+                    Task { await appState.loadEvents() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .controlSize(.small)
+                .help("Reload events")
+                .keyboardShortcut("r", modifiers: .command)
 
                 Divider()
                     .frame(height: 16)
@@ -151,37 +164,37 @@ struct EventStream: View {
                 .frame(maxWidth: .infinity)
             } else {
                 HStack(spacing: 0) {
-                    Table(timeFilteredEvents, selection: $selectedEventID) {
-                        TableColumn("Time") { event in
+                    Table(timeFilteredEvents, selection: $selectedEventID, sortOrder: $sortOrder) {
+                        TableColumn("Time", value: \.timestamp) { event in
                             Text(event.dateTimeString)
                                 .font(.system(.caption, design: .monospaced))
                         }
                         .width(min: 120, ideal: 150, max: 180)
 
-                        TableColumn("Action") { event in
+                        TableColumn("Action", value: \.action) { event in
                             Text(RuleTranslations.translateAction(event.action))
                                 .fontWeight(.medium)
                                 .foregroundColor(event.actionColor)
                         }
                         .width(min: 60, ideal: 80, max: 100)
 
-                        TableColumn("Category") { event in
+                        TableColumn("Category", value: \.category.rawValue) { event in
                             CategoryBadge(category: event.category)
                         }
                         .width(min: 70, ideal: 90, max: 110)
 
-                        TableColumn("Process") { event in
+                        TableColumn("Process", value: \.processName) { event in
                             Text("\(event.processName) (\(event.pid))")
                         }
                         .width(min: 120, ideal: 160, max: 220)
 
-                        TableColumn("Detail") { event in
+                        TableColumn("Detail", value: \.detail) { event in
                             Text(event.detail)
                                 .lineLimit(1)
                                 .help(event.detail)
                         }
 
-                        TableColumn("Signer") { event in
+                        TableColumn("Signer", value: \.signerType) { event in
                             SignerBadge(signerType: event.signerType)
                         }
                         .width(min: 60, ideal: 80, max: 100)
@@ -222,8 +235,8 @@ struct EventStream: View {
             .padding(.vertical, 6)
             .background(.bar)
         }
-        .task {
-            await appState.loadEvents()
+        .onAppear {
+            Task { await appState.loadEvents() }
         }
     }
 }

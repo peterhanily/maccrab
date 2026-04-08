@@ -11,12 +11,17 @@ struct AlertDashboard: View {
     @State private var selectedSeverity: Severity? = nil
     @State private var searchText: String = ""
     @State private var showSuppressed: Bool = false
-    @State private var selectedAlert: AlertViewModel? = nil
+    @State private var selectedAlerts: Set<AlertViewModel> = []
     @State private var suppressedAlertName: String?
     @State private var showUndoToast = false
     @State private var exportInProgress = false
     @State private var showSuppressionManager = false
     @Environment(\.accessibilityReduceMotion) var reduceMotion
+
+    /// Single selected alert for the detail panel (last selected)
+    private var detailAlert: AlertViewModel? {
+        selectedAlerts.count == 1 ? selectedAlerts.first : nil
+    }
 
     private var filteredAlerts: [AlertViewModel] {
         var results = appState.dashboardAlerts
@@ -139,24 +144,58 @@ struct AlertDashboard: View {
                 .frame(maxWidth: .infinity)
             } else {
                 HStack(spacing: 0) {
-                    // Alert list
-                    List(filteredAlerts, selection: $selectedAlert) { alert in
-                        AlertRow(alert: alert) {
-                            suppressedAlertName = alert.ruleTitle
-                            showUndoToast = true
-                            Task { await appState.suppressAlert(alert.id) }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                                showUndoToast = false
-                                suppressedAlertName = nil
+                    VStack(spacing: 0) {
+                        // Bulk action bar (visible when multiple selected)
+                        if selectedAlerts.count > 1 {
+                            HStack(spacing: 12) {
+                                Text("\(selectedAlerts.count) selected")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+
+                                Button {
+                                    bulkSuppress()
+                                } label: {
+                                    Label("Suppress Selected", systemImage: "eye.slash")
+                                }
+                                .controlSize(.small)
+
+                                Button {
+                                    selectedAlerts = []
+                                } label: {
+                                    Text("Deselect All")
+                                }
+                                .controlSize(.small)
+                                .buttonStyle(.plain)
+                                .foregroundColor(.accentColor)
+
+                                Spacer()
+
+                                Text("Shift+click to range select, Cmd+click to toggle")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
                             }
+                            .padding(.horizontal)
+                            .padding(.vertical, 6)
+                            .background(.bar)
                         }
-                        .tag(alert)
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedAlert = alert }
+
+                        // Alert list with multi-selection (Cmd+click, Shift+click, Cmd+A)
+                        List(filteredAlerts, selection: $selectedAlerts) { alert in
+                            AlertRow(alert: alert) {
+                                suppressedAlertName = alert.ruleTitle
+                                showUndoToast = true
+                                Task { await appState.suppressAlert(alert.id) }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                                    showUndoToast = false
+                                    suppressedAlertName = nil
+                                }
+                            }
+                            .tag(alert)
+                        }
                     }
 
-                    // Detail panel — only shown when selected
-                    if let alert = selectedAlert {
+                    // Detail panel — shown when exactly one alert selected
+                    if let alert = detailAlert {
                         Divider()
                         AlertDetailView(alert: alert, onSuppress: {
                             suppressedAlertName = alert.ruleTitle
@@ -168,13 +207,13 @@ struct AlertDashboard: View {
                             }
                         }, onSuppressPattern: {
                             Task { await appState.suppressPattern(ruleTitle: alert.ruleTitle, processName: alert.processName) }
-                            selectedAlert = nil
+                            selectedAlerts = []
                         })
                         .frame(minWidth: 300, idealWidth: 400, maxWidth: 500)
                         .transition(reduceMotion ? .opacity : .move(edge: .trailing))
                     }
                 }
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedAlert)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: detailAlert)
             }
             if showUndoToast, let name = suppressedAlertName {
                 HStack {
@@ -196,6 +235,25 @@ struct AlertDashboard: View {
         }
         .task {
             await appState.loadAlerts()
+        }
+    }
+
+    // MARK: - Bulk Actions
+
+    private func bulkSuppress() {
+        let count = selectedAlerts.count
+        suppressedAlertName = "\(count) alerts"
+        showUndoToast = true
+        let alertsToSuppress = selectedAlerts
+        selectedAlerts = []
+        Task {
+            for alert in alertsToSuppress {
+                await appState.suppressAlert(alert.id)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            showUndoToast = false
+            suppressedAlertName = nil
         }
     }
 

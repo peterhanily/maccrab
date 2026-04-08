@@ -20,7 +20,7 @@
 
 /* ── Alert Dashboard ── */
 "alerts.title" = "アラート";
-"alerts.empty" = "アラートなし \u2014 すべて正常";
+"alerts.empty" = "アラートなし — すべて正常";
 "alerts.noMatch" = "フィルター条件に一致するアラートはありません";
 "alerts.clearFilters" = "フィルターをクリア";
 "alerts.suppressed" = "抑制済み";

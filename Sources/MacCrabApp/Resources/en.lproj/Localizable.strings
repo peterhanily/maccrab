@@ -22,7 +22,7 @@
 
 /* ── Alert Dashboard ── */
 "alerts.title" = "Alerts";
-"alerts.empty" = "No alerts \u2014 all clear";
+"alerts.empty" = "No alerts — all clear";
 "alerts.noMatch" = "No alerts matching filters";
 "alerts.clearFilters" = "Clear Filters";
 "alerts.suppressed" = "Suppressed";
@@ -213,7 +213,7 @@
 "aiGuard.recentAlerts" = "Recent AI Safety Alerts";
 "aiGuard.noAlerts" = "No AI safety alerts";
 "aiGuard.noAlertsDesc" = "AI tools are operating within safe boundaries";
-"aiGuard.credentialFenceTitle" = "Credential Fence \u2014 Protected Paths";
+"aiGuard.credentialFenceTitle" = "Credential Fence — Protected Paths";
 "aiGuard.credentialFenceDesc" = "AI tools will trigger CRITICAL alerts if they access any of these:";
 
 /* ── AI Guard monitor items ── */
@@ -239,7 +239,7 @@
 "responseActions.resetDefaults" = "Reset to Defaults";
 "responseActions.addRuleAction" = "Add Rule Action";
 "responseActions.explanation" = "Response actions execute automatically when detection rules fire.";
-"responseActions.explanationDetail" = "Configure what happens when specific rules trigger \u2014 kill processes, quarantine files, send notifications, or run custom scripts.";
+"responseActions.explanationDetail" = "Configure what happens when specific rules trigger — kill processes, quarantine files, send notifications, or run custom scripts.";
 "responseActions.defaultActions" = "Default Actions (all rules)";
 "responseActions.noDefaults" = "No default actions configured";
 "responseActions.addDefault" = "Add Default Action";
@@ -307,7 +307,7 @@
 "integrations.title" = "Integrations";
 "integrations.scan" = "Scan";
 "integrations.scanHint" = "Scans for installed security tools";
-"integrations.description" = "MacCrab detects and correlates alerts from other macOS security tools. Read-only \u2014 MacCrab never modifies other tools' configuration.";
+"integrations.description" = "MacCrab detects and correlates alerts from other macOS security tools. Read-only — MacCrab never modifies other tools' configuration.";
 "integrations.clickScan" = "Click Scan to detect installed security tools";
 "integrations.available" = "Available Integrations";
 "integrations.notInstalled" = "Not installed";

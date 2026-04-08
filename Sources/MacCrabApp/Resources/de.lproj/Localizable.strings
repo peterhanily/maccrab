@@ -20,7 +20,7 @@
 
 /* ── Alert Dashboard ── */
 "alerts.title" = "Alarme";
-"alerts.empty" = "Keine Alarme \u2014 alles in Ordnung";
+"alerts.empty" = "Keine Alarme — alles in Ordnung";
 "alerts.noMatch" = "Keine Alarme passend zu den Filtern";
 "alerts.clearFilters" = "Filter löschen";
 "alerts.suppressed" = "Unterdrückt";

@@ -20,7 +20,7 @@
 
 /* ── Alert Dashboard ── */
 "alerts.title" = "警报";
-"alerts.empty" = "无警报 \u2014 一切正常";
+"alerts.empty" = "无警报 — 一切正常";
 "alerts.noMatch" = "没有匹配筛选条件的警报";
 "alerts.clearFilters" = "清除筛选";
 "alerts.suppressed" = "已抑制";
