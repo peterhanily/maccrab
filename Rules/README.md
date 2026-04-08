@@ -36,20 +36,24 @@ Rules are organized by [MITRE ATT&CK](https://attack.mitre.org/) tactic:
 
 | Directory | Tactic | Rules |
 |-----------|--------|:-----:|
-| `execution/` | Execution (TA0002) | 22 |
-| `persistence/` | Persistence (TA0003) | 26 |
-| `defense_evasion/` | Defense Evasion (TA0005) | 16 |
-| `credential_access/` | Credential Access (TA0006) | 15 |
-| `command_and_control/` | Command and Control (TA0011) | 15 |
-| `discovery/` | Discovery (TA0007) | 11 |
-| `collection/` | Collection (TA0009) | 10 |
-| `privilege_escalation/` | Privilege Escalation (TA0004) | 6 |
-| `exfiltration/` | Exfiltration (TA0010) | 6 |
-| `initial_access/` | Initial Access (TA0001) | 5 |
+| `defense_evasion/` | Defense Evasion (TA0005) | 55 |
+| `credential_access/` | Credential Access (TA0006) | 32 |
+| `supply_chain/` | Supply Chain (macOS-specific) | 31 |
+| `persistence/` | Persistence (TA0003) | 30 |
+| `execution/` | Execution (TA0002) | 28 |
+| `ai_safety/` | AI Agent Safety (macOS-specific) | 19 |
+| `command_and_control/` | Command and Control (TA0011) | 17 |
+| `discovery/` | Discovery (TA0007) | 16 |
+| `privilege_escalation/` | Privilege Escalation (TA0004) | 16 |
+| `lateral_movement/` | Lateral Movement (TA0008) | 16 |
+| `collection/` | Collection (TA0009) | 15 |
+| `exfiltration/` | Exfiltration (TA0010) | 11 |
+| `initial_access/` | Initial Access (TA0001) | 10 |
+| `container/` | Container Security (macOS-specific) | 8 |
 | `tcc/` | TCC Abuse (macOS-specific) | 6 |
-| `lateral_movement/` | Lateral Movement (TA0008) | 3 |
-| `sequences/` | Temporal sequence rules (multi-tactic) | 15 |
-| **Total** | | **165** |
+| `impact/` | Impact (TA0040) | 6 |
+| `sequences/` | Temporal sequence rules (multi-tactic) | 27 |
+| **Total** | | **343** |
 
 Sequence rules in `sequences/` span multiple tactics. They are stored separately because they use the extended sequence format and are processed by the `SequenceEngine` rather than the standard `RuleEngine`.
 
