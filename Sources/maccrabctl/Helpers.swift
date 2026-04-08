@@ -43,7 +43,7 @@ extension MacCrabCtl {
 
         Monitoring:
           status              Show daemon status and statistics
-          events tail [N]     Show last N events (default: 20)
+          events tail [N] [--hours H] [--category C]  Show recent events
           events search <q>   Full-text search over events
           events stats        Show event statistics
           alerts [N] [--hours H] [--severity S]  Show alerts (N=count, H=hours, S=critical|high|medium|low)

@@ -26,8 +26,22 @@ struct MacCrabCtl {
             }
         case "events":
             if args.count >= 3 && args[2] == "tail" {
-                let limit = args.count >= 4 ? Int(args[3]) ?? 20 : 20
-                await tailEvents(limit: limit)
+                var limit = 20
+                var hours: Double? = nil
+                var category: EventCategory? = nil
+                var idx = 3
+                while idx < args.count {
+                    switch args[idx] {
+                    case "--hours" where idx + 1 < args.count:
+                        hours = Double(args[idx + 1]); idx += 2
+                    case "--category" where idx + 1 < args.count:
+                        category = EventCategory(rawValue: args[idx + 1]); idx += 2
+                    default:
+                        if let n = Int(args[idx]) { limit = n }
+                        idx += 1
+                    }
+                }
+                await tailEvents(limit: limit, hours: hours, category: category)
             } else if args.count >= 3 && args[2] == "search" && args.count >= 4 {
                 let query = args[3...].joined(separator: " ")
                 await searchEvents(query: query)

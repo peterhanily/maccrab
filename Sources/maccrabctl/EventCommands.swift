@@ -2,12 +2,15 @@ import Foundation
 import MacCrabCore
 
 extension MacCrabCtl {
-    static func tailEvents(limit: Int) async {
+    static func tailEvents(limit: Int, hours: Double? = nil, category: EventCategory? = nil) async {
         do {
             let store = try EventStore(directory: maccrabDataDir())
-            let events = try await store.events(since: Date.distantPast, category: nil, limit: limit)
+            let since = hours.map { Date().addingTimeInterval(-$0 * 3600) } ?? Date.distantPast
+            let events = try await store.events(since: since, category: category, limit: limit)
 
-            print("Last \(events.count) events:")
+            let timeLabel = hours.map { " (last \(Int($0))h)" } ?? ""
+            let catLabel = category.map { " [\($0.rawValue)]" } ?? ""
+            print("\(events.count) event(s)\(timeLabel)\(catLabel):")
             print(String(repeating: "─", count: 100))
 
             for event in events {
