@@ -306,6 +306,11 @@ enum DaemonSetup {
         await rootkitDetector.start()
         print("Rootkit detector active (dual-API cross-reference)")
 
+        // EDR/RMM tool monitor — scans for EDR, insider threat, MDM, and remote access tools
+        let edrMonitor = EDRMonitor(pollInterval: 120)
+        await edrMonitor.start()
+        print("EDR/RMM monitor active (CrowdStrike, SentinelOne, ForcePoint, Jamf, TeamViewer + 25 more)")
+
         // Library inventory -- scans for injected dylibs
         let libraryInventory = LibraryInventory()
 
@@ -820,6 +825,7 @@ enum DaemonSetup {
             systemPolicyMonitor: systemPolicyMonitor,
             rootkitDetector: rootkitDetector,
             tccMonitor: tccMonitor,
+            edrMonitor: edrMonitor,
             fsEventsCollector: fsEventsCollector,
             collector: collector,
             esloggerCollector: esloggerCollector,

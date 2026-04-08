@@ -1,0 +1,68 @@
+title: Insider Threat or Employee Monitoring Tool Detected
+id: d1a2b3c4-0444-4000-a000-000000000444
+status: stable
+description: >
+    Detects the presence of insider threat monitoring, employee
+    surveillance, or user activity monitoring (UAM) tools. These tools
+    can capture screenshots, record keystrokes, monitor clipboard
+    content, track application usage, and record screen activity.
+    Users have a right to know when such tools are active on their
+    machine.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1518/001/
+tags:
+    - attack.discovery
+    - attack.collection
+    - attack.t1518.001
+    - edr.insider_threat
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_proofpoint:
+        Image|contains:
+            - 'ObserveIT'
+            - 'proofpoint'
+            - 'OIAgent'
+            - 'observeitd'
+            - 'ProofpointAgent'
+    selection_forcepoint:
+        Image|contains:
+            - 'ForcePoint'
+            - 'FPDLPAgent'
+            - 'fpagent'
+            - 'InnerView'
+            - 'Forcepoint'
+    selection_teramind:
+        Image|contains:
+            - 'teramind'
+            - 'tmicro'
+            - 'TeramindAgent'
+    selection_activtrak:
+        Image|contains:
+            - 'activtrak'
+            - 'ActivTrak'
+            - 'ActivTrakAgent'
+    selection_veriato:
+        Image|contains:
+            - 'veriato'
+            - 'VeriatoAgent'
+            - 'Veriato360'
+    selection_hubstaff:
+        Image|contains:
+            - 'Hubstaff'
+            - 'hubstaff'
+    selection_desktime:
+        Image|contains:
+            - 'DeskTime'
+            - 'desktime'
+    selection_interguard:
+        Image|contains:
+            - 'InterGuard'
+            - 'interguard'
+    condition: selection_proofpoint or selection_forcepoint or selection_teramind or selection_activtrak or selection_veriato or selection_hubstaff or selection_desktime or selection_interguard
+falsepositives:
+    - Legitimately deployed by employer IT department
+level: medium

@@ -1,0 +1,69 @@
+title: EDR Remote Action Session Detected
+id: d1a2b3c4-0442-4000-a000-000000000442
+status: stable
+description: >
+    Detects when an EDR or endpoint management tool starts a remote
+    action session on this machine. These tools (CrowdStrike RTR,
+    SentinelOne Remote Shell, Carbon Black Live Response, Microsoft
+    Defender Live Response, Tanium, Velociraptor) allow remote operators
+    to execute commands, collect files, dump memory, and kill processes.
+    While legitimate for incident response, users should be aware when
+    such sessions are active on their machine.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1219/
+    - https://attack.mitre.org/techniques/T1021/
+tags:
+    - attack.discovery
+    - attack.t1219
+    - edr.remote_session
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_crowdstrike_rtr:
+        Image|endswith:
+            - '/RTR'
+            - '/falconctl'
+        CommandLine|contains:
+            - 'rtr'
+            - 'real-time-response'
+            - 'connect'
+    selection_sentinelone:
+        Image|endswith:
+            - '/sentinelctl'
+        CommandLine|contains:
+            - 'remote-shell'
+            - 'fetch-file'
+            - 'broadcast'
+    selection_carbonblack:
+        Image|endswith:
+            - '/cbagentd'
+            - '/CbLR'
+        CommandLine|contains:
+            - 'live-response'
+            - 'session'
+    selection_defender:
+        Image|endswith:
+            - '/mdatp'
+        CommandLine|contains:
+            - 'live-response'
+            - 'collect-investigation-package'
+    selection_tanium:
+        Image|endswith:
+            - '/TaniumClient'
+        CommandLine|contains:
+            - 'run-action'
+            - 'direct-connect'
+    selection_velociraptor:
+        Image|endswith:
+            - '/velociraptor'
+        CommandLine|contains:
+            - 'client'
+            - '--collect'
+    condition: selection_crowdstrike_rtr or selection_sentinelone or selection_carbonblack or selection_defender or selection_tanium or selection_velociraptor
+falsepositives:
+    - Legitimate incident response by your security team
+    - Scheduled EDR scans and health checks
+level: high

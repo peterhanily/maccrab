@@ -66,6 +66,7 @@ final class DaemonState {
     let systemPolicyMonitor: SystemPolicyMonitor
     let rootkitDetector: RootkitDetector
     let tccMonitor: TCCMonitor
+    let edrMonitor: EDRMonitor
     let fsEventsCollector: FSEventsCollector
 
     // MARK: - Collectors
@@ -180,6 +181,7 @@ final class DaemonState {
         systemPolicyMonitor: SystemPolicyMonitor,
         rootkitDetector: RootkitDetector,
         tccMonitor: TCCMonitor,
+        edrMonitor: EDRMonitor,
         fsEventsCollector: FSEventsCollector,
         collector: ESCollector?,
         esloggerCollector: EsloggerCollector?,
@@ -271,6 +273,7 @@ final class DaemonState {
         self.systemPolicyMonitor = systemPolicyMonitor
         self.rootkitDetector = rootkitDetector
         self.tccMonitor = tccMonitor
+        self.edrMonitor = edrMonitor
         self.fsEventsCollector = fsEventsCollector
         self.collector = collector
         self.esloggerCollector = esloggerCollector

@@ -1,0 +1,71 @@
+title: MDM Remote Management Tool Active
+id: d1a2b3c4-0445-4000-a000-000000000445
+status: stable
+description: >
+    Detects MDM (Mobile Device Management) tools that can execute
+    remote commands, push configuration profiles, install/remove
+    apps, lock or wipe the device, and run arbitrary scripts.
+    While standard in enterprise environments, users should be
+    aware of what remote management capabilities exist on their
+    machine.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1219/
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.discovery
+    - attack.execution
+    - attack.t1219
+    - edr.mdm
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_jamf:
+        Image|endswith:
+            - '/jamf'
+            - '/JamfDaemon'
+            - '/JamfAgent'
+            - '/JamfManagementService'
+        CommandLine|contains:
+            - 'policy'
+            - 'runScript'
+            - 'recon'
+            - 'install'
+            - 'removeFramework'
+    selection_kandji:
+        Image|contains:
+            - 'kandji'
+            - 'io.kandji'
+    selection_mosyle:
+        Image|contains:
+            - 'Mosyle'
+            - 'com.mosyle'
+    selection_hexnode:
+        Image|contains:
+            - 'Hexnode'
+            - 'HexnodeAgent'
+    selection_absolute:
+        Image|contains:
+            - 'rpcnet'
+            - 'absolute-agent'
+            - 'Absolute'
+    selection_addigy:
+        Image|contains:
+            - 'addigy'
+            - 'Addigy'
+    selection_filewave:
+        Image|contains:
+            - 'FileWave'
+            - 'fwcld'
+    selection_munki:
+        Image|endswith:
+            - '/managedsoftwareupdate'
+            - '/munki'
+            - '/ManagedSoftwareCenter'
+    condition: selection_jamf or selection_kandji or selection_mosyle or selection_hexnode or selection_absolute or selection_addigy or selection_filewave or selection_munki
+falsepositives:
+    - Standard enterprise MDM operations
+    - Scheduled policy runs and inventory updates
+level: medium

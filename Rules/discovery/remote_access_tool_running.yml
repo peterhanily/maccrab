@@ -1,0 +1,65 @@
+title: Remote Access or Remote Desktop Tool Running
+id: d1a2b3c4-0446-4000-a000-000000000446
+status: stable
+description: >
+    Detects remote access tools (RATs — both legitimate and dual-use)
+    that allow remote control of this machine. Includes commercial
+    tools (TeamViewer, AnyDesk, Splashtop, ConnectWise/ScreenConnect)
+    as well as Apple Remote Desktop. These tools provide full remote
+    desktop, file transfer, and command execution capabilities.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1219/
+tags:
+    - attack.command_and_control
+    - attack.t1219
+    - edr.remote_access
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_teamviewer:
+        Image|contains:
+            - 'TeamViewer'
+            - 'teamviewerd'
+    selection_anydesk:
+        Image|contains:
+            - 'AnyDesk'
+            - 'anydesk'
+    selection_splashtop:
+        Image|contains:
+            - 'Splashtop'
+            - 'SplashtopStreamer'
+    selection_connectwise:
+        Image|contains:
+            - 'ScreenConnect'
+            - 'ConnectWiseControl'
+    selection_ard:
+        Image|endswith:
+            - '/ARDAgent'
+            - '/RemoteDesktopAgent'
+            - '/screensharingd'
+    selection_rustdesk:
+        Image|contains:
+            - 'RustDesk'
+            - 'rustdesk'
+    selection_bomgar:
+        Image|contains:
+            - 'Bomgar'
+            - 'BeyondTrust'
+            - 'bomgar'
+    selection_logmein:
+        Image|contains:
+            - 'LogMeIn'
+            - 'logmein'
+    selection_vnc:
+        Image|endswith:
+            - '/vncserver'
+            - '/x11vnc'
+            - '/TigerVNC'
+    condition: selection_teamviewer or selection_anydesk or selection_splashtop or selection_connectwise or selection_ard or selection_rustdesk or selection_bomgar or selection_logmein or selection_vnc
+falsepositives:
+    - IT support sessions
+    - Remote collaboration
+level: medium

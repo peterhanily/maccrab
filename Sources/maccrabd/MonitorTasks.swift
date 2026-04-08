@@ -237,6 +237,37 @@ enum MonitorTasks {
             }
         }
 
+        // EDR/RMM tool monitoring task
+        Task {
+            for await discovery in state.edrMonitor.events {
+                let capList = discovery.capabilities.prefix(4).joined(separator: ", ")
+                let processInfo = discovery.processName.map { " (process: \($0), PID: \(discovery.pid ?? 0))" } ?? ""
+                let installedInfo = discovery.installedPath.map { " (installed: \($0))" } ?? ""
+
+                let severity: Severity = discovery.category == .insiderThreat ? .high : .medium
+                let alert = Alert(
+                    ruleId: "maccrab.edr.\(discovery.category.rawValue.lowercased().replacingOccurrences(of: " ", with: "-").replacingOccurrences(of: "/", with: "-"))",
+                    ruleTitle: "\(discovery.category.rawValue) Tool Active: \(discovery.toolName)",
+                    severity: severity,
+                    eventId: UUID().uuidString,
+                    processPath: discovery.processPath ?? discovery.installedPath,
+                    processName: discovery.processName ?? discovery.toolName,
+                    description: "\(discovery.toolName) by \(discovery.vendor) is \(discovery.processName != nil ? "running" : "installed") on this machine.\(processInfo)\(installedInfo)\nCapabilities: \(capList)",
+                    mitreTactics: "attack.discovery",
+                    mitreTechniques: "attack.t1518.001",
+                    suppressed: false
+                )
+                try? await state.alertStore.insert(alert: alert)
+
+                // Only push notifications for insider threat tools (high privacy impact)
+                if discovery.category == .insiderThreat {
+                    await state.notifier.notify(alert: alert)
+                }
+
+                print("[EDR] \(discovery.category.rawValue): \(discovery.toolName) by \(discovery.vendor)\(processInfo)")
+            }
+        }
+
         // DNS event processing task
         Task {
             for await dnsQuery in state.dnsCollector.events {

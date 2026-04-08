@@ -1,0 +1,62 @@
+title: EDR or Remote Management Tool Running
+id: d1a2b3c4-0443-4000-a000-000000000443
+status: stable
+description: >
+    Detects the presence of EDR, endpoint protection, or remote
+    management tools running on this machine. This is an informational
+    detection — these tools are not inherently malicious, but users
+    should know what security and monitoring software is active on
+    their system and what remote capabilities it has.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1518/001/
+tags:
+    - attack.discovery
+    - attack.t1518.001
+    - edr.inventory
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_crowdstrike:
+        Image|endswith:
+            - '/falcond'
+            - '/falcon-sensor'
+            - '/CSFalconService'
+            - '/falconctl'
+    selection_sentinelone:
+        Image|endswith:
+            - '/sentineld'
+            - '/SentinelAgent'
+            - '/sentinelctl'
+            - '/SentinelMonitor'
+    selection_carbonblack:
+        Image|endswith:
+            - '/cbagentd'
+            - '/CbDefense'
+            - '/cbdaemon'
+            - '/CbOsxSensorService'
+    selection_defender:
+        Image|endswith:
+            - '/wdavdaemon'
+            - '/mdatp'
+            - '/MicrosoftDefender'
+            - '/MicrosoftDefenderATP'
+    selection_tanium:
+        Image|endswith:
+            - '/TaniumClient'
+            - '/taniumd'
+            - '/TaniumEndpointIndex'
+    selection_osquery:
+        Image|endswith:
+            - '/osqueryd'
+            - '/orbit'
+            - '/osqueryctl'
+    selection_velociraptor:
+        Image|endswith:
+            - '/velociraptor'
+    condition: selection_crowdstrike or selection_sentinelone or selection_carbonblack or selection_defender or selection_tanium or selection_osquery or selection_velociraptor
+falsepositives:
+    - This rule is informational — all matches are expected on managed machines
+level: informational
