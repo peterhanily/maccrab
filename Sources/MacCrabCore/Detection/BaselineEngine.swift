@@ -778,19 +778,21 @@ public actor BaselineEngine {
             throw BaselineEngineError.serializationFailed(error.localizedDescription)
         }
 
-        // Write atomically to prevent corruption from crashes during write.
+        // Write to temp file then rename() atomically over the destination.
+        // POSIX rename() is atomic on same-filesystem operations — no window
+        // where a crash could leave the baseline file missing (unlike the
+        // removeItem + moveItem sequence).
         let tempPath = persistPath + ".tmp"
         do {
-            try data.write(to: URL(fileURLWithPath: tempPath), options: .atomic)
-            // Atomic move: if the file already exists, remove it first.
-            if fm.fileExists(atPath: persistPath) {
-                try fm.removeItem(atPath: persistPath)
-            }
-            try fm.moveItem(atPath: tempPath, toPath: persistPath)
+            try data.write(to: URL(fileURLWithPath: tempPath))
         } catch {
-            // Clean up temp file on failure.
             try? fm.removeItem(atPath: tempPath)
             throw BaselineEngineError.fileWriteFailed(error.localizedDescription)
+        }
+        guard Darwin.rename(tempPath, persistPath) == 0 else {
+            let code = errno
+            try? fm.removeItem(atPath: tempPath)
+            throw BaselineEngineError.fileWriteFailed("rename failed: errno \(code)")
         }
 
         // Restrict baseline file permissions: owner-only read/write (rw-------).
