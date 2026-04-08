@@ -1,0 +1,61 @@
+title: Screen Capture Followed by Data Upload
+id: e1f2a3b4-0101-4000-b000-000000000101
+status: experimental
+description: >
+    Detects screencapture execution followed by an outbound network upload
+    from the same process context. Malware captures the user's screen to harvest
+    credentials, MFA codes, or sensitive documents, then uploads the screenshot
+    to attacker infrastructure. The tight process correlation distinguishes this
+    from legitimate screenshot tools that don't immediately exfiltrate.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1113/
+    - https://attack.mitre.org/techniques/T1041/
+tags:
+    - attack.collection
+    - attack.t1113
+    - attack.exfiltration
+    - attack.t1041
+
+type: sequence
+window: 120s
+correlation: process.same
+ordered: true
+
+steps:
+    - id: screenshot
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/screencapture'
+                  - '/screenshot'
+          filter_user_invoked:
+              ParentImage|contains:
+                  - '/Terminal'
+                  - '/iTerm'
+          condition: selection and not filter_user_invoked
+
+    - id: upload
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/curl'
+                  - '/wget'
+                  - '/python3'
+                  - '/python'
+              CommandLine|contains:
+                  - ' -F '
+                  - '--data-binary'
+                  - 'upload'
+                  - 'POST'
+          condition: selection
+
+trigger: all
+level: high

@@ -1,0 +1,60 @@
+title: Crontab/At Job Installation Followed by Execution
+id: e1f2a3b4-0100-4000-b000-000000000100
+status: experimental
+description: >
+    Detects crontab or at-job file creation/modification followed by process
+    execution originating from the cron/atrun daemon. Attackers install scheduled
+    tasks for persistence and delayed execution, allowing the initial dropper to
+    exit cleanly while the cron job continues the attack chain independently of
+    the original infection vector.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1053/003/
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.persistence
+    - attack.t1053.003
+    - attack.execution
+    - attack.t1059
+
+type: sequence
+window: 120s
+ordered: true
+
+steps:
+    - id: cron_write
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - '/var/at/tabs/'
+                  - '/etc/cron.d/'
+                  - '/etc/crontab'
+                  - '/var/at/jobs/'
+          condition: selection
+
+    - id: cron_spawn
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              ParentImage|endswith:
+                  - '/cron'
+                  - '/atrun'
+                  - '/launchd'
+          selection_suspicious:
+              Image|endswith:
+                  - '/bash'
+                  - '/sh'
+                  - '/python3'
+                  - '/curl'
+                  - '/wget'
+                  - '/osascript'
+          condition: selection and selection_suspicious
+
+trigger: all
+level: high

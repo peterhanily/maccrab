@@ -1,0 +1,62 @@
+title: File Dropped from Removable Media Then Executed
+id: e1f2a3b4-0025-4000-b000-000000000025
+status: experimental
+description: >
+    Detects a file written from a USB or removable volume path followed by
+    execution of that file or a process from the same removable volume.
+    USB drop attacks are a common initial access technique in air-gapped or
+    restricted environments. The victim mounts the USB device, the attacker's
+    autorun or social engineering payload runs, and the attack chain begins.
+    The correlation to the /Volumes/ path is the key indicator.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1091/
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.initial_access
+    - attack.t1091
+    - attack.lateral_movement
+    - attack.t1091
+    - attack.execution
+    - attack.t1059
+
+type: sequence
+window: 300s
+ordered: true
+
+steps:
+    - id: usb_drop
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|startswith: '/Volumes/'
+              TargetFilename|endswith:
+                  - '.sh'
+                  - '.py'
+                  - '.app'
+                  - '.pkg'
+                  - '.dmg'
+                  - '.command'
+                  - '.scpt'
+                  - '.exe'
+          condition: selection
+
+    - id: usb_exec
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|startswith: '/Volumes/'
+          selection_copy_exec:
+              CommandLine|contains: '/Volumes/'
+          condition: selection or selection_copy_exec
+
+trigger: all
+level: critical
+falsepositives:
+    - Developers running scripts from USB drives during testing
+    - IT technicians deploying software from removable media
