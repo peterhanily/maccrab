@@ -95,7 +95,10 @@ public actor UltrasonicMonitor {
 
         let semaphore = DispatchSemaphore(value: 0)
 
-        inputNode.installTap(onBus: 0, bufferSize: AVAudioFrameCount(expectedSamples), format: format) { buffer, _ in
+        // Use nil format to let AVAudioEngine choose a compatible format.
+        // Passing the inputNode's outputFormat can cause a format mismatch
+        // crash on some hardware configurations.
+        inputNode.installTap(onBus: 0, bufferSize: AVAudioFrameCount(expectedSamples), format: nil) { buffer, _ in
             guard let channelData = buffer.floatChannelData else { return }
             let frameCount = Int(buffer.frameLength)
             let data = Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))

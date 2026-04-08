@@ -391,6 +391,24 @@ action "Masqueraded binaries 'svchost', 'lsass' created and run"
 CLEANUP_FILES+=("$MASQ_DIR")
 sleep 1
 
+tactic "Dylib hijacking (T1574.004)"
+DYLIB_FILE="$TEST_DIR/libmalicious.dylib"
+touch "$DYLIB_FILE"
+install_name_tool -change /usr/lib/libSystem.B.dylib /tmp/libSystem.B.dylib "$DYLIB_FILE" 2>/dev/null || true
+action "Dylib written to hijackable path + install_name_tool reexport"
+sleep 1
+
+tactic "XPC service enumeration (T1559)"
+launchctl print system/ 2>/dev/null | head -3 > /dev/null || true
+action "launchctl print system/ executed (XPC enumeration)"
+sleep 1
+
+tactic "TCC database direct access (T1548)"
+ls "$HOME/Library/Application Support/com.apple.TCC/TCC.db" 2>/dev/null || true
+ls "/Library/Application Support/com.apple.TCC/TCC.db" 2>/dev/null || true
+action "TCC database paths probed (direct bypass attempt)"
+sleep 1
+
 tactic "Additional LaunchAgent (T1543.001) — wave 5 persistence"
 LA2="$HOME/Library/LaunchAgents/com.maccrab.campaign.test.wave5.plist"
 cat > "$LA2" << 'PLIST'
@@ -508,6 +526,9 @@ echo -e "  • T1059.002  Execution — AppleScript"
 echo -e "  • T1021.004  Lateral Movement — SSH"
 echo -e "  • T1567      Exfiltration — Over HTTP"
 echo -e "  • T1036      Defense Evasion — Masquerading"
+echo -e "  • T1574.004  Defense Evasion — Dylib Hijacking"
+echo -e "  • T1559      Privilege Escalation — XPC Enumeration"
+echo -e "  • T1548      Privilege Escalation — TCC Direct Access"
 echo ""
 
 if [ "$NEW_CAMPAIGNS" -gt 0 ]; then

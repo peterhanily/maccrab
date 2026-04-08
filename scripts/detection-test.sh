@@ -387,7 +387,30 @@ for i in $(seq 1 3); do
 done
 
 # ═══════════════════════════════════════════════════
-header "14. ENTROPY / DGA DETECTION"
+header "14. DYLIB HIJACKING / XPC / TCC DETECTION"
+# ═══════════════════════════════════════════════════
+
+info "Test: Dylib written to hijackable path"
+touch "$TEST_DIR/libmalicious.dylib"
+cp /dev/null "$TEST_DIR/libmalicious.dylib" 2>/dev/null || true
+sleep 1
+
+info "Test: install_name_tool with reexport (dylib proxying)"
+# Just echo the command pattern — install_name_tool on a non-existent file fails harmlessly
+install_name_tool -change /usr/lib/libSystem.B.dylib /tmp/libSystem.B.dylib "$TEST_DIR/libmalicious.dylib" 2>/dev/null || true
+sleep 1
+
+info "Test: XPC service enumeration via launchctl"
+launchctl print system/ 2>/dev/null | head -3 > /dev/null || true
+sleep 1
+
+info "Test: TCC database direct access probe"
+ls "$HOME/Library/Application Support/com.apple.TCC/TCC.db" 2>/dev/null || true
+ls "/Library/Application Support/com.apple.TCC/TCC.db" 2>/dev/null || true
+sleep 1
+
+# ═══════════════════════════════════════════════════
+header "15. ENTROPY / DGA DETECTION"
 # ═══════════════════════════════════════════════════
 
 info "Test: High-entropy command line"
@@ -444,6 +467,9 @@ CATEGORIES=(
     "dns:DNS Detection"
     "xprotect:XProtect Status Detection"
     "spotlight:Spotlight Importer Detection"
+    "dylib:Dylib Hijacking Detection"
+    "xpc:XPC Service Detection"
+    "tcc:TCC Database Detection"
 )
 
 ALERT_TEXT=$(sqlite3 "$HOME/Library/Application Support/MacCrab/events.db" "SELECT rule_title || ' ' || COALESCE(description,'') FROM alerts;" 2>/dev/null || echo "")
