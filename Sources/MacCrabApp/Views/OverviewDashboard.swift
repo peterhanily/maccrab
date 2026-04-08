@@ -29,10 +29,10 @@ struct OverviewDashboard: View {
                 VStack(spacing: 12) {
                     ProgressView()
                         .scaleEffect(1.5)
-                    Text("Connecting to MacCrab daemon...")
+                    Text(String(localized: "overview.connecting", defaultValue: "Connecting to MacCrab daemon\u{2026}"))
                         .font(.headline)
                         .foregroundColor(.secondary)
-                    Text("Start the daemon: sudo maccrabd")
+                    Text(String(localized: "overview.startDaemon", defaultValue: "Start the daemon: sudo maccrabd"))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -52,18 +52,18 @@ struct OverviewDashboard: View {
                                     Text("\(criticalCount) critical alert\(criticalCount == 1 ? "" : "s") need\(criticalCount == 1 ? "s" : "") investigation")
                                         .font(.system(.body, weight: .semibold))
                                         .foregroundColor(.white)
-                                    Text("Click to review in Alerts")
+                                    Text(String(localized: "overview.reviewAlerts", defaultValue: "Click to review in Alerts"))
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.8))
                                 } else if highCount > 0 {
                                     Text("\(highCount) high-severity alert\(highCount == 1 ? "" : "s") to review")
                                         .font(.system(.body, weight: .semibold))
                                         .foregroundColor(.white)
-                                    Text("Click to review in Alerts")
+                                    Text(String(localized: "overview.reviewAlerts", defaultValue: "Click to review in Alerts"))
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.8))
                                 } else {
-                                    Text("All clear — no critical alerts")
+                                    Text(String(localized: "overview.allClear", defaultValue: "All clear \u{2014} no critical alerts"))
                                         .font(.system(.body, weight: .semibold))
                                         .foregroundColor(.white)
                                     Text("\(appState.eventsPerSecond) events/sec monitored")
@@ -140,7 +140,7 @@ struct OverviewDashboard: View {
                         // === Recent Alerts ===
                         GroupBox("Recent Alerts") {
                             if appState.recentAlerts.isEmpty {
-                                Text("No recent alerts")
+                                Text(String(localized: "overview.noRecentAlerts", defaultValue: "No recent alerts"))
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity)

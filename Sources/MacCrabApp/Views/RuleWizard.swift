@@ -403,13 +403,13 @@ private struct DetectionStep: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Define what the rule should match. Each condition is AND-ed together.")
+            Text(String(localized: "wizard.conditionsHint", defaultValue: "Define what the rule should match. Each condition is AND-ed together."))
                 .font(.callout).foregroundColor(.secondary)
 
             ForEach($rule.conditions) { $cond in
                 HStack(spacing: 10) {
                     Picker("Field", selection: $cond.field) {
-                        Text("Select field...").tag("")
+                        Text(String(localized: "wizard.selectField", defaultValue: "Select field\u{2026}")).tag("")
                         ForEach(fieldSuggestions, id: \.self) { Text($0).tag($0) }
                     }
                     .frame(width: 200)
@@ -445,7 +445,7 @@ private struct DetectionStep: View {
             if rule.category == "process_creation" {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Example").font(.caption).fontWeight(.semibold)
+                        Text(String(localized: "wizard.example", defaultValue: "Example")).font(.caption).fontWeight(.semibold)
                         Text("Field: Image | Modifier: endswith | Value: /curl, /wget")
                             .font(.caption).foregroundColor(.secondary)
                         Text("Field: CommandLine | Modifier: contains | Value: --insecure")
@@ -471,7 +471,7 @@ private struct FiltersStep: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Filters exclude known-good activity (NOT conditions). Optional.")
+            Text(String(localized: "wizard.filtersHint", defaultValue: "Filters exclude known-good activity (NOT conditions). Optional."))
                 .font(.callout).foregroundColor(.secondary)
 
             ForEach($rule.filters) { $filter in
@@ -506,7 +506,7 @@ private struct FiltersStep: View {
 
                 Divider().frame(height: 20)
 
-                Text("Quick add:").font(.caption).foregroundColor(.secondary)
+                Text(String(localized: "wizard.quickAdd", defaultValue: "Quick add:")).font(.caption).foregroundColor(.secondary)
 
                 Button("Exclude Apple-signed") {
                     rule.filters.append(RuleFilterEntry(field: "SignerType", values: ["apple", "appStore", "devId"]))
@@ -531,7 +531,7 @@ private struct OptionsStep: View {
         VStack(alignment: .leading, spacing: 16) {
             GroupBox("False Positives") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Describe known legitimate scenarios that might trigger this rule:")
+                    Text(String(localized: "wizard.falsepositiveHint", defaultValue: "Describe known legitimate scenarios that might trigger this rule:"))
                         .font(.callout).foregroundColor(.secondary)
                     TextEditor(text: $rule.falsepositives)
                         .frame(height: 80)
@@ -579,7 +579,7 @@ private struct PreviewStep: View {
                     Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.title2)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading) {
-                        Text("Rule saved!").font(.headline)
+                        Text(String(localized: "wizard.savedTitle", defaultValue: "Rule saved!")).font(.headline)
                         Text(path).font(.caption).foregroundColor(.secondary)
                     }
                 }
@@ -587,11 +587,11 @@ private struct PreviewStep: View {
                 .background(Color.green.opacity(0.1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                Text("Next: run **make compile-rules && make restart** to load the new rule.")
+                Text(String(localized: "wizard.nextSteps", defaultValue: "Next: run **make compile-rules && make restart** to load the new rule."))
                     .font(.callout)
             }
 
-            Text("Generated YAML:")
+            Text(String(localized: "wizard.yamlLabel", defaultValue: "Generated YAML:"))
                 .font(.caption).foregroundColor(.secondary)
 
             ScrollView {

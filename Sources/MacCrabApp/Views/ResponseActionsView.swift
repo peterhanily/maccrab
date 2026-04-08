@@ -354,13 +354,13 @@ private struct AddRuleActionSheet: View {
 
             HStack {
                 Picker("Action", selection: $action.action) {
-                    Text("Log Only").tag("log")
-                    Text("Notify").tag("notify")
-                    Text("Escalate Notification").tag("escalateNotification")
-                    Text("Kill Process").tag("kill")
-                    Text("Quarantine File").tag("quarantine")
-                    Text("Block Network").tag("blockNetwork")
-                    Text("Run Script").tag("script")
+                    Text(String(localized: "responseAction.logOnly", defaultValue: "Log Only")).tag("log")
+                    Text(String(localized: "responseAction.notify", defaultValue: "Notify")).tag("notify")
+                    Text(String(localized: "responseAction.escalate", defaultValue: "Escalate Notification")).tag("escalateNotification")
+                    Text(String(localized: "responseAction.killProcess", defaultValue: "Kill Process")).tag("kill")
+                    Text(String(localized: "responseAction.quarantine", defaultValue: "Quarantine File")).tag("quarantine")
+                    Text(String(localized: "responseAction.blockNetwork", defaultValue: "Block Network")).tag("blockNetwork")
+                    Text(String(localized: "responseAction.runScript", defaultValue: "Run Script")).tag("script")
                 }.controlSize(.large)
 
                 Picker("Min Severity", selection: $action.minimumSeverity) {

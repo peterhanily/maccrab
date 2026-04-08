@@ -92,10 +92,10 @@ struct WelcomeView: View {
             Text("🦀")
                 .font(.system(size: 48))
 
-            Text("Welcome to MacCrab")
+            Text(String(localized: "welcome.title", defaultValue: "Welcome to MacCrab"))
                 .font(.title).fontWeight(.bold)
 
-            Text("Choose your language")
+            Text(String(localized: "welcome.chooseLanguage", defaultValue: "Choose your language"))
                 .font(.headline)
                 .foregroundColor(.secondary)
 
@@ -124,14 +124,22 @@ struct WelcomeView: View {
             Text("🦀")
                 .font(.system(size: 48))
 
-            Text("What is MacCrab?")
+            Text(String(localized: "welcome.whatIs", defaultValue: "What is MacCrab?"))
                 .font(.title2).fontWeight(.bold)
 
             VStack(alignment: .leading, spacing: 12) {
-                FeatureRow(icon: "shield.checkered", title: "Real-Time Detection", description: "304 detection rules monitor your Mac for threats in real time")
-                FeatureRow(icon: "brain", title: "AI Safety", description: "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access")
-                FeatureRow(icon: "hand.raised", title: "Active Prevention", description: "Blocks malicious domains, quarantines files, and gates supply chain attacks")
-                FeatureRow(icon: "lock.shield", title: "Privacy First", description: "Everything runs locally — no data ever leaves your machine")
+                FeatureRow(icon: "shield.checkered",
+                    title: String(localized: "welcome.feature.detection", defaultValue: "Real-Time Detection"),
+                    description: String(localized: "welcome.feature.detectionDesc", defaultValue: "343 detection rules monitor your Mac for threats in real time"))
+                FeatureRow(icon: "brain",
+                    title: String(localized: "welcome.feature.ai", defaultValue: "AI Safety"),
+                    description: String(localized: "welcome.feature.aiDesc", defaultValue: "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access"))
+                FeatureRow(icon: "hand.raised",
+                    title: String(localized: "welcome.feature.prevention", defaultValue: "Active Prevention"),
+                    description: String(localized: "welcome.feature.preventionDesc", defaultValue: "Blocks malicious domains, quarantines files, and gates supply chain attacks"))
+                FeatureRow(icon: "lock.shield",
+                    title: String(localized: "welcome.feature.privacy", defaultValue: "Privacy First"),
+                    description: String(localized: "welcome.feature.privacyDesc", defaultValue: "Everything runs locally \u{2014} no data ever leaves your machine"))
             }
             .padding(.horizontal, 20)
         }
@@ -145,19 +153,24 @@ struct WelcomeView: View {
             Text("🦀")
                 .font(.system(size: 48))
 
-            Text("You're All Set!")
+            Text(String(localized: "welcome.allSet", defaultValue: "You\u{2019}re All Set!"))
                 .font(.title2).fontWeight(.bold)
 
-            Text("MacCrab is ready to protect your Mac.")
+            Text(String(localized: "welcome.ready", defaultValue: "MacCrab is ready to protect your Mac."))
                 .font(.callout)
                 .foregroundColor(.secondary)
 
             VStack(alignment: .leading, spacing: 8) {
-                SetupRow(icon: "checkmark.circle.fill", color: .green, text: "Detection engine active")
-                SetupRow(icon: "checkmark.circle.fill", color: .green, text: "304 rules loaded")
-                SetupRow(icon: "checkmark.circle.fill", color: .green, text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
-                SetupRow(icon: "info.circle", color: .blue, text: "Start the daemon: sudo maccrabd")
-                SetupRow(icon: "info.circle", color: .blue, text: "Enable prevention in the Prevention tab")
+                SetupRow(icon: "checkmark.circle.fill", color: .green,
+                    text: String(localized: "welcome.setup.engineActive", defaultValue: "Detection engine active"))
+                SetupRow(icon: "checkmark.circle.fill", color: .green,
+                    text: String(localized: "welcome.setup.rulesLoaded", defaultValue: "343 detection rules loaded"))
+                SetupRow(icon: "checkmark.circle.fill", color: .green,
+                    text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
+                SetupRow(icon: "info.circle", color: .blue,
+                    text: String(localized: "overview.startDaemon", defaultValue: "Start the daemon: sudo maccrabd"))
+                SetupRow(icon: "info.circle", color: .blue,
+                    text: String(localized: "welcome.setup.prevention", defaultValue: "Enable prevention in the Prevention tab"))
             }
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor))

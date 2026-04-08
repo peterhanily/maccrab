@@ -179,7 +179,7 @@ struct AlertDashboard: View {
                                 Button {
                                     selectedAlerts = []
                                 } label: {
-                                    Text("Deselect All")
+                                    Text(String(localized: "alerts.deselectAll", defaultValue: "Deselect All"))
                                 }
                                 .controlSize(.small)
                                 .buttonStyle(.plain)
@@ -187,7 +187,7 @@ struct AlertDashboard: View {
 
                                 Spacer()
 
-                                Text("Shift+click to range select, Cmd+click to toggle")
+                                Text(String(localized: "alerts.multiSelectHint", defaultValue: "Shift+click to range select, Cmd+click to toggle"))
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }

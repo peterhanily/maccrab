@@ -96,7 +96,7 @@ struct ThreatIntelView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Circle().fill(.green).frame(width: 8, height: 8)
-                        Text("Threat intel feeds active")
+                        Text(String(localized: "threatintel.feedsActive", defaultValue: "Threat intel feeds active"))
                             .font(.callout)
                         Spacer()
                         if let lastUpdate = appState.threatIntelStats.lastUpdate {
@@ -105,7 +105,7 @@ struct ThreatIntelView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
-                    Text("IOCs are refreshed every 4 hours from abuse.ch feeds. Custom IOCs persist across restarts.")
+                    Text(String(localized: "threatintel.refreshNote", defaultValue: "IOCs are refreshed every 4 hours from abuse.ch feeds. Custom IOCs persist across restarts."))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }.padding(4)
@@ -128,7 +128,7 @@ struct ThreatIntelView: View {
 
     private var feedsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Active Feeds")
+            Text(String(localized: "threatintel.activeFeedsSection", defaultValue: "Active Feeds"))
                 .font(.headline)
 
             FeedCard(name: "abuse.ch Feodo Tracker", url: "https://feodotracker.abuse.ch", type: "C2 IP addresses", status: "Active", color: .green)
@@ -137,7 +137,7 @@ struct ThreatIntelView: View {
 
             Divider()
 
-            Text("Available Feeds (requires API key)")
+            Text(String(localized: "threatintel.availableFeedsSection", defaultValue: "Available Feeds (requires API key)"))
                 .font(.headline)
                 .padding(.top, 8)
 
@@ -151,7 +151,7 @@ struct ThreatIntelView: View {
 
             Divider()
 
-            Text("Free Feeds (no API key needed)")
+            Text(String(localized: "threatintel.freeFeedsSection", defaultValue: "Free Feeds (no API key needed)"))
                 .font(.headline)
                 .padding(.top, 8)
 
@@ -159,11 +159,11 @@ struct ThreatIntelView: View {
 
             Divider()
 
-            Text("Custom Feed Support")
+            Text(String(localized: "threatintel.customFeedSection", defaultValue: "Custom Feed Support"))
                 .font(.headline)
                 .padding(.top, 8)
 
-            Text("Import IOCs from CSV, JSON, or STIX 2.1 bundles via the Import tab. Custom IOCs are merged with feed data and persist across daemon restarts.")
+            Text(String(localized: "threatintel.importNote", defaultValue: "Import IOCs from CSV, JSON, or STIX 2.1 bundles via the Import tab. Custom IOCs are merged with feed data and persist across daemon restarts."))
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -173,29 +173,29 @@ struct ThreatIntelView: View {
 
     private var browseSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Loaded IOC data is stored in the daemon's memory and threat intel cache. Use maccrabctl to query specific IOCs:")
+            Text(String(localized: "threatintel.queryNote", defaultValue: "Loaded IOC data is stored in the daemon's memory and threat intel cache. Use maccrabctl to query specific IOCs:"))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             GroupBox("Quick Stats") {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("SHA-256 Hashes:").font(.caption).frame(width: 120, alignment: .leading)
+                        Text(String(localized: "threatintel.hashesLabel", defaultValue: "SHA-256 Hashes:")).font(.caption).frame(width: 120, alignment: .leading)
                         Text("\(appState.threatIntelStats.hashes)").font(.system(.caption, design: .monospaced))
                         Spacer()
                     }
                     HStack {
-                        Text("IP Addresses:").font(.caption).frame(width: 120, alignment: .leading)
+                        Text(String(localized: "threatintel.ipsLabel", defaultValue: "IP Addresses:")).font(.caption).frame(width: 120, alignment: .leading)
                         Text("\(appState.threatIntelStats.ips)").font(.system(.caption, design: .monospaced))
                         Spacer()
                     }
                     HStack {
-                        Text("Domains:").font(.caption).frame(width: 120, alignment: .leading)
+                        Text(String(localized: "threatintel.domainsLabel", defaultValue: "Domains:")).font(.caption).frame(width: 120, alignment: .leading)
                         Text("\(appState.threatIntelStats.domains)").font(.system(.caption, design: .monospaced))
                         Spacer()
                     }
                     HStack {
-                        Text("URLs:").font(.caption).frame(width: 120, alignment: .leading)
+                        Text(String(localized: "threatintel.urlsLabel", defaultValue: "URLs:")).font(.caption).frame(width: 120, alignment: .leading)
                         Text("\(appState.threatIntelStats.urls)").font(.system(.caption, design: .monospaced))
                         Spacer()
                     }
@@ -300,7 +300,7 @@ struct ThreatIntelView: View {
 
             GroupBox("VirusTotal") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Multi-engine file, URL, and domain scanning").font(.caption).foregroundColor(.secondary)
+                    Text(String(localized: "threatintel.vtDesc", defaultValue: "Multi-engine file, URL, and domain scanning")).font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $virusTotalKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
@@ -312,7 +312,7 @@ struct ThreatIntelView: View {
 
             GroupBox("AbuseIPDB") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("IP address reputation and abuse reports").font(.caption).foregroundColor(.secondary)
+                    Text(String(localized: "threatintel.abuseDesc", defaultValue: "IP address reputation and abuse reports")).font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $abuseIPDBKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
@@ -324,7 +324,7 @@ struct ThreatIntelView: View {
 
             GroupBox("AlienVault OTX") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Open Threat Exchange community intelligence").font(.caption).foregroundColor(.secondary)
+                    Text(String(localized: "threatintel.otxDesc", defaultValue: "Open Threat Exchange community intelligence")).font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $otxKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
@@ -336,7 +336,7 @@ struct ThreatIntelView: View {
 
             GroupBox("Shodan") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Internet-wide host and service intelligence").font(.caption).foregroundColor(.secondary)
+                    Text(String(localized: "threatintel.shodanDesc", defaultValue: "Internet-wide host and service intelligence")).font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $shodanKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
@@ -348,7 +348,7 @@ struct ThreatIntelView: View {
 
             GroupBox("URLScan.io") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("URL scanning, screenshots, and threat verdicts").font(.caption).foregroundColor(.secondary)
+                    Text(String(localized: "threatintel.urlscanDesc", defaultValue: "URL scanning, screenshots, and threat verdicts")).font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $urlscanKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
@@ -360,7 +360,7 @@ struct ThreatIntelView: View {
 
             GroupBox("GreyNoise") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("IP noise and threat classification \u{2014} identify scanners vs targeted attacks").font(.caption).foregroundColor(.secondary)
+                    Text(String(localized: "threatintel.grenoiseDesc", defaultValue: "IP noise and threat classification \u{2014} identify scanners vs targeted attacks")).font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $greynoiseKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
@@ -372,7 +372,7 @@ struct ThreatIntelView: View {
 
             GroupBox("Have I Been Pwned") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Credential breach detection \u{2014} check if accounts appear in known breaches").font(.caption).foregroundColor(.secondary)
+                    Text(String(localized: "threatintel.hibpDesc", defaultValue: "Credential breach detection \u{2014} check if accounts appear in known breaches")).font(.caption).foregroundColor(.secondary)
                     SecureField("API Key", text: $hibpKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))

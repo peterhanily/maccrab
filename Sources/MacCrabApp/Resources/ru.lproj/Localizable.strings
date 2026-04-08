@@ -408,3 +408,77 @@
 /* ── About ── */
 /* TODO: translate */
 "about.madeWithLove" = "Made with love in Ireland";
+
+
+/* ── Overview Dashboard ── */
+"overview.connecting" = "Connecting to MacCrab daemon…";
+"overview.startDaemon" = "Start the daemon: sudo maccrabd";
+"overview.reviewAlerts" = "Click to review in Alerts";
+"overview.allClear" = "All clear — no critical alerts";
+"overview.noRecentAlerts" = "No recent alerts";
+
+/* ── Alert Dashboard (bulk) ── */
+"alerts.deselectAll" = "Deselect All";
+"alerts.multiSelectHint" = "Shift+click to range select, Cmd+click to toggle";
+
+/* ── Status bar / toolbar ── */
+"status.daemonOffline" = "Daemon offline — data may be stale";
+
+/* ── Welcome Screen ── */
+"welcome.title" = "Welcome to MacCrab";
+"welcome.chooseLanguage" = "Choose your language";
+"welcome.whatIs" = "What is MacCrab?";
+"welcome.allSet" = "You’re All Set!";
+"welcome.ready" = "MacCrab is ready to protect your Mac.";
+"welcome.feature.detection" = "Real-Time Detection";
+"welcome.feature.detectionDesc" = "343 detection rules monitor your Mac for threats in real time";
+"welcome.feature.ai" = "AI Safety";
+"welcome.feature.aiDesc" = "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access";
+"welcome.feature.prevention" = "Active Prevention";
+"welcome.feature.preventionDesc" = "Blocks malicious domains, quarantines files, and gates supply chain attacks";
+"welcome.feature.privacy" = "Privacy First";
+"welcome.feature.privacyDesc" = "Everything runs locally — no data ever leaves your machine";
+"welcome.setup.engineActive" = "Detection engine active";
+"welcome.setup.prevention" = "Enable prevention in the Prevention tab";
+
+/* ── Rule Wizard ── */
+"wizard.conditionsHint" = "Define what the rule should match. Each condition is AND-ed together.";
+"wizard.selectField" = "Select field…";
+"wizard.example" = "Example";
+"wizard.filtersHint" = "Filters exclude known-good activity (NOT conditions). Optional.";
+"wizard.quickAdd" = "Quick add:";
+"wizard.falsepositiveHint" = "Describe known legitimate scenarios that might trigger this rule:";
+"wizard.savedTitle" = "Rule saved!";
+"wizard.yamlLabel" = "Generated YAML:";
+"wizard.nextSteps" = "Next: run make compile-rules && make restart to load the new rule.";
+
+/* ── Threat Intelligence ── */
+"threatintel.feedsActive" = "Threat intel feeds active";
+"threatintel.refreshNote" = "IOCs are refreshed every 4 hours from abuse.ch feeds. Custom IOCs persist across restarts.";
+"threatintel.activeFeedsSection" = "Active Feeds";
+"threatintel.availableFeedsSection" = "Available Feeds (requires API key)";
+"threatintel.freeFeedsSection" = "Free Feeds (no API key needed)";
+"threatintel.customFeedSection" = "Custom Feed Support";
+"threatintel.importNote" = "Import IOCs from CSV, JSON, or STIX 2.1 bundles via the Import tab. Custom IOCs are merged with feed data and persist across daemon restarts.";
+"threatintel.queryNote" = "Loaded IOC data is stored in the daemon’s memory and threat intel cache. Use maccrabctl to query specific IOCs:";
+"threatintel.hashesLabel" = "SHA-256 Hashes:";
+"threatintel.ipsLabel" = "IP Addresses:";
+"threatintel.domainsLabel" = "Domains:";
+"threatintel.urlsLabel" = "URLs:";
+"threatintel.vtDesc" = "Multi-engine file, URL, and domain scanning";
+"threatintel.abuseDesc" = "IP address reputation and abuse reports";
+"threatintel.otxDesc" = "Open Threat Exchange community intelligence";
+"threatintel.shodanDesc" = "Internet-wide host and service intelligence";
+"threatintel.urlscanDesc" = "URL scanning, screenshots, and threat verdicts";
+"threatintel.grenoiseDesc" = "IP noise and threat classification — identify scanners vs targeted attacks";
+"threatintel.hibpDesc" = "Credential breach detection — check if accounts appear in known breaches";
+
+/* ── Response Action types ── */
+"responseAction.logOnly" = "Log Only";
+"responseAction.notify" = "Notify";
+"responseAction.escalate" = "Escalate Notification";
+"responseAction.killProcess" = "Kill Process";
+"responseAction.quarantine" = "Quarantine File";
+"responseAction.blockNetwork" = "Block Network";
+"responseAction.runScript" = "Run Script";
+"welcome.setup.rulesLoaded" = "343 detection rules loaded";
