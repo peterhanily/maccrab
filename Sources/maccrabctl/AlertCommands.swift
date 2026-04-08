@@ -6,18 +6,25 @@ extension MacCrabCtl {
         do {
             let store = try AlertStore(directory: maccrabDataDir())
             let since = hours.map { Date().addingTimeInterval(-$0 * 3600) } ?? Date.distantPast
-            let alerts = try await store.alerts(since: since, severity: severityFilter, limit: limit)
+            let raw = try await store.alerts(since: since, severity: severityFilter, limit: limit)
+            let alerts = raw.filter { !$0.ruleId.hasPrefix("maccrab.campaign.") }
+            let campaignCount = raw.count - alerts.count
 
             if alerts.isEmpty {
                 let timeDesc = hours.map { "last \(Int($0))h" } ?? "all time"
                 let sevDesc = severityFilter.map { " [\($0.rawValue)+]" } ?? ""
                 print("No alerts recorded (\(timeDesc)\(sevDesc)).")
+                if campaignCount > 0 {
+                    print("  \(campaignCount) campaign(s) detected — run 'maccrabctl campaigns' to view.")
+                }
                 return
             }
 
             let timeLabel = hours.map { "last \(Int($0))h" } ?? "last \(alerts.count)"
             let sevLabel = severityFilter.map { " [\($0.rawValue)+]" } ?? ""
-            print("\(alerts.count) alert(s) — \(timeLabel)\(sevLabel):")
+            var header = "\(alerts.count) alert(s) — \(timeLabel)\(sevLabel)"
+            if campaignCount > 0 { header += "  [\(campaignCount) campaigns — see 'maccrabctl campaigns']" }
+            print(header)
             print("══════════════════════════════════════════════════════════════")
 
             for alert in alerts {
@@ -201,6 +208,17 @@ extension MacCrabCtl {
                     if alert.timestamp == lastSeen && lastSeenIDs.contains(alert.id) { continue }
                     if alert.timestamp < lastSeen { continue }
 
+                    // Always advance the frontier (avoids re-fetching on next poll)
+                    if alert.timestamp > frontierTime {
+                        frontierTime = alert.timestamp
+                        frontierIDs = [alert.id]
+                    } else if alert.timestamp == frontierTime {
+                        frontierIDs.insert(alert.id)
+                    }
+
+                    // Campaigns have their own stream — don't print here
+                    if alert.ruleId.hasPrefix("maccrab.campaign.") { continue }
+
                     let time = formatDate(alert.timestamp)
                     let icon: String
                     switch alert.severity {
@@ -216,13 +234,6 @@ extension MacCrabCtl {
                         print("   MITRE: \(tech)")
                     }
                     print()
-
-                    if alert.timestamp > frontierTime {
-                        frontierTime = alert.timestamp
-                        frontierIDs = [alert.id]
-                    } else if alert.timestamp == frontierTime {
-                        frontierIDs.insert(alert.id)
-                    }
                 }
                 if frontierTime > lastSeen {
                     lastSeen = frontierTime

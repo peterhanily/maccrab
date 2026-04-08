@@ -195,7 +195,7 @@ struct ESHealthView: View {
         if dbSize > 0 {
             do {
                 let store = try EventStore(directory: dataDir)
-                eventCount = try store.count()
+                eventCount = try await store.count()
             } catch {
                 eventCount = 0
             }
