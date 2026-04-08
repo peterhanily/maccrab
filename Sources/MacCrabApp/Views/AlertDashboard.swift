@@ -457,6 +457,25 @@ struct AlertDetailView: View {
                     }
                 }
 
+                // What to do — actionable guidance based on alert context
+                GroupBox(String(localized: "alertDetail.whatToDo", defaultValue: "What To Do")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(alertGuidance(alert).enumerated()), id: \.offset) { _, item in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: item.icon)
+                                    .font(.caption)
+                                    .foregroundColor(.accentColor)
+                                    .frame(width: 16)
+                                    .accessibilityHidden(true)
+                                Text(item.text)
+                                    .font(.callout)
+                                    .foregroundColor(.primary)
+                            }
+                        }
+                    }
+                    .padding(4)
+                }
+
                 // Alert metadata
                 GroupBox(String(localized: "alertDetail.metadata", defaultValue: "Metadata")) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -637,6 +656,73 @@ struct AlertDetailView: View {
         }
         return rules.keys.contains(where: { alert.ruleTitle.lowercased().contains($0.lowercased()) || $0 == alert.id })
     }
+}
+
+
+/// Generate actionable guidance for an alert based on its MITRE techniques,
+/// severity, and rule metadata.
+func alertGuidance(_ alert: AlertViewModel) -> [(icon: String, text: String)] {
+    var items: [(String, String)] = []
+    let techniques = alert.mitreTechniques.lowercased()
+    let ruleId = alert.ruleId.lowercased()
+
+    // Severity-based urgency
+    if alert.severity == .critical {
+        items.append(("exclamationmark.triangle.fill", "Investigate immediately — this is a critical severity detection."))
+    }
+
+    // Persistence
+    if techniques.contains("t1543") || techniques.contains("t1546") || ruleId.contains("launchagent") || ruleId.contains("persistence") {
+        items.append(("trash", "Check ~/Library/LaunchAgents/ and /Library/LaunchDaemons/ for unfamiliar entries. Remove any you don't recognize."))
+        items.append(("arrow.clockwise", "Run: launchctl list | grep -v com.apple to see active non-Apple services."))
+    }
+
+    // Credential access
+    if techniques.contains("t1555") || techniques.contains("t1552") || ruleId.contains("credential") || ruleId.contains("keychain") || ruleId.contains("ssh_key") {
+        items.append(("key", "Rotate any credentials that may have been accessed (passwords, SSH keys, API tokens)."))
+        items.append(("lock.shield", "Check Keychain Access.app for recently added or modified entries."))
+    }
+
+    // C2 / beacon
+    if techniques.contains("t1071") || techniques.contains("t1095") || ruleId.contains("beacon") || ruleId.contains("c2") {
+        items.append(("network.badge.shield.half.filled", "Check if the destination IP/domain is known-malicious using VirusTotal or AbuseIPDB."))
+        items.append(("hand.raised", "If confirmed malicious, enable Prevention > Network Blocker to block the IP."))
+    }
+
+    // Defense evasion / quarantine
+    if techniques.contains("t1553") || ruleId.contains("quarantine") || ruleId.contains("gatekeeper") {
+        items.append(("checkmark.shield", "Re-apply quarantine: xattr -w com.apple.quarantine '0081' <file>"))
+        items.append(("magnifyingglass", "Verify the file's code signature: codesign -dvvv <path>"))
+    }
+
+    // AI tool
+    if ruleId.contains("ai-guard") || ruleId.contains("ai_tool") || ruleId.contains("prompt") || ruleId.contains("boundary") {
+        items.append(("brain", "Review what the AI tool accessed — check the process path and parent."))
+        items.append(("arrow.counterclockwise", "Restart the AI tool session to clear any potentially injected context."))
+    }
+
+    // Behavioral score
+    if ruleId.contains("behavioral") || ruleId.contains("behavior") {
+        items.append(("chart.line.uptrend.xyaxis", "This process accumulated multiple suspicious indicators. Review its full activity in the Events tab."))
+        items.append(("xmark.circle", "If the process is unfamiliar, terminate it: kill -9 <PID>"))
+    }
+
+    // Rootkit
+    if techniques.contains("t1014") || ruleId.contains("rootkit") || ruleId.contains("hidden_process") {
+        items.append(("exclamationmark.shield", "A hidden process was detected. This may indicate kernel-level compromise."))
+        items.append(("power", "Consider a clean reboot and running a full system scan."))
+    }
+
+    // Generic fallback
+    if items.isEmpty || (items.count == 1 && alert.severity == .critical) {
+        if !alert.processPath.isEmpty {
+            items.append(("magnifyingglass", "Investigate the process: ls -la \(alert.processPath)"))
+            items.append(("terminal", "Check process lineage: maccrabctl tree-score"))
+        }
+        items.append(("eye.slash", "If this is expected behavior, suppress this alert to reduce noise."))
+    }
+
+    return items
 }
 
 
