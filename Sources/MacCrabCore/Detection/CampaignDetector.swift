@@ -617,12 +617,24 @@ public actor CampaignDetector {
     private func removeFromIndexes(_ alert: AlertSummary) {
         for tactic in alert.tactics {
             let n = normalizeTactic(tactic)
-            normalizedTacticCounts[n, default: 1] -= 1
-            if normalizedTacticCounts[n] == 0 { normalizedTacticCounts.removeValue(forKey: n) }
+            if let count = normalizedTacticCounts[n] {
+                let newCount = count - 1
+                if newCount <= 0 {
+                    normalizedTacticCounts.removeValue(forKey: n)
+                } else {
+                    normalizedTacticCounts[n] = newCount
+                }
+            }
         }
         if let uid = alert.userId {
-            userIdCounts[uid, default: 1] -= 1
-            if userIdCounts[uid] == 0 { userIdCounts.removeValue(forKey: uid) }
+            if let count = userIdCounts[uid] {
+                let newCount = count - 1
+                if newCount <= 0 {
+                    userIdCounts.removeValue(forKey: uid)
+                } else {
+                    userIdCounts[uid] = newCount
+                }
+            }
         }
     }
 

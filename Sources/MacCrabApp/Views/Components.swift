@@ -87,7 +87,7 @@ struct AlertRow: View {
                     .minimumScaleFactor(0.85)
 
                 HStack(spacing: 12) {
-                    Label(alert.severity.label, systemImage: "exclamationmark.triangle.fill")
+                    Label(alert.severity.label, systemImage: alert.severity.sfSymbol)
                         .font(.caption)
                         .foregroundColor(alert.suppressed ? .secondary : alert.severityColor)
 

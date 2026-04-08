@@ -604,6 +604,13 @@ public actor RuleEngine {
             // ParentCommandLine requires enrichment data; fall back to enrichments dict.
             return event.enrichments["parent.commandline"]
 
+        // --- Grandparent process fields ---
+        case "process.grandparent.executable", "GrandparentImage":
+            return event.process.ancestors.count >= 2 ? event.process.ancestors[1].executable : nil
+
+        case "process.grandparent.name":
+            return event.process.ancestors.count >= 2 ? event.process.ancestors[1].name : nil
+
         // --- Code signature fields ---
         case "process.code_signature.signer_type", "SignerType":
             return event.process.codeSignature?.signerType.rawValue

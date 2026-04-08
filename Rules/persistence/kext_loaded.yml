@@ -14,10 +14,15 @@ logsource:
     category: driver_load
     product: macos
 detection:
-    selection_all: true
+    selection:
+        Image|endswith:
+            - '.kext'
+            - 'kextload'
+            - 'kextutil'
+            - 'KernelExtensionManagement'
     filter_apple:
         SignerType: 'apple'
-    condition: selection_all and not filter_apple
+    condition: selection and not filter_apple
 falsepositives:
     - Legitimate third-party kernel extensions (VirtualBox, VMware, audio drivers)
 level: high

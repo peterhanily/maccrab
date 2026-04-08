@@ -109,7 +109,9 @@ enum DaemonSetup {
             atPath: compiledRulesDir,
             withIntermediateDirectories: true
         )
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: compiledRulesDir)
+        // Compiled rules are only read by the daemon — restrict to owner-only
+        // to prevent attackers from reading detection logic for evasion.
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: compiledRulesDir)
 
         // Initialize components
         let eventStore: EventStore
@@ -480,7 +482,7 @@ enum DaemonSetup {
                     }
                 }
             }
-            print("Fleet client active: \(ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] ?? "")")
+            print("Fleet client active")
         }
 
         // === LLM REASONING BACKEND (optional) ===

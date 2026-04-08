@@ -167,6 +167,10 @@ struct WelcomeView: View {
                     text: String(localized: "welcome.setup.rulesLoaded", defaultValue: "348 detection rules loaded"))
                 SetupRow(icon: "checkmark.circle.fill", color: .green,
                     text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
+                SetupRow(icon: "exclamationmark.shield", color: .orange,
+                    text: String(localized: "welcome.setup.fda", defaultValue: "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add maccrabd"))
+                SetupRow(icon: "exclamationmark.shield", color: .orange,
+                    text: String(localized: "welcome.setup.es", defaultValue: "Endpoint Security: approve the system extension prompt on first daemon launch"))
                 SetupRow(icon: "info.circle", color: .blue,
                     text: String(localized: "overview.startDaemon", defaultValue: "Start the daemon: sudo maccrabd"))
                 SetupRow(icon: "info.circle", color: .blue,

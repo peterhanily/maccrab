@@ -282,7 +282,9 @@ public actor SequenceEngine {
 
     /// Cache of compiled `NSRegularExpression` instances keyed by pattern string.
     /// Avoids recompiling the same regex pattern on every evaluation.
+    /// Capped at 2048 entries with FIFO eviction (matches RuleEngine's cap).
     private var regexCache: [String: NSRegularExpression] = [:]
+    private static let maxRegexCacheSize = 2048
 
     /// Reference to a partial match by rule ID and creation time, used for
     /// O(1) LRU eviction. Entries are appended at the back (newest) and
@@ -331,6 +333,10 @@ public actor SequenceEngine {
         }
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return nil
+        }
+        // Evict oldest entry when cache is full
+        if regexCache.count >= Self.maxRegexCacheSize, let firstKey = regexCache.keys.first {
+            regexCache.removeValue(forKey: firstKey)
         }
         regexCache[pattern] = regex
         return regex

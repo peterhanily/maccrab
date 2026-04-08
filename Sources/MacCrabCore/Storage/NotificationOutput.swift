@@ -27,6 +27,11 @@ public actor NotificationOutput {
     private var lastKeySweep = Date()
     private let dedupeWindow: TimeInterval = 300 // 5 minutes
 
+    /// Count of alerts suppressed by rate limiting since the last summary notification.
+    private var rateLimitedCount: Int = 0
+    /// Whether a rate-limit summary notification has been sent this window.
+    private var rateLimitNotified: Bool = false
+
     public init(minimumSeverity: Severity = .high, maxPerMinute: Int = 10) {
         self.minimumSeverity = minimumSeverity
         self.maxPerMinute = maxPerMinute
@@ -39,9 +44,24 @@ public actor NotificationOutput {
         // Rate limit
         let now = Date()
         recentTimestamps = recentTimestamps.filter { now.timeIntervalSince($0) < 60 }
-        guard recentTimestamps.count < maxPerMinute else {
-            logger.warning("Notification rate limit reached (\(self.maxPerMinute)/min)")
+        if recentTimestamps.count >= maxPerMinute {
+            rateLimitedCount += 1
+            // Send a single summary notification the first time we hit the limit
+            if !rateLimitNotified {
+                rateLimitNotified = true
+                deliverRateLimitNotification()
+            }
+            logger.warning("Notification rate limit reached (\(self.maxPerMinute)/min) — \(self.rateLimitedCount) alerts suppressed")
             return
+        }
+
+        // Reset rate-limit tracking when we're under the limit again
+        if rateLimitNotified && recentTimestamps.count < maxPerMinute / 2 {
+            if rateLimitedCount > 0 {
+                logger.info("Rate limit window ended. \(self.rateLimitedCount) notifications were suppressed.")
+            }
+            rateLimitedCount = 0
+            rateLimitNotified = false
         }
 
         // Deduplicate
@@ -60,6 +80,14 @@ public actor NotificationOutput {
             recentKeys.removeAll()
             lastKeySweep = now
         }
+    }
+
+    private func deliverRateLimitNotification() {
+        Self.sendOsascriptNotification(
+            title: "⚠️ \u{1F980} MacCrab: Alert Storm",
+            body: "Too many alerts — notifications are being throttled. Check the dashboard for full details.",
+            sound: "Sosumi"
+        )
     }
 
     private nonisolated func deliverNotification(alert: Alert) {
@@ -82,13 +110,16 @@ public actor NotificationOutput {
             body = alert.description ?? "Security alert detected"
         }
 
-        // Use osascript for reliable notification delivery from CLI daemons.
-        // NSUserNotificationCenter requires an app bundle; UNUserNotificationCenter
-        // requires entitlements. osascript works universally.
+        Self.sendOsascriptNotification(title: title, body: body, sound: "Purr")
+    }
+
+    /// Deliver a notification via osascript. This works without an app bundle
+    /// or UNUserNotificationCenter entitlements.
+    private nonisolated static func sendOsascriptNotification(title: String, body: String, sound: String) {
         let script = """
             display notification "\(body.replacingOccurrences(of: "\"", with: "\\\""))" \
             with title "\(title.replacingOccurrences(of: "\"", with: "\\\""))" \
-            sound name "Purr"
+            sound name "\(sound)"
             """
 
         let process = Process()
@@ -96,11 +127,6 @@ public actor NotificationOutput {
         process.arguments = ["-e", script]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            logger.error("Failed to deliver notification: \(error.localizedDescription)")
-        }
+        try? process.run()
     }
 }

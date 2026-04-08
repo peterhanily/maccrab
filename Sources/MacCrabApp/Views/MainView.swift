@@ -148,18 +148,30 @@ struct MainView: View {
         // "never connected" case, so this targets the subsequent-disconnect case.
         .safeAreaInset(edge: .top, spacing: 0) {
             if !appState.isConnected && appState.rulesLoaded > 0 {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.yellow)
-                        .accessibilityHidden(true)
-                    Text(String(localized: "status.daemonOffline", defaultValue: "Daemon offline \u{2014} data may be stale"))
-                        .font(.subheadline)
-                        .foregroundColor(.primary)
-                    Spacer()
-                    Button("Retry") {
-                        Task { await appState.refresh() }
+                VStack(spacing: 4) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.yellow)
+                            .accessibilityHidden(true)
+                        Text(String(localized: "status.daemonOffline", defaultValue: "Daemon offline \u{2014} data may be stale"))
+                            .font(.subheadline)
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Button("Retry") {
+                            Task { await appState.refresh() }
+                        }
+                        .controlSize(.small)
                     }
-                    .controlSize(.small)
+                    HStack(spacing: 4) {
+                        Text(String(localized: "status.daemonHint", defaultValue: "Start with:"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("sudo maccrabd")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                        Spacer()
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
@@ -168,7 +180,7 @@ struct MainView: View {
                     Divider()
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Daemon offline. Data may be stale.")
+                .accessibilityLabel("Daemon offline. Start with sudo maccrabd.")
             }
         }
         .toolbar {

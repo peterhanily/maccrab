@@ -31,6 +31,37 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Custom YAML loader that warns on duplicate keys within a mapping
+# ---------------------------------------------------------------------------
+
+class _DuplicateKeyChecker(yaml.SafeLoader):
+    """SafeLoader subclass that emits warnings for duplicate mapping keys."""
+    pass
+
+
+def _check_duplicate_keys(loader, node):
+    """Construct a mapping, warning if any key appears more than once."""
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node)
+        if key in mapping:
+            mark = key_node.start_mark
+            print(
+                f"  WARN  Duplicate key '{key}' in {mark.name}:{mark.line + 1} "
+                f"(rule: {_current_compile_rule_title}) — second value overwrites first",
+                file=sys.stderr,
+            )
+        mapping[key] = loader.construct_object(value_node)
+    return mapping
+
+
+_DuplicateKeyChecker.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _check_duplicate_keys,
+)
+
+
+# ---------------------------------------------------------------------------
 # Sigma field-name to ECS dot-path mapping
 # ---------------------------------------------------------------------------
 
@@ -46,6 +77,7 @@ SIGMA_FIELD_MAP = {
     "ProcessId": "process.pid",
     "ParentImage": "process.parent.executable",
     "ParentCommandLine": "process.parent.commandline",
+    "GrandparentImage": "process.grandparent.executable",
     "User": "process.user.name",
     "TargetFilename": "file.path",
     "SourceFilename": "file.source_path",
@@ -58,9 +90,44 @@ SIGMA_FIELD_MAP = {
 }
 
 
+# Fields that are NOT in SIGMA_FIELD_MAP but are known to the RuleEngine
+# (resolved via enrichments dict or special-case code). These don't need
+# mapping but also shouldn't trigger "unmapped field" warnings.
+_KNOWN_PASSTHROUGH_FIELDS = {
+    "SignerType", "ParentSignerType", "XPCServiceName",
+    # TCC fields (resolved via enrichments in RuleEngine)
+    "TCCService", "TCCAllowed", "TCCClient",
+    # Network enrichment fields
+    "DestinationIsPrivate",
+    # File enrichment fields
+    "FileAction", "FileContent",
+    # Code signing enrichment fields
+    "NotarizationStatus", "Architecture",
+}
+
+# Track fields we've already warned about to avoid spam.
+_warned_fields: set = set()
+
+
 def normalize_field(field_name: str) -> str:
-    """Map a Sigma field name to its canonical ECS-style dot-path."""
-    return SIGMA_FIELD_MAP.get(field_name, field_name)
+    """Map a Sigma field name to its canonical ECS-style dot-path.
+
+    Warns once per unknown field name so rule authors can fix typos or
+    add missing mappings.
+    """
+    if field_name in SIGMA_FIELD_MAP:
+        return SIGMA_FIELD_MAP[field_name]
+    # Fields already in ECS dot-path form or known passthroughs are fine.
+    if "." in field_name or field_name in _KNOWN_PASSTHROUGH_FIELDS:
+        return field_name
+    if field_name not in _warned_fields:
+        _warned_fields.add(field_name)
+        print(
+            f"  WARN  Unmapped Sigma field '{field_name}' in rule '{_current_compile_rule_title}' "
+            f"— will be passed through as-is. Add to SIGMA_FIELD_MAP if this is a typo.",
+            file=sys.stderr,
+        )
+    return field_name
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +188,13 @@ def parse_field_modifiers(raw_key: str, rule_title: str = ""):
 
 def ensure_list(value):
     """Wrap a scalar value in a list; pass lists through unchanged."""
+    if isinstance(value, bool):
+        print(
+            f"  WARN  Boolean value '{value}' used as selection value in rule "
+            f"'{_current_compile_rule_title}' — this likely creates an invalid predicate. "
+            f"Use a field selector instead.",
+            file=sys.stderr,
+        )
     if isinstance(value, list):
         return [str(v) for v in value]
     return [str(value)]
@@ -1183,7 +1257,8 @@ def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 # Support multi-document YAML files (multiple rules per file).
-                documents = list(yaml.safe_load_all(f))
+                # Use _DuplicateKeyChecker to warn on duplicate keys.
+                documents = list(yaml.load_all(f, Loader=_DuplicateKeyChecker))
         except Exception as exc:
             print(f"  ERROR parsing {rel_path}: {exc}", file=sys.stderr)
             skipped += 1

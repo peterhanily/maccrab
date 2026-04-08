@@ -387,7 +387,9 @@ struct AlertDetailView: View {
                 // Severity + Time header
                 HStack {
                     HStack(spacing: 6) {
-                        Circle().fill(alert.severityColor).frame(width: 10, height: 10)
+                        Image(systemName: alert.severity.sfSymbol)
+                            .font(.caption)
+                            .foregroundColor(alert.severityColor)
                             .accessibilityHidden(true)
                         Text(RuleTranslations.translateSeverity(alert.severity.label)).font(.caption).fontWeight(.bold).foregroundColor(alert.severityColor)
                     }

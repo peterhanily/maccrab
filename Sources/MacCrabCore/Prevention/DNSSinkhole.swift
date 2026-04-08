@@ -46,10 +46,33 @@ public actor DNSSinkhole {
         (isEnabled, sinkholdDomains.count)
     }
 
+    /// Verify that `path` is a regular file (or does not yet exist) and is NOT
+    /// a symlink.  Returns `false` if a symlink is detected — writing through a
+    /// symlink while running as root would let an attacker redirect the write to
+    /// an arbitrary file.
+    private func isNotSymlink(_ path: String) -> Bool {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: path, isDirectory: &isDir) else {
+            return true  // File doesn't exist yet — safe to create
+        }
+        // Use lstat (attributesOfItem) which does NOT follow symlinks.
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let fileType = attrs[.type] as? FileAttributeType else {
+            return false
+        }
+        return fileType != .typeSymbolicLink
+    }
+
     private func writeHostsFile() {
         let fm = FileManager.default
         guard fm.isWritableFile(atPath: hostsPath) else {
             logger.warning("Cannot write to /etc/hosts (need root)")
+            return
+        }
+
+        guard isNotSymlink(hostsPath) else {
+            logger.error("Refusing to write: \(self.hostsPath) is a symlink (possible attack)")
             return
         }
 
@@ -59,7 +82,11 @@ public actor DNSSinkhole {
         // Remove any existing MacCrab section
         if let startRange = content.range(of: Self.marker),
            let endRange = content.range(of: Self.endMarker) {
-            content.removeSubrange(startRange.lowerBound..<content.index(after: endRange.upperBound))
+            // Safe upper bound: clamp to content.endIndex to avoid out-of-bounds
+            let removeEnd = endRange.upperBound < content.endIndex
+                ? content.index(after: endRange.upperBound)
+                : content.endIndex
+            content.removeSubrange(startRange.lowerBound..<removeEnd)
         }
 
         // Append new sinkhole entries
@@ -77,11 +104,17 @@ public actor DNSSinkhole {
     }
 
     private func removeHostsEntries() {
+        guard isNotSymlink(hostsPath) else {
+            logger.error("Refusing to write: \(self.hostsPath) is a symlink (possible attack)")
+            return
+        }
         guard var content = try? String(contentsOfFile: hostsPath, encoding: .utf8) else { return }
         if let startRange = content.range(of: Self.marker),
            let endRange = content.range(of: Self.endMarker) {
-            let removeEnd = content.index(after: endRange.upperBound)
-            content.removeSubrange(startRange.lowerBound..<min(removeEnd, content.endIndex))
+            let removeEnd = endRange.upperBound < content.endIndex
+                ? content.index(after: endRange.upperBound)
+                : content.endIndex
+            content.removeSubrange(startRange.lowerBound..<removeEnd)
             try? content.write(toFile: hostsPath, atomically: true, encoding: .utf8)
         }
     }

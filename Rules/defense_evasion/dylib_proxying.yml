@@ -1,0 +1,37 @@
+title: Potential Dylib Proxying via LC_REEXPORT
+id: d1a2b3c4-0438-4000-a000-000000000438
+status: experimental
+description: >
+    Detects use of install_name_tool to modify a dylib's load commands,
+    which can be used for dylib proxying attacks. The attacker creates a
+    malicious dylib that re-exports the original library while injecting
+    additional code, then replaces the original on disk.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1574/004/
+tags:
+    - attack.persistence
+    - attack.defense_evasion
+    - attack.t1574.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/install_name_tool'
+    selection_reexport:
+        CommandLine|contains:
+            - '-reexport_library'
+            - '-change'
+            - '-id'
+    filter_apple:
+        SignerType: 'apple'
+        ParentImage|contains:
+            - '/Xcode.app/'
+            - '/Developer/'
+    condition: selection and selection_reexport and not filter_apple
+falsepositives:
+    - Legitimate Xcode build processes
+    - Developer toolchain operations
+level: medium

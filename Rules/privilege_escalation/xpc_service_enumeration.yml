@@ -1,0 +1,37 @@
+title: Privileged XPC Service Enumeration
+id: d1a2b3c4-0439-4000-a000-000000000439
+status: experimental
+description: >
+    Detects enumeration of privileged XPC services using launchctl or
+    other tools. Attackers enumerate available XPC services to identify
+    targets for privilege escalation via XPC message abuse.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1559/
+tags:
+    - attack.discovery
+    - attack.privilege_escalation
+    - attack.t1559
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_launchctl:
+        Image|endswith: '/launchctl'
+        CommandLine|contains:
+            - 'print system/'
+            - 'list'
+            - 'print-disabled'
+    selection_xpc_enum:
+        CommandLine|contains:
+            - 'XPCServices'
+            - 'com.apple.xpc'
+            - 'NSXPCConnection'
+    filter_apple:
+        SignerType: 'apple'
+    condition: (selection_launchctl or selection_xpc_enum) and not filter_apple
+falsepositives:
+    - System administrators auditing services
+    - Monitoring tools inspecting launchd state
+level: medium

@@ -46,6 +46,19 @@ enum Severity: String, CaseIterable, Hashable, Comparable {
     var label: String {
         rawValue.capitalized
     }
+
+    /// Distinct SF Symbol per severity level for accessibility.
+    /// Ensures severity is distinguishable without relying on color alone
+    /// (supports accessibilityDifferentiateWithoutColor).
+    var sfSymbol: String {
+        switch self {
+        case .informational: return "info.circle.fill"
+        case .low:           return "minus.circle.fill"
+        case .medium:        return "exclamationmark.triangle.fill"
+        case .high:          return "exclamationmark.circle.fill"
+        case .critical:      return "xmark.octagon.fill"
+        }
+    }
 }
 
 // MARK: - EventCategory (local mirror)

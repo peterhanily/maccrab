@@ -1,0 +1,52 @@
+title: Dylib Written to Hijackable Search Path
+id: d1a2b3c4-0437-4000-a000-000000000437
+status: experimental
+description: >
+    Detects creation of a .dylib file in directories commonly used for
+    dylib search path hijacking. Attackers place malicious dylibs in
+    writable paths that precede legitimate library locations in the
+    dynamic linker search order, causing applications to load attacker
+    code on next launch.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1574/004/
+    - https://attack.mitre.org/techniques/T1574/006/
+tags:
+    - attack.persistence
+    - attack.defense_evasion
+    - attack.t1574.004
+    - attack.t1574.006
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_dylib:
+        TargetFilename|endswith: '.dylib'
+    selection_path:
+        TargetFilename|contains:
+            - '/usr/local/lib/'
+            - '/opt/homebrew/lib/'
+            - '/Users/'
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/tmp/'
+            - '/.Trash/'
+            - '/Library/Application Support/'
+    filter_homebrew:
+        Image|endswith:
+            - '/brew'
+            - '/ruby'
+            - '/gem'
+    filter_xcode:
+        Image|contains:
+            - '/Xcode.app/'
+            - '/Developer/'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection_dylib and selection_path and not filter_homebrew and not filter_xcode and not filter_apple
+falsepositives:
+    - Homebrew formula installations
+    - Developer building shared libraries
+    - Legitimate application plugins
+level: medium

@@ -59,12 +59,30 @@ public actor NetworkBlocker {
         (isEnabled, blockedIPs.count)
     }
 
+    /// Verify that `path` is NOT a symlink. Prevents symlink attacks where a
+    /// root-privileged write is redirected to an attacker-chosen file.
+    private func isNotSymlink(_ path: String) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return true }
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let fileType = attrs[.type] as? FileAttributeType else {
+            return false
+        }
+        return fileType != .typeSymbolicLink
+    }
+
     private func writeAnchorFile() {
         let dir = (anchorPath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
-        // Write table file (one IP per line)
         let tablePath = "/etc/pf.anchors/com.maccrab.table"
+
+        guard isNotSymlink(tablePath), isNotSymlink(anchorPath) else {
+            logger.error("Refusing to write PF anchor: path is a symlink (possible attack)")
+            return
+        }
+
+        // Write table file (one IP per line)
         let tableContent = blockedIPs.sorted().joined(separator: "\n") + "\n"
         try? tableContent.write(toFile: tablePath, atomically: true, encoding: .utf8)
 

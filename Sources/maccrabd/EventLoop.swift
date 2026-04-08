@@ -695,6 +695,10 @@ enum EventLoop {
             }
 
             if !matches.isEmpty {
+                // Batch-collect alerts from rule matches, then insert as a single
+                // transaction to reduce SQLite I/O from O(n) transactions to O(1).
+                var batchAlerts: [Alert] = []
+
                 for match in matches {
                     // Suppression + deduplication checks
                     if await state.suppressionManager.isSuppressed(ruleId: match.ruleId, processPath: enrichedEvent.process.executable) {
@@ -722,7 +726,7 @@ enum EventLoop {
                         suppressed: false
                     )
 
-                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    batchAlerts.append(alert)
                     await state.notifier.notify(alert: alert)
                     await state.responseEngine.execute(alert: alert, event: enrichedEvent)
 
@@ -924,6 +928,11 @@ enum EventLoop {
                     if let syslog = state.syslogOutput {
                         Task { await syslog.send(alert: alert) }
                     }
+                }
+
+                // Batch insert all rule-match alerts in a single transaction
+                if !batchAlerts.isEmpty {
+                    do { try await state.alertStore.insert(alerts: batchAlerts) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
             }
         }

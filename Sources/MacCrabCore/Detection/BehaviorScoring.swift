@@ -257,8 +257,11 @@ public actor BehaviorScoring {
 
         guard var entry = processScores[key] else { return nil }
 
-        // If score decayed below threshold, allow re-alerting
-        if entry.rawScore < alertThreshold * 0.5 {
+        // If score has decayed below the alert threshold, allow re-alerting.
+        // This uses the full alertThreshold (not a fraction) so that the re-alert
+        // condition is consistent with the firing condition — no dead zone where
+        // new indicators are silently ignored.
+        if entry.rawScore < alertThreshold {
             alerted.remove(key)
         }
 
@@ -275,7 +278,7 @@ public actor BehaviorScoring {
         processScores[key] = entry
         let score = entry
 
-        // Check threshold (re-alert allowed after decay below 50% of threshold)
+        // Check threshold
         if score.rawScore >= alertThreshold && !alerted.contains(key) {
             alerted.insert(key)
 

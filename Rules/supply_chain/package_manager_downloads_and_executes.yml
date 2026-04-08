@@ -37,10 +37,11 @@ detection:
             - '/bundle'
             - '/yarn'
             - '/pnpm'
-    selection_download_execute:
+    selection_download_tool:
         CommandLine|contains:
             - 'curl'
             - 'wget'
+    selection_execution_pattern:
         CommandLine|contains:
             - '| sh'
             - '| bash'
@@ -52,7 +53,7 @@ detection:
             - '-o /tmp'
             - '--output /tmp'
             - 'chmod +x'
-    condition: selection_parent and selection_download_execute
+    condition: selection_parent and selection_download_tool and selection_execution_pattern
 falsepositives:
     - Legitimate package install scripts that download prebuilt binaries
     - Homebrew-related installations triggered through package managers

@@ -1,0 +1,40 @@
+title: Direct TCC Database Modification
+id: d1a2b3c4-0441-4000-a000-000000000441
+status: experimental
+description: >
+    Detects direct write access to the TCC (Transparency, Consent, and
+    Control) SQLite database. Attackers may bypass tccutil and directly
+    modify the TCC database to grant themselves permissions like Full
+    Disk Access, camera, or microphone without user consent.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1548/
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1548
+    - attack.t1562.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Application Support/com.apple.TCC/TCC.db'
+            - 'com.apple.TCC/TCC.db'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_tccutil:
+        Image|endswith: '/tccutil'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection and not filter_system and not filter_tccutil and not filter_apple
+falsepositives:
+    - MDM solutions managing privacy permissions
+    - Enterprise configuration tools
+level: critical
