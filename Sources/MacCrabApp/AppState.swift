@@ -67,6 +67,11 @@ final class AppState: ObservableObject {
     private var lastAlertTimestamp: Date = .distantPast
     private var lastEventTimestamp: Date = .distantPast
 
+    /// Authoritative set of alert IDs the user has manually suppressed this session.
+    /// Published so SwiftUI views (filteredAlerts) re-render whenever it changes,
+    /// guaranteeing suppression state is never overwritten by a DB reload.
+    @Published var suppressedIDs: Set<String> = []
+
     /// Cached DB connections — avoid reopening on every poll cycle
     private var cachedAlertStore: AlertStore?
     private var cachedEventStore: EventStore?
@@ -194,9 +199,21 @@ final class AppState: ObservableObject {
         do {
             let store = try alertStore()
             let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
-            dashboardAlerts = alerts.map { alertToViewModel($0) }
-            recentAlerts = Array(dashboardAlerts.prefix(5))
-            totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
+            // Apply suppressedIDs overlay: if the user suppressed an alert this session,
+            // keep it suppressed regardless of what the DB says (handles read-only DB case).
+            let overlay = suppressedIDs
+            dashboardAlerts = alerts.map { alert in
+                var vm = alertToViewModel(alert)
+                if overlay.contains(vm.id) { vm.suppressed = true }
+                return vm
+            }
+            recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
+            totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+            // Sync cursor so the next incremental poll doesn't re-fetch these alerts
+            // and insert them as unsuppressed duplicates.
+            if let mostRecent = dashboardAlerts.first?.timestamp {
+                lastAlertTimestamp = mostRecent
+            }
         } catch {
             // DB may not exist yet
         }
@@ -270,30 +287,37 @@ final class AppState: ObservableObject {
     }
 
     func unsuppressAlert(_ alertId: String) async {
+        // Update authoritative set and in-memory state immediately
+        suppressedIDs.remove(alertId)
+        if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
+            dashboardAlerts[idx].suppressed = false
+        }
+        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
+        totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+        // Best-effort DB write
         do {
             let store = try alertStore()
             try await store.unsuppress(alertId: alertId)
-            await loadAlerts()
-        } catch {
-            if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
-                dashboardAlerts[idx].suppressed = false
-            }
-        }
+        } catch {}
     }
 
     /// Suppression rules: (ruleTitle, processName) patterns to auto-hide.
     @Published var suppressionPatterns: [(ruleTitle: String, processName: String)] = []
 
     func suppressAlert(_ alertId: String) async {
+        // Update authoritative set and in-memory state immediately — no loadAlerts() needed.
+        // suppressedIDs survives any DB reload, so tab-switching can never undo a suppression.
+        suppressedIDs.insert(alertId)
+        if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
+            dashboardAlerts[idx].suppressed = true
+        }
+        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
+        totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+        // Best-effort DB write (fails silently on read-only DB)
         do {
             let store = try alertStore()
             try await store.suppress(alertId: alertId)
-            await loadAlerts()
-        } catch {
-            if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
-                dashboardAlerts[idx].suppressed = true
-            }
-        }
+        } catch {}
     }
 
     /// Suppress ALL alerts matching this rule + process pattern, now and in the future.
@@ -309,14 +333,15 @@ final class AppState: ObservableObject {
             }
         } catch {}
 
-        // Mark as suppressed in display (keep in array so "show suppressed" works)
+        // Mark as suppressed in display and in the authoritative set
         for i in dashboardAlerts.indices {
             if dashboardAlerts[i].ruleTitle == ruleTitle && dashboardAlerts[i].processName == processName {
+                suppressedIDs.insert(dashboardAlerts[i].id)
                 dashboardAlerts[i].suppressed = true
             }
         }
-        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed }.prefix(5))
-        totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
+        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
+        totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
     }
 
     /// Remove a suppression pattern.
@@ -360,15 +385,21 @@ final class AppState: ObservableObject {
         do {
             let store = try alertStore()
             let newAlerts = try await store.alerts(since: lastAlertTimestamp, limit: 100)
+            let existingIDs = Set(dashboardAlerts.map { $0.id })
+            let overlay = suppressedIDs
             let newViewModels = newAlerts
-                .filter { $0.timestamp > lastAlertTimestamp }
-                .map { alertToViewModel($0) }
+                .filter { $0.timestamp > lastAlertTimestamp && !existingIDs.contains($0.id) }
+                .map { alert -> AlertViewModel in
+                    var vm = alertToViewModel(alert)
+                    if overlay.contains(vm.id) { vm.suppressed = true }
+                    return vm
+                }
             if !newViewModels.isEmpty {
                 dashboardAlerts.insert(contentsOf: newViewModels, at: 0)
                 // Cap at 500
                 if dashboardAlerts.count > 500 { dashboardAlerts = Array(dashboardAlerts.prefix(500)) }
-                recentAlerts = Array(dashboardAlerts.prefix(5))
-                totalAlerts = dashboardAlerts.filter { !$0.suppressed }.count
+                recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
+                totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
                 lastAlertTimestamp = newViewModels.first?.timestamp ?? lastAlertTimestamp
 
                 // Trigger crab speech bubble for critical/high alerts

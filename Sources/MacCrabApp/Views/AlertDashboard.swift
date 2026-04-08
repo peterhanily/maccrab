@@ -26,12 +26,13 @@ struct AlertDashboard: View {
     private var filteredAlerts: [AlertViewModel] {
         var results = appState.dashboardAlerts
 
-        // Mark pattern-suppressed alerts so they display with suppressed styling
+        // Apply session-level suppression overlay and pattern suppression at render time.
+        // This is the authoritative check — dashboardAlerts may have stale suppressed=false
+        // values from a DB reload, but suppressedIDs is never cleared by reloads.
         results = results.map { alert in
             var a = alert
-            if !a.suppressed && appState.isPatternSuppressed(a) {
-                a.suppressed = true
-            }
+            if appState.suppressedIDs.contains(a.id) { a.suppressed = true }
+            if !a.suppressed && appState.isPatternSuppressed(a) { a.suppressed = true }
             return a
         }
 
