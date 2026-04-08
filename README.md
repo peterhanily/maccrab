@@ -5,13 +5,13 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey)]()
-[![Rules](https://img.shields.io/badge/detection%20rules-343-orange)]()
+[![Rules](https://img.shields.io/badge/detection%20rules-348-orange)]()
 [![Version](https://img.shields.io/badge/version-v1.0.0-blue)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
 ---
 
-MacCrab is an on-device security detection engine for macOS. It evaluates 343 Sigma-compatible detection rules against real-time kernel events, Unified Log streams, TCC permission changes, DNS queries, and network connections -- entirely on your machine, with no SIEM, no cloud infrastructure, and no telemetry leaving the host.
+MacCrab is an on-device security detection engine for macOS. It evaluates 348 Sigma-compatible detection rules against real-time kernel events, Unified Log streams, TCC permission changes, DNS queries, and network connections -- entirely on your machine, with no SIEM, no cloud infrastructure, and no telemetry leaving the host.
 
 What sets it apart from other open-source macOS tools:
 
@@ -26,7 +26,7 @@ Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- b
 
 ## What's New in v1.0.0
 
-- 343 Sigma-compatible detection rules (316 single-event + 27 sequences)
+- 348 Sigma-compatible detection rules (321 single-event + 27 sequences)
 - 5-tier detection hierarchy (rules, sequences, anomaly, campaigns, cross-process)
 - LLM reasoning backends: Ollama, Claude, OpenAI-compatible, Gemini, Mistral
 - NL threat hunting, LLM investigation summaries, active defense recommendations
@@ -102,11 +102,11 @@ MacCrab ingests from eight real-time event sources, covering kernel-level proces
 
 ## Detection Stack
 
-### Rules (343 compiled)
+### Rules (348 compiled)
 
 | Layer | Count | Description |
 |-------|:-----:|-------------|
-| **Single-event Sigma rules** | 316 | Standard Sigma YAML compiled to JSON predicates, evaluated per event in real time |
+| **Single-event Sigma rules** | 321 | Standard Sigma YAML compiled to JSON predicates, evaluated per event in real time |
 | **Temporal sequence rules** | 27 | Multi-step ordered rules with time windows, process lineage correlation, and causal chaining |
 
 ### Analysis Engines
@@ -240,10 +240,10 @@ Rules can trigger configurable response actions ranging from passive to active:
 | Exfiltration | `exfiltration/` | 11 | -- | 11 |
 | Initial Access | `initial_access/` | 10 | -- | 10 |
 | Container | `container/` | 8 | -- | 8 |
-| TCC Abuse | `tcc/` | 6 | -- | 6 |
-| Impact | `impact/` | 6 | -- | 6 |
+| TCC Abuse | `tcc/` | 9 | -- | 9 |
+| Impact | `impact/` | 8 | -- | 8 |
 | Temporal Sequences | `sequences/` | -- | 27 | 27 |
-| **Total** | | **316** | **27** | **343** |
+| **Total** | | **321** | **27** | **348** |
 
 ---
 
@@ -741,7 +741,7 @@ maccrab/
 │       └── ViewModels/
 │           └── ViewModels.swift
 │
-├── Rules/                               # 343 Sigma-compatible detection rules
+├── Rules/                               # 348 Sigma-compatible detection rules
 │   ├── defense_evasion/    (55)
 │   ├── credential_access/  (32)
 │   ├── supply_chain/       (31)
