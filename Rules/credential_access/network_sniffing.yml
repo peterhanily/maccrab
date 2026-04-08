@@ -1,0 +1,58 @@
+title: Network Sniffing Tool Executed
+id: b3c4d5e6-3031-4000-a000-000000003031
+status: experimental
+description: |
+  Detects execution of network packet capture and analysis tools in
+  non-developer, non-administrative contexts. Adversaries capture network
+  traffic to harvest credentials transmitted in cleartext (HTTP, FTP, SMTP),
+  session tokens, and other sensitive data. tcpdump, tshark, and similar tools
+  require elevated privileges on macOS, making their presence outside of
+  expected admin workflows suspicious.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1040/
+tags:
+    - attack.credential_access
+    - attack.discovery
+    - attack.t1040
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tools:
+        Image|endswith:
+            - '/tcpdump'
+            - '/tshark'
+            - '/dumpcap'
+            - '/tcpflow'
+            - '/tcptrack'
+            - '/ngrep'
+            - '/dsniff'
+            - '/ettercap'
+            - '/bettercap'
+            - '/arpspoof'
+    selection_promiscuous:
+        # Any process using BPF filters or promiscuous mode flag
+        CommandLine|contains:
+            - '-i any'
+            - 'promisc'
+            - '-w /tmp/'
+            - '-w /var/tmp/'
+            - '-w ~/Desktop/'
+            - '-w /Users/'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_known_admin:
+        # Wireshark and similar GUI tools are usually run interactively
+        ParentImage|endswith:
+            - '/Wireshark'
+            - '/PacketPeeper'
+    condition: (selection_tools or selection_promiscuous) and not filter_apple and not filter_known_admin
+falsepositives:
+    - Network administrators and security engineers using tcpdump for troubleshooting
+    - Developers capturing traffic for debugging API calls
+    - Automated network testing infrastructure
+level: medium

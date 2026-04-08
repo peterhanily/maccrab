@@ -1,0 +1,50 @@
+title: PAM Module Configuration Tampered
+id: b3c4d5e6-3032-4000-a000-000000003032
+status: experimental
+description: |
+  Detects modifications to PAM (Pluggable Authentication Modules) configuration
+  files or installation of new PAM modules. Adversaries modify PAM configs to
+  capture plaintext credentials during authentication, bypass MFA, or create
+  persistent backdoors that survive password changes. Common targets include
+  adding a malicious pam_python.so or modifying /etc/pam.d/sudo to accept
+  any password.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1556/003/
+    - https://attack.mitre.org/techniques/T1556/
+tags:
+    - attack.credential_access
+    - attack.defense_evasion
+    - attack.t1556.003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_pam_config:
+        TargetFilename|startswith:
+            - '/etc/pam.d/'
+            - '/private/etc/pam.d/'
+    selection_pam_module:
+        TargetFilename|contains:
+            - '/lib/pam/'
+            - '/usr/lib/pam/'
+            - '/private/lib/pam/'
+        TargetFilename|endswith:
+            - '.so'
+            - '.dylib'
+    filter_apple:
+        SignerType:
+            - 'apple'
+    filter_system_daemons:
+        # installd writes new PAM configs during OS updates
+        ParentImage|endswith:
+            - '/system_installd'
+            - '/installd'
+            - '/softwareupdate'
+    condition: (selection_pam_config or selection_pam_module) and not filter_apple and not filter_system_daemons
+falsepositives:
+    - macOS software updates modifying PAM configuration
+    - IT administrators deploying enterprise authentication modules (Kerberos, LDAP)
+    - Security products installing PAM modules for monitoring
+level: high
