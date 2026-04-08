@@ -353,6 +353,10 @@ public actor RuleEngine {
     ///
     /// Only rules whose logsource category matches the event's category are
     /// tested. Returns an array of `RuleMatch` for every rule that fires.
+    /// Threshold for logging slow rules (nanoseconds). Rules exceeding this
+    /// are logged at warning level to help identify performance bottlenecks.
+    private static let slowRuleThresholdNs: UInt64 = 50_000_000  // 50ms
+
     public func evaluate(_ event: Event) -> [RuleMatch] {
         let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
         guard let rules = ruleIndex[category] else { return [] }
@@ -360,7 +364,16 @@ public actor RuleEngine {
         var matches: [RuleMatch] = []
 
         for rule in rules where rule.enabled {
-            if evaluateRule(rule, against: event) {
+            let start = DispatchTime.now()
+            let fired = evaluateRule(rule, against: event)
+            let elapsed = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+
+            if elapsed > Self.slowRuleThresholdNs {
+                let ms = Double(elapsed) / 1_000_000
+                logger.warning("Slow rule: \(rule.title) (\(rule.id)) took \(String(format: "%.1f", ms))ms")
+            }
+
+            if fired {
                 let match = RuleMatch(
                     ruleId: rule.id,
                     ruleName: rule.title,

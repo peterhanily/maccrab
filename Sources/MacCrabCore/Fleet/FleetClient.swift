@@ -37,6 +37,12 @@ public actor FleetClient {
     /// Whether the client is active.
     private var isRunning = false
 
+    /// Consecutive push failures (for exponential backoff).
+    private var consecutivePushFailures: Int = 0
+
+    /// Maximum backoff interval (5 minutes).
+    private let maxBackoffInterval: TimeInterval = 300
+
     /// Last pulled aggregation.
     private var lastAggregation: FleetAggregation?
 
@@ -74,10 +80,11 @@ public actor FleetClient {
         self.dataHandler = handler
         self.isRunning = true
 
-        // Push task
+        // Push task with exponential backoff on failure
         Task {
             while isRunning {
-                try? await Task.sleep(nanoseconds: UInt64(pushInterval * 1_000_000_000))
+                let interval = pushBackoffInterval()
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard isRunning else { break }
                 await push()
             }
@@ -151,13 +158,27 @@ public actor FleetClient {
                 let iocCount = pendingIOCs.count
                 pendingAlerts.removeAll()
                 pendingIOCs.removeAll()
+                consecutivePushFailures = 0
                 logger.info("Fleet push: sent \(alertCount) alerts, \(iocCount) IOCs")
             } else {
-                logger.warning("Fleet push failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                consecutivePushFailures += 1
+                logger.warning("Fleet push failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0) (attempt \(self.consecutivePushFailures))")
             }
         } catch {
-            logger.warning("Fleet push error: \(error.localizedDescription)")
+            consecutivePushFailures += 1
+            logger.warning("Fleet push error: \(error.localizedDescription) (attempt \(self.consecutivePushFailures))")
         }
+    }
+
+    /// Calculate push interval with exponential backoff and jitter.
+    /// Base interval doubles on each consecutive failure, capped at maxBackoffInterval.
+    /// Random jitter (0-25%) prevents thundering herd when many nodes recover.
+    private func pushBackoffInterval() -> TimeInterval {
+        guard consecutivePushFailures > 0 else { return pushInterval }
+        let exponential = pushInterval * pow(2.0, Double(min(consecutivePushFailures, 8)))
+        let capped = min(exponential, maxBackoffInterval)
+        let jitter = capped * Double.random(in: 0...0.25)
+        return capped + jitter
     }
 
     // MARK: - Pull

@@ -1,6 +1,40 @@
 import Foundation
 import MacCrabCore
 
+// MARK: - ANSI Terminal Colors
+
+/// Whether stdout is a terminal (enables color output).
+/// Falls back to plain text when output is piped or redirected.
+let isTerminal = isatty(STDOUT_FILENO) != 0
+
+enum ANSIColor: String {
+    case red = "\u{001B}[31m"
+    case orange = "\u{001B}[33m"      // yellow in most terminals
+    case yellow = "\u{001B}[93m"      // bright yellow
+    case blue = "\u{001B}[34m"
+    case gray = "\u{001B}[90m"
+    case bold = "\u{001B}[1m"
+    case reset = "\u{001B}[0m"
+
+    static func wrap(_ text: String, _ color: ANSIColor) -> String {
+        guard isTerminal else { return text }
+        return "\(color.rawValue)\(text)\(ANSIColor.reset.rawValue)"
+    }
+}
+
+extension Severity {
+    /// Colored severity label for CLI output.
+    var coloredLabel: String {
+        switch self {
+        case .critical:      return ANSIColor.wrap("[CRITICAL]", .red)
+        case .high:          return ANSIColor.wrap("[HIGH]    ", .orange)
+        case .medium:        return ANSIColor.wrap("[MEDIUM]  ", .yellow)
+        case .low:           return ANSIColor.wrap("[LOW]     ", .blue)
+        case .informational: return ANSIColor.wrap("[INFO]    ", .gray)
+        }
+    }
+}
+
 /// Resolve the MacCrab data directory.
 /// Prefers the system dir (root daemon) when its DB is newer, since the
 /// user dir may contain stale data from a previous non-root run.

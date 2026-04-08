@@ -6,6 +6,8 @@ import os.log
 /// Creates and initializes all daemon components, returning a fully configured DaemonState.
 enum DaemonSetup {
     static func initialize() async -> DaemonState {
+        let startupBegin = DispatchTime.now()
+
         // Check if running as root (required for ES framework, optional for other sources)
         let isRoot = getuid() == 0
         if !isRoot {
@@ -767,6 +769,9 @@ enum DaemonSetup {
             }
         }
         print("Endpoint Security: \(esMode)")
+
+        let startupMs = Double(DispatchTime.now().uptimeNanoseconds - startupBegin.uptimeNanoseconds) / 1_000_000
+        print(String(format: "Startup complete in %.0fms", startupMs))
 
         return DaemonState(
             isRoot: isRoot,

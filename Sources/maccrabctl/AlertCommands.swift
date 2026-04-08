@@ -32,16 +32,7 @@ extension MacCrabCtl {
                 // Severity prefix provides a text fallback for screen readers and
                 // copy-paste contexts where emoji may be rendered as descriptions
                 // (e.g., "Heavy Red Circle") or stripped entirely.
-                let severityIcon: String
-                switch alert.severity {
-                case .critical:      severityIcon = "[CRITICAL] 🔴"
-                case .high:          severityIcon = "[HIGH]     🟠"
-                case .medium:        severityIcon = "[MEDIUM]   🟡"
-                case .low:           severityIcon = "[LOW]      🔵"
-                case .informational: severityIcon = "[INFO]     ⚪"
-                }
-
-                print("\(severityIcon) \(time) \(alert.ruleTitle)")
+                print("\(alert.severity.coloredLabel) \(time) \(alert.ruleTitle)")
                 print("   Process: \(alert.processName ?? "?") (\(alert.processPath ?? "?"))")
                 if let techniques = alert.mitreTechniques, !techniques.isEmpty {
                     print("   MITRE: \(techniques)")
