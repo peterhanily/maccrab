@@ -468,6 +468,7 @@ private struct IntelMetricBox: View {
         GroupBox {
             VStack(spacing: 4) {
                 Image(systemName: icon).font(.title3).foregroundColor(color)
+                    .accessibilityHidden(true)
                 Text(value).font(.system(.title2, design: .rounded, weight: .bold))
                 Text(label).font(.caption2).foregroundColor(.secondary).multilineTextAlignment(.center)
             }
@@ -489,6 +490,7 @@ private struct FeedCard: View {
     var body: some View {
         HStack(spacing: 12) {
             Circle().fill(color).frame(width: 8, height: 8)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.callout).fontWeight(.medium)
                 Text(type).font(.caption).foregroundColor(.secondary)
@@ -512,6 +514,7 @@ private struct CoverageRow: View {
             Image(systemName: active ? "checkmark.circle.fill" : "circle")
                 .foregroundColor(active ? .green : .secondary)
                 .font(.caption)
+                .accessibilityLabel(active ? "Active" : "Inactive")
             VStack(alignment: .leading, spacing: 1) {
                 Text(label).font(.caption).fontWeight(.medium)
                 Text(detail).font(.caption2).foregroundColor(.secondary)

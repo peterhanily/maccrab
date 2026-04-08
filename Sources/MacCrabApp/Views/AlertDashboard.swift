@@ -130,6 +130,7 @@ struct AlertDashboard: View {
                     Image(systemName: "shield.checkmark")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.5))
+                        .accessibilityHidden(true)
                     Text(appState.dashboardAlerts.isEmpty
                         ? String(localized: "alerts.empty", defaultValue: "No alerts \u{2014} all clear")
                         : String(localized: "alerts.noMatch", defaultValue: "No alerts matching filters"))
@@ -387,6 +388,7 @@ struct AlertDetailView: View {
                 HStack {
                     HStack(spacing: 6) {
                         Circle().fill(alert.severityColor).frame(width: 10, height: 10)
+                            .accessibilityHidden(true)
                         Text(RuleTranslations.translateSeverity(alert.severity.label)).font(.caption).fontWeight(.bold).foregroundColor(alert.severityColor)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
@@ -398,6 +400,7 @@ struct AlertDetailView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "bolt.shield.fill")
                                 .font(.caption2)
+                                .accessibilityHidden(true)
                             Text(String(localized: "alerts.autoResponseConfigured", defaultValue: "Auto-response configured"))
                                 .font(.caption2)
                         }
@@ -441,6 +444,7 @@ struct AlertDetailView: View {
                             ForEach(techniques, id: \.self) { tech in
                                 HStack {
                                     Image(systemName: "shield.fill").foregroundColor(.orange).font(.caption)
+                                        .accessibilityHidden(true)
                                     Text(tech).font(.system(.body, design: .monospaced))
                                     Spacer()
                                     Link("View", destination: URL(string: "https://attack.mitre.org/techniques/\(tech.replacingOccurrences(of: "attack.", with: "").uppercased().replacingOccurrences(of: ".", with: "/"))/")!)
@@ -598,6 +602,7 @@ struct AlertDetailView: View {
                             HStack {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundColor(.green)
+                                    .accessibilityHidden(true)
                                 Text(feedback)
                                     .font(.caption)
                                     .foregroundColor(.secondary)

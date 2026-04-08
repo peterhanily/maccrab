@@ -431,6 +431,7 @@ private struct DetectionStep: View {
                         Image(systemName: "minus.circle.fill").foregroundColor(.red)
                     }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove condition")
                     .disabled(rule.conditions.count <= 1)
                 }
             }
@@ -492,6 +493,7 @@ private struct FiltersStep: View {
                         Image(systemName: "minus.circle.fill").foregroundColor(.red)
                     }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove filter")
                 }
             }
 
@@ -575,6 +577,7 @@ private struct PreviewStep: View {
             if let path = savedPath {
                 HStack {
                     Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.title2)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading) {
                         Text("Rule saved!").font(.headline)
                         Text(path).font(.caption).foregroundColor(.secondary)

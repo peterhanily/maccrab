@@ -99,6 +99,7 @@ struct TCCTimeline: View {
                     Image(systemName: "lock.shield")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.5))
+                        .accessibilityHidden(true)
                     Text(appState.tccEvents.isEmpty
                         ? String(localized: "tcc.emptyDefault", defaultValue: "No permission changes detected yet")
                         : String(localized: "tcc.noMatch", defaultValue: "No TCC events matching current filters"))
@@ -128,6 +129,7 @@ struct TCCTimeline: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
                     .font(.caption)
+                    .accessibilityHidden(true)
                 Text("\(granted) \(String(localized: "tcc.granted", defaultValue: "granted"))")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -136,6 +138,7 @@ struct TCCTimeline: View {
                     .foregroundColor(.red)
                     .font(.caption)
                     .padding(.leading, 8)
+                    .accessibilityHidden(true)
                 Text("\(denied) \(String(localized: "tcc.denied", defaultValue: "denied"))")
                     .font(.caption)
                     .foregroundColor(.secondary)

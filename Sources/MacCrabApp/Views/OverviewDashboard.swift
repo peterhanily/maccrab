@@ -75,6 +75,7 @@ struct OverviewDashboard: View {
                             Image(systemName: "chevron.right")
                                 .foregroundColor(.white.opacity(0.6))
                                 .flipsForRightToLeftLayoutDirection(true)
+                                .accessibilityHidden(true)
                         }
                         .padding()
                         .background(criticalCount > 0 ? criticalColor : highCount > 0 ? highColor : allClearColor)
@@ -99,6 +100,7 @@ struct OverviewDashboard: View {
                             Image(systemName: preventionActive ? "shield.checkered" : "shield")
                                 .font(.title3)
                                 .foregroundColor(preventionActive ? .green : .secondary)
+                                .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(preventionActive ? "Prevention Active" : "Prevention Off")
                                     .font(.subheadline)
@@ -113,6 +115,7 @@ struct OverviewDashboard: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .flipsForRightToLeftLayoutDirection(true)
+                                .accessibilityHidden(true)
                         }
                         .padding(10)
                         .background(Color.secondary.opacity(0.06))
@@ -161,6 +164,7 @@ struct OverviewDashboard: View {
                                                     .font(.caption2)
                                                     .foregroundColor(.secondary)
                                                     .flipsForRightToLeftLayoutDirection(true)
+                                                    .accessibilityHidden(true)
                                             }
                                         }
                                         .buttonStyle(.plain)
@@ -223,6 +227,7 @@ struct StatCard: View {
                 Image(systemName: icon)
                     .font(.title2)
                     .foregroundColor(color)
+                    .accessibilityHidden(true)
                 Text(value)
                     .font(.system(.title, design: .rounded, weight: .bold))
                 Text(title)
@@ -247,6 +252,7 @@ struct SeverityCount: View {
             Circle()
                 .fill(color)
                 .frame(width: 10, height: 10)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text("\(count)")
                     .font(.system(.title3, design: .rounded, weight: .bold))
@@ -294,6 +300,7 @@ struct HealthRow: View {
             Image(systemName: status ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundColor(status ? .green : .red)
                 .font(.subheadline)
+                .accessibilityLabel(status ? "OK" : "Failed")
             Text(label)
                 .font(.subheadline)
                 .fontWeight(.medium)

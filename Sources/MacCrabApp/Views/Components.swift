@@ -58,6 +58,7 @@ struct AlertRow: View {
                         Image(systemName: "eye.slash.fill")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                            .accessibilityHidden(true)
                     }
                     Text(alert.ruleTitle)
                         .font(.headline)

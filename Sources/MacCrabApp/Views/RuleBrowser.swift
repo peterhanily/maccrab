@@ -67,6 +67,7 @@ struct RuleBrowser: View {
                     HStack {
                         Image(systemName: "shield")
                             .foregroundColor(.accentColor)
+                            .accessibilityHidden(true)
                         Text(String(localized: "rules.allRules", defaultValue: "All Rules"))
                         Spacer()
                         Text("\(appState.rules.count)")
@@ -84,6 +85,7 @@ struct RuleBrowser: View {
                             Image(systemName: tacticIcon(for: tactic.name))
                                 .foregroundColor(.accentColor)
                                 .frame(width: 16)
+                                .accessibilityHidden(true)
                             Text(RuleTranslations.translateTactic(tactic.name))
                             Spacer()
                             Text("\(tactic.ruleCount)")
@@ -158,6 +160,7 @@ struct RuleBrowser: View {
                         Image(systemName: "shield.slash")
                             .font(.system(size: 48))
                             .foregroundColor(.secondary.opacity(0.5))
+                            .accessibilityHidden(true)
                         Text(String(localized: "rules.noMatch", defaultValue: "No rules matching current filters"))
                             .font(.headline)
                             .foregroundColor(.secondary)
@@ -258,11 +261,13 @@ private struct RuleDetailPanel: View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Image(systemName: "shield.fill").foregroundColor(.purple).font(.caption)
+                                    .accessibilityHidden(true)
                                 Text("Tactic: \(RuleTranslations.translateTactic(rule.tacticName))").font(.subheadline)
                             }
                             ForEach(rule.techniqueIds, id: \.self) { tech in
                                 HStack {
                                     Image(systemName: "chevron.right").font(.caption2).foregroundColor(.secondary).flipsForRightToLeftLayoutDirection(true)
+                                        .accessibilityHidden(true)
                                     Text(tech).font(.system(.body, design: .monospaced))
                                     Spacer()
                                     Link("MITRE", destination: URL(string: "https://attack.mitre.org/techniques/\(tech.replacingOccurrences(of: ".", with: "/"))/")!)

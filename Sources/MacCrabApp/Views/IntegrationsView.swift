@@ -49,6 +49,7 @@ struct IntegrationsView: View {
                         Image(systemName: "puzzlepiece.extension")
                             .font(.system(size: 48))
                             .foregroundColor(.secondary.opacity(0.5))
+                            .accessibilityHidden(true)
                         Text(String(localized: "integrations.clickScan", defaultValue: "Click Scan to detect installed security tools"))
                             .font(.headline)
                             .foregroundColor(.secondary)
@@ -78,6 +79,7 @@ struct IntegrationsView: View {
                             Image(systemName: "circle")
                                 .foregroundColor(.secondary.opacity(0.3))
                                 .font(.caption)
+                                .accessibilityHidden(true)
                             Text(name)
                                 .font(.callout)
                                 .foregroundColor(.secondary)
@@ -202,6 +204,7 @@ struct ToolCard: View {
                     .font(.title2)
                     .foregroundColor(tool.isRunning ? .green : .secondary)
                     .frame(width: 32)
+                    .accessibilityLabel(tool.isRunning ? "Running" : "Not running")
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {

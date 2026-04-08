@@ -98,6 +98,7 @@ struct ResponseActionsView: View {
                             if config.rules.isEmpty {
                                 VStack(spacing: 8) {
                                     Image(systemName: "bolt.slash").font(.title2).foregroundColor(.secondary.opacity(0.5))
+                                        .accessibilityHidden(true)
                                     Text(String(localized: "responseActions.noPerRule", defaultValue: "No per-rule actions configured")).font(.caption).foregroundColor(.secondary)
                                     Text(String(localized: "responseActions.noPerRuleHint", defaultValue: "Click 'Add Rule Action' to configure responses for specific rules."))
                                         .font(.caption2).foregroundColor(.secondary)
@@ -291,6 +292,7 @@ private struct ActionRow: View {
             Image(systemName: actionIcon)
                 .foregroundColor(actionColor)
                 .frame(width: 20)
+                .accessibilityHidden(true)
 
             Picker("Action", selection: $action.action) {
                 ForEach(actions, id: \.self) { Text($0.capitalized).tag($0) }

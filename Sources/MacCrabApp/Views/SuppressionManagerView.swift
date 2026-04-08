@@ -43,6 +43,7 @@ struct SuppressionManagerView: View {
                     Image(systemName: "eye")
                         .font(.title2)
                         .foregroundColor(.secondary.opacity(0.5))
+                        .accessibilityHidden(true)
                     Text(String(localized: "suppression.noActive", defaultValue: "No active suppressions"))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -57,6 +58,7 @@ struct SuppressionManagerView: View {
                                 Image(systemName: "eye.slash")
                                     .foregroundColor(.secondary)
                                     .font(.subheadline)
+                                    .accessibilityHidden(true)
 
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(pattern.ruleTitle)

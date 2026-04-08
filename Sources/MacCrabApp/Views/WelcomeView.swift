@@ -193,6 +193,7 @@ private struct FeatureRow: View {
                 .font(.title3)
                 .foregroundColor(.accentColor)
                 .frame(width: 24)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.callout).fontWeight(.medium)
                 Text(description).font(.caption).foregroundColor(.secondary)
@@ -211,6 +212,7 @@ private struct SetupRow: View {
             Image(systemName: icon)
                 .foregroundColor(color)
                 .font(.caption)
+                .accessibilityHidden(true)
             Text(text)
                 .font(.callout)
         }

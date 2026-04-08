@@ -116,6 +116,7 @@ struct EventStream: View {
                 }
                 .controlSize(.small)
                 .help("Reload events")
+                .accessibilityLabel("Reload events")
                 .keyboardShortcut("r", modifiers: .command)
 
                 Divider()
@@ -150,6 +151,7 @@ struct EventStream: View {
                     Image(systemName: "list.bullet.rectangle")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary.opacity(0.5))
+                        .accessibilityHidden(true)
                     Text(String(localized: "events.noMatch", defaultValue: "No events matching current filters"))
                         .font(.headline)
                         .foregroundColor(.secondary)
@@ -217,12 +219,14 @@ struct EventStream: View {
                 if isPaused {
                     Image(systemName: "pause.circle.fill")
                         .foregroundColor(.orange)
+                        .accessibilityHidden(true)
                     Text(String(localized: "events.paused", defaultValue: "Paused"))
                         .foregroundColor(.orange)
                 } else {
                     Image(systemName: "circle.fill")
                         .foregroundColor(.green)
                         .font(.system(size: 6))
+                        .accessibilityHidden(true)
                     Text(String(localized: "events.live", defaultValue: "Live"))
                         .foregroundColor(.green)
                 }

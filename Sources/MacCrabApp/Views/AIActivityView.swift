@@ -116,6 +116,7 @@ struct AIActivityView: View {
                                     Image(systemName: "checkmark.shield")
                                         .font(.title)
                                         .foregroundColor(.green)
+                                        .accessibilityHidden(true)
                                     VStack(alignment: .leading) {
                                         Text(String(localized: "aiGuard.noAlerts", defaultValue: "No AI safety alerts"))
                                             .font(.headline)
@@ -131,6 +132,7 @@ struct AIActivityView: View {
                                         Circle()
                                             .fill(alert.severityColor)
                                             .frame(width: 8, height: 8)
+                                            .accessibilityHidden(true)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(alert.ruleTitle)
                                                 .font(.subheadline)
@@ -162,6 +164,7 @@ struct AIActivityView: View {
                                         Image(systemName: "lock.fill")
                                             .font(.caption2)
                                             .foregroundColor(.orange)
+                                            .accessibilityHidden(true)
                                         Text(pattern)
                                             .font(.system(.caption2, design: .monospaced))
                                         Spacer()
@@ -191,6 +194,7 @@ private struct StatusCard: View {
             Image(systemName: icon)
                 .font(.title2)
                 .foregroundColor(color)
+                .accessibilityHidden(true)
             Text(value)
                 .font(.title3)
                 .fontWeight(.bold)

@@ -39,6 +39,7 @@ struct ESHealthView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .accessibilityLabel("Refresh")
                     .keyboardShortcut("r", modifiers: .command)
                 }
                 .padding(.horizontal)
@@ -151,10 +152,12 @@ struct ESHealthView: View {
                                 Image(systemName: appState.isConnected ? "checkmark.circle.fill" : "circle.dashed")
                                     .foregroundColor(appState.isConnected ? .green : .secondary)
                                     .frame(width: 16)
+                                    .accessibilityLabel(appState.isConnected ? "Active" : "Inactive")
                                 Image(systemName: collector.icon)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                                     .frame(width: 16)
+                                    .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(collector.name).font(.subheadline)
                                     Text(collector.note)
@@ -221,6 +224,7 @@ private struct HealthCard: View {
                 HStack {
                     Image(systemName: icon)
                         .foregroundColor(color)
+                        .accessibilityHidden(true)
                     Text(title)
                         .font(.caption)
                         .foregroundColor(.secondary)

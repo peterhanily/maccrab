@@ -72,6 +72,7 @@ struct BrowserExtensionsView: View {
                         Spacer()
                         Image(systemName: "checkmark.shield")
                             .font(.system(size: 48)).foregroundColor(.green.opacity(0.7))
+                            .accessibilityHidden(true)
                         Text(String(localized: "extensions.noSuspicious",
                             defaultValue: "No suspicious extensions found"))
                             .font(.headline).foregroundColor(.secondary)
@@ -82,6 +83,7 @@ struct BrowserExtensionsView: View {
                         Spacer()
                         Image(systemName: "puzzlepiece.extension")
                             .font(.system(size: 48)).foregroundColor(.secondary.opacity(0.5))
+                            .accessibilityHidden(true)
                         Text(String(localized: "extensions.none",
                             defaultValue: "No browser extensions found"))
                             .font(.headline).foregroundColor(.secondary)
@@ -99,6 +101,7 @@ struct BrowserExtensionsView: View {
                                 HStack {
                                     Image(systemName: "globe")
                                         .font(.caption).foregroundColor(.secondary)
+                                        .accessibilityHidden(true)
                                     Text(browser.capitalized)
                                         .font(.headline)
                                     Text("(\(rows.count))")
@@ -143,9 +146,11 @@ private struct ExtensionRowView: View {
                     if row.isSuspicious {
                         Image(systemName: "exclamationmark.shield.fill")
                             .foregroundColor(.red)
+                            .accessibilityLabel("Suspicious")
                     } else {
                         Image(systemName: "puzzlepiece.extension")
                             .foregroundColor(.secondary)
+                            .accessibilityHidden(true)
                     }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(row.name)

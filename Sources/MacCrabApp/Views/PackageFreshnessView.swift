@@ -158,11 +158,22 @@ private struct PackageResultView: View {
         }
     }
 
+    private var riskLabel: String {
+        switch info.riskLevel {
+        case .safe:     return "Risk: Safe"
+        case .low:      return "Risk: Low"
+        case .medium:   return "Risk: Medium"
+        case .high:     return "Risk: High"
+        case .critical: return "Risk: Critical"
+        }
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: riskIcon)
                 .font(.title2)
                 .foregroundColor(riskColor)
+                .accessibilityLabel(riskLabel)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {

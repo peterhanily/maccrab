@@ -91,6 +91,7 @@ struct PreventionView: View {
                                     Image(systemName: "xmark.shield.fill")
                                         .foregroundColor(.red)
                                         .font(.caption)
+                                        .accessibilityHidden(true)
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(alert.ruleTitle)
                                             .font(.caption)
@@ -262,6 +263,7 @@ struct PreventionCard: View {
                     .font(.title2)
                     .foregroundColor(isEnabled ? color : .secondary)
                     .frame(width: 32)
+                    .accessibilityHidden(true)
 
                 // Content
                 VStack(alignment: .leading, spacing: 4) {
@@ -285,6 +287,7 @@ struct PreventionCard: View {
                             Circle()
                                 .fill(.green)
                                 .frame(width: 6, height: 6)
+                                .accessibilityHidden(true)
                             Text(status)
                                 .font(.caption2)
                                 .foregroundColor(.green)
@@ -314,6 +317,7 @@ struct MetricBox: View {
                 Image(systemName: icon)
                     .font(.title3)
                     .foregroundColor(color)
+                    .accessibilityHidden(true)
                 Text(value)
                     .font(.system(.title2, design: .rounded, weight: .bold))
                 Text(label)

@@ -189,6 +189,7 @@ struct MainView: View {
                             .font(.caption)
                             .foregroundColor(.green)
                             .help("AI: \(appState.llmStatus.provider)")
+                            .accessibilityLabel("AI assistant configured: \(appState.llmStatus.provider)")
                     }
                 }
             }

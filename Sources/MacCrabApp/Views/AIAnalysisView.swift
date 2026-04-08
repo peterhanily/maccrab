@@ -73,6 +73,7 @@ struct AIAnalysisView: View {
                             Image(systemName: "brain")
                                 .font(.system(size: 48))
                                 .foregroundColor(.secondary.opacity(0.5))
+                                .accessibilityHidden(true)
                             Text(String(localized: "aiAnalysis.noAnalysis", defaultValue: "No AI analysis yet"))
                                 .font(.headline)
                                 .foregroundColor(.secondary)
@@ -100,6 +101,7 @@ struct AIAnalysisView: View {
             Circle()
                 .fill(appState.llmStatus.isConfigured ? Color.green : Color.secondary)
                 .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
             Text(appState.llmStatus.isConfigured
                 ? appState.llmStatus.provider.capitalized
                 : String(localized: "aiAnalysis.notConfigured", defaultValue: "Not configured"))
@@ -108,6 +110,7 @@ struct AIAnalysisView: View {
             Image(systemName: "gear")
                 .font(.caption2)
                 .foregroundColor(.secondary)
+                .accessibilityHidden(true)
         }
 
         if #available(macOS 14.0, *) {
@@ -126,6 +129,7 @@ struct AIAnalysisView: View {
                     Image(systemName: "brain")
                         .font(.title2)
                         .foregroundColor(.secondary)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(localized: "aiAnalysis.setupTitle", defaultValue: "AI Analysis Backend"))
                             .font(.headline)
@@ -140,6 +144,7 @@ struct AIAnalysisView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "gear")
                         .foregroundColor(.accentColor)
+                        .accessibilityHidden(true)
                     Text(String(localized: "aiAnalysis.configureInSettings", defaultValue: "Configure your AI backend in Settings"))
                         .font(.callout)
 
@@ -224,6 +229,7 @@ struct AIAnalysisView: View {
             HStack {
                 Image(systemName: icon)
                     .foregroundColor(.accentColor)
+                    .accessibilityHidden(true)
                 Text(title)
                     .font(.headline)
                 Text("(\(alerts.count))")
@@ -327,6 +333,7 @@ struct AnalysisCard: View {
                 HStack {
                     Image(systemName: isRecommendation ? "shield.checkered" : "doc.text.magnifyingglass")
                         .foregroundColor(isRecommendation ? .orange : .accentColor)
+                        .accessibilityHidden(true)
                     Text(displayTitle)
                         .font(.callout).fontWeight(.medium)
                         .lineLimit(isExpanded ? nil : 1)
@@ -337,6 +344,7 @@ struct AnalysisCard: View {
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .accessibilityHidden(true)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onTap)
