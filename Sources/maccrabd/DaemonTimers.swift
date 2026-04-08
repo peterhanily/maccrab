@@ -155,6 +155,20 @@ enum DaemonTimers {
                     }
                 }
             }
+
+            // Event flow health check: warn if no new events stored in the last 5 minutes.
+            // Skips the first 2 minutes of uptime to allow collectors to start up.
+            guard uptime > 120 else { return }
+            Task {
+                if let latestEvent = try? await state.eventStore.events(since: Date.distantPast, limit: 1).first {
+                    let staleness = Date().timeIntervalSince(latestEvent.timestamp)
+                    if staleness > 300 {
+                        let staleMinutes = Int(staleness / 60)
+                        logger.warning("Event flow stalled: no new events stored for \(staleMinutes)m — collectors may need restart")
+                        logger.warning("Check: log stream --predicate 'subsystem==\"com.maccrab.daemon\" AND category==\"EventStream\"'")
+                    }
+                }
+            }
         }
         statsTimer.resume()
 
