@@ -89,15 +89,15 @@ struct AlertViewModel: Identifiable, Hashable {
         return f
     }()
 
-    private static let dateTimeFormatter: DateFormatter = {
+    private static let datePart: DateFormatter = {
         let f = DateFormatter()
-        f.timeStyle = .medium
-        f.dateStyle = .short     // Respects user's date format (MM/dd vs dd.MM etc)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "ddMMMyyyy"
         return f
     }()
 
     var dateTimeString: String {
-        Self.dateTimeFormatter.string(from: timestamp)
+        "\(Self.datePart.string(from: timestamp).uppercased()) \(Self.timeFormatter.string(from: timestamp))"
     }
 }
 
@@ -119,7 +119,7 @@ struct EventViewModel: Identifiable {
     }
 
     var dateTimeString: String {
-        Self.dateTimeFormatter.string(from: timestamp)
+        "\(Self.datePart.string(from: timestamp).uppercased()) \(Self.timeFormatter.string(from: timestamp))"
     }
 
     var actionColor: Color {
@@ -152,10 +152,10 @@ struct EventViewModel: Identifiable {
         return f
     }()
 
-    private static let dateTimeFormatter: DateFormatter = {
+    private static let datePart: DateFormatter = {
         let f = DateFormatter()
-        f.timeStyle = .medium
-        f.dateStyle = .short
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "ddMMMyyyy"
         return f
     }()
 }
@@ -204,7 +204,7 @@ struct TCCEventViewModel: Identifiable {
     let authReason: String
 
     var timeString: String {
-        Self.timeFormatter.string(from: timestamp)
+        "\(Self.datePart.string(from: timestamp).uppercased()) \(Self.clockPart.string(from: timestamp))"
     }
 
     /// Friendly display name for the TCC service identifier.
@@ -231,10 +231,16 @@ struct TCCEventViewModel: Identifiable {
         return mapping[serviceName] ?? serviceName
     }
 
-    private static let timeFormatter: DateFormatter = {
+    private static let datePart: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "ddMMMyyyy"
+        return f
+    }()
+    private static let clockPart: DateFormatter = {
         let f = DateFormatter()
         f.timeStyle = .medium
-        f.dateStyle = .short     // Respects user's date format (MM/dd vs dd.MM etc)
+        f.dateStyle = .none
         return f
     }()
 }

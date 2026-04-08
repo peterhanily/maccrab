@@ -1,4 +1,4 @@
-.PHONY: build test compile-rules install uninstall clean run dev restart app stop status
+.PHONY: build test compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign
 
 PREFIX ?= /usr/local
 SUPPORT_DIR = /Library/Application\ Support/MacCrab
@@ -138,3 +138,8 @@ help:
 # Run detection test suite (triggers all detection categories safely)
 test-detection:
 	./scripts/detection-test.sh
+
+# Run multi-tactic campaign simulation (exercises Campaigns panel)
+# Use 'make test-campaign SUSTAINED=1' for a slower 12-minute simulation
+test-campaign:
+	./scripts/campaign-test.sh $(if $(SUSTAINED),--sustained,)

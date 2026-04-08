@@ -101,12 +101,21 @@ extension MacCrabCtl {
     }
 
     static func formatDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        formatter.dateStyle = .short
-        formatter.timeStyle = .medium
-        return formatter.string(from: date)
+        "\(Self._datePart.string(from: date).uppercased()) \(Self._timePart.string(from: date))"
     }
+
+    private static let _datePart: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "ddMMMyyyy"
+        return f
+    }()
+    private static let _timePart: DateFormatter = {
+        let f = DateFormatter()
+        f.timeStyle = .medium
+        f.dateStyle = .none
+        return f
+    }()
 
     /// Create a transient LLM service for CLI use.
     /// Reads from llm_config.json (dashboard settings), then env var overrides.

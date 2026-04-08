@@ -317,14 +317,23 @@ final class DaemonState {
         self.llmService = llmService
     }
 
+    private let mergedStreamLogger = Logger(subsystem: "com.maccrab.daemon", category: "EventStream")
+
     /// Merges all event sources into a single async stream.
+    /// Each source runs in a restart loop — if the underlying AsyncStream ends
+    /// (subprocess exit, actor error, buffer overflow), the Task re-attaches
+    /// after a 2-second back-off so the source recovers without a daemon restart.
     func mergedEventStream() -> AsyncStream<Event> {
         AsyncStream<Event> { continuation in
             // Source 1a: Native Endpoint Security events (if available)
             if let es = collector {
                 Task {
-                    for await event in es.events {
-                        continuation.yield(event)
+                    while true {
+                        for await event in es.events {
+                            continuation.yield(event)
+                        }
+                        mergedStreamLogger.warning("ESCollector stream ended — restarting in 2s")
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
                 }
             }
@@ -332,8 +341,12 @@ final class DaemonState {
             // Source 1b: kdebug events (fallback when ES entitlement unavailable)
             if let kdebug = kdebugCollector {
                 Task {
-                    for await event in kdebug.events {
-                        continuation.yield(event)
+                    while true {
+                        for await event in kdebug.events {
+                            continuation.yield(event)
+                        }
+                        mergedStreamLogger.warning("KdebugCollector stream ended — restarting in 2s")
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
                 }
             }
@@ -341,8 +354,12 @@ final class DaemonState {
             // Source 1c: eslogger proxy events
             if let eslogger = esloggerCollector {
                 Task {
-                    for await event in eslogger.events {
-                        continuation.yield(event)
+                    while true {
+                        for await event in eslogger.events {
+                            continuation.yield(event)
+                        }
+                        mergedStreamLogger.warning("EsloggerCollector stream ended — restarting in 2s")
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
                 }
             }
@@ -350,23 +367,35 @@ final class DaemonState {
             // Source 2: Unified Log events
             if let ul = ulCollector {
                 Task {
-                    for await event in ul.events {
-                        continuation.yield(event)
+                    while true {
+                        for await event in ul.events {
+                            continuation.yield(event)
+                        }
+                        mergedStreamLogger.warning("UnifiedLogCollector stream ended — restarting in 2s")
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
                 }
             }
 
             // Source 3: TCC permission change events
             Task {
-                for await event in tccMonitor.events {
-                    continuation.yield(event)
+                while true {
+                    for await event in tccMonitor.events {
+                        continuation.yield(event)
+                    }
+                    mergedStreamLogger.warning("TCCMonitor stream ended — restarting in 2s")
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
             }
 
             // Source 4: Network connection events
             Task {
-                for await event in networkCollector.events {
-                    continuation.yield(event)
+                while true {
+                    for await event in networkCollector.events {
+                        continuation.yield(event)
+                    }
+                    mergedStreamLogger.warning("NetworkCollector stream ended — restarting in 2s")
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
             }
         }
