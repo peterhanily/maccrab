@@ -41,7 +41,7 @@ check "Swift build tests" swift build --build-tests
 
 echo ""
 echo -e "${BOLD}Tests${NC}"
-check "Swift test suite (250 tests)" swift test
+check "Swift test suite" swift test
 
 echo ""
 echo -e "${BOLD}Rules${NC}"
