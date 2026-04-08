@@ -116,26 +116,11 @@ private func tccEvent(
 }
 
 /// Load all compiled rules into a fresh engine.
+/// Compilation is serialized by the shared NSLock in RuleTestHelpers.swift.
 private func loadAllRules() async throws -> RuleEngine {
-    let compiledDir = "/tmp/maccrab_v3"
-    if !FileManager.default.fileExists(atPath: compiledDir) {
-        // Compile if not already done
-        let projectDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = [
-            projectDir.appendingPathComponent("Compiler/compile_rules.py").path,
-            "--input-dir", projectDir.appendingPathComponent("Rules").path,
-            "--output-dir", compiledDir,
-        ]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try proc.run()
-        proc.waitUntilExit()
-    }
+    ensureRulesCompiled()
     let engine = RuleEngine()
-    let count = try await engine.loadRules(from: URL(fileURLWithPath: compiledDir))
+    let count = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
     #expect(count > 150, "Expected 150+ rules, got \(count)")
     return engine
 }

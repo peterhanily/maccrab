@@ -45,25 +45,9 @@ private func fileEvent(filePath: String, processPath: String = "/tmp/malware", s
 }
 
 private func loadRules() async throws -> RuleEngine {
-    let compiledDir = "/tmp/maccrab_v3"
-    if !FileManager.default.fileExists(atPath: compiledDir) {
-        // Compile rules on the fly from the project directory
-        let projectDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = [
-            projectDir.appendingPathComponent("Compiler/compile_rules.py").path,
-            "--input-dir", projectDir.appendingPathComponent("Rules").path,
-            "--output-dir", compiledDir,
-        ]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try proc.run()
-        proc.waitUntilExit()
-    }
+    ensureRulesCompiled()
     let engine = RuleEngine()
-    _ = try await engine.loadRules(from: URL(fileURLWithPath: compiledDir))
+    _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
     return engine
 }
 
