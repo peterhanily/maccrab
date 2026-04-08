@@ -64,6 +64,13 @@ struct MacCrabCtl {
                 print("Usage: maccrabctl suppress <rule-id> <process-path>")
                 print("  Adds a process to the allowlist for a specific rule.")
             }
+        case "campaigns":
+            if args.count >= 3 && args[2] == "watch" {
+                await watchCampaigns()
+            } else {
+                let limit = args.count >= 3 ? Int(args[2]) ?? 10 : 10
+                await listCampaigns(limit: limit)
+            }
         case "watch":
             await watchAlerts()
         case "hunt":

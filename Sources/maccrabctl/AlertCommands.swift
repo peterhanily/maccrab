@@ -115,6 +115,9 @@ extension MacCrabCtl {
         print("══════════════════════════════════════════════════════════════")
 
         var lastSeen = Date()
+        // IDs of alerts at the exact lastSeen frontier — prevents silent drops when
+        // two alerts share the same timestamp within a single poll batch.
+        var lastSeenIDs = Set<String>()
         let store: AlertStore
         do {
             store = try AlertStore(directory: maccrabDataDir())
@@ -126,25 +129,41 @@ extension MacCrabCtl {
         while true {
             do {
                 let alerts = try await store.alerts(since: lastSeen, limit: 100)
+                var frontierTime = lastSeen
+                var frontierIDs = Set<String>()
                 for alert in alerts {
-                    if alert.timestamp > lastSeen {
-                        let time = formatDate(alert.timestamp)
-                        let icon: String
-                        switch alert.severity {
-                        case .critical:      icon = "[CRITICAL] 🔴"
-                        case .high:          icon = "[HIGH]     🟠"
-                        case .medium:        icon = "[MEDIUM]   🟡"
-                        case .low:           icon = "[LOW]      🔵"
-                        case .informational: icon = "[INFO]     ⚪"
-                        }
-                        print("\(icon) \(time) \(alert.ruleTitle)")
-                        print("   Process: \(alert.processName ?? "?") (\(alert.processPath ?? "?"))")
-                        if let tech = alert.mitreTechniques, !tech.isEmpty {
-                            print("   MITRE: \(tech)")
-                        }
-                        print()
-                        lastSeen = alert.timestamp
+                    // Skip alerts already emitted at the frontier timestamp
+                    if alert.timestamp == lastSeen && lastSeenIDs.contains(alert.id) { continue }
+                    if alert.timestamp < lastSeen { continue }
+
+                    let time = formatDate(alert.timestamp)
+                    let icon: String
+                    switch alert.severity {
+                    case .critical:      icon = "[CRITICAL] 🔴"
+                    case .high:          icon = "[HIGH]     🟠"
+                    case .medium:        icon = "[MEDIUM]   🟡"
+                    case .low:           icon = "[LOW]      🔵"
+                    case .informational: icon = "[INFO]     ⚪"
                     }
+                    print("\(icon) \(time) \(alert.ruleTitle)")
+                    print("   Process: \(alert.processName ?? "?") (\(alert.processPath ?? "?"))")
+                    if let tech = alert.mitreTechniques, !tech.isEmpty {
+                        print("   MITRE: \(tech)")
+                    }
+                    print()
+
+                    if alert.timestamp > frontierTime {
+                        frontierTime = alert.timestamp
+                        frontierIDs = [alert.id]
+                    } else if alert.timestamp == frontierTime {
+                        frontierIDs.insert(alert.id)
+                    }
+                }
+                if frontierTime > lastSeen {
+                    lastSeen = frontierTime
+                    lastSeenIDs = frontierIDs
+                } else if !frontierIDs.isEmpty {
+                    lastSeenIDs.formUnion(frontierIDs)
                 }
             } catch {
                 // DB may not exist yet; wait silently

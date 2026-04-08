@@ -47,6 +47,8 @@ extension MacCrabCtl {
           events search <q>   Full-text search over events
           events stats        Show event statistics
           alerts [N]          Show last N alerts (default: 20)
+          campaigns [N]       Show last N campaigns (default: 10)
+          campaigns watch     Live stream campaigns as they are detected
           watch               Live stream alerts as they happen
 
         Rules:

@@ -556,7 +556,10 @@ public actor CampaignDetector {
     private func isDuplicate(_ campaign: Campaign) -> Bool {
         let key = dedupKey(for: campaign)
         guard let lastEmitted = emittedCampaigns[key] else { return false }
-        return campaign.detectedAt.timeIntervalSince(lastEmitted) < campaignDedupWindow
+        let interval = campaign.detectedAt.timeIntervalSince(lastEmitted)
+        // Guard against clock going backward (NTP adjustment, DST): a negative
+        // interval must not suppress the new campaign.
+        return interval >= 0 && interval < campaignDedupWindow
     }
 
     private func markEmitted(_ campaign: Campaign) {
