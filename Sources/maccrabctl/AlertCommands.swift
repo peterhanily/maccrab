@@ -2,17 +2,22 @@ import Foundation
 import MacCrabCore
 
 extension MacCrabCtl {
-    static func listAlerts(limit: Int) async {
+    static func listAlerts(limit: Int, hours: Double? = nil, severityFilter: Severity? = nil) async {
         do {
             let store = try AlertStore(directory: maccrabDataDir())
-            let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
+            let since = hours.map { Date().addingTimeInterval(-$0 * 3600) } ?? Date.distantPast
+            let alerts = try await store.alerts(since: since, severity: severityFilter, limit: limit)
 
             if alerts.isEmpty {
-                print("No alerts recorded.")
+                let timeDesc = hours.map { "last \(Int($0))h" } ?? "all time"
+                let sevDesc = severityFilter.map { " [\($0.rawValue)+]" } ?? ""
+                print("No alerts recorded (\(timeDesc)\(sevDesc)).")
                 return
             }
 
-            print("Last \(alerts.count) alerts:")
+            let timeLabel = hours.map { "last \(Int($0))h" } ?? "last \(alerts.count)"
+            let sevLabel = severityFilter.map { " [\($0.rawValue)+]" } ?? ""
+            print("\(alerts.count) alert(s) — \(timeLabel)\(sevLabel):")
             print("══════════════════════════════════════════════════════════════")
 
             for alert in alerts {

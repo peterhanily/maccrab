@@ -37,8 +37,22 @@ struct MacCrabCtl {
                 print("Usage: maccrabctl events [tail [N]|search <query>|stats]")
             }
         case "alerts":
-            let limit = args.count >= 3 ? Int(args[2]) ?? 20 : 20
-            await listAlerts(limit: limit)
+            var limit = 20
+            var hours: Double? = nil
+            var severityFilter: Severity? = nil
+            var idx = 2
+            while idx < args.count {
+                switch args[idx] {
+                case "--hours" where idx + 1 < args.count:
+                    hours = Double(args[idx + 1]); idx += 2
+                case "--severity" where idx + 1 < args.count:
+                    severityFilter = Severity(rawValue: args[idx + 1].lowercased()); idx += 2
+                default:
+                    if let n = Int(args[idx]) { limit = n }
+                    idx += 1
+                }
+            }
+            await listAlerts(limit: limit, hours: hours, severityFilter: severityFilter)
         case "compile":
             if args.count >= 4 {
                 compileRules(inputDir: args[2], outputDir: args[3])

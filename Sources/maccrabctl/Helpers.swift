@@ -46,7 +46,7 @@ extension MacCrabCtl {
           events tail [N]     Show last N events (default: 20)
           events search <q>   Full-text search over events
           events stats        Show event statistics
-          alerts [N]          Show last N alerts (default: 20)
+          alerts [N] [--hours H] [--severity S]  Show alerts (N=count, H=hours, S=critical|high|medium|low)
           campaigns [N]       Show last N campaigns (default: 10)
           campaigns watch     Live stream campaigns as they are detected
           watch               Live stream alerts as they happen
@@ -79,6 +79,8 @@ extension MacCrabCtl {
         Examples:
           maccrabctl status
           maccrabctl watch
+          maccrabctl alerts --hours 24
+          maccrabctl alerts --severity critical
           maccrabctl campaigns
           maccrabctl campaigns watch
           maccrabctl events search "curl Downloads"
