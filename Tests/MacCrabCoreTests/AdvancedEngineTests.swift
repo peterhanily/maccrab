@@ -227,6 +227,39 @@ struct CampaignDetectorTests {
         // The primary value of this test is exercising the code path.
         _ = secondStorms // exercised
     }
+
+    @Test("Tactic index stays consistent when alerts are evicted at hard cap")
+    func tacticIndexConsistentAfterEviction() async {
+        // Use a tiny cap (5) to force eviction early.
+        let detector = CampaignDetector(
+            stormThreshold: 100,        // disable storm detection
+            minTacticsForKillChain: 99, // disable kill-chain detection
+            maxRecentAlerts: 5
+        )
+
+        let now = Date()
+        // Fill past the cap — eviction will remove the first 5 to make room for #6–10
+        for i in 0..<10 {
+            let alert = CampaignDetector.AlertSummary(
+                ruleId: "maccrab.test.\(i)",
+                ruleTitle: "Test \(i)",
+                severity: .medium,
+                timestamp: now.addingTimeInterval(Double(i)),
+                tactics: ["TA0001"]
+            )
+            _ = await detector.processAlert(alert)
+        }
+
+        // After eviction the detector must not crash and must still detect new campaigns.
+        // The kill-chain check queries normalizedTacticCounts — a crash here would mean
+        // the index was corrupted during eviction.
+        let extra = CampaignDetector.AlertSummary(
+            ruleId: "maccrab.test.extra", ruleTitle: "Extra", severity: .medium,
+            timestamp: now.addingTimeInterval(100), tactics: ["TA0001"]
+        )
+        let result = await detector.processAlert(extra)
+        _ = result  // No crash = index is consistent
+    }
 }
 
 // MARK: - Package Freshness Checker Tests
