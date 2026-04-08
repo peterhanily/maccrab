@@ -260,8 +260,6 @@ private struct ActionRow: View {
     @Binding var action: ActionEntry
     let onDelete: () -> Void
 
-    let actions = ["log", "notify", "escalateNotification", "kill", "quarantine", "blockNetwork", "script"]
-    let severities = ["informational", "low", "medium", "high", "critical"]
 
     var actionIcon: String {
         switch action.action {
@@ -295,17 +293,27 @@ private struct ActionRow: View {
                 .accessibilityHidden(true)
 
             Picker("Action", selection: $action.action) {
-                ForEach(actions, id: \.self) { Text($0.capitalized).tag($0) }
+                Text(String(localized: "responseAction.logOnly", defaultValue: "Log Only")).tag("log")
+                Text(String(localized: "responseAction.notify", defaultValue: "Notify")).tag("notify")
+                Text(String(localized: "responseAction.escalate", defaultValue: "Escalate Notification")).tag("escalateNotification")
+                Text(String(localized: "responseAction.killProcess", defaultValue: "Kill Process")).tag("kill")
+                Text(String(localized: "responseAction.quarantine", defaultValue: "Quarantine File")).tag("quarantine")
+                Text(String(localized: "responseAction.blockNetwork", defaultValue: "Block Network")).tag("blockNetwork")
+                Text(String(localized: "responseAction.runScript", defaultValue: "Run Script")).tag("script")
             }
             .labelsHidden()
-            .frame(width: 110)
+            .frame(width: 200)
             .controlSize(.small)
 
             Text(String(localized: "responseActions.whenSeverity", defaultValue: "when severity \u{2265}"))
                 .font(.caption).foregroundColor(.secondary)
 
             Picker("Severity", selection: $action.minimumSeverity) {
-                ForEach(severities, id: \.self) { Text($0.capitalized).tag($0) }
+                Text(String(localized: "severity.informational", defaultValue: "Informational")).tag("informational")
+                Text(String(localized: "severity.low", defaultValue: "Low")).tag("low")
+                Text(String(localized: "severity.medium", defaultValue: "Medium")).tag("medium")
+                Text(String(localized: "severity.high", defaultValue: "High")).tag("high")
+                Text(String(localized: "severity.critical", defaultValue: "Critical")).tag("critical")
             }
             .labelsHidden()
             .frame(width: 110)
@@ -364,10 +372,11 @@ private struct AddRuleActionSheet: View {
                 }.controlSize(.large)
 
                 Picker("Min Severity", selection: $action.minimumSeverity) {
-                    Text("Low").tag("low")
-                    Text("Medium").tag("medium")
-                    Text("High").tag("high")
-                    Text("Critical").tag("critical")
+                    Text(String(localized: "severity.informational", defaultValue: "Informational")).tag("informational")
+                    Text(String(localized: "severity.low", defaultValue: "Low")).tag("low")
+                    Text(String(localized: "severity.medium", defaultValue: "Medium")).tag("medium")
+                    Text(String(localized: "severity.high", defaultValue: "High")).tag("high")
+                    Text(String(localized: "severity.critical", defaultValue: "Critical")).tag("critical")
                 }.controlSize(.large)
             }
 

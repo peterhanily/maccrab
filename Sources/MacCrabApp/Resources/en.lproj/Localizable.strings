@@ -488,3 +488,11 @@
 "responseAction.blockNetwork" = "Block Network";
 "responseAction.runScript" = "Run Script";
 "welcome.setup.rulesLoaded" = "343 detection rules loaded";
+
+/* ── Severity Labels ── */
+"severity.informational" = "Informational";
+"severity.low" = "Low";
+"severity.medium" = "Medium";
+"severity.high" = "High";
+"severity.critical" = "Critical";
+
