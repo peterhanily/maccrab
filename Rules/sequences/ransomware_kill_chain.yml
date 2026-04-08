@@ -1,0 +1,94 @@
+title: Ransomware Kill Chain — Recovery Inhibition Then Data Destruction
+id: e1f2a3b4-0016-4000-b000-000000000016
+status: experimental
+description: >
+    Detects a ransomware-style attack sequence: shell execution or suspicious
+    process spawning, followed by disabling backup/recovery mechanisms
+    (Time Machine, APFS snapshots, SIP), followed by destructive file operations
+    such as disk wiping, mass deletion, or creation of ransomware notes.
+    All three stages within a 10-minute window is a strong indicator of an
+    active destructive campaign.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/tactics/TA0040/
+    - https://attack.mitre.org/techniques/T1486/
+    - https://attack.mitre.org/techniques/T1490/
+    - https://attack.mitre.org/techniques/T1485/
+tags:
+    - attack.impact
+    - attack.t1486
+    - attack.t1490
+    - attack.t1485
+
+type: sequence
+window: 600s
+ordered: true
+
+steps:
+    - id: initial_exec
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_shell:
+              Image|endswith:
+                  - '/bash'
+                  - '/zsh'
+                  - '/sh'
+                  - '/python3'
+                  - '/python'
+                  - '/perl'
+                  - '/ruby'
+              ParentImage|endswith:
+                  - '/curl'
+                  - '/wget'
+                  - '/osascript'
+                  - '/Terminal'
+                  - '/iTerm2'
+          selection_unsigned:
+              SignerType: 'unsigned'
+              Image|contains:
+                  - '/tmp/'
+                  - '/var/folders/'
+                  - '/Downloads/'
+          condition: selection_shell or selection_unsigned
+
+    - id: inhibit_recovery
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/tmutil'
+                  - '/csrutil'
+              CommandLine|contains:
+                  - 'disable'
+                  - 'deletelocalsnap'
+                  - 'deletebackup'
+          condition: selection
+
+    - id: impact
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_wipe:
+              Image|endswith: '/dd'
+              CommandLine|contains:
+                  - 'if=/dev/zero'
+                  - 'if=/dev/urandom'
+          selection_diskutil:
+              Image|endswith: '/diskutil'
+              CommandLine|contains:
+                  - 'eraseVolume'
+                  - 'eraseDisk'
+                  - 'secureErase'
+          selection_rm_nuke:
+              Image|endswith: '/rm'
+              CommandLine|re: '-r[f ]\s+/'
+          condition: selection_wipe or selection_diskutil or selection_rm_nuke
+
+trigger: initial_exec and inhibit_recovery and impact
+level: critical
