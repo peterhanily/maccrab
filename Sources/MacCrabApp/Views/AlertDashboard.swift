@@ -24,7 +24,8 @@ struct AlertDashboard: View {
     }
 
     private var filteredAlerts: [AlertViewModel] {
-        var results = appState.dashboardAlerts
+        // Campaigns have their own dedicated tab — exclude them from the Alerts list.
+        var results = appState.dashboardAlerts.filter { !$0.ruleId.hasPrefix("maccrab.campaign.") }
 
         // Apply session-level suppression overlay and pattern suppression at render time.
         // This is the authoritative check — dashboardAlerts may have stale suppressed=false

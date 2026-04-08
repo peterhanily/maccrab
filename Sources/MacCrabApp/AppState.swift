@@ -459,6 +459,7 @@ final class AppState: ObservableObject {
         AlertViewModel(
             id: a.id,
             timestamp: a.timestamp,
+            ruleId: a.ruleId,
             ruleTitle: a.ruleTitle,
             severity: mapSeverity(a.severity),
             processName: a.processName ?? "unknown",

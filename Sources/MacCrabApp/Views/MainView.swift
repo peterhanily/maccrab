@@ -16,7 +16,10 @@ struct MainView: View {
     @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
 
     private var hasCriticalAlerts: Bool {
-        appState.dashboardAlerts.contains { $0.severity == .critical && !$0.suppressed && !appState.isPatternSuppressed($0) }
+        appState.dashboardAlerts.contains {
+            !$0.ruleId.hasPrefix("maccrab.campaign.") && $0.severity == .critical
+            && !$0.suppressed && !appState.isPatternSuppressed($0)
+        }
     }
 
     enum SidebarSection: String, CaseIterable, Hashable {
@@ -47,12 +50,7 @@ struct MainView: View {
     }
 
     private var campaignCount: Int {
-        appState.dashboardAlerts.filter { alert in
-            let title = alert.ruleTitle
-            return title.contains("Campaign") || title.contains("Kill Chain") ||
-                title.contains("Alert Storm") || title.contains("Compromise") ||
-                title.contains("Coordinated") || title.contains("Lateral")
-        }.count
+        appState.dashboardAlerts.filter { $0.ruleId.hasPrefix("maccrab.campaign.") }.count
     }
 
     var body: some View {

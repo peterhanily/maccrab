@@ -9,14 +9,9 @@ import SwiftUI
 struct CampaignView: View {
     @ObservedObject var appState: AppState
 
-    /// Campaign data from alerts with campaign-related rule titles.
+    /// Campaign alerts identified by the canonical ruleId prefix.
     var campaigns: [AlertViewModel] {
-        appState.dashboardAlerts.filter { alert in
-            let title = alert.ruleTitle
-            return title.contains("Campaign") || title.contains("Kill Chain") ||
-                title.contains("Alert Storm") || title.contains("Compromise") ||
-                title.contains("Coordinated") || title.contains("Lateral")
-        }
+        appState.dashboardAlerts.filter { $0.ruleId.hasPrefix("maccrab.campaign.") }
     }
 
     var body: some View {

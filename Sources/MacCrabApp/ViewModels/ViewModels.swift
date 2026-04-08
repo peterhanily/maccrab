@@ -66,6 +66,7 @@ enum EventCategory: String, CaseIterable, Hashable {
 struct AlertViewModel: Identifiable, Hashable {
     let id: String
     let timestamp: Date
+    let ruleId: String
     let ruleTitle: String
     let severity: Severity
     let processName: String
@@ -271,6 +272,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-001",
             timestamp: Date().addingTimeInterval(-120),
+            ruleId: "maccrab.shell_from_web_server",
             ruleTitle: "Suspicious Shell Spawned from Web Server",
             severity: .critical,
             processName: "bash",
@@ -282,6 +284,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-002",
             timestamp: Date().addingTimeInterval(-300),
+            ruleId: "maccrab.launch_agent_persistence",
             ruleTitle: "Launch Agent Persistence Installed",
             severity: .high,
             processName: "python3",
@@ -293,6 +296,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-003",
             timestamp: Date().addingTimeInterval(-600),
+            ruleId: "maccrab.tcc_db_access",
             ruleTitle: "TCC Database Direct Access",
             severity: .high,
             processName: "sqlite3",
@@ -304,6 +308,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-004",
             timestamp: Date().addingTimeInterval(-900),
+            ruleId: "maccrab.outbound_c2",
             ruleTitle: "Outbound Connection to Known C2",
             severity: .critical,
             processName: "curl",
@@ -315,6 +320,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-005",
             timestamp: Date().addingTimeInterval(-1800),
+            ruleId: "maccrab.unsigned_binary_exec",
             ruleTitle: "Unsigned Binary Execution",
             severity: .medium,
             processName: "payload",
@@ -326,6 +332,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-006",
             timestamp: Date().addingTimeInterval(-2400),
+            ruleId: "maccrab.keychain_dump",
             ruleTitle: "Keychain Dump Attempt",
             severity: .high,
             processName: "security",
@@ -337,6 +344,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-007",
             timestamp: Date().addingTimeInterval(-3600),
+            ruleId: "maccrab.cron_modified",
             ruleTitle: "Cron Job Modified",
             severity: .medium,
             processName: "crontab",
@@ -348,6 +356,7 @@ enum MockData {
         AlertViewModel(
             id: "alert-008",
             timestamp: Date().addingTimeInterval(-7200),
+            ruleId: "maccrab.suspicious_dns",
             ruleTitle: "Suspicious DNS Query",
             severity: .low,
             processName: "nslookup",
