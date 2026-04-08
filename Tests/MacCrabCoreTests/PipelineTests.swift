@@ -375,6 +375,38 @@ struct TCCPipelineTests {
         let unsignedMatches = matches.filter { $0.ruleName.lowercased().contains("unsigned") }
         #expect(unsignedMatches.isEmpty, "Apple camera should not trigger unsigned rules")
     }
+
+    @Test("Detects contacts access by unsigned process")
+    func contactsAccessUnsigned() async throws {
+        let engine = try await loadAllRules()
+        let event = tccEvent(
+            service: "kTCCServiceContacts",
+            client: "com.evil.harvester",
+            clientPath: "/tmp/harvester",
+            allowed: true,
+            signer: .unsigned
+        )
+        let matches = await engine.evaluate(event)
+        let names = matches.map { $0.ruleName }
+        #expect(matches.contains { $0.ruleName.lowercased().contains("contact") },
+                "Expected contacts access detection, got: \(names)")
+    }
+
+    @Test("Detects photos library access by unsigned process")
+    func photosAccessUnsigned() async throws {
+        let engine = try await loadAllRules()
+        let event = tccEvent(
+            service: "kTCCServicePhotos",
+            client: "com.evil.exfil",
+            clientPath: "/tmp/exfil",
+            allowed: true,
+            signer: .unsigned
+        )
+        let matches = await engine.evaluate(event)
+        let names = matches.map { $0.ruleName }
+        #expect(matches.contains { $0.ruleName.lowercased().contains("photo") },
+                "Expected photos access detection, got: \(names)")
+    }
 }
 
 // MARK: - Cross-Category Coverage Test
@@ -536,5 +568,35 @@ struct ImpactPipelineTests {
         let matches = await engine.evaluate(event)
         #expect(matches.contains { $0.ruleName.lowercased().contains("shutdown") || $0.ruleName.lowercased().contains("reboot") },
                 "Expected shutdown rule to fire, got: \(matches.map(\.ruleName))")
+    }
+
+    @Test("Detects hosts file modification by non-admin process")
+    func hostsFileModification() async throws {
+        let engine = try await loadAllRules()
+        let event = fileEvent(
+            filePath: "/etc/hosts",
+            action: .write,
+            processPath: "/tmp/malware",
+            processName: "malware",
+            signer: .unsigned
+        )
+        let matches = await engine.evaluate(event)
+        let names = matches.map { $0.ruleName }
+        #expect(matches.contains { $0.ruleName.lowercased().contains("host") },
+                "Expected hosts file rule to fire, got: \(names)")
+    }
+
+    @Test("Detects Gatekeeper disabled via spctl")
+    func gatekeeperDisabled() async throws {
+        let engine = try await loadAllRules()
+        let event = processEvent(
+            name: "spctl", path: "/usr/sbin/spctl",
+            commandLine: "spctl --master-disable",
+            parentPath: "/bin/bash", parentName: "bash"
+        )
+        let matches = await engine.evaluate(event)
+        let names = matches.map { $0.ruleName }
+        #expect(matches.contains { $0.ruleName.lowercased().contains("security") || $0.ruleName.lowercased().contains("gatekeeper") || $0.ruleName.lowercased().contains("disabled") },
+                "Expected security tool disabled rule to fire, got: \(names)")
     }
 }
