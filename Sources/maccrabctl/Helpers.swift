@@ -71,6 +71,7 @@ extension MacCrabCtl {
           tree-score [N]          Top-N suspicious processes (behavioral + Markov scoring)
           mcp list [--suspicious] List MCP server configs across all AI tools
           extensions [--suspicious]  Scan browser extensions for dangerous permissions
+          security            Full security posture breakdown with recommendations
 
         Other:
           version             Show version information
@@ -95,6 +96,7 @@ extension MacCrabCtl {
           maccrabctl tree-score 20
           maccrabctl mcp list
           maccrabctl extensions --suspicious
+          maccrabctl security
         """)
     }
 

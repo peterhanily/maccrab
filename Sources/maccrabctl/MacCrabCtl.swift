@@ -152,6 +152,8 @@ struct MacCrabCtl {
         case "extensions":
             let suspiciousOnly = args.contains("--suspicious")
             listExtensions(suspiciousOnly: suspiciousOnly)
+        case "security":
+            await showSecurityScore()
         case "version":
             printVersion()
         case "help", "-h", "--help":

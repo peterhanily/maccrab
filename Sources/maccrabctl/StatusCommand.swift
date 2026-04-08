@@ -115,7 +115,7 @@ extension MacCrabCtl {
                 print("                 ✗ \(factor.name): \(factor.detail)")
             }
             if failedFactors.count > 3 {
-                print("                   … \(failedFactors.count - 3) more (run: maccrabctl report --security)")
+                print("                   … \(failedFactors.count - 3) more (run: maccrabctl security)")
             }
         }
 
