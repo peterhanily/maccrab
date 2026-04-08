@@ -269,6 +269,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    func unsuppressAlert(_ alertId: String) async {
+        do {
+            let store = try alertStore()
+            try await store.unsuppress(alertId: alertId)
+            await loadAlerts()
+        } catch {
+            if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
+                dashboardAlerts[idx].suppressed = false
+            }
+        }
+    }
+
     /// Suppression rules: (ruleTitle, processName) patterns to auto-hide.
     @Published var suppressionPatterns: [(ruleTitle: String, processName: String)] = []
 

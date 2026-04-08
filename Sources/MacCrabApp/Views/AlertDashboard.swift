@@ -152,12 +152,26 @@ struct AlertDashboard: View {
                                     .font(.caption)
                                     .fontWeight(.medium)
 
-                                Button {
-                                    bulkSuppress()
-                                } label: {
-                                    Label("Suppress Selected", systemImage: "eye.slash")
+                                let hasUnsuppressed = selectedAlerts.contains { !$0.suppressed }
+                                let hasSuppressed = selectedAlerts.contains { $0.suppressed }
+
+                                if hasUnsuppressed {
+                                    Button {
+                                        bulkSuppress()
+                                    } label: {
+                                        Label("Suppress Selected", systemImage: "eye.slash")
+                                    }
+                                    .controlSize(.small)
                                 }
-                                .controlSize(.small)
+
+                                if hasSuppressed {
+                                    Button {
+                                        bulkUnsuppress()
+                                    } label: {
+                                        Label("Unsuppress Selected", systemImage: "eye")
+                                    }
+                                    .controlSize(.small)
+                                }
 
                                 Button {
                                     selectedAlerts = []
@@ -205,6 +219,8 @@ struct AlertDashboard: View {
                                 showUndoToast = false
                                 suppressedAlertName = nil
                             }
+                        }, onUnsuppress: {
+                            Task { await appState.unsuppressAlert(alert.id) }
                         }, onSuppressPattern: {
                             Task { await appState.suppressPattern(ruleTitle: alert.ruleTitle, processName: alert.processName) }
                             selectedAlerts = []
@@ -217,15 +233,15 @@ struct AlertDashboard: View {
             }
             if showUndoToast, let name = suppressedAlertName {
                 HStack {
-                    Text("Suppressed: \(name)")
+                    Text(name)
                         .font(.caption)
                     Spacer()
-                    Button("Undo") {
+                    Button("Dismiss") {
                         showUndoToast = false
-                        // TODO: unsuppress the alert
+                        suppressedAlertName = nil
                     }
                     .font(.caption)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
@@ -252,6 +268,23 @@ struct AlertDashboard: View {
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            showUndoToast = false
+            suppressedAlertName = nil
+        }
+    }
+
+    private func bulkUnsuppress() {
+        let count = selectedAlerts.filter { $0.suppressed }.count
+        let alertsToUnsuppress = selectedAlerts.filter { $0.suppressed }
+        selectedAlerts = []
+        Task {
+            for alert in alertsToUnsuppress {
+                await appState.unsuppressAlert(alert.id)
+            }
+        }
+        suppressedAlertName = "Unsuppressed \(count) alerts"
+        showUndoToast = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             showUndoToast = false
             suppressedAlertName = nil
         }
@@ -337,6 +370,7 @@ struct AlertDashboard: View {
 struct AlertDetailView: View {
     let alert: AlertViewModel
     let onSuppress: () -> Void
+    var onUnsuppress: (() -> Void)? = nil
     var onSuppressPattern: (() -> Void)? = nil
 
     @State private var showKillConfirm = false
@@ -442,7 +476,9 @@ struct AlertDetailView: View {
                                 .controlSize(.large)
                                 .help("Suppress all alerts matching '\(alert.ruleTitle)' from '\(alert.processName)'")
                             } else {
-                                Label(String(localized: "alerts.suppressed", defaultValue: "Suppressed"), systemImage: "eye.slash.fill").foregroundColor(.secondary)
+                                Button { onUnsuppress?() } label: {
+                                    Label(String(localized: "action.unsuppress", defaultValue: "Unsuppress"), systemImage: "eye")
+                                }.controlSize(.large)
                             }
                         }
 

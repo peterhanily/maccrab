@@ -323,6 +323,20 @@ public actor AlertStore {
         }
     }
 
+    /// Unsuppress a previously suppressed alert.
+    public func unsuppress(alertId id: String) throws {
+        let sql = "UPDATE alerts SET suppressed = 0 WHERE id = ?1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: id)
+
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            throw AlertStoreError.stepFailed(msg)
+        }
+    }
+
     // MARK: - Pruning
 
     /// Deletes alerts older than the specified date for data retention.
