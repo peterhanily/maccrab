@@ -1,0 +1,40 @@
+title: FTP/SFTP Outbound Data Transfer to External Host
+id: e1f2a3b4-7004-4000-c000-000000007004
+status: experimental
+description: |
+  Detects ftp, sftp, or ncftp being used to connect to non-localhost hosts,
+  potentially for data exfiltration. FTP is rarely used for legitimate purposes
+  on modern macOS systems and its presence is suspicious. SFTP to unknown hosts
+  outside of developer workflows warrants investigation.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1048/002/
+tags:
+    - attack.exfiltration
+    - attack.t1048.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/ftp'
+            - '/sftp'
+            - '/ncftp'
+            - '/ncftpput'
+            - '/ncftpget'
+            - '/lftp'
+    filter_localhost:
+        CommandLine|contains:
+            - '127.0.0.1'
+            - 'localhost'
+            - '::1'
+    filter_apple:
+        SignerType:
+            - 'apple'
+    condition: selection and not filter_localhost and not filter_apple
+falsepositives:
+    - Developers using sftp for legitimate server management
+    - Legacy systems or applications with FTP dependencies
+level: medium

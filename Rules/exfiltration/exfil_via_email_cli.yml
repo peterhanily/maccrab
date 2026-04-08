@@ -1,0 +1,42 @@
+title: Data Exfiltration via CLI Mail Tools
+id: e1f2a3b4-7001-4000-c000-000000007001
+status: experimental
+description: |
+  Detects use of mail, mailx, mutt, or msmtp to send email with attachments
+  or piped input from a non-interactive context. Attackers send collected data
+  to remote email addresses using CLI mail tools, bypassing GUI-based DLP monitoring.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1048/
+tags:
+    - attack.exfiltration
+    - attack.t1048
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_mail:
+        Image|endswith:
+            - '/mail'
+            - '/mailx'
+            - '/mutt'
+            - '/msmtp'
+            - '/sendmail'
+    selection_attachment:
+        CommandLine|contains:
+            - ' -a '
+            - ' --attach'
+            - ' -A '
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/sbin/sendmail'
+        SignerType:
+            - 'apple'
+    condition: selection_mail and selection_attachment and not filter_system
+falsepositives:
+    - Automated backup notification scripts
+    - CI/CD pipelines sending build artifacts
+    - Legitimate scripted reporting tools
+level: high

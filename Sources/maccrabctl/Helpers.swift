@@ -59,6 +59,8 @@ extension MacCrabCtl {
 
         Response:
           suppress <rule> <path>  Allowlist a process for a rule
+          unsuppress <rule> [path]  Remove a suppression (all paths if no path given)
+          suppression list        Show all configured suppressions
           export [format] [N]     Export alerts (json|csv, default: json)
 
         Forensics:

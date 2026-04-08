@@ -1,0 +1,42 @@
+title: Git Push from Sensitive Data Directories
+id: e1f2a3b4-7003-4000-c000-000000007003
+status: experimental
+description: |
+  Detects git push operations where the working directory is under sensitive
+  paths (Documents, Downloads, Desktop, database directories, private keys).
+  Attackers use git repositories to stage and exfiltrate data to attacker-
+  controlled remote repositories, as git traffic is often permitted through
+  corporate firewalls and DLP tools. Particularly suspicious when the remote
+  URL is not a known corporate SCM host.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1567/003/
+tags:
+    - attack.exfiltration
+    - attack.t1567.003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_git_push:
+        Image|endswith: '/git'
+        CommandLine|contains: 'push'
+    selection_sensitive_cwd:
+        CurrentDirectory|contains:
+            - '/Documents/'
+            - '/Downloads/'
+            - '/Desktop/'
+            - '/.ssh/'
+            - '/Library/Keychains/'
+            - '/Library/Application Support/'
+    filter_common_dev:
+        CommandLine|contains:
+            - 'github.com'
+            - 'gitlab.com'
+            - 'bitbucket.org'
+    condition: selection_git_push and selection_sensitive_cwd and not filter_common_dev
+falsepositives:
+    - Developers pushing personal projects from Documents
+    - Legitimate backup repositories
+level: medium

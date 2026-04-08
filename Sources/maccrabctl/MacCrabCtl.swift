@@ -64,6 +64,20 @@ struct MacCrabCtl {
                 print("Usage: maccrabctl suppress <rule-id> <process-path>")
                 print("  Adds a process to the allowlist for a specific rule.")
             }
+        case "unsuppress":
+            if args.count >= 3 {
+                let processPath = args.count >= 4 ? args[3] : nil
+                await unsuppressRule(ruleId: args[2], processPath: processPath)
+            } else {
+                print("Usage: maccrabctl unsuppress <rule-id> [<process-path>]")
+                print("  Removes a specific process path, or all suppressions for the rule.")
+            }
+        case "suppression":
+            if args.count >= 3 && args[2] == "list" {
+                listSuppressions()
+            } else {
+                print("Usage: maccrabctl suppression list")
+            }
         case "campaigns":
             if args.count >= 3 && args[2] == "watch" {
                 await watchCampaigns()

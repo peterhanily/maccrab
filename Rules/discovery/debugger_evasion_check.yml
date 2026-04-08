@@ -1,0 +1,45 @@
+title: Debugger or Analysis Environment Detection Attempt
+id: d1c2e3f4-8004-4000-d000-000000008004
+status: experimental
+description: |
+  Detects processes using sysctl to query kernel state commonly used for
+  sandbox/debugger detection: kern.proc.pid (ptrace flag check), hw.model
+  (VM detection), kern.boottime (uptime check for sandbox detection).
+  Malware uses these checks to detect analysis environments and avoid
+  executing its payload when being investigated.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1622/
+    - https://attack.mitre.org/techniques/T1497/
+tags:
+    - attack.defense_evasion
+    - attack.t1622
+    - attack.t1497
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_sysctl_debug:
+        Image|endswith: '/sysctl'
+        CommandLine|contains:
+            - 'kern.proc.pid'
+            - 'kern.boottime'
+            - 'sysctl.proc_translated'
+            - 'security.mac.sandbox'
+    selection_ptrace:
+        Image|endswith: '/ptrace'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    filter_dev_tools:
+        Image|startswith:
+            - '/Applications/Xcode'
+            - '/Library/Developer/'
+    condition: (selection_sysctl_debug or selection_ptrace) and not filter_apple and not filter_dev_tools
+falsepositives:
+    - Legitimate debugging tools and profilers
+    - Security research and reversing tools
+    - Crash reporting agents checking process state
+level: medium

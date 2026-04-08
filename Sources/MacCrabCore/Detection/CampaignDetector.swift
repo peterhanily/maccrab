@@ -127,7 +127,7 @@ public actor CampaignDetector {
     private var userIdCounts: [String: Int] = [:]
 
     /// Don't re-emit the same campaign type within this window.
-    private let campaignDedupWindow: TimeInterval = 600 // 10 min
+    private let campaignDedupWindow: TimeInterval
 
     // MARK: - Initialization
 
@@ -137,7 +137,8 @@ public actor CampaignDetector {
         stormCriticalThreshold: Int = 50,
         stormWindow: TimeInterval = 300,
         minTacticsForKillChain: Int = 3,
-        maxRecentAlerts: Int = 50_000
+        maxRecentAlerts: Int = 50_000,
+        campaignDedupWindow: TimeInterval = 600
     ) {
         self.campaignWindow = campaignWindow
         self.stormThreshold = stormThreshold
@@ -145,6 +146,7 @@ public actor CampaignDetector {
         self.stormWindow = stormWindow
         self.minTacticsForKillChain = minTacticsForKillChain
         self.maxRecentAlerts = maxRecentAlerts
+        self.campaignDedupWindow = campaignDedupWindow
     }
 
     // MARK: - Public API

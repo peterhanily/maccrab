@@ -109,6 +109,66 @@ extension MacCrabCtl {
         }
     }
 
+    static func unsuppressRule(ruleId: String, processPath: String?) async {
+        let configDir = maccrabDataDir()
+        let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
+
+        var suppressions: [String: [String]] = [:]
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)) {
+            suppressions = (try? JSONDecoder().decode([String: [String]].self, from: data)) ?? [:]
+        }
+
+        guard suppressions[ruleId] != nil else {
+            print("No suppressions found for rule '\(ruleId)'.")
+            return
+        }
+
+        if let path = processPath {
+            guard let idx = suppressions[ruleId]?.firstIndex(of: path) else {
+                print("Process '\(path)' is not suppressed for rule '\(ruleId)'.")
+                return
+            }
+            suppressions[ruleId]?.remove(at: idx)
+            if suppressions[ruleId]?.isEmpty == true { suppressions.removeValue(forKey: ruleId) }
+            print("✔ Removed suppression of '\(path)' for rule '\(ruleId)'")
+        } else {
+            let count = suppressions[ruleId]?.count ?? 0
+            suppressions.removeValue(forKey: ruleId)
+            print("✔ Removed all \(count) suppression(s) for rule '\(ruleId)'")
+        }
+
+        do {
+            let data = try JSONEncoder().encode(suppressions)
+            try data.write(to: URL(fileURLWithPath: suppressFile))
+            print("  Restart daemon (SIGHUP) to apply.")
+        } catch {
+            print("Error saving suppressions: \(error)")
+        }
+    }
+
+    static func listSuppressions() {
+        let configDir = maccrabDataDir()
+        let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
+
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)),
+              let suppressions = try? JSONDecoder().decode([String: [String]].self, from: data),
+              !suppressions.isEmpty else {
+            print("No suppressions configured.")
+            print("Use 'maccrabctl suppress <rule-id> <process-path>' to add one.")
+            return
+        }
+
+        let totalPaths = suppressions.values.reduce(0) { $0 + $1.count }
+        print("\(suppressions.count) rule(s) suppressed, \(totalPaths) path(s) total:")
+        print("══════════════════════════════════════════════════════════════")
+        for (ruleId, paths) in suppressions.sorted(by: { $0.key < $1.key }) {
+            print("  \(ruleId) (\(paths.count) path\(paths.count == 1 ? "" : "s"))")
+            for path in paths.sorted() {
+                print("    • \(path)")
+            }
+        }
+    }
+
     static func watchAlerts() async {
         // LOCALIZE: "Watching for new alerts... (Ctrl+C to stop)"
         print("Watching for new alerts... (Ctrl+C to stop)")

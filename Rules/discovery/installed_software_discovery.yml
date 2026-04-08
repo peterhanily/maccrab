@@ -1,0 +1,53 @@
+title: Installed Software Enumeration via CLI
+id: d1c2e3f4-8002-4000-d000-000000008002
+status: experimental
+description: |
+  Detects enumeration of installed applications and packages using
+  system_profiler, pkgutil, or mdfind. Adversaries inventory installed
+  security tools (antivirus, EDR, DLP), development tools, and vulnerable
+  software versions to identify targets, evasion opportunities, and local
+  privilege escalation candidates.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1518/
+    - https://attack.mitre.org/techniques/T1518/001/
+tags:
+    - attack.discovery
+    - attack.t1518
+    - attack.t1518.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_profiler:
+        Image|endswith: '/system_profiler'
+        CommandLine|contains:
+            - 'SPApplicationsDataType'
+            - 'SPFrameworksDataType'
+            - 'SPExtensionsDataType'
+    selection_pkgutil:
+        Image|endswith: '/pkgutil'
+        CommandLine|contains:
+            - '--pkgs'
+            - '--files'
+            - '--pkg-info'
+    selection_mdfind_security:
+        Image|endswith: '/mdfind'
+        CommandLine|contains:
+            - 'kMDItemKind == "Application"'
+            - 'antivirus'
+            - 'endpoint'
+            - 'crowdstrike'
+            - 'sentinel'
+            - 'malwarebytes'
+    filter_apple:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+    condition: (selection_profiler or selection_pkgutil or selection_mdfind_security) and not filter_apple
+falsepositives:
+    - Software asset management tools
+    - License compliance checkers
+    - Legitimate system administration scripts
+level: low

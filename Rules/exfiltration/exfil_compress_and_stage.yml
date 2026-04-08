@@ -1,0 +1,52 @@
+title: Bulk Archive of Sensitive Directories Before Exfiltration
+id: e1f2a3b4-7005-4000-c000-000000007005
+status: experimental
+description: |
+  Detects tar, zip, or 7z being used to create compressed archives of
+  sensitive directory paths (Documents, Desktop, .ssh, Library, database
+  files). Creating compressed archives of sensitive directories is a common
+  pre-exfiltration staging step. The combination of sensitive source paths
+  and archive output in /tmp or /var/folders is particularly suspicious.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1560/001/
+tags:
+    - attack.exfiltration
+    - attack.t1560.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/tar'
+            - '/zip'
+            - '/7z'
+            - '/7za'
+            - '/gzip'
+            - '/bzip2'
+    selection_sensitive_src:
+        CommandLine|contains:
+            - '/Documents'
+            - '/Desktop'
+            - '/.ssh'
+            - '/Keychains'
+            - '/Library/Application Support'
+            - '.sqlite'
+            - '.db'
+            - 'id_rsa'
+            - 'id_ed25519'
+    selection_staging_dest:
+        CommandLine|contains:
+            - '/tmp/'
+            - '/var/folders/'
+            - '/private/tmp/'
+    filter_apple:
+        SignerType:
+            - 'apple'
+    condition: selection_tool and selection_sensitive_src and selection_staging_dest and not filter_apple
+falsepositives:
+    - Backup tools archiving documents to temporary staging area
+    - Developer build processes packaging application resources
+level: high

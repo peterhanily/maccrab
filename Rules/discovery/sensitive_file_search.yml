@@ -1,0 +1,54 @@
+title: Targeted Search for Sensitive Files and Credentials
+id: d1c2e3f4-8003-4000-d000-000000008003
+status: experimental
+description: |
+  Detects find, locate, or mdfind commands searching for sensitive file
+  types: private keys, certificates, password files, configuration files
+  containing credentials, and database files. Adversaries sweep the
+  filesystem for credentials and sensitive data as part of pre-exfiltration
+  collection. The combination of sensitive extensions and broad search
+  scope is the key indicator.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1083/
+    - https://attack.mitre.org/techniques/T1552/001/
+tags:
+    - attack.discovery
+    - attack.t1083
+    - attack.credential_access
+    - attack.t1552.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_find:
+        Image|endswith:
+            - '/find'
+            - '/locate'
+            - '/mdfind'
+    selection_sensitive_patterns:
+        CommandLine|contains:
+            - 'id_rsa'
+            - 'id_ed25519'
+            - 'id_ecdsa'
+            - '.pem'
+            - '.p12'
+            - '.pfx'
+            - '.keystore'
+            - 'password'
+            - 'passwd'
+            - 'credentials'
+            - '.aws/credentials'
+            - '.env'
+            - 'secret'
+            - 'token'
+    filter_apple:
+        SignerType:
+            - 'apple'
+    condition: selection_find and selection_sensitive_patterns and not filter_apple
+falsepositives:
+    - Security auditing tools scanning for key exposure
+    - Developers searching their own project directories
+    - Password managers doing initial key discovery
+level: medium

@@ -1,0 +1,45 @@
+title: Potential Data Exfiltration via Webhook POST
+id: e1f2a3b4-7002-4000-c000-000000007002
+status: experimental
+description: |
+  Detects curl or wget POST requests to known webhook hosting domains (Discord,
+  Slack, IFTTT, pipedream, ntfy, webhook.site). Attackers abuse free webhook
+  services to exfiltrate data with minimal infrastructure, blending into normal
+  web traffic. The use of file upload flags (-F, --data-binary @) significantly
+  raises suspicion.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1567/001/
+tags:
+    - attack.exfiltration
+    - attack.t1567.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+    selection_webhook:
+        CommandLine|contains:
+            - 'discord.com/api/webhooks'
+            - 'hooks.slack.com'
+            - 'ifttt.com/trigger'
+            - 'pipedream.net'
+            - 'webhook.site'
+            - 'ntfy.sh'
+            - 'requestbin'
+            - 'beeceptor.com'
+    selection_upload:
+        CommandLine|contains:
+            - ' -F '
+            - '--data-binary @'
+            - '--data @'
+            - ' -d @'
+    condition: selection_tool and selection_webhook and selection_upload
+falsepositives:
+    - Legitimate automation posting alerts to Slack/Discord
+    - Deployment pipelines notifying webhooks with logs
+level: high

@@ -1,0 +1,49 @@
+title: Local Group and Permission Discovery
+id: d1c2e3f4-8005-4000-d000-000000008005
+status: experimental
+description: |
+  Detects enumeration of local groups and user permissions using id, groups,
+  dsmemberutil, or dscl. Adversaries enumerate group membership to understand
+  which users have administrative access, access to sensitive directories
+  (e.g., _developer, _admin, wheel), or are enrolled in MDM. This information
+  guides privilege escalation target selection.
+author: MacCrab Community
+date: 2026/04/08
+references:
+    - https://attack.mitre.org/techniques/T1069/001/
+tags:
+    - attack.discovery
+    - attack.t1069
+    - attack.t1069.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_dsmemberutil:
+        Image|endswith: '/dsmemberutil'
+        CommandLine|contains:
+            - 'checkmembership'
+            - 'getid'
+    selection_dscl_groups:
+        Image|endswith: '/dscl'
+        CommandLine|contains:
+            - '/Groups'
+            - 'GroupMembership'
+            - 'GroupMembers'
+    selection_id_all:
+        Image|endswith: '/id'
+        CommandLine|re: '-G|-nG|id\s+\w'
+    filter_apple:
+        SignerType:
+            - 'apple'
+    filter_normal_id:
+        # Plain 'id' with no arguments or just the current user is noise
+        CommandLine|endswith:
+            - '/id'
+            - ' id'
+    condition: (selection_dsmemberutil or selection_dscl_groups or selection_id_all) and not filter_apple and not filter_normal_id
+falsepositives:
+    - System administration scripts auditing group membership
+    - MDM configuration profiles checking user roles
+    - Application installers checking for admin privileges
+level: low
