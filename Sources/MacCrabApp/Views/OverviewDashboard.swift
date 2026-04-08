@@ -90,7 +90,7 @@ struct OverviewDashboard: View {
                         StatCard(title: "Rules", value: "\(appState.rulesLoaded)", icon: "shield.checkered", color: .blue)
                         StatCard(title: "Events/sec", value: "\(appState.eventsPerSecond)", icon: "waveform.path.ecg", color: .green)
                         StatCard(title: "Connected", value: appState.isConnected ? "Yes" : "No", icon: appState.isConnected ? "checkmark.circle" : "xmark.circle", color: appState.isConnected ? .green : .red)
-                        StatCard(title: "Security", value: "\u{2014}", icon: "shield.checkered", color: .purple)
+                        StatCard(title: "Security", value: appState.securityGrade.isEmpty ? "\u{2014}" : appState.securityGrade, icon: "shield.checkered", color: appState.securityScore >= 80 ? .green : appState.securityScore >= 60 ? .orange : .red)
                     }
                     .padding(.horizontal)
 

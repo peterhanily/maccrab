@@ -56,6 +56,11 @@ final class AppState: ObservableObject {
 
     @Published var selectedTab: Tab = .overview
 
+    /// Security posture score (0-100) and letter grade.
+    /// Computed by SecurityScorer on first load and refreshed every 5 minutes.
+    @Published var securityScore: Int = 0
+    @Published var securityGrade: String = ""
+
     // MARK: Private
 
     /// Callback for showing critical alert popovers in the menu bar
@@ -66,6 +71,7 @@ final class AppState: ObservableObject {
     private var rulesLoaded_cached = false
     private var lastAlertTimestamp: Date = .distantPast
     private var lastEventTimestamp: Date = .distantPast
+    private var lastSecurityScoreUpdate: Date = .distantPast
 
     /// Authoritative set of alert IDs the user has manually suppressed this session.
     /// Published so SwiftUI views (filteredAlerts) re-render whenever it changes,
@@ -539,5 +545,14 @@ final class AppState: ObservableObject {
             eventsPerSecond = max(0, (currentCount - previousEventCount) / 10)
             previousEventCount = currentCount
         } catch {}
+
+        // Recompute security score at most every 5 minutes (scorer calls system APIs)
+        let now = Date()
+        if now.timeIntervalSince(lastSecurityScoreUpdate) >= 300 {
+            let result = await SecurityScorer().calculate()
+            securityScore = result.totalScore
+            securityGrade = result.grade
+            lastSecurityScoreUpdate = now
+        }
     }
 }
