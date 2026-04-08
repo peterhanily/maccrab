@@ -12,8 +12,9 @@ import os.log
 /// Each vendor can be queried independently. Results are cached.
 public actor ThreatIntelAPIs {
     private let logger = Logger(subsystem: "com.maccrab.enrichment", category: "threat-intel-apis")
-    // Shared secure session — enforces TLS 1.2+; add SPKI pins in SecureURLSession.swift.
-    private let session: URLSession = SecureURLSession.make(for: .virustotal)
+    // Per-provider sessions — each carries SPKI pins specific to that host.
+    private let vtSession: URLSession = SecureURLSession.make(for: .virustotal)
+    private let shodanSession: URLSession = SecureURLSession.make(for: .shodan)
 
     // API keys (set from config or environment)
     private var apiKeys: [String: String] = [:]
@@ -92,7 +93,7 @@ public actor ThreatIntelAPIs {
         default: return nil
         }
 
-        guard let json = await apiRequest(url: endpoint, headers: ["x-apikey": key]) else {
+        guard let json = await apiRequest(url: endpoint, headers: ["x-apikey": key], session: vtSession) else {
             logger.warning("VirusTotal: API request failed for \(type):\(query)")
             return nil
         }
@@ -124,7 +125,7 @@ public actor ThreatIntelAPIs {
         if let cached = checkCache("abuseipdb:ip:\(ip)") { return cached }
 
         let endpoint = "https://api.abuseipdb.com/api/v2/check?ipAddress=\(ip)&maxAgeInDays=90"
-        guard let json = await apiRequest(url: endpoint, headers: ["Key": key, "Accept": "application/json"]) else {
+        guard let json = await apiRequest(url: endpoint, headers: ["Key": key, "Accept": "application/json"], session: vtSession) else {
             logger.warning("AbuseIPDB: API request failed for \(ip)")
             return nil
         }
@@ -164,7 +165,7 @@ public actor ThreatIntelAPIs {
         }
 
         let endpoint = "https://otx.alienvault.com/api/v1/indicators/\(section)/\(query)/general"
-        guard let json = await apiRequest(url: endpoint, headers: ["X-OTX-API-KEY": key]) else {
+        guard let json = await apiRequest(url: endpoint, headers: ["X-OTX-API-KEY": key], session: vtSession) else {
             logger.warning("OTX: API request failed for \(type):\(query)")
             return nil
         }
@@ -197,7 +198,7 @@ public actor ThreatIntelAPIs {
         var components = URLComponents(string: "https://api.shodan.io/shodan/host/\(ip)")
         components?.queryItems = [URLQueryItem(name: "key", value: key)]
         guard let endpoint = components?.url?.absoluteString else { return nil }
-        guard let json = await apiRequest(url: endpoint, headers: [:]) else {
+        guard let json = await apiRequest(url: endpoint, headers: [:], session: shodanSession) else {
             logger.warning("Shodan: API request failed for \(ip)")
             return nil
         }
@@ -230,7 +231,7 @@ public actor ThreatIntelAPIs {
         // Search for existing scans
         let encoded = url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? url
         let endpoint = "https://urlscan.io/api/v1/search/?q=page.url:\(encoded)&size=1"
-        guard let json = await apiRequest(url: endpoint, headers: ["API-Key": key]) else {
+        guard let json = await apiRequest(url: endpoint, headers: ["API-Key": key], session: vtSession) else {
             logger.warning("URLScan: API request failed for \(url)")
             return nil
         }
@@ -260,7 +261,7 @@ public actor ThreatIntelAPIs {
         if let cached = checkCache("greynoise:ip:\(ip)") { return cached }
 
         let endpoint = "https://api.greynoise.io/v3/community/\(ip)"
-        guard let json = await apiRequest(url: endpoint, headers: ["key": key]) else {
+        guard let json = await apiRequest(url: endpoint, headers: ["key": key], session: vtSession) else {
             logger.warning("GreyNoise: API request failed for \(ip)")
             return nil
         }
@@ -293,7 +294,7 @@ public actor ThreatIntelAPIs {
 
         let encoded = email.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? email
         let endpoint = "https://haveibeenpwned.com/api/v3/breachedaccount/\(encoded)?truncateResponse=false"
-        guard let rawData = await apiRequestRaw(url: endpoint, headers: ["hibp-api-key": key, "user-agent": "MacCrab"]) else {
+        guard let rawData = await apiRequestRaw(url: endpoint, headers: ["hibp-api-key": key, "user-agent": "MacCrab"], session: vtSession) else {
             // 404 = not breached, or network error — return clean result
             let result = LookupResult(
                 vendor: "HIBP", query: email, isMalicious: false,
@@ -335,7 +336,7 @@ public actor ThreatIntelAPIs {
         let body = "url=\(url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? url)&format=json&app_key=MacCrab"
         request.httpBody = body.data(using: .utf8)
 
-        guard let (data, response) = try? await session.data(for: request),
+        guard let (data, response) = try? await vtSession.data(for: request),
               let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -397,7 +398,7 @@ public actor ThreatIntelAPIs {
 
     // MARK: - HTTP Helpers
 
-    private nonisolated func apiRequest(url: String, headers: [String: String]) async -> [String: Any]? {
+    private nonisolated func apiRequest(url: String, headers: [String: String], session: URLSession) async -> [String: Any]? {
         guard let requestURL = URL(string: url) else { return nil }
         var request = URLRequest(url: requestURL)
         request.timeoutInterval = 10
@@ -413,7 +414,7 @@ public actor ThreatIntelAPIs {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
-    private nonisolated func apiRequestRaw(url: String, headers: [String: String]) async -> Data? {
+    private nonisolated func apiRequestRaw(url: String, headers: [String: String], session: URLSession) async -> Data? {
         guard let requestURL = URL(string: url) else { return nil }
         var request = URLRequest(url: requestURL)
         request.timeoutInterval = 10

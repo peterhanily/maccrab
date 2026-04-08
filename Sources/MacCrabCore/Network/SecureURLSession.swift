@@ -40,26 +40,81 @@ public enum APIProvider: String, Sendable {
     /// Known SHA-256 SPKI pins for this provider.
     /// Empty means "no pinning enforced, rely on OS trust store only."
     ///
-    /// Populate these with verified hashes before enabling pinning in production.
-    /// See the `MACCRAB_TLS_PINNING` environment variable in `SecureURLSession`.
+    /// Each entry is a base64-encoded SHA-256 digest of the SubjectPublicKeyInfo
+    /// (SPKI) structure in DER format. The pinning check accepts a match against
+    /// ANY certificate in the server's presented chain (leaf OR intermediate CA),
+    /// so intermediate CA pins remain valid through normal leaf cert rotation.
+    ///
+    /// ## Refreshing pins
+    ///
+    /// Run the following against the live server to obtain current leaf + CA pins:
+    ///
+    /// ```bash
+    /// # Leaf cert SPKI pin:
+    /// openssl s_client -connect <host>:443 -servername <host> </dev/null 2>/dev/null \
+    ///   | openssl x509 -pubkey -noout \
+    ///   | openssl pkey -pubin -outform DER \
+    ///   | openssl dgst -sha256 -binary | base64
+    ///
+    /// # Intermediate CA SPKI pin (second cert in chain):
+    /// openssl s_client -connect <host>:443 -servername <host> -showcerts </dev/null 2>/dev/null \
+    ///   | awk '/-----BEGIN CERTIFICATE-----/{n++} n==2{print} /-----END CERTIFICATE-----/ && n==2{exit}' \
+    ///   | openssl x509 -pubkey -noout \
+    ///   | openssl pkey -pubin -outform DER \
+    ///   | openssl dgst -sha256 -binary | base64
+    /// ```
+    ///
+    /// Leaf pins should be refreshed annually (or when a provider rotates their
+    /// certificate). Intermediate CA pins are stable across leaf rotations but
+    /// should be verified before each release. Last verified: 2026-04-08.
     var knownSPKIPins: [String] {
         switch self {
         case .anthropic:
-            // Obtain with: openssl s_client -connect api.anthropic.com:443 …
-            // TODO: populate with verified SPKI hashes before enabling strict mode
-            return []
+            return [
+                // Leaf cert — api.anthropic.com (Google Trust Services WE1)
+                // Verified 2026-04-08 via openssl s_client
+                "j5kESgiKjzimbszCPTJVwS5+IuoZ55eIIsx5UIY5rBk=",
+                // Intermediate CA — Google Trust Services WE1
+                // Shared by Anthropic, OpenAI, Mistral, Shodan (all GTS WE1)
+                "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
+            ]
         case .openai:
-            return []
+            return [
+                // Leaf cert — api.openai.com (Google Trust Services WE1)
+                "xiKNSl8SLMeEvynHDp4SxLxmkAJJf+66AglYicZnjgY=",
+                // Intermediate CA — Google Trust Services WE1
+                "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
+            ]
         case .gemini:
-            return []
+            return [
+                // Leaf cert — generativelanguage.googleapis.com (Google Trust Services WR2)
+                "Zr9OBQdY/8iuAP5GGyuQROLgBzu6JYE7bBgOqqA2S4U=",
+                // Intermediate CA — Google Trust Services WR2
+                "YPtHaftLw6/0vnc2BnNKGF54xiCA28WFcccjkA4ypCM=",
+            ]
         case .mistral:
-            return []
+            return [
+                // Leaf cert — api.mistral.ai (Google Trust Services WE1)
+                "H1mh77uO0FxfT226oUXYAQZB2YsPlszbN7wyuPAGKTE=",
+                // Intermediate CA — Google Trust Services WE1
+                "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
+            ]
         case .virustotal:
-            return []
+            return [
+                // Leaf cert — www.virustotal.com (Google Trust Services WR3)
+                "7BtyalLCzV/bk7EEYAhghT1SqZX+NNW6NIIiRR/cTKs=",
+                // Intermediate CA — Google Trust Services WR3
+                "OdSlmQD9NWJh4EbcOHBxkhygPwNSwA9Q91eounfbcoE=",
+            ]
         case .shodan:
-            return []
+            return [
+                // Leaf cert — api.shodan.io (Google Trust Services WE1)
+                "/0cKVdo1Q3WKkrGy+axY18I8sDv3Di4RIcrvZK6hIvw=",
+                // Intermediate CA — Google Trust Services WE1
+                "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
+            ]
         case .ollama:
-            return []   // Local only
+            return []   // Local only — no pinning needed
         }
     }
 }
@@ -154,13 +209,19 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
 
     // MARK: - SPKI Hash Extraction
 
-    /// Returns true if the leaf certificate's SPKI SHA-256 hash matches any
-    /// of the configured expected pins.
+    /// Returns true if ANY certificate in the server's presented chain has an
+    /// SPKI SHA-256 hash matching one of the configured expected pins.
+    ///
+    /// Checking the full chain (not just the leaf) means intermediate CA pins
+    /// remain valid through normal annual leaf certificate rotation, while still
+    /// detecting a compromised or substituted certificate authority.
     private func spkiMatchesPin(serverTrust: SecTrust) -> Bool {
         guard let chain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate],
-              let leaf = chain.first else { return false }
-        guard let spkiHash = extractSPKIHash(from: leaf) else { return false }
-        return expectedPins.contains(spkiHash)
+              !chain.isEmpty else { return false }
+        return chain.contains { cert in
+            guard let hash = extractSPKIHash(from: cert) else { return false }
+            return expectedPins.contains(hash)
+        }
     }
 
     /// Extracts the SHA-256 hash of the Subject Public Key Info (SPKI) from
