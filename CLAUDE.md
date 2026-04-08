@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (250 tests)
+swift test                     # Unit tests (314 tests)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
