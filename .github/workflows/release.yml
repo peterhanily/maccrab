@@ -9,6 +9,8 @@ jobs:
     runs-on: macos-15
     permissions:
       contents: write
+    env:
+      VERSION: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -20,10 +22,14 @@ jobs:
       - name: Install PyYAML
         run: pip install pyyaml
 
-      - name: Build release binary
+      - name: Build DMG release package
+        run: |
+          VERSION="${VERSION#v}" ./scripts/build-release.sh
+
+      - name: Build release binaries for tarball
         run: swift build -c release 2>&1 || echo "Binary build requires ES entitlement - packaging rules only"
 
-      - name: Compile rules
+      - name: Compile rules for tarball
         run: |
           mkdir -p compiled_rules
           python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir compiled_rules/
@@ -42,5 +48,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/maccrab-*.tar.gz
+          files: |
+            dist/maccrab-*.tar.gz
+            .build/MacCrab-v*.dmg
           generate_release_notes: true

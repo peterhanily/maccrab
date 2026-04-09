@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-VERSION="1.0.0"
+VERSION="${VERSION:-1.0.0}"
 BUILD_DIR="$PROJECT_DIR/.build/release"
 STAGING_DIR="/tmp/maccrab-release-$$"
 

@@ -24,7 +24,7 @@
 
 ### Homebrew (recommended)
 ```bash
-brew install --cask maccrab
+brew install --cask https://raw.githubusercontent.com/peterhanily/maccrab/main/homebrew/maccrab.rb
 ```
 
 ### Manual

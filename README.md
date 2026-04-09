@@ -291,7 +291,7 @@ Additional views: Settings → AI Backend (LLM provider configuration), Response
 ### Install via Homebrew
 
 ```bash
-brew install --cask maccrab
+brew install --cask https://raw.githubusercontent.com/peterhanily/maccrab/main/homebrew/maccrab.rb
 ```
 
 ### Build and run
