@@ -55,7 +55,11 @@ struct MainView: View {
     }
 
     private var campaignCount: Int {
-        appState.dashboardAlerts.filter { $0.ruleId.hasPrefix("maccrab.campaign.") }.count
+        appState.dashboardAlerts.filter {
+            $0.ruleId.hasPrefix("maccrab.campaign.")
+            && !$0.suppressed
+            && !appState.isPatternSuppressed($0)
+        }.count
     }
 
     var body: some View {
