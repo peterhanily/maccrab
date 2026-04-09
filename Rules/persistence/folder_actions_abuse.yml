@@ -1,0 +1,37 @@
+title: Folder Actions Script Installed for Persistence
+id: d1a2b3c4-0463-4000-a000-000000000463
+status: experimental
+description: >
+    Detects installation of Folder Action scripts, which execute
+    automatically when files are added to a monitored folder. Attackers
+    use Folder Actions for persistence — the script runs every time
+    a file is dropped into the folder, with no visible indicator.
+    Common targets: Desktop, Downloads, Documents folders.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1547/015/
+tags:
+    - attack.persistence
+    - attack.t1547.015
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_folder_actions:
+        TargetFilename|contains:
+            - '/Library/Scripts/Folder Action Scripts/'
+            - '/Folder Action Scripts/'
+    selection_osa_setup:
+        Image|endswith: '/osascript'
+        CommandLine|contains:
+            - 'attach script'
+            - 'folder action'
+            - 'adding folder items'
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection_folder_actions or (selection_osa_setup and not filter_apple)
+falsepositives:
+    - Legitimate Automator folder actions
+    - Photography workflows (auto-import on folder add)
+level: high

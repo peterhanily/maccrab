@@ -1,0 +1,39 @@
+title: Wi-Fi Network SSID Changed or Evil Twin Indicator
+id: d1a2b3c4-0459-4000-a000-000000000459
+status: experimental
+description: >
+    Detects networksetup or airport commands that change the Wi-Fi
+    network, create ad-hoc networks, or indicate evil twin detection.
+    An attacker may force the machine to connect to a rogue access
+    point with the same SSID as a trusted network but a different
+    BSSID, enabling MITM attacks.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1557/
+tags:
+    - attack.credential_access
+    - attack.t1557
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_join:
+        Image|endswith: '/networksetup'
+        CommandLine|contains:
+            - '-setairportnetwork'
+            - '-setairportpower'
+            - '-addpreferredwirelessnetworkatindex'
+    selection_create_network:
+        CommandLine|contains:
+            - 'create_ibss'
+            - 'ibss'
+            - '--adhoc'
+    filter_system:
+        SignerType: 'apple'
+        ParentImage|startswith: '/System/'
+    condition: (selection_join or selection_create_network) and not filter_system
+falsepositives:
+    - User manually changing Wi-Fi networks
+    - Network management scripts
+level: medium

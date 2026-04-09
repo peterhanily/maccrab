@@ -1,0 +1,40 @@
+title: Custom URL Scheme Handler Registered
+id: d1a2b3c4-0464-4000-a000-000000000464
+status: experimental
+description: >
+    Detects registration of custom URL scheme handlers by non-Apple
+    applications. URL scheme hijacking allows an attacker's app to
+    intercept links meant for legitimate apps (e.g., registering a
+    handler for slack:// or zoommtg:// URLs). This can be used for
+    credential phishing or code execution.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1036/
+tags:
+    - attack.initial_access
+    - attack.defense_evasion
+    - attack.t1036
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_lsregister:
+        Image|endswith: '/lsregister'
+        CommandLine|contains:
+            - '-f '
+            - '-u '
+            - 'URLTypes'
+    selection_defaults:
+        Image|endswith: '/defaults'
+        CommandLine|contains:
+            - 'LSHandlers'
+            - 'CFBundleURLSchemes'
+            - 'CFBundleURLTypes'
+    filter_apple:
+        SignerType: 'apple'
+    condition: (selection_lsregister or selection_defaults) and not filter_apple
+falsepositives:
+    - Legitimate app installations registering their URL schemes
+    - Developer testing custom URL handlers
+level: medium

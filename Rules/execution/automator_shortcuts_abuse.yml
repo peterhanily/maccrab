@@ -1,0 +1,56 @@
+title: Automator Workflow or Shortcuts Executes Shell Commands
+id: d1a2b3c4-0460-4000-a000-000000000460
+status: experimental
+description: >
+    Detects Automator workflows (.workflow) or Shortcuts that spawn
+    shell processes. While Automator and Shortcuts are legitimate
+    Apple automation tools, attackers can weaponize them to execute
+    arbitrary commands with the user's privileges. Malicious workflows
+    can be delivered via email, AirDrop, or web download.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+tags:
+    - attack.execution
+    - attack.t1059.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_automator:
+        ParentImage|contains:
+            - '/Automator'
+            - 'Automator Runner'
+            - 'com.apple.automator'
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/python'
+            - '/python3'
+            - '/curl'
+    selection_shortcuts:
+        ParentImage|contains:
+            - '/Shortcuts'
+            - 'ShortcutsAgent'
+            - 'WorkflowKit'
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/python'
+            - '/python3'
+            - '/curl'
+    selection_workflow_file:
+        TargetFilename|endswith:
+            - '.workflow'
+            - '.shortcut'
+        TargetFilename|contains:
+            - '/Library/Services/'
+            - '/Workflows/'
+    condition: selection_automator or selection_shortcuts or selection_workflow_file
+falsepositives:
+    - Legitimate Automator workflows for productivity
+    - Developer automation scripts
+level: medium

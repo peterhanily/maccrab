@@ -1,0 +1,69 @@
+title: Fileless Attack Indicators
+id: d1a2b3c4-0461-4000-a000-000000000461
+status: experimental
+description: >
+    Detects indicators of fileless/memory-only attacks on macOS. These
+    attacks avoid writing malware to disk by using interpreters to execute
+    payloads directly from memory, network streams, or encoded command
+    lines. Common patterns include downloading and executing in a single
+    pipeline, reflective loading via Python/Ruby, and using JXA
+    (JavaScript for Automation) for persistence.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1059/007/
+    - https://attack.mitre.org/techniques/T1620/
+tags:
+    - attack.execution
+    - attack.defense_evasion
+    - attack.t1059.007
+    - attack.t1620
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_jxa:
+        Image|endswith: '/osascript'
+        CommandLine|contains:
+            - '-l JavaScript'
+            - '-l javascript'
+            - 'ObjC.import'
+            - 'ObjC.unwrap'
+            - '$.NSTask'
+            - 'currentApp'
+    selection_python_reflective:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+        CommandLine|contains:
+            - 'exec(compile('
+            - '__import__("ctypes")'
+            - 'mmap.mmap('
+            - 'ctypes.cdll'
+            - 'ctypes.CDLL'
+            - 'cffi.FFI'
+    selection_ruby_reflective:
+        Image|endswith: '/ruby'
+        CommandLine|contains:
+            - 'Fiddle.dlopen'
+            - 'DL.dlopen'
+            - 'require "fiddle"'
+    selection_curl_pipe:
+        CommandLine|contains:
+            - 'curl -s'
+            - 'curl --silent'
+        CommandLine|contains:
+            - '| python'
+            - '| ruby'
+            - '| perl'
+            - '| osascript'
+            - '| /bin/sh'
+            - '| bash -'
+    filter_apple:
+        SignerType: 'apple'
+    condition: (selection_jxa or selection_python_reflective or selection_ruby_reflective or selection_curl_pipe) and not filter_apple
+falsepositives:
+    - Legitimate JXA automation scripts
+    - Python scientific computing using ctypes/cffi
+    - DevOps installation scripts (curl | bash pattern for installers)
+level: high
