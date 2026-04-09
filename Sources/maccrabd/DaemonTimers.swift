@@ -84,6 +84,37 @@ enum DaemonTimers {
                 let score = await state.securityScorer.calculate()
                 logger.info("Security score: \(score.totalScore)/100 (\(score.grade))")
 
+                // LLM security posture analysis (non-blocking, hourly, only if score < 90)
+                if let llm = state.llmService, score.totalScore < 90 {
+                    let totalScore = score.totalScore
+                    let grade = score.grade
+                    let factors = score.factors.map { ($0.name, $0.category, $0.score, $0.maxScore, $0.status, $0.detail) }
+                    let recs = score.recommendations
+                    Task {
+                        if let analysis = await llm.query(
+                            systemPrompt: LLMPrompts.securityScoreSystem,
+                            userPrompt: LLMPrompts.securityScoreUser(
+                                totalScore: totalScore, grade: grade,
+                                factors: factors, recommendations: recs
+                            ),
+                            maxTokens: 512, temperature: 0.3
+                        ) {
+                            let scoreAlert = Alert(
+                                ruleId: "maccrab.llm.security-score",
+                                ruleTitle: "AI Security Recommendations (\(grade) — \(totalScore)/100)",
+                                severity: .informational,
+                                eventId: UUID().uuidString,
+                                processPath: nil, processName: "maccrabd",
+                                description: analysis.response,
+                                mitreTactics: nil, mitreTechniques: nil,
+                                suppressed: false
+                            )
+                            do { try await state.alertStore.insert(alert: scoreAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            print("[LLM] Security score analysis: \(grade) (\(totalScore)/100)")
+                        }
+                    }
+                }
+
                 // Vulnerability scan
                 let vulns = await state.vulnScanner.scanInstalledApps()
                 for vuln in vulns {

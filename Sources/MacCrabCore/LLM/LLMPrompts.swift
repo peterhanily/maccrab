@@ -300,6 +300,84 @@ public enum LLMPrompts {
         return parts.joined(separator: "\n")
     }
 
+    // MARK: - Security Score Recommendations
+
+    public static let securityScoreSystem = """
+        You are a macOS security hardening advisor. Given a system's security posture \
+        score with individual factors, provide prioritized recommendations to improve \
+        the score. Focus on practical, actionable steps.
+
+        FORMAT:
+        **Current Posture**: 1-2 sentences summarizing the overall security state.
+        **Priority Fixes** (things that will have the biggest impact):
+        1. [Factor name]: Specific command or System Settings path to fix it.
+        2. [Factor name]: Specific steps.
+        3. [Factor name]: Specific steps.
+        **Good Practices Already in Place**: Brief acknowledgment of what's working.
+        **Risk Context**: What real-world attacks these gaps enable.
+
+        Keep under 250 words. Every recommendation must include the exact System Settings \
+        path or terminal command needed. Prioritize by impact (highest score improvement first). \
+        Do not recommend things that are already passing.
+        """
+
+    public static func securityScoreUser(
+        totalScore: Int, grade: String,
+        factors: [(name: String, category: String, score: Int, maxScore: Int, status: String, detail: String)],
+        recommendations: [String]
+    ) -> String {
+        var parts: [String] = []
+        parts.append("Security Score: \(totalScore)/100 (Grade: \(grade))")
+        parts.append("")
+        parts.append("Factors:")
+        for f in factors {
+            let icon = f.status == "pass" ? "PASS" : (f.status == "warn" ? "WARN" : "FAIL")
+            parts.append("  [\(icon)] \(sanitizePromptField(f.name)) — \(f.score)/\(f.maxScore) — \(sanitizePromptField(f.detail))")
+        }
+        if !recommendations.isEmpty {
+            parts.append("")
+            parts.append("Current recommendations: \(recommendations.joined(separator: "; "))")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    // MARK: - Baseline Anomaly Analysis
+
+    public static let baselineAnomalySystem = """
+        You are a macOS process behavior analyst. A process lineage anomaly has been \
+        detected — a parent-child process relationship that was NEVER observed during \
+        a learning period. Explain whether this is likely malicious or benign.
+
+        FORMAT:
+        **What Was Detected**: 1-2 sentences in plain language about the unusual process spawn.
+        **Normal Behavior**: What the parent process typically spawns (if known).
+        **Suspicious Indicators**: Why this lineage could indicate an attack.
+        **Benign Explanations**: Legitimate reasons this could occur (updates, user action, etc.).
+        **Verdict**: Likely malicious / Likely benign / Needs investigation — with reasoning.
+        **If Suspicious**:
+        - Verification step
+        - Containment step (if needed)
+
+        Keep under 200 words. macOS process lineage is the key signal — unusual parent-child \
+        relationships often indicate code injection, exploitation, or living-off-the-land attacks. \
+        Be balanced: novel does not always mean malicious.
+        """
+
+    public static func baselineAnomalyUser(
+        parentName: String, childName: String,
+        parentPath: String, childPath: String,
+        pid: Int32, userName: String, edgeCount: Int
+    ) -> String {
+        var parts: [String] = []
+        parts.append("Novel process lineage detected:")
+        parts.append("Parent: \(sanitizePromptField(parentName)) (\(sanitizePromptField(parentPath)))")
+        parts.append("Child: \(sanitizePromptField(childName)) (\(sanitizePromptField(childPath)))")
+        parts.append("Child PID: \(pid)")
+        parts.append("User: \(sanitizePromptField(userName))")
+        parts.append("Baseline size: \(edgeCount) known edges (never seen this combination)")
+        return parts.joined(separator: "\n")
+    }
+
     // MARK: - Prompt Safety
 
     /// Strip characters that could be used for prompt injection.

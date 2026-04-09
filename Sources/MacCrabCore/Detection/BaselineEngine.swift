@@ -417,6 +417,9 @@ public actor BaselineEngine {
         )
     }
 
+    /// Number of known baseline edges (learned process relationships).
+    public var edgeCount: Int { edges.count }
+
     /// Add a user-supplied exemption for a specific edge (e.g., "this is normal").
     ///
     /// The edge is added to the config's exemptEdges list and also inserted into

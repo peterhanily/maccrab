@@ -704,6 +704,42 @@ enum EventLoop {
             // Layer 3: Baseline anomaly detection (Phase 3)
             if let baselineMatch = await state.baselineEngine.evaluate(enrichedEvent) {
                 matches.append(baselineMatch)
+
+                // LLM baseline anomaly analysis (non-blocking)
+                if let llm = state.llmService {
+                    let matchCopy = baselineMatch
+                    let parentName = enrichedEvent.process.ancestors.first?.name ?? "unknown"
+                    let parentPath = enrichedEvent.process.ancestors.first?.executable ?? "unknown"
+                    let childName = enrichedEvent.process.name
+                    let childPath = enrichedEvent.process.executable
+                    let pid = enrichedEvent.process.pid
+                    let userName = enrichedEvent.process.userName
+                    let edgeCount = await state.baselineEngine.edgeCount
+                    Task {
+                        if let analysis = await llm.query(
+                            systemPrompt: LLMPrompts.baselineAnomalySystem,
+                            userPrompt: LLMPrompts.baselineAnomalyUser(
+                                parentName: parentName, childName: childName,
+                                parentPath: parentPath, childPath: childPath,
+                                pid: pid, userName: userName, edgeCount: edgeCount
+                            ),
+                            maxTokens: 512, temperature: 0.3
+                        ) {
+                            let analysisAlert = Alert(
+                                ruleId: "maccrab.llm.baseline-analysis",
+                                ruleTitle: "AI Anomaly Analysis: \(parentName) → \(childName)",
+                                severity: .informational,
+                                eventId: UUID().uuidString,
+                                processPath: childPath, processName: childName,
+                                description: analysis.response,
+                                mitreTactics: nil, mitreTechniques: nil,
+                                suppressed: false
+                            )
+                            do { try await state.alertStore.insert(alert: analysisAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            print("[LLM] Baseline anomaly analysis: \(parentName) → \(childName)")
+                        }
+                    }
+                }
             }
 
             // Layer 4: Behavioral scoring -- escalate score on rule matches
