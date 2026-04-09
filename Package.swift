@@ -12,6 +12,7 @@ let package = Package(
         .executable(name: "maccrabd", targets: ["maccrabd"]),
         .executable(name: "maccrabctl", targets: ["maccrabctl"]),
         .executable(name: "MacCrabApp", targets: ["MacCrabApp"]),
+        .executable(name: "maccrab-mcp", targets: ["maccrab-mcp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-testing.git", branch: "release/6.2"),
@@ -42,6 +43,10 @@ let package = Package(
             resources: [
                 .process("Resources"),
             ]
+        ),
+        .executableTarget(
+            name: "maccrab-mcp",
+            dependencies: ["MacCrabCore"]
         ),
         .testTarget(
             name: "MacCrabCoreTests",
