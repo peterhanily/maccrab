@@ -237,6 +237,61 @@ enum MonitorTasks {
             }
         }
 
+        // TEMPEST / Van Eck phreaking monitoring task
+        Task {
+            for await tempestEvent in state.tempestMonitor.events {
+                let alert = Alert(
+                    ruleId: "maccrab.tempest.\(tempestEvent.type.rawValue)",
+                    ruleTitle: tempestEvent.title,
+                    severity: tempestEvent.severity,
+                    eventId: UUID().uuidString,
+                    processPath: nil,
+                    processName: "TEMPESTMonitor",
+                    description: "\(tempestEvent.description)\n\n\(tempestEvent.detail)",
+                    mitreTactics: "attack.collection",
+                    mitreTechniques: "attack.t1040",
+                    suppressed: false
+                )
+                try? await state.alertStore.insert(alert: alert)
+                await state.notifier.notify(alert: alert)
+                print("[TEMPEST] \(tempestEvent.type.rawValue): \(tempestEvent.title)")
+
+                // LLM analysis for TEMPEST events (non-blocking)
+                if let llm = state.llmService {
+                    let title = tempestEvent.title
+                    let desc = tempestEvent.description
+                    let detail = tempestEvent.detail
+                    let alertId = alert.id
+                    Task {
+                        if let analysis = await llm.query(
+                            systemPrompt: """
+                                You are a TEMPEST/EMSEC (electromagnetic security) specialist. \
+                                A potential Van Eck phreaking indicator has been detected. Explain \
+                                the threat, what an attacker could see or capture, and specific \
+                                countermeasures. Keep under 200 words. Include both the risk \
+                                assessment and practical steps the user can take RIGHT NOW.
+                                """,
+                            userPrompt: "Detection: \(title)\nDetail: \(desc)\nTechnical: \(detail)",
+                            maxTokens: 512, temperature: 0.2
+                        ) {
+                            let analysisAlert = Alert(
+                                ruleId: "maccrab.llm.tempest-analysis",
+                                ruleTitle: "AI TEMPEST Analysis: \(title)",
+                                severity: .informational,
+                                eventId: alertId,
+                                processPath: nil, processName: "TEMPESTMonitor",
+                                description: analysis.response,
+                                mitreTactics: nil, mitreTechniques: nil,
+                                suppressed: false
+                            )
+                            do { try await state.alertStore.insert(alert: analysisAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            print("[LLM] TEMPEST analysis generated for: \(title)")
+                        }
+                    }
+                }
+            }
+        }
+
         // EDR/RMM tool monitoring task
         Task {
             for await discovery in state.edrMonitor.events {

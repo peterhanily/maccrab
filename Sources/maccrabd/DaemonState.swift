@@ -67,6 +67,7 @@ final class DaemonState {
     let rootkitDetector: RootkitDetector
     let tccMonitor: TCCMonitor
     let edrMonitor: EDRMonitor
+    let tempestMonitor: TEMPESTMonitor
     let fsEventsCollector: FSEventsCollector
 
     // MARK: - Collectors
@@ -182,6 +183,7 @@ final class DaemonState {
         rootkitDetector: RootkitDetector,
         tccMonitor: TCCMonitor,
         edrMonitor: EDRMonitor,
+        tempestMonitor: TEMPESTMonitor,
         fsEventsCollector: FSEventsCollector,
         collector: ESCollector?,
         esloggerCollector: EsloggerCollector?,
@@ -274,6 +276,7 @@ final class DaemonState {
         self.rootkitDetector = rootkitDetector
         self.tccMonitor = tccMonitor
         self.edrMonitor = edrMonitor
+        self.tempestMonitor = tempestMonitor
         self.fsEventsCollector = fsEventsCollector
         self.collector = collector
         self.esloggerCollector = esloggerCollector

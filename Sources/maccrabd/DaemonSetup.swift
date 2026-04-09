@@ -311,6 +311,11 @@ enum DaemonSetup {
         await edrMonitor.start()
         print("EDR/RMM monitor active (CrowdStrike, SentinelOne, ForcePoint, Jamf, TeamViewer + 25 more)")
 
+        // TEMPEST / Van Eck phreaking monitor — SDR device detection + display anomalies
+        let tempestMonitor = TEMPESTMonitor(pollInterval: 60)
+        await tempestMonitor.start()
+        print("TEMPEST monitor active (SDR device detection, display anomaly monitoring)")
+
         // Library inventory -- scans for injected dylibs
         let libraryInventory = LibraryInventory()
 
@@ -826,6 +831,7 @@ enum DaemonSetup {
             rootkitDetector: rootkitDetector,
             tccMonitor: tccMonitor,
             edrMonitor: edrMonitor,
+            tempestMonitor: tempestMonitor,
             fsEventsCollector: fsEventsCollector,
             collector: collector,
             esloggerCollector: esloggerCollector,
