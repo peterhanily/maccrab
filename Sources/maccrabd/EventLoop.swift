@@ -934,6 +934,46 @@ enum EventLoop {
                 if !batchAlerts.isEmpty {
                     do { try await state.alertStore.insert(alerts: batchAlerts) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
+
+                // LLM analysis for individual HIGH/CRITICAL alerts (non-blocking).
+                // Only the first high/critical alert per event gets analysis to avoid
+                // flooding the LLM when many rules fire on the same event.
+                if let llm = state.llmService,
+                   let topAlert = batchAlerts.first(where: { $0.severity == .critical || $0.severity == .high }),
+                   // Skip campaign/LLM meta-alerts to avoid recursion
+                   !topAlert.ruleId.hasPrefix("maccrab.campaign."),
+                   !topAlert.ruleId.hasPrefix("maccrab.llm.") {
+                    let alertCopy = topAlert
+                    Task {
+                        if let analysis = await llm.query(
+                            systemPrompt: LLMPrompts.alertAnalysisSystem,
+                            userPrompt: LLMPrompts.alertAnalysisUser(
+                                ruleTitle: alertCopy.ruleTitle,
+                                severity: alertCopy.severity.rawValue,
+                                processName: alertCopy.processName,
+                                processPath: alertCopy.processPath,
+                                description: alertCopy.description,
+                                mitreTechniques: alertCopy.mitreTechniques,
+                                mitreTactics: alertCopy.mitreTactics
+                            ),
+                            maxTokens: 512, temperature: 0.2
+                        ) {
+                            let analysisAlert = Alert(
+                                ruleId: "maccrab.llm.alert-analysis",
+                                ruleTitle: "AI Analysis: \(alertCopy.ruleTitle)",
+                                severity: .informational,
+                                eventId: alertCopy.id,
+                                processPath: alertCopy.processPath,
+                                processName: alertCopy.processName,
+                                description: analysis.response,
+                                mitreTactics: nil, mitreTechniques: nil,
+                                suppressed: false
+                            )
+                            do { try await state.alertStore.insert(alert: analysisAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            print("[LLM] Alert analysis generated for: \(alertCopy.ruleTitle)")
+                        }
+                    }
+                }
             }
         }
 

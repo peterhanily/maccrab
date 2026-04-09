@@ -145,6 +145,81 @@ public enum LLMPrompts {
         sanitizePromptField(alertContext)
     }
 
+    // MARK: - Individual Alert Analysis
+
+    public static let alertAnalysisSystem = """
+        You are a macOS security analyst. Given a single detection alert with its \
+        context (rule, process, MITRE technique), explain what happened, why it matters, \
+        and what the user should do.
+
+        FORMAT:
+        **What Happened**: 1-2 sentences explaining the detection in plain language.
+        **Why It Matters**: 1-2 sentences on the risk (what an attacker could achieve).
+        **What To Do**:
+        - Step 1 (most important action)
+        - Step 2
+        - Step 3 (if applicable)
+        **False Positive?**: Brief note on whether this could be benign and how to verify.
+
+        Keep under 200 words. Be specific to macOS. Use command-line examples where helpful. \
+        Do not speculate beyond the evidence. If the process is Apple-signed, note that \
+        the risk is lower but the behavior is still worth understanding.
+        """
+
+    public static func alertAnalysisUser(
+        ruleTitle: String, severity: String, processName: String?,
+        processPath: String?, description: String?,
+        mitreTechniques: String?, mitreTactics: String?
+    ) -> String {
+        var parts: [String] = []
+        parts.append("Alert: \(sanitizePromptField(ruleTitle))")
+        parts.append("Severity: \(severity)")
+        if let name = processName, !name.isEmpty { parts.append("Process: \(sanitizePromptField(name))") }
+        if let path = processPath, !path.isEmpty { parts.append("Path: \(sanitizePromptField(path))") }
+        if let desc = description, !desc.isEmpty { parts.append("Detail: \(sanitizePromptField(desc))") }
+        if let tactics = mitreTactics, !tactics.isEmpty { parts.append("MITRE Tactics: \(sanitizePromptField(tactics))") }
+        if let techs = mitreTechniques, !techs.isEmpty { parts.append("MITRE Techniques: \(sanitizePromptField(techs))") }
+        return parts.joined(separator: "\n")
+    }
+
+    // MARK: - EDR/RMM Tool Context
+
+    public static let edrContextSystem = """
+        You are a macOS security and privacy advisor. Given a detected EDR, remote \
+        management, insider threat, or remote access tool running on this machine, \
+        explain what it can do, what data it can access, and what the user should know.
+
+        FORMAT:
+        **What This Tool Does**: 2-3 sentences explaining its purpose and who typically deploys it.
+        **Privacy Impact**: What data this tool can see or capture (files, screens, keystrokes, network, etc.).
+        **Remote Capabilities**: What actions a remote operator can take on this machine.
+        **What You Should Know**:
+        - Key fact 1
+        - Key fact 2
+        - Key fact 3
+        **If Unexpected**: Steps to verify if this tool was legitimately installed.
+
+        Keep under 250 words. Be factual and balanced — these tools are often legitimately \
+        deployed by IT departments, but users deserve transparency about their capabilities. \
+        If the tool is an insider threat/UAM product, be direct about its surveillance capabilities.
+        """
+
+    public static func edrContextUser(
+        toolName: String, vendor: String, category: String,
+        capabilities: [String], processName: String?,
+        processPath: String?, installedPath: String?
+    ) -> String {
+        var parts: [String] = []
+        parts.append("Tool: \(sanitizePromptField(toolName))")
+        parts.append("Vendor: \(sanitizePromptField(vendor))")
+        parts.append("Category: \(sanitizePromptField(category))")
+        parts.append("Capabilities: \(capabilities.map { sanitizePromptField($0) }.joined(separator: ", "))")
+        if let name = processName { parts.append("Running as: \(sanitizePromptField(name))") }
+        if let path = processPath { parts.append("Process path: \(sanitizePromptField(path))") }
+        if let installed = installedPath { parts.append("Installed at: \(sanitizePromptField(installed))") }
+        return parts.joined(separator: "\n")
+    }
+
     // MARK: - Prompt Safety
 
     /// Strip characters that could be used for prompt injection.

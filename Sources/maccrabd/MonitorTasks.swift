@@ -265,6 +265,44 @@ enum MonitorTasks {
                 }
 
                 print("[EDR] \(discovery.category.rawValue): \(discovery.toolName) by \(discovery.vendor)\(processInfo)")
+
+                // LLM contextual analysis for EDR/RMM discoveries (non-blocking)
+                if let llm = state.llmService {
+                    let toolName = discovery.toolName
+                    let vendor = discovery.vendor
+                    let category = discovery.category.rawValue
+                    let capabilities = discovery.capabilities
+                    let procName = discovery.processName
+                    let procPath = discovery.processPath
+                    let instPath = discovery.installedPath
+                    let alertId = alert.id
+
+                    Task {
+                        if let analysis = await llm.query(
+                            systemPrompt: LLMPrompts.edrContextSystem,
+                            userPrompt: LLMPrompts.edrContextUser(
+                                toolName: toolName, vendor: vendor, category: category,
+                                capabilities: capabilities, processName: procName,
+                                processPath: procPath, installedPath: instPath
+                            ),
+                            maxTokens: 512, temperature: 0.2
+                        ) {
+                            let contextAlert = Alert(
+                                ruleId: "maccrab.llm.edr-context",
+                                ruleTitle: "AI Context: \(toolName) (\(category))",
+                                severity: .informational,
+                                eventId: alertId,
+                                processPath: procPath ?? instPath,
+                                processName: procName ?? toolName,
+                                description: analysis.response,
+                                mitreTactics: nil, mitreTechniques: nil,
+                                suppressed: false
+                            )
+                            do { try await state.alertStore.insert(alert: contextAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            print("[LLM] EDR context generated for: \(toolName)")
+                        }
+                    }
+                }
             }
         }
 
