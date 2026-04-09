@@ -1,0 +1,63 @@
+title: Wi-Fi Attack or Reconnaissance Tool Detected
+id: d1a2b3c4-0456-4000-a000-000000000456
+status: experimental
+description: >
+    Detects execution of Wi-Fi attack, reconnaissance, or monitoring
+    tools. These tools can perform deauthentication attacks, create evil
+    twin access points, capture WPA handshakes, and perform MITM attacks
+    on wireless networks.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1557/
+tags:
+    - attack.discovery
+    - attack.credential_access
+    - attack.t1557
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tools:
+        Image|endswith:
+            - '/aircrack-ng'
+            - '/airodump-ng'
+            - '/aireplay-ng'
+            - '/airmon-ng'
+            - '/wifite'
+            - '/bettercap'
+            - '/hostapd'
+            - '/mdk3'
+            - '/mdk4'
+            - '/reaver'
+            - '/bully'
+            - '/fluxion'
+            - '/wifiphisher'
+            - '/eaphammer'
+            - '/hashcat'
+    selection_airport:
+        Image|endswith: '/airport'
+        CommandLine|contains:
+            - '-s'
+            - 'scan'
+            - 'sniff'
+            - '--disassociate'
+    selection_monitor_mode:
+        CommandLine|contains:
+            - 'monitor mode'
+            - 'ifconfig.*promisc'
+            - 'airport.*sniff'
+    selection_python_wifi:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+        CommandLine|contains:
+            - 'from scapy'
+            - 'import scapy'
+            - 'Dot11Deauth'
+            - 'RadioTap'
+    condition: selection_tools or selection_airport or selection_monitor_mode or selection_python_wifi
+falsepositives:
+    - Network security auditing (authorized penetration testing)
+    - Wi-Fi troubleshooting by IT staff
+level: critical

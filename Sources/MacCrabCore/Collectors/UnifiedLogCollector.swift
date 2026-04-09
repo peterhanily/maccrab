@@ -71,6 +71,12 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         "com.apple.screensharing",
         "com.apple.mDNSResponder",
         "com.apple.networkd",
+        // Bluetooth & AirDrop — wireless attack detection
+        "com.apple.bluetooth",
+        "com.apple.sharingd",
+        // Wi-Fi — evil twin, deauth, rogue AP detection
+        "com.apple.wifi",
+        "com.apple.wifid",
     ]
 
     // MARK: - Properties

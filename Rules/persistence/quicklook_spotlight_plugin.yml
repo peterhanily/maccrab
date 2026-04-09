@@ -1,0 +1,41 @@
+title: Malicious Quick Look or Spotlight Plugin Installed
+id: d1a2b3c4-0458-4000-a000-000000000458
+status: experimental
+description: >
+    Detects installation of Quick Look generators (.qlgenerator) or
+    Spotlight importers (.mdimporter) outside system directories.
+    These plugins execute code when files are previewed (Quick Look)
+    or indexed (Spotlight), providing persistence and code execution
+    without any explicit user action.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.persistence
+    - attack.execution
+    - attack.t1547
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_quicklook:
+        TargetFilename|endswith: '.qlgenerator'
+        TargetFilename|contains:
+            - '/Library/QuickLook/'
+            - '/QuickLook/'
+    selection_spotlight:
+        TargetFilename|endswith: '.mdimporter'
+        TargetFilename|contains:
+            - '/Library/Spotlight/'
+            - '/Spotlight/'
+    filter_system:
+        TargetFilename|startswith:
+            - '/System/'
+    filter_apple:
+        SignerType: 'apple'
+    condition: (selection_quicklook or selection_spotlight) and not filter_system and not filter_apple
+falsepositives:
+    - Legitimate application installations adding preview plugins
+    - Developer tools adding source code preview handlers
+level: high

@@ -1,0 +1,49 @@
+title: Repeated Authentication Failures
+id: d1a2b3c4-0448-4000-a000-000000000448
+status: experimental
+description: >
+    Detects processes that repeatedly invoke sudo or security commands,
+    suggesting password brute-force or credential spraying. Normal users
+    rarely fail authentication more than once or twice. Repeated failures
+    from a single process or in rapid succession indicate automated attack.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1110/
+tags:
+    - attack.credential_access
+    - attack.t1110
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_sudo:
+        Image|endswith: '/sudo'
+        CommandLine|contains:
+            - '-S'
+            - '-A'
+            - '--stdin'
+    selection_security_unlock:
+        Image|endswith: '/security'
+        CommandLine|contains:
+            - 'unlock-keychain'
+            - 'authorizationdb'
+            - 'find-generic-password'
+            - 'find-internet-password'
+    selection_login:
+        Image|endswith:
+            - '/login'
+            - '/su'
+        CommandLine|contains:
+            - '-f'
+            - '-l'
+    filter_apple:
+        SignerType: 'apple'
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: (selection_sudo or selection_security_unlock or selection_login) and not filter_apple
+falsepositives:
+    - Automated deployment scripts using sudo -S with correct passwords
+    - Password managers querying keychain
+level: high

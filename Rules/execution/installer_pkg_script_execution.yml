@@ -1,0 +1,50 @@
+title: Installer Package Pre/Post-Install Script Execution
+id: d1a2b3c4-0449-4000-a000-000000000449
+status: stable
+description: >
+    Detects when macOS installer packages (.pkg) execute pre-install or
+    post-install scripts. These scripts run as root and can perform
+    arbitrary actions including installing backdoors, modifying system
+    files, and downloading additional payloads. Common malware delivery
+    vector — user double-clicks .pkg and scripts execute with full
+    privileges before the user sees any installation UI.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1059/004/
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.execution
+    - attack.initial_access
+    - attack.t1059.004
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_installer_parent:
+        ParentImage|endswith:
+            - '/Installer'
+            - '/installer'
+            - '/package_script_service'
+            - '/installd'
+            - '/system_installd'
+    selection_script:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+            - '/python'
+            - '/python3'
+            - '/perl'
+            - '/ruby'
+    filter_apple_installer:
+        SignerType: 'apple'
+        CommandLine|contains:
+            - '/System/Library/'
+            - 'com.apple.'
+    condition: selection_installer_parent and selection_script and not filter_apple_installer
+falsepositives:
+    - Legitimate software installers (Homebrew cask, Adobe, Microsoft)
+    - System software updates
+level: high

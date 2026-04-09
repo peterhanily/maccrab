@@ -1,0 +1,54 @@
+title: Bluetooth Scanning or Exploitation Tool Detected
+id: d1a2b3c4-0455-4000-a000-000000000455
+status: experimental
+description: >
+    Detects execution of Bluetooth scanning, enumeration, or exploitation
+    tools. These tools can discover nearby devices, exploit Bluetooth
+    vulnerabilities (BlueBorne, KNOB, BLESA), and intercept Bluetooth
+    communications. Also detects BLE (Bluetooth Low Energy) scanning
+    frameworks used for tracking and surveillance.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1011/001/
+tags:
+    - attack.discovery
+    - attack.collection
+    - attack.t1011.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tools:
+        Image|endswith:
+            - '/blueutil'
+            - '/btlejack'
+            - '/bettercap'
+            - '/hcitool'
+            - '/gatttool'
+            - '/bluetoothctl'
+            - '/ubertooth'
+            - '/crackle'
+    selection_commands:
+        CommandLine|contains:
+            - 'blueutil'
+            - 'btlejuice'
+            - 'bleah'
+            - 'bluetooth_scanner'
+            - 'ble_scan'
+            - 'gattacker'
+            - 'btle_find'
+    selection_python_bt:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+        CommandLine|contains:
+            - 'import bluetooth'
+            - 'import bluepy'
+            - 'import bleak'
+            - 'CoreBluetooth'
+    condition: selection_tools or selection_commands or selection_python_bt
+falsepositives:
+    - Bluetooth development and testing
+    - Home automation tools (HomeKit, IoT)
+level: high

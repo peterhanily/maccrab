@@ -1,0 +1,43 @@
+title: PAM Module Installed or Modified
+id: d1a2b3c4-0447-4000-a000-000000000447
+status: stable
+description: >
+    Detects creation or modification of PAM (Pluggable Authentication Module)
+    configuration files or module libraries. Malicious PAM modules can silently
+    intercept every sudo, login, screensaver unlock, and SSH authentication,
+    harvesting credentials without any visible indicator.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1556/003/
+tags:
+    - attack.credential_access
+    - attack.persistence
+    - attack.t1556.003
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_pam_config:
+        TargetFilename|contains:
+            - '/etc/pam.d/'
+    selection_pam_modules:
+        TargetFilename|contains:
+            - '/usr/lib/pam/'
+            - '/usr/local/lib/pam/'
+            - '/Library/Security/SecurityAgentPlugins/'
+        TargetFilename|endswith:
+            - '.so'
+            - '.dylib'
+            - '.bundle'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple:
+        SignerType: 'apple'
+    condition: (selection_pam_config or selection_pam_modules) and not filter_system and not filter_apple
+falsepositives:
+    - System updates modifying PAM configuration
+    - Enterprise security tools adding auth modules
+level: critical

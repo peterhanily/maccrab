@@ -1,0 +1,46 @@
+title: Synthetic Click or Accessibility API Abuse
+id: d1a2b3c4-0452-4000-a000-000000000452
+status: experimental
+description: >
+    Detects processes that use CGEvent or AXUIElement APIs to generate
+    synthetic mouse clicks or UI interactions. Malware uses synthetic
+    clicks to dismiss TCC permission dialogs, granting itself camera,
+    microphone, Full Disk Access, or screen recording permissions without
+    genuine user consent. Also detects accessibility API usage by
+    unsigned processes.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1548/
+    - https://attack.mitre.org/techniques/T1056/
+tags:
+    - attack.privilege_escalation
+    - attack.defense_evasion
+    - attack.t1548
+    - attack.t1056
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_cgevent:
+        CommandLine|contains:
+            - 'CGEvent'
+            - 'CGEventCreateMouseEvent'
+            - 'CGEventPost'
+            - 'CGEventCreateKeyboardEvent'
+    selection_axui:
+        CommandLine|contains:
+            - 'AXUIElement'
+            - 'AXIsProcessTrusted'
+            - 'kAXPressAction'
+            - 'AXUIElementPerformAction'
+    selection_unsigned:
+        SignerType:
+            - 'unsigned'
+            - 'adhoc'
+    condition: (selection_cgevent or selection_axui) and selection_unsigned
+falsepositives:
+    - Accessibility tools (Voice Control, Switch Control)
+    - UI automation testing frameworks (XCUITest, Appium)
+    - Keyboard remapping utilities (Karabiner)
+level: high

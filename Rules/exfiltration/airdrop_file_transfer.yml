@@ -1,0 +1,44 @@
+title: AirDrop File Transfer by Non-Standard Process
+id: d1a2b3c4-0457-4000-a000-000000000457
+status: experimental
+description: >
+    Detects AirDrop file transfers initiated by processes other than
+    Finder or standard system sharing services. AirDrop can be used
+    for data exfiltration (sending files to a nearby attacker device)
+    or initial access (receiving malicious files). Unsigned or
+    non-Apple processes using the sharing framework are suspicious.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1011/001/
+    - https://attack.mitre.org/techniques/T1566/001/
+tags:
+    - attack.exfiltration
+    - attack.initial_access
+    - attack.t1011.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_sharing:
+        CommandLine|contains:
+            - 'NSSharingService'
+            - 'SHKAirDrop'
+            - 'sharingd'
+            - 'AirDrop'
+    selection_cli:
+        Image|endswith:
+            - '/sharing'
+        CommandLine|contains:
+            - 'airdrop'
+    filter_apple:
+        SignerType: 'apple'
+    filter_finder:
+        ParentImage|endswith:
+            - '/Finder'
+            - '/sharingd'
+    condition: (selection_sharing or selection_cli) and not filter_apple and not filter_finder
+falsepositives:
+    - Third-party file sharing applications
+    - Automation tools using AirDrop
+level: high

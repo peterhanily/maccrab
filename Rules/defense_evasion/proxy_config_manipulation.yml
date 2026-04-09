@@ -1,0 +1,48 @@
+title: System Proxy Configuration Modified
+id: d1a2b3c4-0451-4000-a000-000000000451
+status: experimental
+description: >
+    Detects modification of macOS network proxy settings via networksetup
+    or scutil. Attackers modify proxy settings to redirect traffic through
+    their own MITM proxy for credential interception or data exfiltration.
+    Also detects PAC (Proxy Auto-Config) file injection.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1090/
+tags:
+    - attack.command_and_control
+    - attack.defense_evasion
+    - attack.t1090
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_networksetup:
+        Image|endswith: '/networksetup'
+        CommandLine|contains:
+            - '-setwebproxy'
+            - '-setsecurewebproxy'
+            - '-setsocksfirewallproxy'
+            - '-setautoproxyurl'
+            - '-setautoproxystate'
+            - '-setproxybypassdomains'
+    selection_scutil:
+        Image|endswith: '/scutil'
+        CommandLine|contains:
+            - 'Proxies'
+            - 'ProxyAutoConfig'
+    selection_pac_file:
+        TargetFilename|endswith:
+            - '.pac'
+            - 'proxy.pac'
+            - 'wpad.dat'
+    filter_system:
+        SignerType: 'apple'
+        ParentImage|startswith:
+            - '/System/'
+    condition: selection_networksetup or selection_scutil or selection_pac_file
+falsepositives:
+    - Corporate VPN clients configuring proxy
+    - Network management tools
+level: high

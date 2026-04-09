@@ -1,0 +1,48 @@
+title: Installer Script Downloads and Executes Payload
+id: d1a2b3c4-0450-4000-a000-000000000450
+status: stable
+description: >
+    Detects when a process spawned by the macOS installer framework
+    downloads content from the internet (curl, wget) and/or executes
+    downloaded content. This is the hallmark of a malicious .pkg that
+    uses its pre/post-install script to fetch and run a second-stage
+    payload with root privileges.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1105/
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.execution
+    - attack.command_and_control
+    - attack.t1105
+    - attack.t1204.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_parent:
+        ParentImage|endswith:
+            - '/Installer'
+            - '/installer'
+            - '/package_script_service'
+            - '/installd'
+    selection_download:
+        CommandLine|contains:
+            - 'curl '
+            - 'wget '
+            - 'urllib'
+            - 'urlretrieve'
+    selection_execute:
+        CommandLine|contains:
+            - 'chmod +x'
+            - '| sh'
+            - '| bash'
+            - '| zsh'
+            - 'python -c'
+            - 'python3 -c'
+            - 'osascript'
+    condition: selection_parent and (selection_download or selection_execute)
+falsepositives:
+    - Some legitimate installers download components during install
+level: critical

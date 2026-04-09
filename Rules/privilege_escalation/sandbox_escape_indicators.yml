@@ -1,0 +1,46 @@
+title: App Sandbox Escape Indicators
+id: d1a2b3c4-0453-4000-a000-000000000453
+status: experimental
+description: >
+    Detects indicators of macOS App Sandbox escape attempts. Sandboxed
+    apps should not be able to access files outside their container or
+    communicate with arbitrary Mach services. This rule detects common
+    sandbox escape patterns including Mach port manipulation, XPC abuse,
+    and IOKit user client exploitation.
+author: MacCrab Community
+date: 2026/04/09
+references:
+    - https://attack.mitre.org/techniques/T1611/
+tags:
+    - attack.privilege_escalation
+    - attack.defense_evasion
+    - attack.t1611
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_mach:
+        CommandLine|contains:
+            - 'mach_port'
+            - 'mach_msg'
+            - 'bootstrap_look_up'
+            - 'task_get_special_port'
+            - 'thread_set_exception_ports'
+    selection_iokit:
+        CommandLine|contains:
+            - 'IOServiceOpen'
+            - 'IOConnectCallMethod'
+            - 'IOConnectCallScalarMethod'
+            - 'IORegistryEntryCreateCFProperties'
+    selection_xpc_abuse:
+        CommandLine|contains:
+            - 'xpc_connection_create_mach_service'
+            - 'xpc_dictionary_set_fd'
+            - 'xpc_shmem_create'
+    filter_system:
+        SignerType: 'apple'
+    condition: (selection_mach or selection_iokit or selection_xpc_abuse) and not filter_system
+falsepositives:
+    - Legitimate apps using IOKit for hardware access
+    - Virtual machine hypervisors
+level: high
