@@ -52,7 +52,7 @@ public actor PackageFreshnessChecker {
         case high = "high"                   // < 24 hours old
         case critical = "critical"           // < 6 hours old OR < 24h + low downloads
 
-        private var ordinal: Int {
+        public var ordinal: Int {
             switch self {
             case .safe:     return 0
             case .low:      return 1
@@ -176,6 +176,79 @@ public actor PackageFreshnessChecker {
         let packages = Self.parseInstallCommand(commandLine)
         guard !packages.isEmpty else { return [] }
         return await checkPackages(packages)
+    }
+
+    // MARK: - Installed Package Scanning
+
+    /// Discover and check all installed packages from npm, pip, and Homebrew.
+    /// Returns packages grouped by registry with freshness/risk assessment.
+    public func scanInstalledPackages() async -> [PackageInfo] {
+        var packages: [(name: String, registry: Registry)] = []
+
+        // npm global packages
+        packages.append(contentsOf: listInstalledNpm())
+        // pip user packages
+        packages.append(contentsOf: listInstalledPip())
+        // Homebrew formulae
+        packages.append(contentsOf: listInstalledBrew())
+
+        guard !packages.isEmpty else { return [] }
+
+        // Check in batches of 20 to avoid overwhelming APIs
+        var results: [PackageInfo] = []
+        for batch in stride(from: 0, to: packages.count, by: 20) {
+            let end = min(batch + 20, packages.count)
+            let slice = Array(packages[batch..<end])
+            let batchResults = await checkPackages(slice)
+            results.append(contentsOf: batchResults)
+        }
+
+        return results.sorted { $0.riskLevel.ordinal > $1.riskLevel.ordinal }
+    }
+
+    private nonisolated func listInstalledNpm() -> [(name: String, registry: Registry)] {
+        guard let output = runCommand("/usr/bin/env", args: ["npm", "ls", "-g", "--depth=0", "--json"]) else { return [] }
+        guard let data = output.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let deps = json["dependencies"] as? [String: Any] else { return [] }
+        return deps.keys.filter { !$0.hasPrefix("@") || $0.contains("/") }
+            .prefix(100)
+            .map { ($0, .npm) }
+    }
+
+    private nonisolated func listInstalledPip() -> [(name: String, registry: Registry)] {
+        guard let output = runCommand("/usr/bin/env", args: ["pip3", "list", "--format=json", "--user"]) else { return [] }
+        guard let data = output.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return arr.compactMap { $0["name"] as? String }
+            .filter { !$0.hasPrefix("_") }
+            .prefix(100)
+            .map { ($0, .pypi) }
+    }
+
+    private nonisolated func listInstalledBrew() -> [(name: String, registry: Registry)] {
+        guard let output = runCommand("/usr/bin/env", args: ["brew", "list", "--formula", "-1"]) else { return [] }
+        return output.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .prefix(100)
+            .map { ($0, .homebrew) }
+    }
+
+    private nonisolated func runCommand(_ path: String, args: [String]) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = args
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)
+        } catch { return nil }
     }
 
     /// Clear the result cache.

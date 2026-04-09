@@ -17,6 +17,11 @@ struct PackageFreshnessView: View {
     @State private var result: PackageFreshnessChecker.PackageInfo?
     @State private var error: String?
 
+    // Bulk scan state
+    @State private var isScanning = false
+    @State private var scanResults: [PackageFreshnessChecker.PackageInfo] = []
+    @State private var scanProgress: String = ""
+
     private var supplyChainAlerts: [AlertViewModel] {
         appState.dashboardAlerts.filter {
             $0.ruleTitle.lowercased().contains("supply") ||
@@ -98,6 +103,94 @@ struct PackageFreshnessView: View {
                 }
                 .padding(.horizontal)
 
+                // Scan installed packages
+                GroupBox(label: Label(
+                    String(localized: "packageFreshness.scanTitle", defaultValue: "Scan Installed Packages"),
+                    systemImage: "arrow.triangle.2.circlepath"
+                )) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(String(localized: "packageFreshness.scanDescription",
+                            defaultValue: "Discover all packages from npm (global), pip (user), and Homebrew, then check each against its registry for freshness and risk."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack {
+                            Button {
+                                Task { await scanAll() }
+                            } label: {
+                                if isScanning {
+                                    HStack(spacing: 6) {
+                                        ProgressView().scaleEffect(0.7)
+                                        Text(scanProgress)
+                                            .font(.caption)
+                                    }
+                                } else {
+                                    Label(String(localized: "packageFreshness.scanButton",
+                                        defaultValue: "Scan All Packages"),
+                                        systemImage: "magnifyingglass.circle.fill")
+                                }
+                            }
+                            .disabled(isScanning)
+                            .controlSize(.large)
+
+                            Spacer()
+
+                            if !scanResults.isEmpty {
+                                let risky = scanResults.filter { $0.riskLevel >= .medium }.count
+                                Text("\(scanResults.count) packages scanned\(risky > 0 ? " — \(risky) flagged" : "")")
+                                    .font(.caption)
+                                    .foregroundColor(risky > 0 ? .orange : .secondary)
+                            }
+                        }
+
+                        if !scanResults.isEmpty {
+                            Divider()
+
+                            // Show risky packages first, then safe ones collapsed
+                            let risky = scanResults.filter { $0.riskLevel >= .medium }
+                            let safe = scanResults.filter { $0.riskLevel < .medium }
+
+                            if !risky.isEmpty {
+                                Text("Flagged Packages (\(risky.count))")
+                                    .font(.subheadline).fontWeight(.semibold)
+                                    .foregroundColor(.orange)
+                                ForEach(risky, id: \.name) { pkg in
+                                    PackageResultView(info: pkg)
+                                    Divider()
+                                }
+                            }
+
+                            if !safe.isEmpty {
+                                DisclosureGroup(
+                                    "\(safe.count) packages OK"
+                                ) {
+                                    ForEach(safe, id: \.name) { pkg in
+                                        HStack(spacing: 8) {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundColor(.green)
+                                                .font(.caption)
+                                            Text(pkg.name)
+                                                .font(.caption)
+                                            Text("(\(pkg.registry.rawValue))")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                            Spacer()
+                                            if let age = pkg.ageInDays {
+                                                Text("\(Int(age))d old")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                    }
+                                }
+                                .font(.subheadline)
+                            }
+                        }
+                    }
+                    .padding(4)
+                }
+                .padding(.horizontal)
+
                 // Daemon supply-chain alerts
                 if !supplyChainAlerts.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -119,6 +212,18 @@ struct PackageFreshnessView: View {
             }
         }
         .navigationTitle("Package Freshness")
+    }
+
+    private func scanAll() async {
+        isScanning = true
+        scanProgress = "Discovering installed packages..."
+        scanResults = []
+        let checker = PackageFreshnessChecker()
+        scanProgress = "Checking freshness against registries..."
+        let results = await checker.scanInstalledPackages()
+        scanResults = results
+        isScanning = false
+        scanProgress = ""
     }
 
     private func check() async {

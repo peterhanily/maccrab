@@ -68,6 +68,7 @@ final class AppState: ObservableObject {
 
     private var pollTimer: AnyCancellable?
     private var previousEventCount: Int = 0
+    private var lastStatsUpdate: Date = Date()
     private var rulesLoaded_cached = false
     private var lastAlertTimestamp: Date = .distantPast
     private var lastEventTimestamp: Date = .distantPast
@@ -542,8 +543,12 @@ final class AppState: ObservableObject {
         do {
             let store = try eventStore()
             let currentCount = try await store.count()
-            eventsPerSecond = max(0, (currentCount - previousEventCount) / 10)
+            let now = Date()
+            let elapsed = max(1, Int(now.timeIntervalSince(lastStatsUpdate)))
+            let delta = currentCount - previousEventCount
+            eventsPerSecond = delta > 0 ? max(1, delta / elapsed) : 0
             previousEventCount = currentCount
+            lastStatsUpdate = now
         } catch {}
 
         // Recompute security score at most every 5 minutes (scorer calls system APIs)
