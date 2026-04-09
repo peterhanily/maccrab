@@ -50,7 +50,7 @@ Sources/MacCrabCore/
   Output/         Notifications, webhooks, syslog, reports
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            358 Sigma-compatible YAML detection rules (17 tactic directories)
+Rules/            376 Sigma-compatible YAML detection rules (17 tactic directories)
   sequences/      27 multi-step sequence rules
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
@@ -60,7 +60,7 @@ Tests/            Swift Testing unit tests (326 tests in 85 suites)
 
 ## Detection Stack (5 tiers)
 
-1. **Rules** -- 358 Sigma-compatible YAML rules compiled to JSON predicates. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
+1. **Rules** -- 376 Sigma-compatible YAML rules compiled to JSON predicates. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
 3. **Sequences** -- 27 temporal multi-step rules with process lineage correlation, 10K partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.
@@ -88,7 +88,7 @@ Known passthrough fields (resolved via RuleEngine enrichments): `SignerType`, `P
 | Monitor | Purpose | Poll Interval |
 |---------|---------|--------------|
 | ESCollector | Endpoint Security framework events | Real-time |
-| UnifiedLogCollector | System log (12+ subsystems) | Real-time |
+| UnifiedLogCollector | System log (18 subsystems incl. Bluetooth, Wi-Fi, AirDrop) | Real-time |
 | NetworkCollector | TCP/UDP connections | 5s |
 | DNSCollector | DNS queries (BPF) | Real-time |
 | TCCMonitor | Privacy permission changes | Real-time |
@@ -102,6 +102,7 @@ Known passthrough fields (resolved via RuleEngine enrichments): `SignerType`, `P
 | SystemPolicyMonitor | SIP, XProtect, MDM, auth plugins | 300s |
 | BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup |
 | MCPMonitor | MCP server configs across AI tools | Startup |
+| TEMPESTMonitor | Van Eck phreaking: SDR devices + display anomalies | 60s |
 
 ## EDR/RMM Tool Detection
 
@@ -113,6 +114,16 @@ The EDRMonitor proactively scans for 30+ tools across 5 categories:
 - **Remote Access**: TeamViewer, AnyDesk, ScreenConnect, Splashtop, BeyondTrust, LogMeIn, RustDesk, VNC
 
 Each discovery includes vendor, category, and capability list. Insider threat tools push OS notifications.
+
+## TEMPEST / Van Eck Phreaking Detection
+
+The TEMPESTMonitor detects indicators of electromagnetic eavesdropping (Van Eck phreaking) against display output:
+
+- **17 known SDR devices**: RTL-SDR, HackRF, USRP B200/B210, BladeRF, Airspy, LimeSDR, SDRplay, FunCube
+- **Display anomaly detection**: Phantom hotplug, rapid connect/disconnect cycling (HDMI tap insertion)
+- **LLM EMSEC analysis**: Auto-generated electromagnetic security assessment with countermeasures
+
+References: Deep-TEMPEST (arXiv:2407.09717), NATO SDIP-27 TEMPEST zones.
 
 ## LLM Agent Integration
 
@@ -155,6 +166,7 @@ Or configure via `daemon_config.json` or Settings > AI Backend in the dashboard.
 | Sequence analysis | Sequence rule fires | 0.2 |
 | Security score | Hourly (if score < 90) | 0.3 |
 | Baseline anomaly | Novel process lineage | 0.3 |
+| TEMPEST analysis | SDR device or display anomaly detected | 0.2 |
 | Threat hunting | `maccrabctl hunt "query"` | 0.1 |
 | Report narrative | `maccrabctl report` | 0.3 |
 
