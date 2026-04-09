@@ -666,6 +666,41 @@ enum EventLoop {
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
             matches.append(contentsOf: sequenceMatches)
 
+            // LLM sequence analysis (non-blocking) — explains temporal attack chains
+            if let llm = state.llmService, !sequenceMatches.isEmpty {
+                for seqMatch in sequenceMatches {
+                    let matchCopy = seqMatch
+                    let procName = enrichedEvent.process.name
+                    let procPath = enrichedEvent.process.executable
+                    Task {
+                        if let analysis = await llm.query(
+                            systemPrompt: LLMPrompts.sequenceAnalysisSystem,
+                            userPrompt: LLMPrompts.sequenceAnalysisUser(
+                                ruleName: matchCopy.ruleName,
+                                description: matchCopy.description,
+                                processName: procName, processPath: procPath,
+                                mitreTechniques: matchCopy.mitreTechniques,
+                                tags: matchCopy.tags
+                            ),
+                            maxTokens: 512, temperature: 0.2
+                        ) {
+                            let analysisAlert = Alert(
+                                ruleId: "maccrab.llm.sequence-analysis",
+                                ruleTitle: "AI Sequence Analysis: \(matchCopy.ruleName)",
+                                severity: .informational,
+                                eventId: UUID().uuidString,
+                                processPath: procPath, processName: procName,
+                                description: analysis.response,
+                                mitreTactics: nil, mitreTechniques: nil,
+                                suppressed: false
+                            )
+                            do { try await state.alertStore.insert(alert: analysisAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            print("[LLM] Sequence analysis generated for: \(matchCopy.ruleName)")
+                        }
+                    }
+                }
+            }
+
             // Layer 3: Baseline anomaly detection (Phase 3)
             if let baselineMatch = await state.baselineEngine.evaluate(enrichedEvent) {
                 matches.append(baselineMatch)
@@ -691,6 +726,39 @@ enum EventLoop {
                         tags: ["attack.execution", "attack.defense_evasion"]
                     )
                     matches.append(behaviorMatch)
+
+                    // LLM behavioral analysis (non-blocking) — explains what the
+                    // indicator combination reveals about the attack pattern
+                    if let llm = state.llmService {
+                        let procName = enrichedEvent.process.name
+                        let procPath = enrichedEvent.process.executable
+                        let pid = enrichedEvent.process.pid
+                        let score = scoringResult.totalScore
+                        let indicators = scoringResult.indicators.map { ($0.name, $0.weight, $0.detail) }
+                        Task {
+                            if let analysis = await llm.query(
+                                systemPrompt: LLMPrompts.behaviorAnalysisSystem,
+                                userPrompt: LLMPrompts.behaviorAnalysisUser(
+                                    processName: procName, processPath: procPath, pid: pid,
+                                    totalScore: score, indicators: indicators
+                                ),
+                                maxTokens: 512, temperature: 0.2
+                            ) {
+                                let analysisAlert = Alert(
+                                    ruleId: "maccrab.llm.behavior-analysis",
+                                    ruleTitle: "AI Behavioral Analysis: \(procName)",
+                                    severity: .informational,
+                                    eventId: UUID().uuidString,
+                                    processPath: procPath, processName: procName,
+                                    description: analysis.response,
+                                    mitreTactics: nil, mitreTechniques: nil,
+                                    suppressed: false
+                                )
+                                do { try await state.alertStore.insert(alert: analysisAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                                print("[LLM] Behavioral analysis generated for: \(procName) (score: \(String(format: "%.1f", score)))")
+                            }
+                        }
+                    }
                 }
             }
 

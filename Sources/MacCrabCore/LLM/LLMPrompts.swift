@@ -220,6 +220,86 @@ public enum LLMPrompts {
         return parts.joined(separator: "\n")
     }
 
+    // MARK: - Behavioral Score Analysis
+
+    public static let behaviorAnalysisSystem = """
+        You are a macOS behavioral threat analyst. A process has accumulated multiple \
+        suspicious indicators that individually may be benign, but together suggest \
+        compromise. Analyze the combination of indicators and explain the pattern.
+
+        FORMAT:
+        **Threat Pattern**: 1-2 sentences identifying what attack pattern the indicators suggest \
+        when combined (e.g., "credential theft followed by exfiltration", "persistence + defense evasion").
+        **Indicator Analysis**: For each indicator, one line explaining its significance.
+        **Combined Risk**: Why these indicators together are more concerning than individually.
+        **Immediate Actions**:
+        - Most urgent step
+        - Second step
+        - Verification step
+
+        Keep under 250 words. Focus on what the COMBINATION of indicators reveals \
+        that individual detections would miss. This is the value of behavioral scoring — \
+        catching sophisticated attacks that distribute actions to stay under the radar.
+        """
+
+    public static func behaviorAnalysisUser(
+        processName: String, processPath: String, pid: Int32,
+        totalScore: Double, indicators: [(name: String, weight: Double, detail: String)]
+    ) -> String {
+        var parts: [String] = []
+        parts.append("Process: \(sanitizePromptField(processName)) (PID \(pid))")
+        parts.append("Path: \(sanitizePromptField(processPath))")
+        parts.append("Total Score: \(String(format: "%.1f", totalScore))")
+        parts.append("")
+        parts.append("Indicators (name, weight, detail):")
+        for ind in indicators.prefix(15) {
+            parts.append("  - \(sanitizePromptField(ind.name)) [weight: \(String(format: "%.1f", ind.weight))]: \(sanitizePromptField(ind.detail))")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    // MARK: - Sequence Match Analysis
+
+    public static let sequenceAnalysisSystem = """
+        You are a macOS threat analyst specializing in multi-step attacks. A temporal \
+        sequence rule has fired, meaning multiple distinct actions occurred in order \
+        within a time window, matching a known attack pattern.
+
+        FORMAT:
+        **Attack Chain**: 2-3 sentences describing the full attack sequence in plain language \
+        (what happened first, what happened next, what the attacker was trying to achieve).
+        **Kill Chain Stage**: Map each step to the MITRE ATT&CK kill chain.
+        **Why This Matters**: Why this sequence of actions is more dangerous than any single action.
+        **Immediate Actions**:
+        - Most urgent containment step
+        - Investigation step
+        - Recovery step
+
+        Keep under 200 words. Emphasize the TEMPORAL relationship between steps — \
+        the fact that these actions happened in sequence within a short window is the \
+        key signal. Individual actions may be benign; the sequence is not.
+        """
+
+    public static func sequenceAnalysisUser(
+        ruleName: String, description: String,
+        processName: String, processPath: String,
+        mitreTechniques: [String], tags: [String]
+    ) -> String {
+        var parts: [String] = []
+        parts.append("Sequence Rule: \(sanitizePromptField(ruleName))")
+        parts.append("Description: \(sanitizePromptField(description))")
+        parts.append("Process: \(sanitizePromptField(processName))")
+        parts.append("Path: \(sanitizePromptField(processPath))")
+        if !mitreTechniques.isEmpty {
+            parts.append("MITRE Techniques: \(mitreTechniques.joined(separator: ", "))")
+        }
+        let tactics = tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }
+        if !tactics.isEmpty {
+            parts.append("Tactics: \(tactics.joined(separator: ", "))")
+        }
+        return parts.joined(separator: "\n")
+    }
+
     // MARK: - Prompt Safety
 
     /// Strip characters that could be used for prompt injection.
