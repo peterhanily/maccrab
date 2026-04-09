@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "maccrab": {
+      "command": ".build/debug/maccrab-mcp",
+      "description": "MacCrab threat detection engine — query alerts, events, campaigns, security score, and hunt threats"
+    }
+  }
+}

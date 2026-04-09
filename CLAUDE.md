@@ -149,6 +149,12 @@ Or configure via `daemon_config.json` or Settings > AI Backend in the dashboard.
 | Investigation summary | Campaign detected | 0.3 |
 | Defense recommendation | Campaign (HIGH/CRITICAL) | 0.1 |
 | Rule generation | Campaign detected | 0.4 |
+| Alert analysis | Individual HIGH/CRITICAL alert | 0.2 |
+| EDR tool context | EDR/RMM tool discovered | 0.2 |
+| Behavioral analysis | Behavioral score threshold | 0.2 |
+| Sequence analysis | Sequence rule fires | 0.2 |
+| Security score | Hourly (if score < 90) | 0.3 |
+| Baseline anomaly | Novel process lineage | 0.3 |
 | Threat hunting | `maccrabctl hunt "query"` | 0.1 |
 | Report narrative | `maccrabctl report` | 0.3 |
 
@@ -157,6 +163,31 @@ All LLM features degrade gracefully when no backend is configured. Cloud APIs ge
 **Safety**: Circuit breaker (3 failures → 5min cooldown), rate limiting (5s min interval), response size cap (50KB), SQL mutation prevention, prompt injection mitigation.
 
 **Files:** `Sources/MacCrabCore/LLM/` (11 files — backend protocol, 5 providers, service orchestrator, cache, sanitizer, prompts)
+
+## MCP Server (AI Agent Integration)
+
+MacCrab includes an MCP (Model Context Protocol) server that lets AI agents query security data directly.
+
+**Binary:** `maccrab-mcp` (5th executable target in Package.swift)
+
+**Tools exposed:**
+
+| Tool | Purpose |
+|------|---------|
+| `get_alerts` | Query alerts with severity/time/suppression filtering |
+| `get_events` | Query events with category/search/time filtering |
+| `get_campaigns` | List detected attack campaigns |
+| `get_status` | Daemon status, rule count, DB size |
+| `hunt` | Full-text threat hunting across events |
+| `get_security_score` | Security posture (0-100) with factors |
+| `suppress_alert` | Suppress false positive alerts |
+
+**Registration:** `.mcp.json` at project root configures it for Claude Code. Build with `swift build --target maccrab-mcp`.
+
+**Slash commands** (`.claude/commands/`):
+- `/security-check` — Full security posture report via MCP
+- `/threat-hunt <query>` — Natural language threat hunting
+- `/alerts` — Review and triage recent alerts
 
 ## Dashboard (MacCrabApp)
 

@@ -261,14 +261,22 @@ struct AIAnalysisView: View {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
 
-            // Find maccrabctl in common locations
-            let paths = ["/usr/local/bin/maccrabctl", ".build/debug/maccrabctl"]
-            let ctlPath = paths.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "maccrabctl"
+            // Find maccrabctl in common locations — check build dir relative to app
+            // bundle, Homebrew, user-local, and absolute build paths
+            let bundleDir = Bundle.main.bundlePath
+                .components(separatedBy: "/").dropLast().joined(separator: "/")
+            let paths = [
+                bundleDir + "/maccrabctl",                    // Same dir as app
+                "/usr/local/bin/maccrabctl",                  // Homebrew / system install
+                NSHomeDirectory() + "/.local/bin/maccrabctl", // User-local install
+                ".build/debug/maccrabctl",                    // Dev build (relative)
+            ]
+            let ctlPath = paths.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/local/bin/maccrabctl"
 
             process.arguments = [ctlPath, "hunt", huntQuery]
             // Pass through LLM env vars + config
             var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+            env["PATH"] = "\(bundleDir):/usr/local/bin:/usr/bin:/bin:\(NSHomeDirectory())/.local/bin"
             // If not set via env, read from dashboard config
             if env["MACCRAB_LLM_PROVIDER"] == nil {
                 let configPath = NSHomeDirectory() + "/Library/Application Support/MacCrab/llm_config.json"
