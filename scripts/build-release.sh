@@ -130,6 +130,14 @@ hdiutil create -volname "MacCrab v$VERSION" \
     -ov -format UDZO \
     "$DMG_PATH" 2>/dev/null
 
+# Sign and notarize if credentials are available
+if [ -n "${DEVELOPER_ID:-}" ] || [ -n "${APPLE_ID:-}" ]; then
+    echo "  Signing and notarizing DMG..."
+    "$SCRIPT_DIR/notarize.sh" "$DMG_PATH"
+else
+    echo "  Skipping code signing (set DEVELOPER_ID for Developer ID signing)"
+fi
+
 echo ""
 echo "═══════════════════════════════════════"
 echo "  MacCrab v$VERSION Release Built"

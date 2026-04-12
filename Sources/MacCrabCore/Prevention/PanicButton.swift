@@ -69,9 +69,14 @@ public actor PanicButton {
         proc.arguments = ["-a", "com.maccrab.emergency", "-F", "all"]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        actions.append("Emergency firewall rules removed")
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            actions.append("Emergency firewall rules removed")
+        } catch {
+            logger.error("Failed to remove emergency firewall rules: \(error.localizedDescription)")
+            actions.append("Failed to remove emergency firewall rules: \(error.localizedDescription)")
+        }
 
         logger.info("Panic mode deactivated — normal operation restored")
         actions.append("Normal operation restored")

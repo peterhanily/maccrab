@@ -280,10 +280,11 @@ public actor SequenceEngine {
     /// Reference to the process lineage graph for ancestry checks.
     private let lineage: ProcessLineage
 
-    /// Cache of compiled `NSRegularExpression` instances keyed by pattern string.
-    /// Avoids recompiling the same regex pattern on every evaluation.
-    /// Capped at 2048 entries with FIFO eviction (matches RuleEngine's cap).
+    /// LRU cache of compiled `NSRegularExpression` instances keyed by pattern.
+    /// On cache hit the entry is promoted; on eviction the least-recently-used
+    /// entry is removed. Matches RuleEngine's LRU cache strategy.
     private var regexCache: [String: NSRegularExpression] = [:]
+    private var regexAccessOrder: [String] = []
     private static let maxRegexCacheSize = 2048
 
     /// Reference to a partial match by rule ID and creation time, used for
@@ -326,19 +327,26 @@ public actor SequenceEngine {
     // MARK: - Regex Caching
 
     /// Returns a compiled `NSRegularExpression` for the given pattern, using the
-    /// cache to avoid recompilation. Returns `nil` if the pattern is invalid.
+    /// LRU cache to avoid recompilation. Returns `nil` if the pattern is invalid.
     private func cachedRegex(for pattern: String) -> NSRegularExpression? {
         if let cached = regexCache[pattern] {
+            // Promote to most-recently-used
+            if let idx = regexAccessOrder.lastIndex(of: pattern) {
+                regexAccessOrder.remove(at: idx)
+            }
+            regexAccessOrder.append(pattern)
             return cached
         }
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return nil
         }
-        // Evict oldest entry when cache is full
-        if regexCache.count >= Self.maxRegexCacheSize, let firstKey = regexCache.keys.first {
-            regexCache.removeValue(forKey: firstKey)
+        // Evict least-recently-used when cache is full
+        if regexCache.count >= Self.maxRegexCacheSize, let lru = regexAccessOrder.first {
+            regexCache.removeValue(forKey: lru)
+            regexAccessOrder.removeFirst()
         }
         regexCache[pattern] = regex
+        regexAccessOrder.append(pattern)
         return regex
     }
 

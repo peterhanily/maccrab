@@ -48,11 +48,36 @@ detection:
         GrandparentImage|endswith:
             - '/Terminal'
             - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
             - '/login'
             - '/sshd'
             - '/tmux'
             - '/screen'
-    condition: selection_shell and selection_parent_shell and selection_grandparent_shell and not filter_terminal
+    filter_build_systems:
+        # Build tools commonly create deep shell nesting
+        GrandparentImage|endswith:
+            - '/make'
+            - '/gmake'
+            - '/ninja'
+            - '/xcodebuild'
+            - '/node'
+            - '/npm'
+            - '/npx'
+            - '/gradle'
+            - '/mvnw'
+            - '/bazel'
+            - '/cargo'
+            - '/brew'
+    filter_ci_cd:
+        # CI/CD agents and automation tools
+        GrandparentImage|contains:
+            - 'jenkins'
+            - 'buildkite'
+            - 'github-actions'
+            - 'gitlab-runner'
+    condition: selection_shell and selection_parent_shell and selection_grandparent_shell and not filter_terminal and not filter_build_systems and not filter_ci_cd
 falsepositives:
     - Complex shell scripts calling sub-shells
     - Build systems with nested script invocations

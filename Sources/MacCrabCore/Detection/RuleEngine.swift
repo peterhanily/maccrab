@@ -33,11 +33,30 @@ public struct Predicate: Codable, Sendable, Hashable {
     public let values: [String]
     public let negate: Bool
 
+    /// Pre-lowercased values for case-insensitive comparison. Computed once at
+    /// init time to avoid repeated `.lowercased()` calls on the hot path.
+    public let lowercasedValues: [String]
+
     public init(field: String, modifier: PredicateModifier, values: [String], negate: Bool) {
         self.field = field
         self.modifier = modifier
         self.values = values
         self.negate = negate
+        self.lowercasedValues = values.map { $0.lowercased() }
+    }
+
+    // Custom Codable: lowercasedValues is derived, not serialized.
+    private enum CodingKeys: String, CodingKey {
+        case field, modifier, values, negate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.field = try container.decode(String.self, forKey: .field)
+        self.modifier = try container.decode(PredicateModifier.self, forKey: .modifier)
+        self.values = try container.decode([String].self, forKey: .values)
+        self.negate = try container.decode(Bool.self, forKey: .negate)
+        self.lowercasedValues = self.values.map { $0.lowercased() }
     }
 }
 
@@ -105,6 +124,12 @@ extension ConditionNode: Codable {
         case "group":
             let start = try container.decode(Int.self, forKey: .rangeStart)
             let end = try container.decode(Int.self, forKey: .rangeEnd)
+            guard start >= 0, end >= start else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Invalid predicate group range: \(start)..<\(end) (must be non-negative with start <= end)"
+                ))
+            }
             let mode = try container.decodeIfPresent(RuleCondition.self, forKey: .mode) ?? .allOf
             self = .predicateGroup(range: start..<end, mode: mode)
         default:
@@ -207,9 +232,12 @@ public actor RuleEngine {
     /// All rules keyed by ID for individual lookups.
     private var allRules: [String: CompiledRule] = [:]
 
-    /// Cache of compiled `NSRegularExpression` instances keyed by pattern string.
-    /// Avoids recompiling the same regex pattern on every evaluation.
+    /// LRU cache of compiled `NSRegularExpression` instances keyed by pattern.
+    /// On cache hit the entry is promoted; on eviction the least-recently-used
+    /// entry is removed.  Backed by a Dictionary for O(1) lookup and an Array
+    /// for recency ordering (sufficient at the 2048-entry cap).
     private var regexCache: [String: NSRegularExpression] = [:]
+    private var regexAccessOrder: [String] = []
 
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "RuleEngine")
 
@@ -219,23 +247,31 @@ public actor RuleEngine {
 
     // MARK: Regex caching
 
-    /// Returns a compiled `NSRegularExpression` for the given pattern, using the
-    /// cache to avoid recompilation. Returns `nil` if the pattern is invalid.
-    /// Maximum cached regex patterns. Evict oldest when exceeded.
+    /// Maximum cached regex patterns. Evict least-recently-used when exceeded.
     private static let maxRegexCacheSize = 2048
 
+    /// Returns a compiled `NSRegularExpression` for the given pattern, using the
+    /// cache to avoid recompilation. Returns `nil` if the pattern is invalid.
     private func cachedRegex(for pattern: String) -> NSRegularExpression? {
         if let cached = regexCache[pattern] {
+            // Promote to most-recently-used
+            if let idx = regexAccessOrder.lastIndex(of: pattern) {
+                regexAccessOrder.remove(at: idx)
+            }
+            regexAccessOrder.append(pattern)
             return cached
         }
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            logger.warning("Failed to compile regex pattern: \(pattern)")
             return nil
         }
-        // Evict if cache is full (simple FIFO — remove arbitrary entry)
-        if regexCache.count >= Self.maxRegexCacheSize, let firstKey = regexCache.keys.first {
-            regexCache.removeValue(forKey: firstKey)
+        // Evict least-recently-used when cache is full
+        if regexCache.count >= Self.maxRegexCacheSize, let lru = regexAccessOrder.first {
+            regexCache.removeValue(forKey: lru)
+            regexAccessOrder.removeFirst()
         }
         regexCache[pattern] = regex
+        regexAccessOrder.append(pattern)
         return regex
     }
 
@@ -313,19 +349,22 @@ public actor RuleEngine {
         let snapshotIndex  = ruleIndex
         let snapshotRules  = allRules
         let snapshotRegex  = regexCache
+        let snapshotRegexOrder = regexAccessOrder
 
         ruleIndex.removeAll()
         allRules.removeAll()
         regexCache.removeAll()
+        regexAccessOrder.removeAll()
 
         let count: Int
         do {
             count = try loadRules(from: directory)
         } catch {
             // Restore previous state — engine must never be left empty.
-            ruleIndex  = snapshotIndex
-            allRules   = snapshotRules
-            regexCache = snapshotRegex
+            ruleIndex       = snapshotIndex
+            allRules        = snapshotRules
+            regexCache      = snapshotRegex
+            regexAccessOrder = snapshotRegexOrder
             logger.error("Rule reload failed, previous rules restored: \(error)")
             throw error
         }
@@ -467,7 +506,10 @@ public actor RuleEngine {
             return evaluatePredicate(predicates[index], against: event)
 
         case .predicateGroup(let range, let mode):
-            let slice = predicates[range.clamped(to: 0..<predicates.count)]
+            let clamped = range.clamped(to: 0..<predicates.count)
+            // An empty slice must not produce a vacuous-truth match.
+            guard !clamped.isEmpty else { return false }
+            let slice = predicates[clamped]
             switch mode {
             case .allOf:
                 return slice.allSatisfy { evaluatePredicate($0, against: event) }
@@ -500,7 +542,8 @@ public actor RuleEngine {
             rawResult = evaluateModifier(
                 predicate.modifier,
                 fieldValue: fieldValue,
-                values: predicate.values
+                values: predicate.values,
+                lowercasedValues: predicate.lowercasedValues
             )
         }
 
@@ -511,25 +554,29 @@ public actor RuleEngine {
     /// predicate's value list. The predicate matches when the field satisfies
     /// the comparison for *any* value in the list (OR semantics within a
     /// single predicate).
+    ///
+    /// `lowercasedValues` are pre-computed at Predicate init time to avoid
+    /// repeated `.lowercased()` calls on the hot path.
     private func evaluateModifier(
         _ modifier: PredicateModifier,
         fieldValue: String,
-        values: [String]
+        values: [String],
+        lowercasedValues: [String]
     ) -> Bool {
         let fieldLower = fieldValue.lowercased()
 
         switch modifier {
         case .equals:
-            return values.contains { fieldLower == $0.lowercased() }
+            return lowercasedValues.contains { fieldLower == $0 }
 
         case .contains:
-            return values.contains { fieldLower.contains($0.lowercased()) }
+            return lowercasedValues.contains { fieldLower.contains($0) }
 
         case .startswith:
-            return values.contains { fieldLower.hasPrefix($0.lowercased()) }
+            return lowercasedValues.contains { fieldLower.hasPrefix($0) }
 
         case .endswith:
-            return values.contains { fieldLower.hasSuffix($0.lowercased()) }
+            return lowercasedValues.contains { fieldLower.hasSuffix($0) }
 
         case .regex:
             return values.contains { pattern in

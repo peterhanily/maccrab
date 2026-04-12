@@ -100,7 +100,11 @@ public actor DNSSinkhole {
         content += section
 
         // Write atomically
-        try? content.write(toFile: hostsPath, atomically: true, encoding: .utf8)
+        do {
+            try content.write(toFile: hostsPath, atomically: true, encoding: .utf8)
+        } catch {
+            logger.error("Failed to write sinkhole entries to \(self.hostsPath): \(error.localizedDescription)")
+        }
     }
 
     private func removeHostsEntries() {
@@ -115,7 +119,11 @@ public actor DNSSinkhole {
                 ? content.index(after: endRange.upperBound)
                 : content.endIndex
             content.removeSubrange(startRange.lowerBound..<removeEnd)
-            try? content.write(toFile: hostsPath, atomically: true, encoding: .utf8)
+            do {
+                try content.write(toFile: hostsPath, atomically: true, encoding: .utf8)
+            } catch {
+                logger.error("Failed to clean sinkhole entries from \(self.hostsPath): \(error.localizedDescription)")
+            }
         }
     }
 }

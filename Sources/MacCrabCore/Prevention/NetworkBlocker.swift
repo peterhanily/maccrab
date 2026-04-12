@@ -50,7 +50,11 @@ public actor NetworkBlocker {
     public func disable() {
         isEnabled = false
         blockedIPs.removeAll()
-        try? FileManager.default.removeItem(atPath: anchorPath)
+        do {
+            try FileManager.default.removeItem(atPath: anchorPath)
+        } catch {
+            logger.warning("Could not remove anchor file at \(self.anchorPath): \(error.localizedDescription)")
+        }
         reloadPF()
         logger.info("Network blocker disabled")
     }
@@ -73,7 +77,12 @@ public actor NetworkBlocker {
 
     private func writeAnchorFile() {
         let dir = (anchorPath as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        } catch {
+            logger.error("Failed to create PF anchors directory at \(dir): \(error.localizedDescription)")
+            return
+        }
 
         let tablePath = "/etc/pf.anchors/com.maccrab.table"
 
@@ -84,7 +93,12 @@ public actor NetworkBlocker {
 
         // Write table file (one IP per line)
         let tableContent = blockedIPs.sorted().joined(separator: "\n") + "\n"
-        try? tableContent.write(toFile: tablePath, atomically: true, encoding: .utf8)
+        do {
+            try tableContent.write(toFile: tablePath, atomically: true, encoding: .utf8)
+        } catch {
+            logger.error("Failed to write IP block table to \(tablePath): \(error.localizedDescription)")
+            return
+        }
 
         // Write anchor rules using the table
         let rules = """
@@ -92,7 +106,11 @@ public actor NetworkBlocker {
         block drop out quick from any to <\(tableName)>
         block drop in quick from <\(tableName)> to any
         """
-        try? rules.write(toFile: anchorPath, atomically: true, encoding: .utf8)
+        do {
+            try rules.write(toFile: anchorPath, atomically: true, encoding: .utf8)
+        } catch {
+            logger.error("Failed to write PF anchor rules to \(self.anchorPath): \(error.localizedDescription)")
+        }
     }
 
     private func reloadPF() {

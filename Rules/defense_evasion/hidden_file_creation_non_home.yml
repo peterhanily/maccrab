@@ -1,5 +1,5 @@
 title: Hidden File Created Outside Home Directory
-id: d1a2b3c4-0441-4000-a000-000000000441
+id: d1a2b3c4-0441-4000-b000-000000000441
 status: experimental
 description: >
     Detects creation of hidden files (dot-prefixed) in system directories

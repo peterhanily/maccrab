@@ -19,6 +19,9 @@ detection:
         ParentImage|endswith:
             - '/Terminal'
             - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
             - '/bash'
             - '/zsh'
             - '/sh'
@@ -29,8 +32,29 @@ detection:
             - '/sshd'
     filter_apple:
         ParentImage|startswith: '/System/'
-    condition: selection and not filter_terminals and not filter_apple
+    filter_ide_terminals:
+        # IDEs with integrated terminals that run sudo
+        ParentImage|contains:
+            - 'Visual Studio Code'
+            - 'VSCodium'
+            - 'Cursor'
+            - 'JetBrains'
+            - 'IntelliJ'
+            - 'PyCharm'
+            - 'WebStorm'
+            - 'CLion'
+            - 'Xcode'
+    filter_automation:
+        # System management and automation tools
+        ParentImage|endswith:
+            - '/make'
+            - '/brew'
+            - '/ansible-playbook'
+            - '/puppet'
+            - '/chef-client'
+    condition: selection and not filter_terminals and not filter_apple and not filter_ide_terminals and not filter_automation
 falsepositives:
     - IDE integrated terminals
     - Automation scripts
+    - Package managers
 level: medium

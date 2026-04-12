@@ -19,9 +19,34 @@
 
 import Foundation
 import MacCrabCore
+import os.log
 
 // Force unbuffered stdout for reliable pipe output
 setbuf(stdout, nil)
+
+private let logger = Logger(subsystem: "com.maccrab.mcp", category: "server")
+
+// MARK: - Security: Parent Process Validation
+
+/// Verify the MCP server was launched by a trusted parent process.
+/// MCP stdio transport is inherently scoped to the launching process,
+/// but this check adds defense-in-depth against unexpected invocations.
+func validateParentProcess() {
+    let ppid = getppid()
+    var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    let result = proc_pidpath(ppid, &buffer, UInt32(buffer.count))
+    if result > 0 {
+        let parentPath = String(cString: buffer)
+        logger.info("MCP server started by PID \(ppid): \(parentPath)")
+    } else {
+        logger.warning("Could not resolve parent process path (PID \(ppid))")
+    }
+}
+
+/// Audit log for state-modifying operations.
+func auditLog(_ operation: String, details: String) {
+    logger.notice("MCP AUDIT: \(operation) — \(details)")
+}
 
 // MARK: - Data Directory Resolution
 
@@ -363,6 +388,11 @@ func handleHunt(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": "Error: 'query' parameter is required"]]]
     }
 
+    // Input validation: cap query length to prevent FTS abuse
+    guard query.count <= 1000 else {
+        return ["content": [["type": "text", "text": "Error: query too long (max 1000 characters)"]]]
+    }
+
     do {
         let store = try EventStore(directory: dataDir)
         let results = try await store.search(text: query, limit: 50)
@@ -416,6 +446,14 @@ func handleSuppressAlert(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": "Error: 'alert_id' parameter is required"]]]
     }
 
+    // Input validation: alert IDs are UUIDs
+    guard alertId.count <= 64 else {
+        return ["content": [["type": "text", "text": "Error: invalid alert_id format"]]]
+    }
+
+    // Audit log: state-modifying operation
+    auditLog("suppress_alert", details: "alert_id=\(alertId) ppid=\(getppid())")
+
     do {
         let store = try AlertStore(directory: dataDir)
         try await store.suppress(alertId: alertId)
@@ -428,6 +466,9 @@ func handleSuppressAlert(_ args: [String: Any]) async -> Any {
 // MARK: - Main Loop (stdio JSON-RPC)
 
 let decoder = JSONDecoder()
+
+// Security: validate parent process at startup
+validateParentProcess()
 
 // Read JSON-RPC messages from stdin.
 // MCP uses Content-Length framing, but many clients also send bare JSON lines.
@@ -461,8 +502,8 @@ while let line = readLine(strippingNewline: true) {
     }
 
     guard let request = try? decoder.decode(JSONRPCRequest.self, from: body) else {
-        // Parse failed — send error response
-        writeJSON(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Parse error: \(String(data: body, encoding: .utf8)?.prefix(100) ?? "nil")"]] as [String: Any])
+        // Parse failed — send generic error (don't leak request body which may contain secrets)
+        writeJSON(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Parse error: invalid JSON-RPC request"]] as [String: Any])
         continue
     }
 

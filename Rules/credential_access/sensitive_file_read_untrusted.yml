@@ -1,5 +1,5 @@
 title: Untrusted Process Reads macOS Local Directory Service Data
-id: d1a2b3c4-0438-4000-a000-000000000438
+id: d1a2b3c4-0438-4000-b000-000000000438
 status: experimental
 description: >
     Detects untrusted processes reading from /var/db/dslocal/, which contains

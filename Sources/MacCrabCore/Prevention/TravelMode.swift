@@ -55,8 +55,12 @@ public actor TravelMode {
         proc.arguments = ["-a", "com.maccrab.travel", "-F", "all"]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            logger.error("Failed to remove travel mode firewall rules: \(error.localizedDescription)")
+        }
 
         logger.info("Travel mode deactivated")
 
@@ -82,14 +86,25 @@ public actor TravelMode {
         block drop out quick proto tcp to port 8080 # Block alt HTTP
         """
         let path = "/tmp/maccrab_travel.conf"
-        try? rules.write(toFile: path, atomically: true, encoding: .utf8)
+        do {
+            try rules.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
+                .error("Failed to write travel mode firewall rules to \(path): \(error.localizedDescription)")
+            return
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
         proc.arguments = ["-a", "com.maccrab.travel", "-f", path]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
+                .error("Failed to load travel mode firewall rules: \(error.localizedDescription)")
+        }
     }
 
     private nonisolated func flushDNS() {

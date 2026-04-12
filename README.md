@@ -1,62 +1,117 @@
 # MacCrab
 
-**Local-first macOS threat detection engine -- Sigma rules, temporal sequences, AI safety, and behavioral scoring with no cloud required**
+**Real-time threat detection for macOS -- no cloud, no SIEM, no telemetry.**
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
+[![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey)]()
-[![Rules](https://img.shields.io/badge/detection%20rules-348-orange)]()
-[![Version](https://img.shields.io/badge/version-v1.0.0-blue)]()
+[![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
+[![Rules](https://img.shields.io/badge/detection%20rules-376-orange)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
----
+MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, 376 Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a single daemon -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS with a SwiftUI dashboard.
 
-MacCrab is an on-device security detection engine for macOS. It evaluates 348 Sigma-compatible detection rules against real-time kernel events, Unified Log streams, TCC permission changes, DNS queries, and network connections -- entirely on your machine, with no SIEM, no cloud infrastructure, and no telemetry leaving the host.
-
-What sets it apart from other open-source macOS tools:
-
-- **Temporal-causal sequence detection** -- correlate ordered chains of events (download, execute, persist, call home) within time windows and across process lineage, not just individual indicators.
-- **AI coding tool guardrails** -- monitor Claude Code, Codex, Cursor, and other AI agents for credential access, project boundary escapes, and prompt injection patterns.
-- **Behavioral scoring** -- accumulate weighted suspicion per process so that sophisticated attacks distributed across many small actions still trigger alerts, even when no single rule fires at critical severity.
-- **Threat intelligence enrichment** -- match file hashes, IPs, and domains against abuse.ch feeds (Feodo, URLhaus, MalwareBazaar) in real time.
-
-Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- but native to macOS, running as a single daemon with a SwiftUI dashboard.
+**Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine.
 
 ---
 
-## What's New in v1.0.0
+## Quick Start
 
-- 348 Sigma-compatible detection rules (321 single-event + 27 sequences)
-- 5-tier detection hierarchy (rules, sequences, anomaly, campaigns, cross-process)
-- LLM reasoning backends: Ollama, Claude, OpenAI-compatible, Gemini, Mistral
-- NL threat hunting, LLM investigation summaries, active defense recommendations
-- AI Guard monitoring 8 coding tools + MCP servers
-- Zero-entitlement kernel events via eslogger proxy
-- Package freshness checking (npm, PyPI, Homebrew, Cargo)
-- Ultrasonic attack detection (DolphinAttack, NUIT, SurfingAttack)
-- Clipboard, browser extension, USB monitoring
-- TLS fingerprinting and C2 beacon detection
-- Auto rule generation from observed attacks (template + LLM-enhanced)
-- Encrypted database (AES-256)
-- HTML incident reports
-- Rootkit detection via cross-referenced process enumeration
-- Crash report mining for exploitation indicators
-- Power/thermal anomaly detection (crypto mining, C2 beacons)
-- CDHash extraction for process integrity verification
+### Option A: Homebrew (recommended)
+
+```bash
+# 1. Install
+brew install --cask https://raw.githubusercontent.com/peterhanily/maccrab/main/homebrew/maccrab.rb
+
+# 2. Start the daemon (requires root for kernel events)
+sudo maccrabd
+
+# 3. Open the dashboard
+open /Applications/MacCrab.app
+```
+
+### Option B: Build from source
+
+```bash
+# 1. Clone and build
+git clone https://github.com/peterhanily/maccrab.git && cd maccrab
+make dev    # builds, codesigns, compiles rules, starts daemon
+
+# 2. Check status
+.build/debug/maccrabctl status
+
+# 3. Open the dashboard
+make app
+```
+
+> **Note:** Full Endpoint Security coverage requires granting Full Disk Access to Terminal in **System Settings > Privacy & Security > Full Disk Access**.
+
+---
+
+## What You Get
+
+Once running, MacCrab gives you:
+
+- **Real-time alerts** -- macOS notifications and a live alert dashboard when suspicious activity is detected (shell spawned by browser, unsigned binary persistence, credential access, etc.)
+- **A SwiftUI menubar dashboard** with 15 views -- security overview, alert triage with bulk actions, live event stream, campaign timelines, rule browser, AI Guard status, and more
+- **CLI threat hunting** -- `maccrabctl hunt "show processes connecting to unusual ports"` for natural-language queries against your event data
+- **Behavioral scoring** -- even if no single rule fires at critical severity, accumulated suspicious indicators across a process tree will still trigger an alert
+- **Campaign detection** -- multi-step attack chains (download, execute, persist, call home) are correlated across process lineage and time windows
+- **AI coding tool guardrails** -- monitors Claude Code, Codex, Cursor, and 5 other AI tools for credential access, project boundary escapes, and prompt injection
+- **Zero telemetry by default** -- all data stays in a local SQLite database; optional LLM backends sanitize data before any external call
+
+---
+
+## How MacCrab Compares
+
+| Capability | MacCrab | Santa | osquery | Commercial EDR |
+|------------|:-------:|:-----:|:-------:|:--------------:|
+| Real-time kernel events (90+ ES types) | Yes | Exec only | Scheduled | Yes |
+| Sigma-compatible rules | **376** | No | No | Varies |
+| Temporal sequence detection | **Yes** | No | No | Some |
+| Behavioral scoring | **Yes** | No | No | Yes |
+| AI coding tool guardrails | **Yes** | No | No | No |
+| Threat intel feeds (abuse.ch) | **Yes** | No | No | Yes |
+| Baseline anomaly detection | **Yes** | No | No | Yes |
+| TCC permission monitoring | **Yes** | No | Partial | Some |
+| Process lineage DAG | **Yes** | No | Partial | Yes |
+| Native macOS dashboard | **Yes** | Yes | No | Agent only |
+| Self-defense (8 layers) | **Yes** | No | No | Yes |
+| Runs entirely local | **Yes** | **Yes** | **Yes** | No |
+| Open source | **Yes** | **Yes** | **Yes** | No |
+| Infrastructure required | **None** | Sync server | Fleet server | Cloud console |
+
+---
+
+## Privacy
+
+MacCrab has **zero telemetry** and no phone-home behavior. All data is collected and stored locally in SQLite. Nothing leaves your machine unless you explicitly enable an optional feature (LLM backends, threat intel feeds, or fleet telemetry) -- and when you do, usernames, private IPs, hostnames, and credentials are automatically redacted before transmission.
+
+Read the full [Privacy Policy](PRIVACY.md).
+
+---
+
+## Security
+
+MacCrab's daemon runs as root (required for Endpoint Security) but the CLI and dashboard run as your user with read-only database access. The daemon protects itself with 8 layers of tamper detection including binary integrity checks, anti-debug, and process injection detection.
+
+To report a vulnerability, **do not open a public issue** -- email security@maccrab.dev instead.
+
+Read the full [Security Policy](SECURITY.md).
 
 ---
 
 ## Architecture
 
 ```
-                             MacCrab Detection Pipeline
+                         MacCrab Detection Pipeline
 
  +--------------------+     +---------------------+     +----------------------+
  |   Event Sources    |     |    Enrichment       |     |     Detection        |
  |                    |     |                     |     |                      |
  | ES Framework  ----------> Process Lineage DAG  |     | Single-Event Rules   |
- | Unified Log   ----------> Code Signing Cache   |     |   (282 Sigma YAML)   |
- | TCC Monitor   ----------> Quarantine Origin    +---->| Sequence Rules (22)  |
+ | Unified Log   ----------> Code Signing Cache   |     |   (349 Sigma YAML)   |
+ | TCC Monitor   ----------> Quarantine Origin    +---->| Sequence Rules (27)  |
  | Network Coll. ----------> Threat Intel Feeds   |     | Baseline Anomaly     |
  | DNS Collector ----------> Cert Transparency    |     | Statistical Anomaly  |
  | Event Tap     ----------> YARA Scanner         |     | Behavioral Scoring   |
@@ -83,7 +138,64 @@ Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows -- b
 
 ---
 
-## Event Sources
+## CLI Reference
+
+```bash
+maccrabctl status                       # Daemon status
+maccrabctl alerts                       # Recent alerts
+maccrabctl events tail 20               # Live event stream
+maccrabctl watch                        # Streaming alert tail
+maccrabctl rules list                   # Loaded rules
+maccrabctl hunt "show critical alerts"  # NL threat hunting
+maccrabctl report --hours 48            # Incident report
+maccrabctl suppress <rule-id> <path>    # Suppress false positive
+maccrabctl cdhash 1234                  # CDHash lookup
+maccrabctl tree-score 20                # Behavioral scoring
+maccrabctl mcp list                     # MCP server inventory
+maccrabctl extensions --suspicious      # Browser extension scan
+```
+
+---
+
+## Uninstall
+
+### Homebrew
+
+```bash
+brew uninstall maccrab
+```
+
+### Manual / source build
+
+```bash
+sudo ./scripts/uninstall.sh
+```
+
+The uninstall script stops the daemon, removes binaries and the launchd plist, and asks before deleting your data (events, rules, logs). Pass `-y` to skip the prompt.
+
+To remove user-level data as well:
+
+```bash
+rm -rf ~/Library/Application\ Support/MacCrab
+rm -f ~/Library/Preferences/com.maccrab.app.plist
+```
+
+---
+
+## Detection Stack
+
+MacCrab evaluates events through a 5-tier detection hierarchy:
+
+| Tier | Description |
+|------|-------------|
+| **1. Rules** | 376 Sigma-compatible YAML rules compiled to JSON. Category-indexed for O(1) dispatch. |
+| **2. Anomaly** | Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators). |
+| **3. Sequences** | 27 temporal multi-step rules with process lineage correlation and time windows. |
+| **4. Campaigns** | Kill chain, alert storm, AI compromise, coordinated attack, and lateral movement detection. |
+| **5. Cross-process** | Correlation across the full process lineage graph. |
+
+<details>
+<summary><strong>Event Sources (click to expand)</strong></summary>
 
 MacCrab ingests from eight real-time event sources, covering kernel-level process activity through application-layer permissions:
 
@@ -98,18 +210,34 @@ MacCrab ingests from eight real-time event sources, covering kernel-level proces
 | **System Policy monitor** | Gatekeeper, XProtect, and notarization enforcement activity |
 | **FSEvents fallback** | File system event stream for coverage when ES file events are unavailable |
 
----
+</details>
 
-## Detection Stack
+<details>
+<summary><strong>Monitors and Collectors (click to expand)</strong></summary>
 
-### Rules (348 compiled)
+| Monitor | Purpose | Poll Interval |
+|---------|---------|--------------|
+| ESCollector | Endpoint Security framework events | Real-time |
+| UnifiedLogCollector | System log (18 subsystems incl. Bluetooth, Wi-Fi, AirDrop) | Real-time |
+| NetworkCollector | TCP/UDP connections | 5s |
+| DNSCollector | DNS queries (BPF) | Real-time |
+| TCCMonitor | Privacy permission changes | Real-time |
+| FSEventsCollector | File system events (non-root fallback) | Real-time |
+| EDRMonitor | EDR/RMM/insider threat/remote access tool scanning | 120s |
+| USBMonitor | USB device connect/disconnect | 10s |
+| ClipboardMonitor | Clipboard content + injection detection | 2s |
+| UltrasonicMonitor | DolphinAttack/NUIT audio injection | Configurable |
+| RootkitDetector | Dual-API process cross-reference | 120s |
+| EventTapMonitor | Keylogger detection | Real-time |
+| SystemPolicyMonitor | SIP, XProtect, MDM, auth plugins | 300s |
+| BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup |
+| MCPMonitor | MCP server configs across AI tools | Startup |
+| TEMPESTMonitor | Van Eck phreaking: SDR devices + display anomalies | 60s |
 
-| Layer | Count | Description |
-|-------|:-----:|-------------|
-| **Single-event Sigma rules** | 321 | Standard Sigma YAML compiled to JSON predicates, evaluated per event in real time |
-| **Temporal sequence rules** | 27 | Multi-step ordered rules with time windows, process lineage correlation, and causal chaining |
+</details>
 
-### Analysis Engines
+<details>
+<summary><strong>Analysis Engines (click to expand)</strong></summary>
 
 | Engine | Description |
 |--------|-------------|
@@ -122,7 +250,10 @@ MacCrab ingests from eight real-time event sources, covering kernel-level proces
 | **Crash report miner** | Scans DiagnosticReports for exploitation indicators (EXC_BAD_ACCESS, buffer overflows, ASan faults, use-after-free) |
 | **Power anomaly detector** | Monitors power assertions and thermal pressure to detect crypto mining and sustained C2 beaconing |
 
-### AI Guard
+</details>
+
+<details>
+<summary><strong>AI Guard (click to expand)</strong></summary>
 
 Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, Codex, OpenClaw, Cursor, Aider, Copilot, Continue.dev, and Windsurf by executable path and process ancestry.
 
@@ -135,13 +266,16 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 
 19 dedicated AI safety detection rules in `Rules/ai_safety/`.
 
-### LLM Reasoning Backends
+</details>
+
+<details>
+<summary><strong>LLM Reasoning Backends (click to expand)</strong></summary>
 
 MacCrab integrates pluggable LLM backends for threat hunting, investigation summaries, and adaptive rule generation. All features degrade gracefully when no backend is configured. Cloud providers receive automatic privacy sanitization (usernames, private IPs, and hostnames are redacted before transmission).
 
 | Backend | Config | Use case |
 |---------|--------|----------|
-| **Ollama** (recommended) | `MACCRAB_LLM_PROVIDER=ollama` | Fully local, zero cloud dependency — best for privacy-sensitive environments |
+| **Ollama** (recommended) | `MACCRAB_LLM_PROVIDER=ollama` | Fully local, zero cloud dependency -- best for privacy-sensitive environments |
 | **Claude API** | `MACCRAB_LLM_PROVIDER=claude` + `MACCRAB_LLM_CLAUDE_KEY` | Anthropic's Claude models via API |
 | **OpenAI-compatible** | `MACCRAB_LLM_PROVIDER=openai` + `MACCRAB_LLM_OPENAI_KEY` | OpenAI or any compatible endpoint (LM Studio, vLLM, etc.) |
 | **Gemini** | `MACCRAB_LLM_PROVIDER=gemini` | Google Gemini via API |
@@ -156,9 +290,12 @@ LLM-powered features:
 | **Active defense recommendations** | Generated alongside campaign alerts; stored as `maccrab.llm.defense-recommendation` alert |
 | **AI-generated detection rules** | Auto-generated from observed campaigns using `RuleGenerator.generateFromCampaignEnhanced()` |
 
-All LLM settings can be configured in **Settings → AI Backend** in the dashboard, or via `daemon_config.json`.
+All LLM settings can be configured in **Settings > AI Backend** in the dashboard, or via `daemon_config.json`.
 
-### Threat Intelligence
+</details>
+
+<details>
+<summary><strong>Threat Intelligence (click to expand)</strong></summary>
 
 | Feed | IOC type | Update interval |
 |------|----------|:---------------:|
@@ -167,7 +304,10 @@ All LLM settings can be configured in **Settings → AI Backend** in the dashboa
 | **abuse.ch MalwareBazaar** | Malicious file hashes (SHA-256) | 4 hours |
 | **Custom IOC lists** | User-provided hashes, IPs, domains | On change |
 
-### Enrichment Pipeline
+</details>
+
+<details>
+<summary><strong>Enrichment Pipeline (click to expand)</strong></summary>
 
 Every event passes through enrichment before rule evaluation:
 
@@ -181,7 +321,10 @@ Every event passes through enrichment before rule evaluation:
 | **Threat intel lookup** | Checks file hashes, destination IPs, and domains against cached IOC feeds |
 | **Entropy analysis** | Shannon entropy scoring for command arguments and domain names |
 
-### Self-Defense (8 layers)
+</details>
+
+<details>
+<summary><strong>Self-Defense (8 layers) (click to expand)</strong></summary>
 
 The daemon protects its own integrity with continuous tamper detection:
 
@@ -194,7 +337,10 @@ The daemon protects its own integrity with continuous tamper detection:
 7. **LaunchDaemon plist watch** -- alerts on plist removal or modification
 8. **Process injection detection** -- detects attempts to inject into the daemon
 
-### Suppression Manager
+</details>
+
+<details>
+<summary><strong>Suppression Manager (click to expand)</strong></summary>
 
 Per-rule process allowlists loaded from `suppressions.json`. Operators can suppress known false positives without disabling rules entirely:
 
@@ -207,7 +353,10 @@ Per-rule process allowlists loaded from `suppressions.json`. Operators can suppr
 
 The CLI (`maccrabctl suppress`) writes to the same file. The daemon checks suppressions before emitting alerts.
 
-### Response Actions
+</details>
+
+<details>
+<summary><strong>Response Actions (click to expand)</strong></summary>
 
 Rules can trigger configurable response actions ranging from passive to active:
 
@@ -220,9 +369,14 @@ Rules can trigger configurable response actions ranging from passive to active:
 | `script` | Run a custom shell script with alert context as environment variables |
 | `blockNetwork` | Block the network connection (requires Network Extension) |
 
+</details>
+
 ---
 
 ## Rule Coverage by MITRE ATT&CK Tactic
+
+<details>
+<summary><strong>Full rule breakdown (376 rules across 17 tactics)</strong></summary>
 
 | Tactic | Directory | Single-Event | Sequences | Total |
 |--------|-----------|:------------:|:---------:|:-----:|
@@ -243,7 +397,9 @@ Rules can trigger configurable response actions ranging from passive to active:
 | TCC Abuse | `tcc/` | 9 | -- | 9 |
 | Impact | `impact/` | 8 | -- | 8 |
 | Temporal Sequences | `sequences/` | -- | 27 | 27 |
-| **Total** | | **321** | **27** | **348** |
+| **Total** | | **349** | **27** | **376** |
+
+</details>
 
 ---
 
@@ -264,6 +420,9 @@ Rules can trigger configurable response actions ranging from passive to active:
 
 A native status bar application with a sidebar navigation layout across 15 views:
 
+<details>
+<summary><strong>All dashboard views (click to expand)</strong></summary>
+
 | View | Description |
 |------|-------------|
 | **Overview** | At-a-glance stats: events/sec, alert counts by severity, top processes, threat intel status |
@@ -282,58 +441,46 @@ A native status bar application with a sidebar navigation layout across 15 views
 | **ES Health** | Daemon status, database health, collector checklist, event throughput |
 | **Docs** | Built-in documentation and reference |
 
-Additional views: Settings → AI Backend (LLM provider configuration), Response Actions log.
+Additional views: Settings > AI Backend (LLM provider configuration), Response Actions log.
+
+</details>
 
 ---
 
-## Quick Start
+## What's New in v1.0.0
 
-### Install via Homebrew
+<details>
+<summary><strong>Full changelog (click to expand)</strong></summary>
 
-```bash
-brew install --cask https://raw.githubusercontent.com/peterhanily/maccrab/main/homebrew/maccrab.rb
-```
+- 376 Sigma-compatible detection rules (349 single-event + 27 sequences)
+- 5-tier detection hierarchy (rules, sequences, anomaly, campaigns, cross-process)
+- LLM reasoning backends: Ollama, Claude, OpenAI-compatible, Gemini, Mistral
+- NL threat hunting, LLM investigation summaries, active defense recommendations
+- AI Guard monitoring 8 coding tools + MCP servers
+- Zero-entitlement kernel events via eslogger proxy
+- Package freshness checking (npm, PyPI, Homebrew, Cargo)
+- Ultrasonic attack detection (DolphinAttack, NUIT, SurfingAttack)
+- Clipboard, browser extension, USB monitoring
+- TLS fingerprinting and C2 beacon detection
+- Auto rule generation from observed attacks (template + LLM-enhanced)
+- Encrypted database (AES-256)
+- HTML incident reports
+- Rootkit detection via cross-referenced process enumeration
+- Crash report mining for exploitation indicators
+- Power/thermal anomaly detection (crypto mining, C2 beacons)
+- CDHash extraction for process integrity verification
+- TEMPEST / Van Eck phreaking detection (17 SDR devices, display anomaly monitoring)
+- EDR/RMM tool discovery (30+ tools across 5 categories)
+- 14 language localizations for the dashboard
 
-### Build and run
-
-```bash
-# One command: build, codesign, compile rules, restart daemon, open app
-make dev
-
-# Or step by step:
-swift build
-python3 Compiler/compile_rules.py --input-dir Rules/ \
-    --output-dir ~/Library/Application\ Support/MacCrab/compiled_rules/
-sudo .build/debug/maccrabd
-```
-
-### Control and query
-
-```bash
-.build/debug/maccrabctl status                       # Daemon status
-.build/debug/maccrabctl alerts                       # Recent alerts
-.build/debug/maccrabctl events tail 20               # Live event stream
-.build/debug/maccrabctl watch                        # Streaming alert tail
-.build/debug/maccrabctl rules list                   # Loaded rules
-.build/debug/maccrabctl hunt "show critical alerts"  # NL threat hunting
-.build/debug/maccrabctl report --hours 48            # Incident report
-.build/debug/maccrabctl cdhash 1234                  # CDHash lookup
-.build/debug/maccrabctl tree-score 20                # Behavioral scoring
-.build/debug/maccrabctl mcp list                     # MCP server inventory
-.build/debug/maccrabctl extensions --suspicious      # Browser extension scan
-```
-
-### Open the dashboard
-
-```bash
-make app
-```
+</details>
 
 ---
 
 ## Development
 
-### dev.sh
+<details>
+<summary><strong>dev.sh (click to expand)</strong></summary>
 
 The `scripts/dev.sh` script is the primary development driver. It builds, codesigns with the ES entitlement, compiles rules, and restarts the daemon in one step:
 
@@ -346,6 +493,8 @@ The `scripts/dev.sh` script is the primary development driver. It builds, codesi
 ./scripts/dev.sh --status     # Show daemon status
 ```
 
+</details>
+
 ### Make targets
 
 ```
@@ -354,7 +503,6 @@ make restart          Restart daemon (no rebuild)
 make stop             Stop daemon and app
 make status           Show daemon status
 make watch            Live stream alerts
-make app              Open the GUI dashboard
 
 make build            Build debug binaries
 make release          Build release binaries
@@ -380,7 +528,8 @@ make test-stress       # 60-second stress test for event throughput
 make lint-rules        # Lint all YAML rules for format, UUID uniqueness, tags
 ```
 
-Test files:
+<details>
+<summary><strong>Test files (click to expand)</strong></summary>
 
 | File | Scope |
 |------|-------|
@@ -395,6 +544,20 @@ Test files:
 | `scripts/rule-lint.sh` | YAML validation, UUID uniqueness, ATT&CK tag checks |
 | `scripts/stress-test.sh` | High-throughput event flooding for performance validation |
 
+</details>
+
+### Red team simulation
+
+```bash
+make test-detection              # 15 detection categories (~2 min)
+make test-campaign               # 5-wave kill chain simulation (~5 min)
+make test-campaign SUSTAINED=1   # Slow burn (~12 min, more realistic)
+make test-fp                     # False positive validation (105 system processes)
+make test-stress 120             # Sustained operation monitor (120s)
+```
+
+All tests are safe -- artifacts in `/tmp`, localhost connections, cleanup on exit.
+
 ---
 
 ## Detection Rules
@@ -405,7 +568,8 @@ MacCrab uses a Sigma-compatible YAML format. Single-event rules follow the [stan
 
 Rules are compiled from YAML to an optimized JSON predicate format by `Compiler/compile_rules.py` before being loaded by the detection engine at runtime.
 
-### Example: single-event rule
+<details>
+<summary><strong>Example: single-event rule (click to expand)</strong></summary>
 
 ```yaml
 title: Shell Spawned by Browser Process
@@ -445,7 +609,10 @@ falsepositives:
 level: high
 ```
 
-### Example: temporal sequence rule
+</details>
+
+<details>
+<summary><strong>Example: temporal sequence rule (click to expand)</strong></summary>
 
 Sequence rules define multi-step attack chains with time windows, ordering constraints, and process lineage correlation:
 
@@ -514,7 +681,10 @@ trigger: persist and c2
 level: critical
 ```
 
-### Sequence rule fields
+</details>
+
+<details>
+<summary><strong>Sequence rule fields (click to expand)</strong></summary>
 
 | Field | Description |
 |-------|-------------|
@@ -524,6 +694,8 @@ level: critical
 | `ordered` | Whether steps must occur in the listed order (`true`) or in any order (`false`) |
 | `steps[].process` | Process relationship to another step: `<step_id>.descendant`, `<step_id>.ancestor`, `<step_id>.same`, `<step_id>.sibling` |
 | `trigger` | Boolean expression over step IDs that must be satisfied for the rule to fire |
+
+</details>
 
 ### Writing custom rules
 
@@ -536,7 +708,7 @@ level: critical
 
 ```bash
 make compile-rules
-.build/debug/maccrabctl rules list | grep "your rule title"
+maccrabctl rules list | grep "your rule title"
 make lint-rules       # Validates format, UUID uniqueness, and tags
 make test-fp          # Verify no false positives against normal activity
 ```
@@ -545,7 +717,8 @@ make test-fp          # Verify no false positives against normal activity
 
 ## Configuration
 
-### Environment variables
+<details>
+<summary><strong>Environment variables (click to expand)</strong></summary>
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -557,7 +730,10 @@ make test-fp          # Verify no false positives against normal activity
 | `MACCRAB_SYSLOG_PROTO` | `udp` | Syslog transport (`udp` or `tcp`) |
 | `MACCRAB_MIN_SEVERITY` | `low` | Minimum output severity (`informational`, `low`, `medium`, `high`, `critical`) |
 
-### Baseline engine
+</details>
+
+<details>
+<summary><strong>Baseline engine (click to expand)</strong></summary>
 
 The baseline anomaly engine builds a profile of normal activity over a configurable learning period. Configuration is stored in `~/Library/Application Support/MacCrab/baseline_config.json`:
 
@@ -575,13 +751,18 @@ The baseline anomaly engine builds a profile of normal activity over a configura
 }
 ```
 
-### Alert deduplication
+</details>
+
+<details>
+<summary><strong>Alert deduplication (click to expand)</strong></summary>
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Suppression window | 300 seconds | Time before the same (rule, process, context) tuple can fire again |
 | Max alerts per rule per hour | 50 | Hard cap on alert volume per rule |
 | Dedup key fields | rule ID, process path, file path or destination IP | Fields used to compute the deduplication key |
+
+</details>
 
 ---
 
@@ -599,6 +780,9 @@ The baseline anomaly engine builds a profile of normal activity over a configura
 ---
 
 ## Self-Signing for Development
+
+<details>
+<summary><strong>Instructions for code signing (click to expand)</strong></summary>
 
 Apple restricts the Endpoint Security entitlement to signed binaries. For local development:
 
@@ -641,9 +825,14 @@ codesign --sign "Developer ID Application: Your Name (TEAM_ID)" \
     .build/release/maccrabd
 ```
 
+</details>
+
 ---
 
 ## Project Structure
+
+<details>
+<summary><strong>Full directory layout (click to expand)</strong></summary>
 
 ```
 maccrab/
@@ -741,7 +930,7 @@ maccrab/
 │       └── ViewModels/
 │           └── ViewModels.swift
 │
-├── Rules/                               # 348 Sigma-compatible detection rules
+├── Rules/                               # 376 Sigma-compatible detection rules
 │   ├── defense_evasion/    (55)
 │   ├── credential_access/  (32)
 │   ├── supply_chain/       (31)
@@ -756,8 +945,8 @@ maccrab/
 │   ├── exfiltration/       (11)
 │   ├── initial_access/     (10)
 │   ├── container/          (8)
-│   ├── tcc/                (6)
-│   ├── impact/             (6)
+│   ├── tcc/                (9)
+│   ├── impact/             (8)
 │   └── sequences/          (27)
 │
 ├── Compiler/
@@ -791,30 +980,7 @@ maccrab/
         └── ForensicTests.swift          # Forensic component tests
 ```
 
----
-
-## How It Compares
-
-| Capability | MacCrab | coreSigma | osquery | Santa | Commercial EDR |
-|------------|:-------:|:---------:|:-------:|:-----:|:--------------:|
-| Real-time ES events | Yes | Yes | Scheduled | Exec only | Yes |
-| Sigma rule format | Yes | Yes | No | No | Varies |
-| Temporal sequence rules | **Yes** | No | No | No | Some |
-| Behavioral scoring | **Yes** | No | No | No | Yes |
-| AI coding tool guardrails | **Yes** | No | No | No | No |
-| Threat intel feeds | **Yes** | No | No | No | Yes |
-| Baseline anomaly detection | **Yes** | No | No | No | Yes |
-| TCC permission monitoring | **Yes** | No | Partial | No | Some |
-| Process lineage DAG | **Yes** | Limited | Partial | No | Yes |
-| Incident grouping | **Yes** | No | No | No | Yes |
-| Certificate Transparency | **Yes** | No | No | No | Some |
-| Self-defense / tamper protection | **Yes** | No | No | No | Yes |
-| Response actions | **Yes** | No | No | Block only | Yes |
-| Runs entirely local | **Yes** | **Yes** | **Yes** | **Yes** | No |
-| Open source | **Yes** | **Yes** | **Yes** | **Yes** | No |
-| macOS ES framework depth | 90+ types | ~20 types | Limited | Exec only | Varies |
-| Infrastructure required | **None** | None | Fleet server | Sync server | Cloud console |
-| Native macOS UI | **Yes** | No | No | Yes | Agent only |
+</details>
 
 ---
 

@@ -1,5 +1,5 @@
 title: Application Executed from App Translocation Path
-id: d1a2b3c4-0129-4000-a000-000000000129
+id: d1a2b3c4-0129-4000-b000-000000000129
 status: experimental
 description: Detects execution of processes from the macOS App Translocation path (/private/var/folders/.../AppTranslocation/). App Translocation is a Gatekeeper feature that moves quarantined apps to a randomized read-only path. Execution from this path indicates an application was run directly from a DMG or archive without being moved to /Applications, which is common with malicious payloads.
 author: MacCrab Community

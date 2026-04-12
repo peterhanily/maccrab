@@ -14,6 +14,7 @@ struct ESHealthView: View {
     @State private var walSize: UInt64 = 0
     @State private var eventCount: Int = 0
     @State private var esloggerAvailable = false
+    @State private var fdaGranted = false
     @State private var lastRefresh: Date?
 
     private let dataDir: String = {
@@ -53,6 +54,16 @@ struct ESHealthView: View {
                         icon: "antenna.radiowaves.left.and.right",
                         color: appState.isConnected ? .green : .red,
                         detail: appState.isConnected ? "Events being collected" : "Start with: sudo maccrabd"
+                    )
+
+                    HealthCard(
+                        title: "Full Disk Access",
+                        value: fdaGranted ? "Granted" : "Not Granted",
+                        icon: fdaGranted ? "lock.open.fill" : "lock.fill",
+                        color: fdaGranted ? .green : .orange,
+                        detail: fdaGranted
+                            ? "Complete detection coverage enabled"
+                            : "Grant FDA to maccrabd in System Settings > Privacy for full coverage"
                     )
 
                     HealthCard(
@@ -193,6 +204,11 @@ struct ESHealthView: View {
         dbSize = (try? fm.attributesOfItem(atPath: dbPath))?[.size] as? UInt64 ?? 0
         walSize = (try? fm.attributesOfItem(atPath: walPath))?[.size] as? UInt64 ?? 0
         esloggerAvailable = fm.fileExists(atPath: "/usr/bin/eslogger")
+
+        // Check Full Disk Access by probing a TCC-protected path.
+        // The user's TCC database is only readable with FDA.
+        let tccPath = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db"
+        fdaGranted = fm.isReadableFile(atPath: tccPath)
 
         // Count events via SQLite (lightweight row count)
         if dbSize > 0 {

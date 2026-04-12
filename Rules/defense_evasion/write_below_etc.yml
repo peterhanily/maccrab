@@ -1,5 +1,5 @@
 title: Non-System Process Writes to /etc Directory
-id: d1a2b3c4-0437-4000-a000-000000000437
+id: d1a2b3c4-0437-4000-b000-000000000437
 status: experimental
 description: >
     Detects non-system processes writing files under /etc/ or /private/etc/.

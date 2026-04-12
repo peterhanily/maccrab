@@ -16,6 +16,19 @@ enum DaemonSetup {
             print("      For full coverage: sudo maccrabd")
         }
 
+        // Check Full Disk Access by probing a TCC-protected path.
+        // Without FDA, ES events for protected file paths are silently dropped.
+        if isRoot {
+            let tccDB = "/Library/Application Support/com.apple.TCC/TCC.db"
+            if FileManager.default.isReadableFile(atPath: tccDB) {
+                print("Full Disk Access: granted (complete ES coverage)")
+            } else {
+                print("WARNING: Full Disk Access not granted — detection at ~70% coverage.")
+                print("         Grant FDA to maccrabd in System Settings > Privacy & Security")
+                print("         > Full Disk Access, then restart the daemon.")
+            }
+        }
+
         // Paths -- root uses system location (shared with app), non-root uses user directory
         let supportDir: String
         if isRoot {

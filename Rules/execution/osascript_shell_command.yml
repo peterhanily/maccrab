@@ -1,5 +1,5 @@
 title: osascript Executes Shell Command via do shell script
-id: d1a2b3c4-0454-4000-a000-000000000454
+id: d1a2b3c4-0454-4000-b000-000000000454
 status: experimental
 description: >
     Detects osascript executing arbitrary shell commands via the 'do shell

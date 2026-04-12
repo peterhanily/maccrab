@@ -1,5 +1,5 @@
 title: Docker Container Granted Dangerous Linux Capabilities
-id: d1a2b3c4-0444-4000-a000-000000000444
+id: d1a2b3c4-0444-4000-b000-000000000444
 status: experimental
 description: >
     Detects docker run with --cap-add granting dangerous capabilities such

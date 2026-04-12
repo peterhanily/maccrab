@@ -17,7 +17,21 @@ detection:
         TargetFilename|startswith: '/private/var/at/tabs/'
     filter_crontab:
         Image|endswith: '/crontab'
-    condition: selection and not filter_crontab
+    filter_system_management:
+        # System administration and automation tools
+        Image|endswith:
+            - '/ansible-playbook'
+            - '/ansible'
+            - '/puppet'
+            - '/chef-client'
+            - '/cfengine3'
+            - '/salt-minion'
+    filter_apple:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_crontab and not filter_system_management and not filter_apple
 falsepositives:
     - System management tools writing cron entries directly
+    - Configuration management agents (Ansible, Puppet, Chef)
 level: high

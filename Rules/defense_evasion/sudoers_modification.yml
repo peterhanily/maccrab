@@ -1,5 +1,5 @@
 title: Sudoers File Modified
-id: d1a2b3c4-0439-4000-a000-000000000439
+id: d1a2b3c4-0439-4000-b000-000000000439
 status: experimental
 description: >
     Detects any modification to /etc/sudoers or files under /etc/sudoers.d/.

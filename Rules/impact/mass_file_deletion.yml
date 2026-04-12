@@ -50,8 +50,7 @@ detection:
             - '/DerivedData/'
             - '/.build/'
             - '/.swiftpm/'
-    condition: (selection_rm_rf and selection_critical_targets or selection_nuke)
-        and not filter_package_managers and not filter_xcode
+    condition: ((selection_rm_rf and selection_critical_targets) or selection_nuke) and not filter_package_managers and not filter_xcode
 falsepositives:
     - Developers cleaning build artifacts or temporary directories
     - IT scripts performing legitimate system cleanup

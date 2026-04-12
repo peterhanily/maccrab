@@ -1,5 +1,5 @@
 title: Docker Container Uses Host Network Namespace
-id: d1a2b3c4-0443-4000-a000-000000000443
+id: d1a2b3c4-0443-4000-b000-000000000443
 status: experimental
 description: >
     Detects docker run with --network=host flag, which gives the container

@@ -1,5 +1,5 @@
 title: ISO or DMG Mounted from Downloads Directory
-id: d1a2b3c4-0128-4000-a000-000000000128
+id: d1a2b3c4-0128-4000-b000-000000000128
 status: experimental
 description: Detects mounting of ISO or DMG disk images located in user Downloads directories. Threat actors commonly deliver malware via disk images downloaded from the internet, as ISO files may bypass Gatekeeper checks and Mark-of-the-Web in some configurations.
 author: MacCrab Community

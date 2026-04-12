@@ -1,5 +1,5 @@
 title: SSH Private Key File Accessed
-id: d1a2b3c4-0450-4000-a000-000000000450
+id: d1a2b3c4-0450-4000-b000-000000000450
 status: experimental
 description: >
     Detects any process reading SSH private key files, regardless of the

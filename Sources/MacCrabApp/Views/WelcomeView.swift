@@ -10,6 +10,11 @@ struct WelcomeView: View {
     @State private var selectedLanguage: String = Locale.current.language.languageCode?.identifier ?? "en"
     @State private var currentStep = 0
 
+    // MARK: - Daemon Health State
+    @State private var daemonDBFound = false
+    @State private var compiledRuleCount = 0
+    @State private var isChecking = false
+
     private let languages: [(code: String, name: String, native: String)] = [
         ("en", "English", "English"),
         ("es", "Spanish", "Español"),
@@ -82,7 +87,7 @@ struct WelcomeView: View {
             }
             .padding(20)
         }
-        .frame(width: 500, height: 420)
+        .frame(width: 500, height: 460)
     }
 
     // MARK: - Step 1: Language
@@ -130,7 +135,7 @@ struct WelcomeView: View {
             VStack(alignment: .leading, spacing: 12) {
                 FeatureRow(icon: "shield.checkered",
                     title: String(localized: "welcome.feature.detection", defaultValue: "Real-Time Detection"),
-                    description: String(localized: "welcome.feature.detectionDesc", defaultValue: "348 detection rules monitor your Mac for threats in real time"))
+                    description: String(localized: "welcome.feature.detectionDesc", defaultValue: "Hundreds of detection rules monitor your Mac for threats in real time"))
                 FeatureRow(icon: "brain",
                     title: String(localized: "welcome.feature.ai", defaultValue: "AI Safety"),
                     description: String(localized: "welcome.feature.aiDesc", defaultValue: "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access"))
@@ -153,7 +158,7 @@ struct WelcomeView: View {
             Text("🦀")
                 .font(.system(size: 48))
 
-            Text(String(localized: "welcome.allSet", defaultValue: "You\u{2019}re All Set!"))
+            Text(String(localized: "welcome.allSet", defaultValue: "Setup Checklist"))
                 .font(.title2).fontWeight(.bold)
 
             Text(String(localized: "welcome.ready", defaultValue: "MacCrab is ready to protect your Mac."))
@@ -161,12 +166,26 @@ struct WelcomeView: View {
                 .foregroundColor(.secondary)
 
             VStack(alignment: .leading, spacing: 8) {
-                SetupRow(icon: "checkmark.circle.fill", color: .green,
-                    text: String(localized: "welcome.setup.engineActive", defaultValue: "Detection engine active"))
-                SetupRow(icon: "checkmark.circle.fill", color: .green,
-                    text: String(localized: "welcome.setup.rulesLoaded", defaultValue: "348 detection rules loaded"))
+                // Dynamic: daemon database check
+                SetupRow(
+                    icon: daemonDBFound ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                    color: daemonDBFound ? .green : .orange,
+                    text: daemonDBFound
+                        ? String(localized: "welcome.setup.engineActive", defaultValue: "Detection engine active")
+                        : String(localized: "welcome.setup.engineInactive", defaultValue: "Detection engine not detected \u{2014} start the daemon first"))
+
+                // Dynamic: compiled rule count
+                SetupRow(
+                    icon: compiledRuleCount > 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                    color: compiledRuleCount > 0 ? .green : .orange,
+                    text: compiledRuleCount > 0
+                        ? "\(compiledRuleCount) detection rules loaded"
+                        : String(localized: "welcome.setup.noRules", defaultValue: "No compiled rules found \u{2014} run make compile-rules"))
+
+                // Language is always set
                 SetupRow(icon: "checkmark.circle.fill", color: .green,
                     text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
+
                 SetupRow(icon: "exclamationmark.shield", color: .orange,
                     text: String(localized: "welcome.setup.fda", defaultValue: "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add maccrabd"))
                 SetupRow(icon: "exclamationmark.shield", color: .orange,
@@ -180,8 +199,90 @@ struct WelcomeView: View {
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(12)
             .padding(.horizontal, 20)
+
+            // Refresh button
+            Button(action: {
+                checkDaemonHealth()
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.clockwise")
+                        .rotationEffect(.degrees(isChecking ? 360 : 0))
+                        .animation(isChecking ? .linear(duration: 0.6).repeatForever(autoreverses: false) : .default, value: isChecking)
+                    Text(String(localized: "welcome.setup.checkAgain", defaultValue: "Check Again"))
+                }
+            }
+            .controlSize(.small)
+            .disabled(isChecking)
         }
         .padding(.horizontal, 20)
+        .onAppear { checkDaemonHealth() }
+    }
+
+    // MARK: - Daemon Health Check
+
+    /// Check if the daemon database exists (user or system path) and count compiled rules.
+    /// Uses the same path resolution logic as AppState.dataDir.
+    private func checkDaemonHealth() {
+        isChecking = true
+        let fm = FileManager.default
+
+        // 1. Check daemon DB in both locations
+        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first.map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+
+        let userDB = userDir + "/events.db"
+        let systemDB = systemDir + "/events.db"
+        let userDBExists = fm.fileExists(atPath: userDB)
+        let systemDBReadable = fm.isReadableFile(atPath: systemDB)
+
+        // Also check for WAL file which indicates active daemon writer
+        let userWAL = fm.fileExists(atPath: userDB + "-wal") || fm.fileExists(atPath: userDB + "-shm")
+        let systemWAL = fm.fileExists(atPath: systemDB + "-wal") || fm.fileExists(atPath: systemDB + "-shm")
+
+        daemonDBFound = (userDBExists && userWAL) || (systemDBReadable && systemWAL)
+
+        // 2. Count compiled rules from all candidate directories (same as AppState.loadRules)
+        let activeDataDir: String
+        if userDBExists && systemDBReadable {
+            let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
+            let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
+            if let s = sysMod, let u = userMod, s >= u {
+                activeDataDir = systemDir
+            } else {
+                activeDataDir = userDir
+            }
+        } else if systemDBReadable {
+            activeDataDir = systemDir
+        } else if userDBExists {
+            activeDataDir = userDir
+        } else {
+            activeDataDir = systemDir
+        }
+
+        let candidates = [
+            activeDataDir + "/compiled_rules",
+            userDir + "/compiled_rules",
+            systemDir + "/compiled_rules",
+            fm.currentDirectoryPath + "/.build/debug/compiled_rules",
+        ]
+
+        var ruleCount = 0
+        for dir in candidates {
+            if let files = try? fm.contentsOfDirectory(atPath: dir) {
+                let jsonCount = files.filter { $0.hasSuffix(".json") }.count
+                if jsonCount > ruleCount {
+                    ruleCount = jsonCount
+                }
+            }
+        }
+        compiledRuleCount = ruleCount
+
+        // Brief delay so the spinner animation is visible
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            isChecking = false
+        }
     }
 
     // MARK: - Apply

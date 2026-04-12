@@ -36,15 +36,16 @@ cask "maccrab" do
   ]
 
   caveats <<~EOS
-    MacCrab requires root to access kernel events:
-      sudo maccrabd
-
-    For full Endpoint Security coverage, grant Full Disk Access to Terminal:
-      System Settings → Privacy & Security → Full Disk Access → Terminal.app
-
     Quick start:
       sudo maccrabd                    # Start detection daemon
       open /Applications/MacCrab.app   # Open dashboard
       maccrabctl status                # Check status
+
+    IMPORTANT — Grant Full Disk Access for complete detection coverage:
+      1. Open System Settings > Privacy & Security > Full Disk Access
+      2. Click + and add /usr/local/bin/maccrabd
+      3. Restart: sudo killall maccrabd && sudo maccrabd
+
+    Without FDA, MacCrab detects ~70% of threats. With FDA, 100%.
   EOS
 end

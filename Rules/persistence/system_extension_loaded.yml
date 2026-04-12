@@ -1,5 +1,5 @@
 title: System Extension Loaded (Modern Persistence)
-id: d1a2b3c4-0455-4000-a000-000000000455
+id: d1a2b3c4-0455-4000-b000-000000000455
 status: experimental
 description: >
     Detects loading of system extensions, the modern replacement for

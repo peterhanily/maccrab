@@ -81,9 +81,23 @@ info "Set MacCrab dashboard language to $LANG_NAME"
 
 echo ""
 
-# Build
-info "Building MacCrab (release mode)..."
-swift build -c release 2>&1 | tail -3
+# Locate pre-built binaries or build from source
+# Priority: 1) DMG mount (bin/), 2) .build/release/, 3) build from source
+BIN_SOURCE=""
+if [ -x "$PROJECT_DIR/bin/maccrabd" ] && [ -x "$PROJECT_DIR/bin/maccrabctl" ]; then
+    BIN_SOURCE="$PROJECT_DIR/bin"
+    info "Using pre-built binaries from DMG."
+elif [ -x "$PROJECT_DIR/.build/release/maccrabd" ] && [ -x "$PROJECT_DIR/.build/release/maccrabctl" ]; then
+    BIN_SOURCE="$PROJECT_DIR/.build/release"
+    info "Using pre-built binaries from .build/release."
+else
+    info "No pre-built binaries found. Building from source (requires Xcode CLT)..."
+    if ! command -v swift &>/dev/null; then
+        error "Swift toolchain not found. Install Xcode Command Line Tools: xcode-select --install"
+    fi
+    swift build -c release 2>&1 | tail -3
+    BIN_SOURCE="$PROJECT_DIR/.build/release"
+fi
 
 # Create directories
 info "Creating directories..."
@@ -93,18 +107,26 @@ mkdir -p "$PREFIX/bin"
 
 # Install binaries
 info "Installing binaries to $PREFIX/bin..."
-cp -f .build/release/maccrabd "$PREFIX/bin/maccrabd"
-cp -f .build/release/maccrabctl "$PREFIX/bin/maccrabctl"
+cp -f "$BIN_SOURCE/maccrabd" "$PREFIX/bin/maccrabd"
+cp -f "$BIN_SOURCE/maccrabctl" "$PREFIX/bin/maccrabctl"
 chmod 755 "$PREFIX/bin/maccrabd" "$PREFIX/bin/maccrabctl"
 
 # Install entitlements (for reference; codesigning must be done separately)
-cp -f entitlements.plist "$SUPPORT_DIR/entitlements.plist"
+cp -f entitlements.plist "$SUPPORT_DIR/entitlements.plist" 2>/dev/null || true
 
-# Compile and install rules
-info "Compiling detection rules..."
-python3 Compiler/compile_rules.py \
-    --input-dir Rules/ \
-    --output-dir "$SUPPORT_DIR/compiled_rules" 2>&1 | tail -5
+# Compile and install rules — use pre-compiled if available, otherwise compile
+if [ -d "$PROJECT_DIR/compiled_rules" ] && [ "$(find "$PROJECT_DIR/compiled_rules" -name '*.json' 2>/dev/null | head -1)" ]; then
+    info "Installing pre-compiled detection rules..."
+    cp -f "$PROJECT_DIR/compiled_rules/"*.json "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
+    cp -f "$PROJECT_DIR/compiled_rules/sequences/"*.json "$SUPPORT_DIR/compiled_rules/sequences/" 2>/dev/null || true
+elif [ -d "$PROJECT_DIR/Rules" ] && command -v python3 &>/dev/null; then
+    info "Compiling detection rules..."
+    python3 Compiler/compile_rules.py \
+        --input-dir Rules/ \
+        --output-dir "$SUPPORT_DIR/compiled_rules" 2>&1 | tail -5
+else
+    warn "No rules found to install. Rules can be added later with: make compile-rules"
+fi
 
 # Ensure compiled rules have correct permissions
 chmod -R 644 "$SUPPORT_DIR/compiled_rules/"*.json 2>/dev/null || true
@@ -176,5 +198,30 @@ echo "  Usage:    maccrabctl status"
 echo "            maccrabctl events tail 20"
 echo "            maccrabctl alerts 10"
 echo ""
-warn "Note: Full Endpoint Security support requires granting"
-warn "Full Disk Access to maccrabd in System Settings > Privacy."
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║  IMPORTANT: Grant Full Disk Access               ║"
+echo "╠══════════════════════════════════════════════════╣"
+echo "║                                                  ║"
+echo "║  MacCrab needs Full Disk Access for complete      ║"
+echo "║  threat detection coverage.                       ║"
+echo "║                                                  ║"
+echo "║  1. Open System Settings                          ║"
+echo "║  2. Privacy & Security > Full Disk Access         ║"
+echo "║  3. Click + and add: $PREFIX/bin/maccrabd"
+echo "║  4. Restart the daemon: sudo launchctl unload     ║"
+echo "║     $PLIST_DIR/$PLIST_NAME.plist"
+echo "║     && sudo launchctl load                        ║"
+echo "║     $PLIST_DIR/$PLIST_NAME.plist"
+echo "║                                                  ║"
+echo "║  Without FDA, detection runs at ~70% coverage.    ║"
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+# Offer to open System Settings directly
+read -p "Open Full Disk Access settings now? [Y/n] " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" 2>/dev/null || \
+    open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles" 2>/dev/null || \
+    warn "Could not open System Settings automatically. Please open manually."
+fi

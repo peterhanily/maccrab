@@ -1,5 +1,5 @@
 title: Docker Container Uses Host PID Namespace
-id: d1a2b3c4-0442-4000-a000-000000000442
+id: d1a2b3c4-0442-4000-b000-000000000442
 status: experimental
 description: >
     Detects docker run with --pid=host flag, which shares the host's process

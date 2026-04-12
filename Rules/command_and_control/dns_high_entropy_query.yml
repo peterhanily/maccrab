@@ -19,6 +19,10 @@ logsource:
 detection:
     selection:
         DestinationPort: 53
+    selection_entropy:
+        # Match domain queries containing high-entropy segments:
+        # 20+ alphanumeric characters without hyphens or dots (random-looking).
+        DestinationHostname|re: '[a-z0-9]{20,}\.'
     filter_system:
         Image|startswith:
             - '/System/'
@@ -26,8 +30,20 @@ detection:
             - '/usr/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_system and not filter_apple_signed
+    filter_known_cdn:
+        # CDN/cloud services with hash-based subdomains
+        DestinationHostname|endswith:
+            - '.cloudfront.net'
+            - '.akamaized.net'
+            - '.fastly.net'
+            - '.azureedge.net'
+            - '.googleapis.com'
+            - '.gstatic.com'
+            - '.amazonaws.com'
+            - '.1e100.net'
+    condition: selection and selection_entropy and not filter_system and not filter_apple_signed and not filter_known_cdn
 falsepositives:
     - CDN domains with hash-based subdomains
     - Cloud services using UUID-based hostnames
+    - Content-addressable storage systems
 level: medium

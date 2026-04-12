@@ -26,13 +26,37 @@ detection:
             - 465
             - 8080
             - 8443
+    filter_dev_ports:
+        # Common development and service ports
+        DestinationPort:
+            - 3000
+            - 3001
+            - 4000
+            - 4200
+            - 5000
+            - 5173
+            - 5432
+            - 5900
+            - 6379
+            - 8000
+            - 8888
+            - 9090
+            - 9200
+            - 9418
+            - 27017
     filter_signed:
         SignerType:
             - 'apple'
             - 'appStore'
             - 'devId'
-    condition: selection and not filter_common_ports and not filter_signed
+    filter_vpn:
+        Image|endswith:
+            - '/openvpn'
+            - '/wireguard-go'
+            - '/tailscaled'
+    condition: selection and not filter_common_ports and not filter_dev_ports and not filter_signed and not filter_vpn
 falsepositives:
     - Development servers on custom ports
     - VPN or P2P applications
+    - Database clients (PostgreSQL, MongoDB, Redis)
 level: medium

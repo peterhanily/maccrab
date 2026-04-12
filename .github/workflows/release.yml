@@ -11,6 +11,8 @@ jobs:
       contents: write
     env:
       VERSION: ${{ github.ref_name }}
+      HAS_SIGNING_CERT: ${{ secrets.DEVELOPER_ID_CERT != '' }}
+      HAS_NOTARIZE_CREDS: ${{ secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.NOTARIZE_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,9 +24,71 @@ jobs:
       - name: Install PyYAML
         run: pip install pyyaml
 
+      - name: Import Developer ID certificate
+        if: env.HAS_SIGNING_CERT == 'true'
+        env:
+          DEVELOPER_ID_CERT: ${{ secrets.DEVELOPER_ID_CERT }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          # Create a temporary keychain for CI
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import the certificate
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          echo "$DEVELOPER_ID_CERT" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productsign
+          rm -f "$CERT_PATH"
+
+          # Allow codesign to access the keychain without UI prompt
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          # Extract the Developer ID identity name
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "DEVELOPER_ID=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Imported Developer ID certificate: $IDENTITY"
+
       - name: Build DMG release package
+        env:
+          DEVELOPER_ID: ${{ env.DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
         run: |
           VERSION="${VERSION#v}" ./scripts/build-release.sh
+
+      - name: Sign and notarize DMG
+        if: env.HAS_SIGNING_CERT == 'true'
+        env:
+          DEVELOPER_ID: ${{ env.DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
+        run: |
+          DMG_PATH=$(ls .build/MacCrab-v*.dmg 2>/dev/null | head -1)
+          if [ -n "$DMG_PATH" ]; then
+            chmod +x scripts/notarize.sh
+            ./scripts/notarize.sh "$DMG_PATH"
+          else
+            echo "No DMG found to sign"
+          fi
+
+      - name: Cleanup signing keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          fi
 
       - name: Build release binaries for tarball
         run: swift build -c release 2>&1 || echo "Binary build requires ES entitlement - packaging rules only"
@@ -33,6 +97,10 @@ jobs:
         run: |
           mkdir -p compiled_rules
           python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir compiled_rules/
+
+      - name: Build .pkg installer
+        run: |
+          VERSION="${VERSION#v}" ./scripts/build-pkg.sh || echo "PKG build optional — continuing"
 
       - name: Package
         run: |
@@ -45,10 +113,40 @@ jobs:
           cp README.md LICENSE CONTRIBUTING.md dist/maccrab/
           cd dist && tar czf maccrab-${{ github.ref_name }}-macos-arm64.tar.gz maccrab/
 
+      - name: Update Homebrew formula version and SHA256
+        run: |
+          DMG_PATH=$(ls .build/MacCrab-v*.dmg 2>/dev/null | head -1)
+          CLEAN_VERSION="${VERSION#v}"
+          if [ -n "$DMG_PATH" ]; then
+            SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
+            echo "DMG SHA256: $SHA"
+            # Update version
+            sed -i '' "s/version \".*\"/version \"$CLEAN_VERSION\"/" homebrew/maccrab.rb
+            # Update sha256 (replace :no_check or existing hash)
+            sed -i '' "s/sha256 .*/sha256 \"$SHA\"/" homebrew/maccrab.rb
+            echo "Updated homebrew/maccrab.rb to v$CLEAN_VERSION (sha256: $SHA)"
+            cat homebrew/maccrab.rb | head -3
+          else
+            echo "No DMG found — skipping Homebrew update"
+          fi
+
+      - name: Commit Homebrew formula update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet homebrew/maccrab.rb; then
+            echo "No Homebrew formula changes to commit"
+          else
+            git add homebrew/maccrab.rb
+            git commit -m "chore: update Homebrew formula to ${VERSION#v}"
+            git push origin HEAD:main || echo "Could not push formula update — manual update needed"
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/maccrab-*.tar.gz
             .build/MacCrab-v*.dmg
+            .build/MacCrab-v*.pkg
           generate_release_notes: true
