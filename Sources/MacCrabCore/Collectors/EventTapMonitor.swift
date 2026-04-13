@@ -122,6 +122,20 @@ public actor EventTapMonitor {
         // Remote access
         "ARDAgent",
         "screensharingd",
+
+        // Peripheral input customization (vendor-signed)
+        "logioptionsplus_agent",
+        "LogiMgrDaemon",
+        "logi_daemon",
+
+        // Popular keyboard/input tools
+        "Karabiner-EventViewer",
+        "karabiner_grabber",
+        "karabiner_observer",
+        "BetterTouchTool",
+        "Hammerspoon",
+        "skhd",
+        "yabai",
     ]
 
     /// Path prefixes known to be Apple system directories.

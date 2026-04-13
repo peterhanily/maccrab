@@ -24,14 +24,39 @@ detection:
     filter_browsers:
         Image|endswith:
             - '/Google Chrome'
+            - '/Google Chrome Helper'
             - '/Safari'
             - '/firefox'
             - '/Microsoft Edge'
+            - '/Arc'
+            - '/Brave Browser'
     filter_system:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection and not filter_browsers and not filter_system
+            - '/usr/sbin/'
+    filter_messaging:
+        Image|contains:
+            - 'WhatsApp'
+            - 'Signal'
+            - 'Telegram'
+            - 'Slack'
+            - 'Discord'
+            - 'Messages'
+            - 'Microsoft Teams'
+            - 'Zoom'
+    filter_known_services:
+        Image|contains:
+            - 'Keybase'
+            - 'mDNSResponder'
+            - 'maccrabd'
+            - 'CrowdStrike'
+            - 'SentinelOne'
+            - 'Dropbox'
+            - 'OneDrive'
+            - 'Google Drive'
+            - 'iCloud'
+    condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services
 falsepositives:
     - Legitimate heartbeat/health-check connections
     - Auto-update services

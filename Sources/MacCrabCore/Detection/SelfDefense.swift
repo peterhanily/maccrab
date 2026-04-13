@@ -90,7 +90,10 @@ public actor SelfDefense {
 
     public init(dataDir: String, rulesDir: String) {
         // Compute baseline hashes at startup
-        let binaryPath = CommandLine.arguments[0]
+        // Resolve symlinks so Homebrew Caskroom paths are monitored correctly
+        // (e.g., /opt/homebrew/bin/maccrabd → /opt/homebrew/Caskroom/maccrab/1.1.1/bin/maccrabd)
+        let rawPath = CommandLine.arguments[0]
+        let binaryPath = (try? FileManager.default.destinationOfSymbolicLink(atPath: rawPath)) ?? rawPath
         self.binaryHash = Self.sha256(fileAt: binaryPath)
 
         self.rulesHash = Self.directoryHash(at: rulesDir)
@@ -98,13 +101,15 @@ public actor SelfDefense {
         // Build list of paths to monitor
         var paths: [MonitoredPath] = []
 
-        // The binary itself — non-critical in development builds (.build/debug)
-        // to avoid alert storms during rebuild cycles
+        // The binary itself — non-critical in dev builds or Homebrew installs.
+        // Dev rebuilds and Homebrew upgrades routinely replace/move the binary,
+        // and monitoring a deleted file causes SIGBUS (unmapped page fault).
         let isDev = binaryPath.contains(".build/debug")
+        let isHomebrew = binaryPath.contains("Caskroom") || binaryPath.contains("Cellar") || binaryPath.contains("homebrew")
         paths.append(MonitoredPath(
             path: binaryPath,
             description: "MacCrab daemon binary",
-            critical: !isDev
+            critical: !isDev && !isHomebrew
         ))
 
         // LaunchDaemon plist
@@ -318,9 +323,13 @@ public actor SelfDefense {
                 var message = "\(desc) was modified"
 
                 if data.contains(.delete) {
+                    // Non-critical deletes are logged but don't fire tamper alerts
+                    // (Homebrew upgrades routinely delete the old binary)
+                    if !critical { return }
                     eventType = .fileDeleted
                     message = "\(desc) was DELETED: \(path)"
                 } else if data.contains(.rename) {
+                    if !critical { return }
                     eventType = .fileDeleted
                     message = "\(desc) was RENAMED/MOVED: \(path)"
                 } else if data.contains(.write) {
