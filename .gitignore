@@ -41,6 +41,12 @@ events.jsonl
 *.mobileprovision
 *.provisionprofile
 
+# Release scripts (private build/sign/notarize tooling)
+scripts/build-release.sh
+scripts/build-pkg.sh
+scripts/notarize.sh
+scripts/release.sh
+
 # Python
 __pycache__/
 *.pyc

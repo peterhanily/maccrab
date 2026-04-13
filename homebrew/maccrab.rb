@@ -1,6 +1,6 @@
 cask "maccrab" do
-  version "1.0.0"
-  sha256 :no_check  # Updated per release
+  version "1.1.1"
+  sha256 "ee86897427e1b4818a498fec4c537951bd3af37b451f2205a98e238ded8c5ab1"
 
   url "https://github.com/peterhanily/maccrab/releases/download/v#{version}/MacCrab-v#{version}.dmg"
   name "MacCrab"
@@ -12,6 +12,7 @@ cask "maccrab" do
   app "MacCrab.app"
   binary "bin/maccrabd"
   binary "bin/maccrabctl"
+  binary "bin/maccrab-mcp"
 
   postflight do
     # Install compiled rules
