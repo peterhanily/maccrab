@@ -289,9 +289,16 @@ enum DaemonSetup {
         print("Browser extension monitor active")
 
         // Ultrasonic attack monitor -- FFT mic sampling for DolphinAttack/NUIT
+        // Opt-in: requires microphone access which triggers a TCC permission popup.
+        // Enable with "ultrasonicEnabled": true in daemon_config.json or MACCRAB_ULTRASONIC=1.
+        let ultrasonicEnabled = config.ultrasonicEnabled || ProcessInfo.processInfo.environment["MACCRAB_ULTRASONIC"] == "1"
         let ultrasonicMonitor = UltrasonicMonitor(pollInterval: config.ultrasonicPollInterval)
-        await ultrasonicMonitor.start()
-        print("Ultrasonic attack monitor active (DolphinAttack, NUIT, SurfingAttack)")
+        if ultrasonicEnabled {
+            await ultrasonicMonitor.start()
+            print("Ultrasonic attack monitor active (DolphinAttack, NUIT, SurfingAttack)")
+        } else {
+            print("Ultrasonic attack monitor: disabled (set MACCRAB_ULTRASONIC=1 to enable)")
+        }
 
         // DoH evasion detector -- flags non-browser DoH usage
         let dohDetector = DoHDetector()

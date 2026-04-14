@@ -22,6 +22,7 @@ struct DaemonConfig: Codable {
     var clipboardPollInterval: TimeInterval = 3
     var browserExtensionPollInterval: TimeInterval = 120
     var ultrasonicPollInterval: TimeInterval = 60
+    var ultrasonicEnabled: Bool = false  // Opt-in: requires microphone access
     var rootkitPollInterval: TimeInterval = 120
     var eventTapPollInterval: TimeInterval = 30
     var systemPolicyPollInterval: TimeInterval = 300

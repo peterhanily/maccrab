@@ -165,8 +165,9 @@ public actor EventStore {
             withIntermediateDirectories: true,
             attributes: nil
         )
+        // rwxr-xr-x: non-root MacCrab.app needs to traverse and read the DB
         try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o750],
+            [.posixPermissions: 0o755],
             ofItemAtPath: maccrabDir.path
         )
 
@@ -175,7 +176,8 @@ public actor EventStore {
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o600)
+        // rw-r--r--: non-root MacCrab.app needs read access to display events
+        chmod(databasePath, 0o644)
     }
 
     /// Creates an `EventStore` at a custom path (useful for testing).

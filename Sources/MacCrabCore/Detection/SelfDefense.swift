@@ -108,15 +108,15 @@ public actor SelfDefense {
         // Build list of paths to monitor
         var paths: [MonitoredPath] = []
 
-        // The binary itself — non-critical in dev builds or Homebrew installs.
-        // Dev rebuilds and Homebrew upgrades routinely replace/move the binary,
-        // and monitoring a deleted file causes SIGBUS (unmapped page fault).
-        let isDev = binaryPath.contains(".build/debug")
-        let isHomebrew = binaryPath.contains("Caskroom") || binaryPath.contains("Cellar") || binaryPath.contains("homebrew")
+        // Binary monitoring is never critical — the running process is in memory
+        // and file deletion doesn't affect it. Hash-based integrity checks (in
+        // integrityCheck()) catch actual modifications. File existence checks
+        // cause false positives on dev rebuilds, Homebrew upgrades, and path
+        // resolution edge cases (sudo, symlinks).
         paths.append(MonitoredPath(
             path: binaryPath,
             description: "MacCrab daemon binary",
-            critical: !isDev && !isHomebrew
+            critical: false
         ))
 
         // LaunchDaemon plist
