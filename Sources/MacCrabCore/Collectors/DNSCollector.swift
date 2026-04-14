@@ -250,10 +250,17 @@ public actor DNSCollector {
 
             // Parse BPF packets
             var offset = 0
-            while offset < bytesRead {
+            while offset + MemoryLayout<bpf_hdr>.size <= bytesRead {
                 let hdr = buffer.advanced(by: offset).assumingMemoryBound(to: bpf_hdr.self).pointee
                 let packetStart = offset + Int(hdr.bh_hdrlen)
                 let packetLen = Int(hdr.bh_caplen)
+
+                // Bounds check: ensure packet data is fully within the read buffer
+                guard packetStart >= 0,
+                      packetLen >= 0,
+                      packetStart + packetLen <= bytesRead else {
+                    break
+                }
 
                 if packetLen > 42 { // Minimum: 14 (eth) + 20 (IP) + 8 (UDP) + DNS header
                     let packetData = Data(bytes: buffer.advanced(by: packetStart), count: packetLen)
@@ -263,7 +270,9 @@ public actor DNSCollector {
                 }
 
                 // Advance to next BPF packet (aligned)
-                offset += BPF_WORDALIGN(Int(hdr.bh_hdrlen) + Int(hdr.bh_caplen))
+                let advance = BPF_WORDALIGN(Int(hdr.bh_hdrlen) + Int(hdr.bh_caplen))
+                guard advance > 0 else { break } // Prevent infinite loop on zero-advance
+                offset += advance
             }
         }
     }
