@@ -89,11 +89,18 @@ public actor SelfDefense {
     // MARK: - Initialization
 
     public init(dataDir: String, rulesDir: String) {
-        // Compute baseline hashes at startup
-        // Resolve symlinks so Homebrew Caskroom paths are monitored correctly
-        // (e.g., /opt/homebrew/bin/maccrabd → /opt/homebrew/Caskroom/maccrab/1.1.1/bin/maccrabd)
-        let rawPath = CommandLine.arguments[0]
-        let binaryPath = (try? FileManager.default.destinationOfSymbolicLink(atPath: rawPath)) ?? rawPath
+        // Resolve the actual binary path using proc_pidpath (reliable even when
+        // CommandLine.arguments[0] is just "maccrabd" without a full path).
+        let binaryPath: String = {
+            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            let result = proc_pidpath(getpid(), &buffer, UInt32(buffer.count))
+            if result > 0 {
+                return String(cString: buffer)
+            }
+            // Fallback: try resolving arguments[0]
+            let raw = CommandLine.arguments[0]
+            return (try? FileManager.default.destinationOfSymbolicLink(atPath: raw)) ?? raw
+        }()
         self.binaryHash = Self.sha256(fileAt: binaryPath)
 
         self.rulesHash = Self.directoryHash(at: rulesDir)
