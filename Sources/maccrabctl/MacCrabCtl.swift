@@ -154,6 +154,8 @@ struct MacCrabCtl {
             listExtensions(suspiciousOnly: suspiciousOnly)
         case "security":
             await showSecurityScore()
+        case "deception":
+            await runDeception(args: args)
         case "version":
             printVersion()
         case "help", "-h", "--help":
