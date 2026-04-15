@@ -21,6 +21,7 @@ public actor AlertExporter {
         case leef = "leef"          // QRadar Log Event Extended Format
         case stix = "stix"          // STIX 2.1 bundle
         case syslogCEF = "syslog-cef"  // CEF over syslog
+        case ocsf = "ocsf"          // OCSF 1.3 Security Finding (JSONL, one per line)
 
         /// File extension for this format.
         public var fileExtension: String {
@@ -31,6 +32,7 @@ public actor AlertExporter {
             case .cef, .syslogCEF: return "cef"
             case .leef: return "leef"
             case .stix: return "json"
+            case .ocsf: return "ocsf.jsonl"
             }
         }
 
@@ -44,6 +46,7 @@ public actor AlertExporter {
             case .leef: return "LEEF (QRadar)"
             case .stix: return "STIX 2.1"
             case .syslogCEF: return "Syslog CEF"
+            case .ocsf: return "OCSF 1.3 (JSONL)"
             }
         }
     }
@@ -175,6 +178,7 @@ public actor AlertExporter {
         case .leef:       result = exportLEEF(filtered)
         case .stix:       result = exportSTIX(filtered)
         case .syslogCEF:  result = exportCEF(filtered) // Same format, different transport
+        case .ocsf:       result = exportOCSF(filtered)
         }
 
         logger.info("Exported \(filtered.count) alerts in \(format.rawValue) format")
@@ -216,6 +220,36 @@ public actor AlertExporter {
             return "[]"
         }
         return str
+    }
+
+    // MARK: - OCSF (Open Cybersecurity Schema Framework 1.3)
+
+    /// Emit one OCSF Security Finding (class_uid 2004) per line — JSONL
+    /// format suited to SIEM bulk-ingest pipelines. Each line is a complete,
+    /// self-contained OCSF record.
+    private func exportOCSF(_ alerts: [ExportableAlert]) -> String {
+        var lines: [String] = []
+        lines.reserveCapacity(alerts.count)
+        for a in alerts {
+            let alert = Alert(
+                id: a.id,
+                timestamp: a.timestamp,
+                ruleId: a.ruleId,
+                ruleTitle: a.ruleTitle,
+                severity: Severity(rawValue: a.severity) ?? .informational,
+                eventId: "",
+                processPath: a.processPath,
+                processName: a.processName,
+                description: a.description,
+                mitreTactics: a.mitreTactics.isEmpty ? nil : a.mitreTactics,
+                mitreTechniques: a.mitreTechniques.isEmpty ? nil : a.mitreTechniques
+            )
+            let finding = OCSFMapper.mapAlert(alert)
+            if let json = try? OCSFMapper.encodeJSON(finding) {
+                lines.append(json)
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - CSV
