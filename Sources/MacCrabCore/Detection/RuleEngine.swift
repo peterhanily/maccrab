@@ -692,6 +692,59 @@ public actor RuleEngine {
             // would require enrichment. Fall through to enrichments dict.
             return event.enrichments["ParentSignerType"]
 
+        // --- Phase 1 hash enrichment ---
+        case "process.hashes.sha256", "ProcessSHA256":
+            return event.process.hashes?.sha256
+
+        case "process.hashes.cdhash", "ProcessCDHash":
+            return event.process.hashes?.cdhash
+
+        case "process.hashes.md5", "ProcessMD5":
+            return event.process.hashes?.md5
+
+        // --- Phase 1 extended code signing ---
+        case "process.code_signature.issuer", "SigningCertIssuer":
+            // Leaf issuer CN (first entry in issuerChain, ordered leaf → root).
+            return event.process.codeSignature?.issuerChain?.first
+
+        case "process.code_signature.cert_hash", "SigningCertHash":
+            return event.process.codeSignature?.certHashes?.first
+
+        case "process.code_signature.is_adhoc", "IsAdhocSigned":
+            return event.process.codeSignature?.isAdhocSigned.map { String($0) }
+
+        // --- Phase 1 session / login context ---
+        case "process.session.tty", "SessionTTY":
+            return event.process.session?.tty
+
+        case "process.session.login_user", "SessionLoginUser":
+            return event.process.session?.loginUser
+
+        case "process.session.ssh_remote_ip", "SessionSSHRemoteIP":
+            return event.process.session?.sshRemoteIP
+
+        case "process.session.launch_source", "LaunchSource":
+            return event.process.session?.launchSource?.rawValue
+
+        case "IsSSHLaunched":
+            // Convenience boolean: launched via SSH session.
+            return event.process.session.map {
+                String($0.launchSource == .ssh)
+            }
+
+        // --- Phase 1 lineage + env ---
+        case "process.ancestor_depth", "AncestorDepth":
+            return String(event.process.ancestors.count)
+
+        case "process.env", "EnvVarsFlat":
+            // Flatten the env dict into "KEY1=val1 KEY2=val2" so Sigma's
+            // `contains` modifier can match against env fragments.
+            guard let env = event.process.envVars, !env.isEmpty else { return nil }
+            return env
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: " ")
+
         case "process.is_platform_binary":
             return String(event.process.isPlatformBinary)
 

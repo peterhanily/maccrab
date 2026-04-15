@@ -103,6 +103,16 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     "FileAction", "FileContent",
     # Code signing enrichment fields
     "NotarizationStatus", "Architecture",
+    # --- Phase 1 enrichment fields (hashes, session, signing) ---
+    # Hash fingerprints populated by ProcessHasher/FileHasher enrichers.
+    "ProcessSHA256", "ProcessCDHash", "ProcessMD5",
+    # Session / login context populated by SessionEnricher.
+    "SessionTTY", "SessionLoginUser", "SessionSSHRemoteIP",
+    "LaunchSource", "IsSSHLaunched",
+    # Extended code-signing fields (issuer chain, cert hashes, ad-hoc flag).
+    "SigningCertIssuer", "SigningCertHash", "IsAdhocSigned",
+    # Lineage + environment.
+    "AncestorDepth", "EnvVarsFlat",
 }
 
 # Track fields we've already warned about to avoid spam.
