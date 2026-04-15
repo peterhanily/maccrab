@@ -55,6 +55,21 @@ public actor EventStore {
     /// Whether this store was opened in read-only mode (fallback for non-owner access).
     private var isReadOnly = false
 
+    // MARK: - Schema migrations
+
+    /// Ordered list of schema migrations applied on top of the baseline
+    /// `CREATE TABLE IF NOT EXISTS events` statements in `openDatabase`.
+    ///
+    /// Each entry bumps `PRAGMA user_version` atomically. Fresh DBs run all
+    /// migrations in order; existing DBs skip ones already applied.
+    nonisolated static let schemaMigrations: [Migration] = [
+        Migration(
+            version: 1,
+            name: "baseline",
+            sql: []
+        ),
+    ]
+
     // MARK: Initialization
 
     /// Opens a SQLite database before actor isolation begins.
@@ -126,6 +141,13 @@ public actor EventStore {
             """,
         ]
         for sql in schemaSQLs { Self.exec(handle, sql) }
+
+        // Apply versioned schema migrations on top of the baseline tables above.
+        // v1 marks "baseline schema present"; later versions add columns for
+        // enrichment fields (file/process hashes, session context, etc).
+        if !isReadOnly {
+            try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
+        }
 
         // Prepare insert statement
         let insertSQL = """

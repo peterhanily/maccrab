@@ -57,3 +57,6 @@ __pycache__/
 .idea/
 .vscode/
 *.code-workspace
+
+# Local planning docs (not part of public repo)
+plans/

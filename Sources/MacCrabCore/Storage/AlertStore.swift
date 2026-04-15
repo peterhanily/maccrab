@@ -47,6 +47,21 @@ public actor AlertStore {
     /// Whether this store was opened in read-only mode.
     private var isReadOnly = false
 
+    // MARK: - Schema migrations
+
+    /// Ordered list of schema migrations applied on top of the baseline
+    /// `CREATE TABLE IF NOT EXISTS alerts` statements in `openDatabase`.
+    ///
+    /// Each entry bumps `PRAGMA user_version` atomically. Fresh DBs run all
+    /// migrations in order; existing DBs skip ones already applied.
+    nonisolated static let schemaMigrations: [Migration] = [
+        Migration(
+            version: 1,
+            name: "baseline",
+            sql: []
+        ),
+    ]
+
     // MARK: Initialization
 
     /// Opens a SQLite database, creates schema, and prepares statements before
@@ -99,6 +114,13 @@ public actor AlertStore {
             "CREATE INDEX IF NOT EXISTS idx_alerts_ts_sev_sup ON alerts(timestamp, severity, suppressed)",
         ]
         for sql in schemaSQLs { Self.exec(handle, sql) }
+
+        // Apply versioned schema migrations on top of the baseline tables above.
+        // v1 marks "baseline schema present"; later versions add columns for
+        // campaign linkage, host context, analyst metadata, etc.
+        if !isReadOnly {
+            try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
+        }
 
         // Prepare insert statement
         let insertSQL = """

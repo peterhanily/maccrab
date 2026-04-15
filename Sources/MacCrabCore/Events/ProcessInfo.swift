@@ -77,6 +77,22 @@ public struct ProcessInfo: Codable, Sendable, Hashable {
     /// Whether the binary is part of the macOS platform (Apple-shipped).
     public let isPlatformBinary: Bool
 
+    // MARK: Enrichment (Phase 1)
+    //
+    // Nil when not captured. Adding these as Optional keeps existing Codable
+    // JSON rows readable (synthesized decodeIfPresent).
+
+    /// File-level hashes of the executable on disk, plus macOS CDHash.
+    public let hashes: ProcessHashes?
+
+    /// Session / login context (TTY, SSH remote IP, launch source).
+    public let session: SessionInfo?
+
+    /// Environment variables at exec time. Opt-in capture via
+    /// `MACCRAB_CAPTURE_ENV=1`. Keys are allowlisted; secret-bearing keys
+    /// (AWS_SECRET_*, etc.) are never captured.
+    public let envVars: [String: String]?
+
     // MARK: Initializer
 
     public init(
@@ -96,7 +112,10 @@ public struct ProcessInfo: Codable, Sendable, Hashable {
         codeSignature: CodeSignatureInfo? = nil,
         ancestors: [ProcessAncestor] = [],
         architecture: String? = nil,
-        isPlatformBinary: Bool = false
+        isPlatformBinary: Bool = false,
+        hashes: ProcessHashes? = nil,
+        session: SessionInfo? = nil,
+        envVars: [String: String]? = nil
     ) {
         self.pid = pid
         self.ppid = ppid
@@ -115,7 +134,84 @@ public struct ProcessInfo: Codable, Sendable, Hashable {
         self.ancestors = ancestors
         self.architecture = architecture
         self.isPlatformBinary = isPlatformBinary
+        self.hashes = hashes
+        self.session = session
+        self.envVars = envVars
     }
+}
+
+// MARK: - ProcessHashes
+
+/// Hash fingerprint for a process and its on-disk executable.
+///
+/// Field semantics:
+/// - `sha256`: SHA-256 of the executable bytes on disk (matches MISP, AbuseIPDB).
+/// - `cdhash`: macOS code-directory SHA-1 (matches Apple notarization records).
+/// - `md5`: optional MD5 for legacy threat-intel feeds.
+public struct ProcessHashes: Codable, Sendable, Hashable {
+    public let sha256: String?
+    public let cdhash: String?
+    public let md5: String?
+
+    public init(sha256: String? = nil, cdhash: String? = nil, md5: String? = nil) {
+        self.sha256 = sha256
+        self.cdhash = cdhash
+        self.md5 = md5
+    }
+}
+
+// MARK: - SessionInfo
+
+/// Launch / session context for a process.
+///
+/// Helps distinguish user-initiated activity (Finder, Terminal) from
+/// system daemons, scheduled tasks, and remote logins — critical for
+/// account-compromise and lateral-movement detection.
+public struct SessionInfo: Codable, Sendable, Hashable {
+
+    /// Audit session ID (from audit_token) — groups processes in the same login session.
+    public let sessionId: UInt32?
+
+    /// Controlling TTY path (`/dev/ttys000`) or nil if detached.
+    public let tty: String?
+
+    /// Original login user, as set by `loginwindow` / `sudo`. Differs from
+    /// `ProcessInfo.userName` when the process has changed effective UID.
+    public let loginUser: String?
+
+    /// Remote IP parsed from `SSH_CLIENT` / `SSH_CONNECTION` env vars, if present.
+    public let sshRemoteIP: String?
+
+    /// How the process was launched.
+    public let launchSource: LaunchSource?
+
+    public init(
+        sessionId: UInt32? = nil,
+        tty: String? = nil,
+        loginUser: String? = nil,
+        sshRemoteIP: String? = nil,
+        launchSource: LaunchSource? = nil
+    ) {
+        self.sessionId = sessionId
+        self.tty = tty
+        self.loginUser = loginUser
+        self.sshRemoteIP = sshRemoteIP
+        self.launchSource = launchSource
+    }
+}
+
+// MARK: - LaunchSource
+
+/// Coarse classification of how a process was started.
+public enum LaunchSource: String, Codable, Sendable, Hashable, CaseIterable {
+    case finder
+    case terminal
+    case ssh
+    case launchd
+    case cron
+    case xpc
+    case applescript
+    case unknown
 }
 
 // MARK: - CodeSignatureInfo
@@ -141,13 +237,33 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
     /// Whether the binary has been notarized by Apple.
     public let isNotarized: Bool
 
+    // MARK: Phase 1 additions
+    //
+    // All Optional so existing Codable JSON rows keep deserializing cleanly.
+
+    /// Certificate issuer common names, ordered leaf → root. Nil = not captured.
+    public let issuerChain: [String]?
+
+    /// SHA-256 hex digests for each certificate in the signing chain.
+    public let certHashes: [String]?
+
+    /// True when the binary is ad-hoc signed (no Team ID, no notarization).
+    public let isAdhocSigned: Bool?
+
+    /// Declared entitlements (opt-in capture — may leak paths).
+    public let entitlements: [String]?
+
     public init(
         signerType: SignerType,
         teamId: String? = nil,
         signingId: String? = nil,
         authorities: [String] = [],
         flags: UInt32 = 0,
-        isNotarized: Bool = false
+        isNotarized: Bool = false,
+        issuerChain: [String]? = nil,
+        certHashes: [String]? = nil,
+        isAdhocSigned: Bool? = nil,
+        entitlements: [String]? = nil
     ) {
         self.signerType = signerType
         self.teamId = teamId
@@ -155,6 +271,10 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
         self.authorities = authorities
         self.flags = flags
         self.isNotarized = isNotarized
+        self.issuerChain = issuerChain
+        self.certHashes = certHashes
+        self.isAdhocSigned = isAdhocSigned
+        self.entitlements = entitlements
     }
 }
 

@@ -50,6 +50,30 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
     /// Whether this alert has been suppressed (de-duplicated / silenced).
     public var suppressed: Bool
 
+    // MARK: Phase 1 enrichment
+    //
+    // All Optional so existing callers, DB rows, and Codable JSON keep working.
+    // Persistence of these fields into AlertStore is wired up in a later task
+    // (schema v2 adds a `metadata_json` TEXT column).
+
+    /// Campaign this alert belongs to, if the CampaignDetector grouped it.
+    public let campaignId: String?
+
+    /// Host context at alert time (hostname, OS version, hardware UUID, score).
+    public let hostContext: HostContext?
+
+    /// Analyst workflow metadata (notes, owner, status, ticket).
+    public var analyst: AnalystMetadata?
+
+    /// MITRE D3FEND defensive techniques that would have mitigated this alert.
+    public let d3fendTechniques: [String]?
+
+    /// Static first-line remediation guidance surfaced in the dashboard.
+    public let remediationHint: String?
+
+    /// Structured LLM investigation output (populated in Phase 4).
+    public var llmInvestigation: LLMInvestigation?
+
     // MARK: Initializer
 
     public init(
@@ -64,7 +88,13 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         description: String? = nil,
         mitreTactics: String? = nil,
         mitreTechniques: String? = nil,
-        suppressed: Bool = false
+        suppressed: Bool = false,
+        campaignId: String? = nil,
+        hostContext: HostContext? = nil,
+        analyst: AnalystMetadata? = nil,
+        d3fendTechniques: [String]? = nil,
+        remediationHint: String? = nil,
+        llmInvestigation: LLMInvestigation? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -78,5 +108,126 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         self.mitreTactics = mitreTactics
         self.mitreTechniques = mitreTechniques
         self.suppressed = suppressed
+        self.campaignId = campaignId
+        self.hostContext = hostContext
+        self.analyst = analyst
+        self.d3fendTechniques = d3fendTechniques
+        self.remediationHint = remediationHint
+        self.llmInvestigation = llmInvestigation
+    }
+}
+
+// MARK: - Array helpers for MITRE fields
+
+extension Alert {
+    /// MITRE ATT&CK tactic IDs parsed from the CSV `mitreTactics` string.
+    /// Returns an empty array when absent. Preferred for JSON/OCSF export.
+    public var mitreTacticsList: [String] {
+        splitCSV(mitreTactics)
+    }
+
+    /// MITRE ATT&CK technique IDs parsed from the CSV `mitreTechniques` string.
+    public var mitreTechniquesList: [String] {
+        splitCSV(mitreTechniques)
+    }
+
+    private func splitCSV(_ s: String?) -> [String] {
+        guard let s, !s.isEmpty else { return [] }
+        return s.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+// MARK: - HostContext
+
+/// Context about the host at the time the alert was generated.
+///
+/// Useful for fleet views ("which host fired this?") and for cross-referencing
+/// alerts with MDM / asset inventory systems.
+public struct HostContext: Codable, Sendable, Hashable {
+    /// Host name as seen by `Host.current().localizedName` or `gethostname(3)`.
+    public let hostname: String?
+
+    /// OS version string (e.g. `"macOS 15.4"` or `"26.4.0"`).
+    public let osVersion: String?
+
+    /// Hardware UUID, stable across reboots. Opaque — useful only as a key.
+    public let hardwareUUID: String?
+
+    /// SecurityScorer score at alert time (0–100). Nil if scorer disabled.
+    public let securityScore: Int?
+
+    public init(
+        hostname: String? = nil,
+        osVersion: String? = nil,
+        hardwareUUID: String? = nil,
+        securityScore: Int? = nil
+    ) {
+        self.hostname = hostname
+        self.osVersion = osVersion
+        self.hardwareUUID = hardwareUUID
+        self.securityScore = securityScore
+    }
+}
+
+// MARK: - AnalystMetadata
+
+/// SOC-analyst workflow fields attached to an alert.
+public struct AnalystMetadata: Codable, Sendable, Hashable {
+    public var notes: String?
+    public var owner: String?
+    public var status: AlertStatus?
+    public var ticketRef: String?
+
+    public init(
+        notes: String? = nil,
+        owner: String? = nil,
+        status: AlertStatus? = nil,
+        ticketRef: String? = nil
+    ) {
+        self.notes = notes
+        self.owner = owner
+        self.status = status
+        self.ticketRef = ticketRef
+    }
+}
+
+// MARK: - AlertStatus
+
+/// Analyst-assigned triage state for an alert.
+public enum AlertStatus: String, Codable, Sendable, Hashable, CaseIterable {
+    case new
+    case investigating
+    case resolved
+    case falsePositive = "false_positive"
+    case dismissed
+}
+
+// MARK: - LLMInvestigation
+
+/// Structured investigation output produced by an LLM backend.
+///
+/// Minimal shape in Phase 1; will be expanded in Phase 4 with evidence chain,
+/// D3FEND-mapped suggested actions, and confidence penalties.
+public struct LLMInvestigation: Codable, Sendable, Hashable {
+    public let summary: String?
+    public let verdict: String?
+    public let confidence: Double?
+    public let modelVersion: String?
+    public let generatedAt: Date?
+
+    public init(
+        summary: String? = nil,
+        verdict: String? = nil,
+        confidence: Double? = nil,
+        modelVersion: String? = nil,
+        generatedAt: Date? = nil
+    ) {
+        self.summary = summary
+        self.verdict = verdict
+        self.confidence = confidence
+        self.modelVersion = modelVersion
+        self.generatedAt = generatedAt
     }
 }
