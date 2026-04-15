@@ -74,4 +74,8 @@ steps:
       process: package_install.descendant
 
 trigger: persist and exfil
+falsepositives:
+    - Legitimate package post-install hooks (Homebrew casks, pip console_scripts, cargo build scripts) that register LaunchAgents and hit public registries for updates
+    - Dev tooling installs that modify .zshrc or .bashrc and then curl/fetch from official CDNs
+    - CI/CD agents that install packages, add cron-like triggers, and contact upstream mirrors
 level: critical

@@ -56,4 +56,8 @@ steps:
       process: installer.descendant
 
 trigger: persist and shell
+falsepositives:
+    - Legitimate signed PKG installers (Microsoft Office, Zoom, VPN clients) that install LaunchDaemons and run post-install shell scripts
+    - MDM-deployed packages (Jamf, Kandji) provisioning services and running configuration scripts
+    - Developer tool installers (Docker Desktop, Xcode Command Line Tools) that legitimately register daemons
 level: high

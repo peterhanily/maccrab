@@ -63,4 +63,8 @@ steps:
           condition: selection_name or selection_args
 
 trigger: download and miner_exec
+falsepositives:
+    - Blockchain developers or researchers intentionally running xmrig/cpuminer for local benchmarking
+    - Hobbyist mining setups where the user knowingly installs and runs a miner
+    - GPU/CPU benchmark suites that include miner binaries for hashrate measurement
 level: high

@@ -54,4 +54,8 @@ steps:
       process: execute.descendant
 
 trigger: execute and c2
+falsepositives:
+    - Intel-only legacy apps run under Rosetta 2 that download updates or connect to vendor servers
+    - Developers running x86_64 open-source tools compiled without Developer ID signing on Apple Silicon
+    - Cross-platform CLI utilities installed to /tmp or /Downloads that legitimately update themselves online
 level: critical

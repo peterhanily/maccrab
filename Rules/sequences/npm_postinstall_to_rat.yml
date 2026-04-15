@@ -65,4 +65,8 @@ steps:
       process: postinstall.descendant
 
 trigger: drop_payload and c2_callback
+falsepositives:
+    - Legitimate npm packages (puppeteer, playwright, electron, node-sass) whose postinstall downloads platform binaries to caches and validates them online
+    - CI pipelines running npm install that cache artifacts under /tmp and fetch updates from registries
+    - Developer-run npm installs of packages that legitimately cache compiled addons under /Library/Caches
 level: critical

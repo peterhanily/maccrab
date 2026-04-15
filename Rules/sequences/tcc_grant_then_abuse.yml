@@ -44,4 +44,8 @@ steps:
           condition: selection
 
 trigger: all
+falsepositives:
+    - First-run experience of legitimate apps (e.g., backup tools, cloud sync, communication apps) that immediately access Documents, Desktop, or Downloads after the user grants Full Disk Access
+    - IDE or editor onboarding that opens files in the newly-authorized location
+    - Password managers or keychain utilities accessing keychain paths right after being granted permission
 level: high

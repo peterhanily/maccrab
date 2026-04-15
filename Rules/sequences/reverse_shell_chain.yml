@@ -49,4 +49,8 @@ steps:
       process: shell.same
 
 trigger: all
+falsepositives:
+    - Build tools, IDEs, or editor plugins that spawn non-interactive shells and fetch dependencies from public registries
+    - CI runners or remote automation that invoke shells from non-terminal parents and connect to public services
+    - Developer scripts launched from launchd that legitimately reach out to GitHub, package registries, or webhook endpoints
 level: critical

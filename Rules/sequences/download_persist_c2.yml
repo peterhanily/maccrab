@@ -65,4 +65,8 @@ steps:
       process: execute.descendant
 
 trigger: persist and c2
+falsepositives:
+    - Developers running unsigned local builds from ~/Downloads or /tmp that install LaunchAgents and phone home for updates
+    - Research or red-team tooling executed intentionally from Downloads that registers persistence
+    - Custom internal utilities without Developer ID that install their own LaunchAgent and contact update servers
 level: critical

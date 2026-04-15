@@ -81,4 +81,8 @@ steps:
           condition: selection and not filter_system
 
 trigger: all
+falsepositives:
+    - Notarized IDEs (Xcode, JetBrains, VS Code) building or launching developer-signed unnotarized binaries during local development
+    - Notarized package managers (Homebrew GUI wrappers) installing open-source binaries that are not notarized
+    - Notarized auto-updaters downloading and launching new build artifacts prior to notarization completion
 level: critical

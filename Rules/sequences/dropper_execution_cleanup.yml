@@ -47,4 +47,8 @@ steps:
       process: execute.descendant
 
 trigger: all
+falsepositives:
+    - Package installers (pkg, brew postinstall) extracting binaries to /tmp or /var/folders and cleaning up after execution
+    - Build tools (cargo, go, swift) that compile to temp directories and remove intermediate artifacts
+    - macOS installer self-extracting binaries that legitimately unpack, execute, and delete their scratch files
 level: high

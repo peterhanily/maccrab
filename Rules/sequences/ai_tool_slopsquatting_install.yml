@@ -63,4 +63,8 @@ steps:
       process: ai_tool.descendant
 
 trigger: all
+falsepositives:
+    - Developers legitimately installing packages via Cursor, Cline, or other AI coding assistants
+    - Post-install scripts in trusted packages invoking curl to fetch platform binaries (e.g., esbuild, puppeteer)
+    - Node-based build tooling shelling out during legitimate npm install workflows
 level: high

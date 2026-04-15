@@ -58,4 +58,8 @@ steps:
           condition: selection
 
 trigger: all
+falsepositives:
+    - Screenshot utilities like CleanShot X or Shottr that capture and upload to their cloud sharing service
+    - Bug reporting tools (e.g., Sentry helpers, support agents) that capture the screen and POST it to a backend
+    - Help-desk remote support apps that take screenshots and upload them for technician review
 level: high

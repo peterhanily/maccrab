@@ -49,4 +49,8 @@ steps:
       process: kill_security.descendant
 
 trigger: all
+falsepositives:
+    - Administrators manually restarting LuLu, Santa, or maccrabd during troubleshooting and updating their LaunchAgent plist
+    - Security tool installers or upgrades that stop the running process and rewrite persistence
+    - MDM-driven tooling updates that kill and redeploy security agents
 level: critical

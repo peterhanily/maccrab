@@ -47,4 +47,8 @@ steps:
       process: xcode_build.descendant
 
 trigger: all
+falsepositives:
+    - Swift Package Manager, CocoaPods, or Carthage resolving and downloading third-party dependencies during a build
+    - Build scripts that call out to private artifact stores, Sentry symbol uploads, or App Store Connect APIs on non-Apple IP ranges
+    - Crash-reporting and analytics SDKs (Firebase, Datadog) uploading dSYMs or telemetry during CI builds
 level: high

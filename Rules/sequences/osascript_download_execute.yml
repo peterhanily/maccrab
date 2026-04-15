@@ -57,4 +57,8 @@ steps:
       after: download
 
 trigger: download and execute
+falsepositives:
+    - Admin automation scripts that use AppleScript to orchestrate curl downloads and shell execution for deployments
+    - Developer tooling that uses osascript for UI automation while also invoking curl and shells during builds
+    - Legitimate installer helpers driven by AppleScript (e.g., Homebrew cask post-install workflows)
 level: critical

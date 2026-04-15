@@ -44,4 +44,8 @@ steps:
       after: dequarantine
 
 trigger: all
+falsepositives:
+    - Developers intentionally removing quarantine from ad-hoc-signed binaries downloaded for local testing
+    - Open-source tools distributed outside the App Store where users clear quarantine to bypass Gatekeeper warnings
+    - CI or build scripts that download and de-quarantine unsigned internal utilities before execution
 level: high

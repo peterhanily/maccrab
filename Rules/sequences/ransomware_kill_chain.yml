@@ -91,4 +91,8 @@ steps:
           condition: selection_wipe or selection_diskutil or selection_rm_nuke
 
 trigger: initial_exec and inhibit_recovery and impact
+falsepositives:
+    - Administrators using tmutil to manage Time Machine snapshots and diskutil to reformat volumes during legitimate system maintenance
+    - Disk repurposing or decommissioning workflows where secure-erase follows snapshot cleanup
+    - Advanced user scripts that clean up local snapshots and wipe scratch volumes as part of build automation
 level: critical

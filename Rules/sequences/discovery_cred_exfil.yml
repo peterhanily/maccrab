@@ -72,4 +72,8 @@ steps:
       process: discovery.descendant
 
 trigger: cred_access and exfil
+falsepositives:
+    - System inventory tools (Jamf, Kandji, osquery) running whoami/system_profiler and archiving reports for upload
+    - Backup or sync agents reading browser/ssh configs and uploading to user cloud storage
+    - Developer scripts that run discovery commands, then tar project directories and scp them to remote hosts
 level: critical
