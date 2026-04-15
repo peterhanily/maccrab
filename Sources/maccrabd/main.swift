@@ -34,9 +34,19 @@ if args.contains("--background") || args.contains("--bg") || args.contains("-b")
     posix_spawn_file_actions_addopen(&fileActions, STDOUT_FILENO, logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
     posix_spawn_file_actions_addopen(&fileActions, STDERR_FILENO, errPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
 
-    let result = cArgs.withUnsafeBufferPointer { buf in
-        posix_spawn(&pid, resolvedPath, &fileActions, nil,
-                    UnsafeMutablePointer(mutating: buf.baseAddress!), environ)
+    // Clean environment: only pass PATH and HOME (don't leak API keys etc.)
+    let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
+    let home = ProcessInfo.processInfo.environment["HOME"] ?? "/var/root"
+    let envPath = strdup("PATH=\(path)")!
+    let envHome = strdup("HOME=\(home)")!
+    let cEnv: [UnsafeMutablePointer<CChar>?] = [envPath, envHome, nil]
+
+    let result = cArgs.withUnsafeBufferPointer { argBuf in
+        cEnv.withUnsafeBufferPointer { envBuf in
+            posix_spawn(&pid, resolvedPath, &fileActions, nil,
+                        UnsafeMutablePointer(mutating: argBuf.baseAddress!),
+                        UnsafeMutablePointer(mutating: envBuf.baseAddress!))
+        }
     }
     posix_spawn_file_actions_destroy(&fileActions)
     free(cPath)

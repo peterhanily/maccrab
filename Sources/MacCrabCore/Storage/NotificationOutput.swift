@@ -114,12 +114,17 @@ public actor NotificationOutput {
     }
 
     /// Deliver a notification via osascript. This works without an app bundle
-    /// or UNUserNotificationCenter entitlements.
+    /// or UNUserNotificationCenter entitlements. After the notification,
+    /// activates MacCrab.app so clicking it opens the dashboard.
     private nonisolated static func sendOsascriptNotification(title: String, body: String, sound: String) {
+        let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
-            display notification "\(body.replacingOccurrences(of: "\"", with: "\\\""))" \
-            with title "\(title.replacingOccurrences(of: "\"", with: "\\\""))" \
-            sound name "\(sound)"
+            tell application "System Events"
+                display notification "\(escapedBody)" \
+                with title "\(escapedTitle)" \
+                sound name "\(sound)"
+            end tell
             """
 
         let process = Process()
