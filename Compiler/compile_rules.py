@@ -113,6 +113,8 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     "SigningCertIssuer", "SigningCertHash", "IsAdhocSigned",
     # Lineage + environment.
     "AncestorDepth", "EnvVarsFlat",
+    # Deception tier: honeyfile access markers set by EventEnricher.
+    "IsHoneyfile", "HoneyfileType",
 }
 
 # Track fields we've already warned about to avoid spam.

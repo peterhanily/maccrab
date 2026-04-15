@@ -149,7 +149,30 @@ enum DaemonSetup {
         // downstream rules and exports can match against threat-intel hashes.
         // Shared state across the daemon lifetime for cache reuse.
         let processHasher = ProcessHasher()
-        enricher = EventEnricher(processHasher: processHasher)
+
+        // Deception tier (opt-in via MACCRAB_DECEPTION=1). Plants canary
+        // credential files and exposes an isHoneyfile() lookup the enricher
+        // uses to tag file events touching a canary.
+        let honeyfileManager: HoneyfileManager?
+        if ProcessInfo.processInfo.environment["MACCRAB_DECEPTION"] == "1" {
+            let mgr = HoneyfileManager()
+            honeyfileManager = mgr
+            Task {
+                do {
+                    let deployed = try await mgr.deploy()
+                    logger.info("Deployed \(deployed.count) honeyfiles (deception tier enabled)")
+                } catch {
+                    logger.warning("Honeyfile deploy failed: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            honeyfileManager = nil
+        }
+
+        enricher = EventEnricher(
+            processHasher: processHasher,
+            honeyfileManager: honeyfileManager
+        )
         ruleEngine = RuleEngine()
         let notifier = NotificationOutput(minimumSeverity: .high)
         let responseEngine = ResponseEngine()

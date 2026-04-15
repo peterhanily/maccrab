@@ -1,0 +1,36 @@
+title: Deception Honeyfile Accessed
+id: f1e2d3c4-b5a6-4987-9876-543210deception
+status: stable
+description: |
+  A MacCrab-deployed decoy credential file (honeyfile) was accessed by
+  a process. Legitimate software never reads these canary paths — they
+  only exist to bait intruders scanning the home directory for stored
+  credentials. Near-zero false-positive rate by design. Maps to MITRE
+  D3FEND D3-DF (Decoy File).
+author: MacCrab Community
+date: 2026/04/15
+references:
+    - https://d3fend.mitre.org/technique/d3f:DecoyFile/
+    - https://attack.mitre.org/techniques/T1552/001/
+tags:
+    - attack.credential_access
+    - attack.discovery
+    - attack.t1552.001
+    - attack.t1083
+    - d3fend.decoy_file
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        IsHoneyfile: 'true'
+    filter_maccrab:
+        Image|contains:
+            - '/maccrabd'
+            - '/maccrabctl'
+            - '/MacCrab.app/'
+    condition: selection and not filter_maccrab
+falsepositives:
+    - First-party allowlisted backup agents indexing the home directory — these should be explicitly suppressed per process path in the allowlist rather than ignored at rule level
+    - Spotlight initial indexing on a fresh user profile (brief, rare)
+level: critical

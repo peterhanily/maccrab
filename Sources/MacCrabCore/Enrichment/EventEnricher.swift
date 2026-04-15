@@ -35,6 +35,11 @@ public actor EventEnricher {
     /// is never blocked by hashing latency.
     private let processHasher: ProcessHasher?
 
+    /// Optional deception module. When provided, file events whose path
+    /// matches a deployed honeyfile get `enrichments["IsHoneyfile"] = "true"`
+    /// so the detection rule engine can fire on canary access.
+    private let honeyfileManager: HoneyfileManager?
+
     /// Logger scoped to the enrichment subsystem.
     private let log = Logger(
         subsystem: "com.maccrab.core",
@@ -63,11 +68,13 @@ public actor EventEnricher {
         lineage: ProcessLineage = ProcessLineage(),
         codeSigningCache: CodeSigningCache = CodeSigningCache(),
         processHasher: ProcessHasher? = nil,
+        honeyfileManager: HoneyfileManager? = nil,
         pruneInterval: UInt64 = 5000
     ) {
         self.lineage = lineage
         self.codeSigningCache = codeSigningCache
         self.processHasher = processHasher
+        self.honeyfileManager = honeyfileManager
         self.pruneInterval = pruneInterval
     }
 
@@ -156,6 +163,18 @@ public actor EventEnricher {
             }
             if let pst = parentInfo.signerType {
                 enrichedEvent.enrichments["ParentSignerType"] = pst
+            }
+        }
+
+        // Deception tier: flag any file event whose path matches a deployed
+        // honeyfile. Near-zero false positives by design — legitimate software
+        // doesn't read canary credential paths.
+        if let filePath = event.file?.path,
+           let deception = honeyfileManager,
+           await deception.isHoneyfile(filePath) {
+            enrichedEvent.enrichments["IsHoneyfile"] = "true"
+            if let record = await deception.honeyfile(atPath: filePath) {
+                enrichedEvent.enrichments["HoneyfileType"] = record.type.rawValue
             }
         }
 

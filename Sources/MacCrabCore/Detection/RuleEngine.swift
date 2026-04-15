@@ -732,6 +732,15 @@ public actor RuleEngine {
                 String($0.launchSource == .ssh)
             }
 
+        // --- Deception: honeyfile access ---
+        case "IsHoneyfile":
+            // Set by EventEnricher when the file path matches a deployed
+            // honeyfile. Any value present indicates a canary was touched.
+            return event.enrichments["IsHoneyfile"]
+
+        case "HoneyfileType":
+            return event.enrichments["HoneyfileType"]
+
         // --- Phase 1 lineage + env ---
         case "process.ancestor_depth", "AncestorDepth":
             return String(event.process.ancestors.count)
