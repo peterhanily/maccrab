@@ -117,6 +117,10 @@ final class DaemonState {
     // MARK: - Grouping & Campaigns
     let incidentGrouper: IncidentGrouper
     let campaignDetector: CampaignDetector
+    /// Persistent campaign store — nil when storage init failed.
+    /// Detected campaigns are written here so the dashboard can query
+    /// across restarts and analysts can attach notes/suppression.
+    let campaignStore: CampaignStore?
     let ruleGenerator: RuleGenerator
 
     // MARK: - Package Security
@@ -219,6 +223,7 @@ final class DaemonState {
         scheduledReports: ScheduledReports,
         incidentGrouper: IncidentGrouper,
         campaignDetector: CampaignDetector,
+        campaignStore: CampaignStore?,
         ruleGenerator: RuleGenerator,
         packageChecker: PackageFreshnessChecker,
         notarizationChecker: NotarizationChecker,
@@ -312,6 +317,7 @@ final class DaemonState {
         self.scheduledReports = scheduledReports
         self.incidentGrouper = incidentGrouper
         self.campaignDetector = campaignDetector
+        self.campaignStore = campaignStore
         self.ruleGenerator = ruleGenerator
         self.packageChecker = packageChecker
         self.notarizationChecker = notarizationChecker

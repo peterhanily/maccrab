@@ -234,6 +234,17 @@ enum DaemonSetup {
         // alert storms, AI compromise patterns, and coordinated attacks
         let campaignDetector = CampaignDetector()
 
+        // Persistent campaign store. Non-fatal if it fails to open — the
+        // detector stays in-memory-only in that case and the daemon logs
+        // the error rather than crashing.
+        let campaignStore: CampaignStore?
+        do {
+            campaignStore = try CampaignStore(directory: supportDir)
+        } catch {
+            logger.warning("CampaignStore failed to open: \(error.localizedDescription) — campaigns will not persist across restarts")
+            campaignStore = nil
+        }
+
         // Load response action config if it exists
         let actionConfigPath = supportDir + "/actions.json"
         if FileManager.default.fileExists(atPath: actionConfigPath) {
@@ -892,6 +903,7 @@ enum DaemonSetup {
             scheduledReports: scheduledReports,
             incidentGrouper: incidentGrouper,
             campaignDetector: campaignDetector,
+            campaignStore: campaignStore,
             ruleGenerator: ruleGenerator,
             packageChecker: packageChecker,
             notarizationChecker: notarizationChecker,

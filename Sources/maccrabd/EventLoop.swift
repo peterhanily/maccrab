@@ -891,9 +891,44 @@ enum EventLoop {
                             description: campaign.description,
                             mitreTactics: campaign.tactics.joined(separator: ","),
                             mitreTechniques: "",
-                            suppressed: false
+                            suppressed: false,
+                            campaignId: campaign.id
                         )
                         do { try await state.alertStore.insert(alert: campaignAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+
+                        // Persist the campaign itself so dashboards and the
+                        // analyst workflow survive daemon restarts. Failures
+                        // are non-fatal — log and continue.
+                        if let store = state.campaignStore {
+                            let record = CampaignStore.Record(
+                                id: campaign.id,
+                                type: campaign.type.rawValue,
+                                severity: campaign.severity,
+                                title: campaign.title,
+                                description: campaign.description,
+                                tactics: Array(campaign.tactics).sorted(),
+                                timeSpanSeconds: campaign.timeSpanSeconds,
+                                detectedAt: campaign.detectedAt,
+                                alerts: campaign.alerts.map {
+                                    CampaignStore.AlertRef(
+                                        ruleId: $0.ruleId,
+                                        ruleTitle: $0.ruleTitle,
+                                        severity: $0.severity,
+                                        processPath: $0.processPath,
+                                        pid: $0.pid,
+                                        userId: $0.userId,
+                                        timestamp: $0.timestamp,
+                                        tactics: Array($0.tactics).sorted()
+                                    )
+                                }
+                            )
+                            do {
+                                try await store.insert(record)
+                            } catch {
+                                await StorageErrorTracker.shared.recordAlertError(error)
+                            }
+                        }
+
                         await state.notifier.notify(alert: campaignAlert)
                         print("[CAMPAIGN] \(campaign.type.rawValue): \(campaign.title)")
 
