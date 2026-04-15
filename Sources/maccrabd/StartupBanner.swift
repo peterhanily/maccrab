@@ -72,7 +72,7 @@ enum StartupBanner {
         Storage: \(state.supportDir)/events.db
         Rules:   \(state.compiledRulesDir)
 
-        Press Ctrl+C to stop.
+        Ctrl+C to stop. Use --background (-b) to run as background daemon.
         """)
     }
 }

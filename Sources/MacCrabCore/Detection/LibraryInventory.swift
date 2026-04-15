@@ -65,10 +65,22 @@ public actor LibraryInventory {
             if lib == processPath { continue }
             // Skip frameworks in /Library/Frameworks (legitimate)
             if lib.hasPrefix("/Library/Frameworks/") { continue }
-            // Skip app bundles the process belongs to
+            // Skip libraries from the same app bundle (including nested .app helpers).
+            // Use the outermost .app/ to catch frameworks within the bundle.
             if let appDir = processPath.range(of: ".app/") {
                 let appBundle = String(processPath[processPath.startIndex..<appDir.upperBound])
                 if lib.hasPrefix(appBundle) { continue }
+            }
+            // Also check if the library and process share a common .app parent
+            // (e.g., Chrome Helper loading dylibs from Google Chrome.app/Frameworks/)
+            if let libAppDir = lib.range(of: ".app/"),
+               let procAppDir = processPath.range(of: ".app/") {
+                let libApp = String(lib[lib.startIndex..<libAppDir.upperBound])
+                let procApp = String(processPath[processPath.startIndex..<procAppDir.upperBound])
+                if libApp == procApp { continue }
+                // Same parent directory (e.g., both under /Applications/)
+                if (libApp as NSString).deletingLastPathComponent ==
+                   (procApp as NSString).deletingLastPathComponent { continue }
             }
 
             // Check for suspicious paths

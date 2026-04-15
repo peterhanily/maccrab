@@ -55,7 +55,13 @@ detection:
             - 'Dropbox'
             - 'OneDrive'
             - 'Google Drive'
+            - 'GoogleUpdater'
+            - 'Google Chrome Helper'
             - 'iCloud'
+            - 'Spotlight'
+            - 'softwareupdated'
+            - 'nsurlsessiond'
+            - 'com.apple.'
     condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services
 falsepositives:
     - Legitimate heartbeat/health-check connections
