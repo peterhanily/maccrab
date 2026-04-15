@@ -29,6 +29,12 @@ public actor EventEnricher {
     /// Code-signing evaluation cache.
     private let codeSigningCache: CodeSigningCache
 
+    /// Optional SHA-256/CDHash fingerprinter. When provided, exec/fork events
+    /// get their `process.hashes` populated. Runs opportunistically — I/O
+    /// errors or cache misses silently leave hashes nil so event throughput
+    /// is never blocked by hashing latency.
+    private let processHasher: ProcessHasher?
+
     /// Logger scoped to the enrichment subsystem.
     private let log = Logger(
         subsystem: "com.maccrab.core",
@@ -56,10 +62,12 @@ public actor EventEnricher {
     public init(
         lineage: ProcessLineage = ProcessLineage(),
         codeSigningCache: CodeSigningCache = CodeSigningCache(),
+        processHasher: ProcessHasher? = nil,
         pruneInterval: UInt64 = 5000
     ) {
         self.lineage = lineage
         self.codeSigningCache = codeSigningCache
+        self.processHasher = processHasher
         self.pruneInterval = pruneInterval
     }
 
@@ -93,6 +101,14 @@ public actor EventEnricher {
             codeSignature = await codeSigningCache.evaluate(path: proc.executable)
         }
 
+        // --- 3.5 Compute file + process hashes on exec/fork ---
+        //
+        // Only hash when a new process is observed; subsequent events
+        // inherit the hash via the FileHasher cache if they share an
+        // executable path. Avoids re-hashing a long-running process on
+        // every file/network event it emits.
+        let hashes = await resolveHashes(for: event, existing: proc.hashes)
+
         // --- 4. Build enriched ProcessInfo ---
         let enrichedProcess = ProcessInfo(
             pid: proc.pid,
@@ -111,7 +127,10 @@ public actor EventEnricher {
             codeSignature: codeSignature,
             ancestors: ancestors.isEmpty ? proc.ancestors : ancestors,
             architecture: proc.architecture,
-            isPlatformBinary: proc.isPlatformBinary
+            isPlatformBinary: proc.isPlatformBinary,
+            hashes: hashes,
+            session: proc.session,
+            envVars: proc.envVars
         )
 
         // --- 5. Build enriched Event ---
@@ -150,6 +169,35 @@ public actor EventEnricher {
         }
 
         return enrichedEvent
+    }
+
+    // MARK: Hashing
+
+    /// Resolve `ProcessHashes` for an event. Preserves collector-provided
+    /// hashes when present; otherwise opportunistically computes them for
+    /// exec/fork events when a `ProcessHasher` is configured.
+    private func resolveHashes(for event: Event, existing: ProcessHashes?) async -> ProcessHashes? {
+        if let existing { return existing }
+        guard let hasher = processHasher else { return nil }
+
+        // Only fingerprint on process-launch events — keeps the hot path
+        // short and avoids spurious SHA-256 recomputation on file / network
+        // events emitted by long-running processes.
+        guard event.eventCategory == .process,
+              event.eventAction == "exec" || event.eventAction == "fork" else {
+            return nil
+        }
+
+        let computed = await hasher.hash(
+            pid: event.process.pid,
+            executablePath: event.process.executable
+        )
+        guard computed.hasAny else { return nil }
+        return ProcessHashes(
+            sha256: computed.sha256,
+            cdhash: computed.cdhash,
+            md5: nil
+        )
     }
 
     // MARK: Lineage Updates

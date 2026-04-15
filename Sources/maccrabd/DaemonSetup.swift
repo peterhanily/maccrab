@@ -145,7 +145,11 @@ enum DaemonSetup {
             exit(1)
         }
 
-        enricher = EventEnricher()
+        // ProcessHasher populates SHA-256 + CDHash on exec/fork events so
+        // downstream rules and exports can match against threat-intel hashes.
+        // Shared state across the daemon lifetime for cache reuse.
+        let processHasher = ProcessHasher()
+        enricher = EventEnricher(processHasher: processHasher)
         ruleEngine = RuleEngine()
         let notifier = NotificationOutput(minimumSeverity: .high)
         let responseEngine = ResponseEngine()
