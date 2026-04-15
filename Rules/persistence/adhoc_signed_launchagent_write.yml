@@ -1,0 +1,40 @@
+title: Ad-Hoc Signed Binary Writes a LaunchAgent or LaunchDaemon
+id: 9a2d1b84-4a10-4a25-b7a6-1a4a2e3c9fb1
+status: experimental
+description: |
+  An ad-hoc signed binary (no Team ID, no notarization) writing a
+  launchd plist under /Library/Launch*Agents, /Library/Launch*Daemons,
+  or ~/Library/LaunchAgents is a strong persistence signal. Legitimate
+  software installs its launchd items either as Apple-notarized binaries
+  or via a signed installer. Ad-hoc signing is the common malware
+  shortcut to bypass Gatekeeper warnings on unsigned payloads.
+author: MacCrab Community
+date: 2026/04/15
+references:
+    - https://attack.mitre.org/techniques/T1543/001/
+    - https://attack.mitre.org/techniques/T1543/004/
+tags:
+    - attack.persistence
+    - attack.t1543.001
+    - attack.t1543.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/LaunchAgents/'
+            - '/Library/LaunchDaemons/'
+            - '/LaunchAgents/'
+            - '/LaunchDaemons/'
+        TargetFilename|endswith: '.plist'
+        IsAdhocSigned: 'true'
+    filter_apple:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_apple
+falsepositives:
+    - Developer builds of in-house agents signed ad-hoc during iteration
+    - Internally-distributed tools that skip Developer ID signing for cost reasons
+level: high

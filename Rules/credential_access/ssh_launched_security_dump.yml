@@ -1,0 +1,41 @@
+title: Keychain or Credential Dump over SSH Session
+id: c4f6a9b2-3e5d-4c1a-8d90-1b2e3f4a5c60
+status: experimental
+description: |
+  A process using macOS credential-extraction commands — `security
+  find-generic-password`, `security dump-keychain`, `sudo dscl ... readpl`
+  — launched from within an SSH session indicates a remote actor
+  enumerating credentials. Interactive local users rarely invoke these
+  commands; remote SSH sessions issuing them is a high-signal credential
+  access pattern.
+author: MacCrab Community
+date: 2026/04/15
+references:
+    - https://attack.mitre.org/techniques/T1555/001/
+    - https://attack.mitre.org/techniques/T1003/
+tags:
+    - attack.credential_access
+    - attack.t1555.001
+    - attack.t1003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/security'
+            - '/dscl'
+    selection_action:
+        CommandLine|contains:
+            - 'dump-keychain'
+            - 'find-generic-password'
+            - 'find-internet-password'
+            - 'readpl'
+    selection_ssh:
+        IsSSHLaunched: 'true'
+    condition: selection_tool and selection_action and selection_ssh
+falsepositives:
+    - Remote admin tooling run manually by an authorized operator
+    - Automation over SSH that legitimately rotates or reads credentials
+    - MDM / fleet-management agents collecting credential inventory
+level: critical

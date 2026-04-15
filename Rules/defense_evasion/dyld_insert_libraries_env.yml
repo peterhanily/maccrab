@@ -1,0 +1,32 @@
+title: DYLD_INSERT_LIBRARIES Set in Process Environment
+id: b2e5f9c1-7d4e-4b3a-9f20-7e8d4b2c5f90
+status: experimental
+description: |
+  A process launching with DYLD_INSERT_LIBRARIES in its environment is
+  loading an arbitrary dynamic library into another binary's address
+  space — the classic macOS dylib hijack. Apple System Integrity
+  Protection blocks this for Apple-signed binaries, so when it works
+  against a non-platform target it's almost always an attacker bypassing
+  code signing. Requires `MACCRAB_CAPTURE_ENV=1` to capture env vars.
+author: MacCrab Community
+date: 2026/04/15
+references:
+    - https://attack.mitre.org/techniques/T1574/006/
+    - https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/UsingDynamicLibraries.html
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.privilege_escalation
+    - attack.t1574.006
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        EnvVarsFlat|contains: 'DYLD_INSERT_LIBRARIES='
+    condition: selection
+falsepositives:
+    - Developer debugging builds with DYLD injection tooling (lldb, Instruments targets)
+    - Legitimate profilers (e.g., sample, leaks, guardmalloc) launching with DYLD injection
+    - Crash reporter symbolication pipelines
+level: high
