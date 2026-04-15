@@ -136,17 +136,23 @@ public actor AlertStore {
             withIntermediateDirectories: true,
             attributes: nil
         )
+        // rwxr-xr-x: non-root MacCrab.app needs to read alerts
         try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o750],
+            [.posixPermissions: 0o755],
             ofItemAtPath: maccrabDir.path
         )
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
+        let oldUmask = umask(0o022)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
+        umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o600)
+        // rw-r--r--: non-root MacCrab.app needs read access
+        chmod(databasePath, 0o644)
+        chmod(databasePath + "-wal", 0o644)
+        chmod(databasePath + "-shm", 0o644)
     }
 
     /// Creates an `AlertStore` at a custom path (useful for testing).

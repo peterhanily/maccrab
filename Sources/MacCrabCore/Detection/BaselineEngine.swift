@@ -798,8 +798,8 @@ public actor BaselineEngine {
             throw BaselineEngineError.fileWriteFailed("rename failed: errno \(code)")
         }
 
-        // Restrict baseline file permissions: owner-only read/write (rw-------).
-        chmod(persistPath, 0o600)
+        // rw-r--r--: allow non-root MacCrab.app to read baseline data
+        chmod(persistPath, 0o644)
 
         lastSaved = Date()
 

@@ -468,8 +468,14 @@ public actor SelfDefense {
 
     // MARK: - Impersonation Detection
 
+    /// Track whether we've already alerted on duplicate processes (one-shot).
+    private var duplicateAlerted = false
+
     /// Check if another process is running with our name (possible replacement attack).
+    /// Only alerts once per daemon lifetime to avoid spam during upgrades/restarts.
     private func checkForImpersonation() async {
+        guard !duplicateAlerted else { return }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         process.arguments = ["-x", "maccrabd"]
@@ -485,11 +491,8 @@ public actor SelfDefense {
         // Filter out our own PID
         let otherPids = pids.filter { $0 != getpid() }
         if !otherPids.isEmpty {
-            await handleTamperEvent(TamperEvent(
-                type: .processKillAttempt,
-                description: "Another maccrabd process detected (PIDs: \(otherPids)). Possible replacement or injection attack.",
-                severity: .critical
-            ))
+            duplicateAlerted = true
+            logger.warning("Another maccrabd process detected (PIDs: \(otherPids))")
         }
     }
 

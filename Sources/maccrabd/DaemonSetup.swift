@@ -126,7 +126,8 @@ enum DaemonSetup {
         )
         // Compiled rules are only read by the daemon — restrict to owner-only
         // to prevent attackers from reading detection logic for evasion.
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: compiledRulesDir)
+        // rwxr-xr-x: non-root MacCrab.app needs to read rules for display
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: compiledRulesDir)
 
         // Initialize components
         let eventStore: EventStore

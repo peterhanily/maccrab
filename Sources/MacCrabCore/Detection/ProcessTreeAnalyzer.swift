@@ -573,8 +573,8 @@ public actor ProcessTreeAnalyzer {
         }
         try fm.moveItem(atPath: tempPath, toPath: modelPath)
 
-        // Owner-only permissions.
-        chmod(modelPath, 0o600)
+        // rw-r--r--: allow non-root MacCrab.app to read model data
+        chmod(modelPath, 0o644)
 
         logger.debug(
             "Model saved: \(self.totalTransitions) transitions, \(self.transitionCounts.count) parents"
