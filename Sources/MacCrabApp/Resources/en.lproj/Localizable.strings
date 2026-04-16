@@ -413,7 +413,7 @@
 "settings.help.autoBlock" = "Automatically add PF firewall rules to block command-and-control IPs";
 
 /* ── About ── */
-"about.madeWithLove" = "Made with love in Ireland";
+"about.madeWithLove" = "Made with love and tokens in Ireland";
 
 
 /* ── Overview Dashboard ── */

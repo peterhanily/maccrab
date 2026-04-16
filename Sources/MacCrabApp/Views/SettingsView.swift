@@ -708,7 +708,7 @@ struct SettingsView: View {
 
                 Spacer()
 
-                Text(String(localized: "about.madeWithLove", defaultValue: "Made with love in Ireland"))
+                Text(String(localized: "about.madeWithLove", defaultValue: "Made with love and tokens in Ireland"))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.bottom, 8)
