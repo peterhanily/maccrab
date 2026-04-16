@@ -82,8 +82,17 @@ public enum SchemaMigrator {
         let current = try readVersion(db: db)
         let latest = migrations.map(\.version).max() ?? 0
 
+        // `PRAGMA user_version` is a single per-database counter. When
+        // multiple stores (EventStore, AlertStore, CampaignStore) share
+        // the same .db file, each runs its own migration chain against
+        // the same counter. A store whose max version is behind the
+        // counter must tolerate it — the counter simply records that
+        // SOME store bumped the schema. SQLite's ALTER TABLE ADD COLUMN
+        // is forward-compatible for readers, so our own tables keep
+        // working even when another store has added columns to its.
         if current > latest {
-            throw SchemaMigrationError.unknownVersion(current: current, maxAvailable: latest)
+            logger?("DB user_version=\(current) exceeds this store's latest known v\(latest) — another co-resident store bumped it; skipping")
+            return
         }
 
         let pending = migrations

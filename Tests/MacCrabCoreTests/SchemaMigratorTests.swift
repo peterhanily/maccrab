@@ -138,8 +138,14 @@ struct SchemaMigratorTests {
         #expect(!hasColumn(db.handle, table: "t", column: "col_b"))
     }
 
-    @Test("Rejects DBs at a version newer than the binary knows about")
-    func newerDBRejected() throws {
+    @Test("Tolerates a DB bumped past this store's max (co-resident store case)")
+    func newerDBTolerated() throws {
+        // `PRAGMA user_version` is a single per-database counter; when
+        // multiple stores share a .db file (EventStore + AlertStore +
+        // CampaignStore), each runs its own migration chain against the
+        // same counter. A store whose max is behind the counter must
+        // tolerate it — the counter only records that SOME store
+        // advanced, not that every store is incompatible.
         let db = openTempDB()
         defer { db.close() }
 
@@ -147,9 +153,9 @@ struct SchemaMigratorTests {
 
         let v1 = Migration(version: 1, name: "create",
                            sql: ["CREATE TABLE t (id INTEGER)"])
-        #expect(throws: SchemaMigrationError.self) {
-            try SchemaMigrator.run(on: db.handle, migrations: [v1])
-        }
+        // Must not throw; must leave user_version untouched.
+        try SchemaMigrator.run(on: db.handle, migrations: [v1])
+        #expect(try SchemaMigrator.readVersion(db: db.handle) == 99)
     }
 
     @Test("Reports migration progress via logger callback")
