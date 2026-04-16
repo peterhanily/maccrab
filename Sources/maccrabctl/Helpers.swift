@@ -92,10 +92,16 @@ extension MacCrabCtl {
           compile <in> <out>  Compile Sigma YAML rules to JSON
 
         Response:
-          suppress <rule> <path>  Allowlist a process for a rule
+          suppress <rule> <path>  Allowlist a process for a rule (v1 API)
           unsuppress <rule> [path]  Remove a suppression (all paths if no path given)
           suppression list        Show all configured suppressions
+          allow <sub>             Allowlist v2 — TTL, scope, audit
+                                  (add / list / remove / stats)
           export [format] [N]     Export alerts (json|csv, default: json)
+
+        Deception (opt-in):
+          deception <sub>         Honeyfile canaries
+                                  (deploy / status / remove)
 
         Forensics:
           hunt <query>            Natural language threat hunting
@@ -131,12 +137,16 @@ extension MacCrabCtl {
           maccrabctl mcp list
           maccrabctl extensions --suspicious
           maccrabctl security
+          maccrabctl allow add --rule rule.noisy --path /usr/local/bin/vendor --ttl 7d --reason "vendor rollout"
+          maccrabctl allow list --expired
+          maccrabctl deception deploy
+          maccrabctl deception status
         """)
     }
 
     static func printVersion() {
-        // LOCALIZE: "MacCrab Detection Engine v1.0.0"
-        print("MacCrab Detection Engine v1.0.0")
+        // LOCALIZE: "MacCrab Detection Engine v1.2.0"
+        print("MacCrab Detection Engine v1.2.0")
         // LOCALIZE: "License: Apache 2.0 (code), DRL 1.1 (rules)"
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
         print("https://github.com/maccrab-detection/maccrab")
