@@ -835,13 +835,25 @@ enum BrowserExtensionScanner {
         let installDate = mtime(of: versionDir)
         let sizeBytes = sizeOfItem(at: versionDir)
 
-        let (score, reasons) = computeRisk(
+        var (score, reasons) = computeRisk(
             apiPerms: apiPerms,
             hostPerms: hostPerms,
             updateUrl: updateUrl,
             hasNativeMessaging: apiPerms.contains("nativeMessaging"),
             contentScripts: scripts
         )
+
+        // Trusted-publisher cap: well-known first-party and security-vendor
+        // extensions (password managers, official browser integrations, ad
+        // blockers, etc.) legitimately need the permission combinations
+        // that would otherwise flag them as high risk. Clamp the score to
+        // "Caution" and replace the scary reason list with a one-line
+        // publisher note so the user can still see the detail without it
+        // dominating the Suspicious tab.
+        if let publisher = trustedPublisher(extId: extId, homepageUrl: homepageUrl) {
+            score = min(score, 15)
+            reasons = ["Trusted publisher: \(publisher). Requested permissions are expected for this extension's stated function."]
+        }
 
         return ExtensionRow(
             id: "\(extId)-\(browser)",
@@ -873,6 +885,80 @@ enum BrowserExtensionScanner {
             || s.hasPrefix("https://")
             || s.hasPrefix("*://")
             || s.hasPrefix("file://")
+    }
+
+    /// Well-known extensions from trusted publishers. Password managers, the
+    /// vendor's own first-party extensions, and established security tools
+    /// legitimately need the permission combinations (nativeMessaging +
+    /// cookies + `<all_urls>`) that would otherwise flag them as high risk.
+    /// An entry here caps the extension's risk at "Caution" so the user can
+    /// still see the detail, without it dominating the flagged list.
+    ///
+    /// Map: `extensionId → publisherLabel`. IDs confirmed from the
+    /// respective vendors' documentation or Chrome Web Store listings.
+    static let trustedPublisherIds: [String: String] = [
+        // Apple
+        "pejdijmoenmkgeppbflobdenhhabjlaj": "Apple (iCloud Passwords)",
+        "clkfkokeefkeglehmmhachpinmmaaomb": "Apple (iCloud Bookmarks)",
+        // Google first-party (Chrome component extensions)
+        "ghbmnnjooekpmoecnnnilnnbdlolhkhi": "Google (Docs Offline)",
+        "nmmhkkegccagdldgiimedpiccmgmieda": "Google (Chrome Web Store Payments)",
+        "aapbdbdomjkkjkaonfhkkikfgjllcleb": "Google (Google Translate)",
+        "kbfnbcaeplbcioakkpcpgfkobkghlhen": "Google (Grammarly — published by Google)",
+        "nkbihfbeogaeaoehlefnkodbefgpgknn": "MetaMask",
+        // Password managers
+        "bpoadfkcbjbfhfodiogcnhhhpibjhbnh": "AgileBits (1Password)",
+        "aeblfdkhhhdcdjpifhhbdiojplfjncoa": "AgileBits (1Password X)",
+        "nngceckbapebfimnlniiiahkandclblb": "Bitwarden",
+        "fdjamakpfbbddfjaooikfcpapjohcfmg": "Dashlane",
+        "hdokiejnpimakedhajhdlcegeplioahd": "LastPass",
+        "gpdjojdkbbmdfjfahjcgigfpmkopogic": "Keeper Security",
+        "jbkfoedolllekgbhcbcoahefnbanhhlh": "Bitwarden (Canary)",
+        // Security vendors
+        "cjpalhdlnbpafiamejdnhcphjbkeiagm": "Raymond Hill (uBlock Origin)",
+        "mlomiejdfkolichcflejclcbmpeaniij": "Ghostery",
+        "gcbommkclmclpchllfjekcdonpmejbdp": "EFF (HTTPS Everywhere)",
+        "fheoggkfdfchfphceeifdbepaooicaho": "Malwarebytes (Browser Guard)",
+        "apaclbdiljnbpmlenjahdajpbdcblpnl": "Cisco (Umbrella)",
+        // Microsoft
+        "ncjbeingokdeimlmolagjaddccfdlkbd": "Microsoft (Authenticator)",
+    ]
+
+    /// Domain suffixes that identify a first-party / established publisher
+    /// when the extension declares a homepage_url. Used as a secondary
+    /// signal when the ID isn't in `trustedPublisherIds` (e.g. Firefox
+    /// UUID-style IDs, Arc-specific IDs, or newer Chrome extensions from
+    /// the same vendors).
+    static let trustedPublisherDomains: [String] = [
+        "apple.com", "icloud.com",
+        "google.com", "googleusercontent.com",
+        "microsoft.com", "microsoftonline.com",
+        "mozilla.org", "mozilla.com", "firefox.com",
+        "1password.com", "agilebits.com",
+        "bitwarden.com",
+        "lastpass.com",
+        "dashlane.com",
+        "keepersecurity.com",
+        "eff.org",
+        "raymondhill.net",
+        "ghostery.com",
+        "malwarebytes.com",
+        "cisco.com",
+        "proton.me", "protonmail.com",
+        "grammarly.com",
+    ]
+
+    /// Returns a non-nil publisher label when the extension is clearly from
+    /// an established first-party or security vendor — i.e., the
+    /// combination of permissions is expected for its stated purpose.
+    static func trustedPublisher(extId: String, homepageUrl: String?) -> String? {
+        if let label = trustedPublisherIds[extId] { return label }
+        guard let homepage = homepageUrl,
+              let host = URL(string: homepage)?.host?.lowercased() else { return nil }
+        for suffix in trustedPublisherDomains where host.hasSuffix(suffix) {
+            return "Publisher: \(host)"
+        }
+        return nil
     }
 
     /// Compute a 0-100 risk score with per-factor reasons. Thresholds map to

@@ -42,6 +42,51 @@ public actor PackageFreshnessChecker {
         public let isLowPopularity: Bool     // Below popularity threshold
         public let riskLevel: RiskLevel
         public let description: String
+        /// Detail fields populated by the registry query when available.
+        /// All optional — earlier callers that only care about risk see the
+        /// same shape they saw before. New callers (the dashboard drill-in
+        /// view) use these to render homepage, repo, license, etc.
+        public let latestVersion: String?
+        public let summary: String?          // Short one-line description
+        public let homepage: String?
+        public let repository: String?
+        public let license: String?
+        public let maintainers: [String]
+        public let registryURL: String?      // Link to the registry's own page
+        public let riskReasons: [String]     // Per-factor explanation
+
+        public init(
+            name: String, registry: Registry,
+            publishedDate: Date?, ageInDays: Double?, downloadCount: Int?,
+            isFresh: Bool, isLowPopularity: Bool, riskLevel: RiskLevel,
+            description: String,
+            latestVersion: String? = nil,
+            summary: String? = nil,
+            homepage: String? = nil,
+            repository: String? = nil,
+            license: String? = nil,
+            maintainers: [String] = [],
+            registryURL: String? = nil,
+            riskReasons: [String] = []
+        ) {
+            self.name = name
+            self.registry = registry
+            self.publishedDate = publishedDate
+            self.ageInDays = ageInDays
+            self.downloadCount = downloadCount
+            self.isFresh = isFresh
+            self.isLowPopularity = isLowPopularity
+            self.riskLevel = riskLevel
+            self.description = description
+            self.latestVersion = latestVersion
+            self.summary = summary
+            self.homepage = homepage
+            self.repository = repository
+            self.license = license
+            self.maintainers = maintainers
+            self.registryURL = registryURL
+            self.riskReasons = riskReasons
+        }
     }
 
     /// Risk level derived from package age and popularity.
@@ -455,9 +500,53 @@ public actor PackageFreshnessChecker {
 
     // MARK: - npm
 
-    /// npm registry response for the `time` field.
+    /// npm registry response. Selective decoding — npm payloads are large.
     private struct NpmRegistryResponse: Decodable {
         let time: [String: String]?  // version -> ISO 8601 timestamp
+        // swiftlint:disable:next identifier_name
+        let dist_tags: [String: String]?  // e.g. {"latest": "4.17.21"}
+        let description: String?
+        let homepage: String?
+        let repository: NpmRepository?
+        let license: NpmLicense?
+        let maintainers: [NpmMaintainer]?
+    }
+
+    private struct NpmRepository: Decodable {
+        let url: String?
+        init(from decoder: Decoder) throws {
+            // `repository` is either a string ("github:foo/bar") or an object
+            // ({url: "...", type: "git"}). Accept both shapes.
+            if let obj = try? decoder.container(keyedBy: CodingKeys.self) {
+                self.url = try obj.decodeIfPresent(String.self, forKey: .url)
+            } else if let single = try? decoder.singleValueContainer() {
+                self.url = try? single.decode(String.self)
+            } else {
+                self.url = nil
+            }
+        }
+        enum CodingKeys: String, CodingKey { case url }
+    }
+
+    private struct NpmLicense: Decodable {
+        let value: String?
+        init(from decoder: Decoder) throws {
+            // `license` may be a string ("MIT") or an object ({type: "MIT"}).
+            if let obj = try? decoder.container(keyedBy: CodingKeys.self) {
+                self.value = try obj.decodeIfPresent(String.self, forKey: .type)
+                    ?? obj.decodeIfPresent(String.self, forKey: .name)
+            } else if let single = try? decoder.singleValueContainer() {
+                self.value = try? single.decode(String.self)
+            } else {
+                self.value = nil
+            }
+        }
+        enum CodingKeys: String, CodingKey { case type, name }
+    }
+
+    private struct NpmMaintainer: Decodable {
+        let name: String?
+        let email: String?
     }
 
     /// npm downloads API response.
@@ -489,7 +578,7 @@ public actor PackageFreshnessChecker {
         }
 
         // Package not found in registry
-        if registryData == nil {
+        guard let reg = registryData else {
             return makeUnknownInfo(
                 name: name,
                 registry: .npm,
@@ -497,12 +586,39 @@ public actor PackageFreshnessChecker {
             )
         }
 
+        var details = PackageDetails()
+        details.latestVersion = reg.dist_tags?["latest"]
+        details.summary = reg.description
+        details.homepage = reg.homepage
+        details.repository = Self.normalizeRepoURL(reg.repository?.url)
+        details.license = reg.license?.value
+        details.maintainers = (reg.maintainers ?? []).compactMap { $0.name }
+
         return buildPackageInfo(
             name: name,
             registry: .npm,
             publishedDate: publishedDate,
-            downloads: downloads
+            downloads: downloads,
+            details: details
         )
+    }
+
+    /// Convert npm's assorted repo-URL shapes into an https:// URL browsers
+    /// can open. `git+https://github.com/foo/bar.git`, `github:foo/bar`, and
+    /// `git://...` all become `https://github.com/foo/bar`.
+    private static func normalizeRepoURL(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        var s = raw
+        if s.hasPrefix("git+") { s = String(s.dropFirst(4)) }
+        if s.hasPrefix("git://") { s = "https://" + s.dropFirst(6) }
+        if s.hasSuffix(".git") { s = String(s.dropLast(4)) }
+        if s.hasPrefix("github:") {
+            return "https://github.com/" + s.dropFirst("github:".count)
+        }
+        if s.hasPrefix("gitlab:") {
+            return "https://gitlab.com/" + s.dropFirst("gitlab:".count)
+        }
+        return s
     }
 
     // MARK: - PyPI
@@ -516,6 +632,18 @@ public actor PackageFreshnessChecker {
     private struct PyPIInfo: Decodable {
         let name: String?
         let summary: String?
+        let version: String?
+        // swiftlint:disable:next identifier_name
+        let home_page: String?
+        // swiftlint:disable:next identifier_name
+        let project_url: String?
+        // swiftlint:disable:next identifier_name
+        let project_urls: [String: String]?
+        let license: String?
+        let author: String?
+        // swiftlint:disable:next identifier_name
+        let author_email: String?
+        let maintainer: String?
     }
 
     private struct PyPIRelease: Decodable {
@@ -552,11 +680,37 @@ public actor PackageFreshnessChecker {
 
         // PyPI doesn't expose weekly downloads directly in the JSON API.
         // We leave downloads as nil — risk calculation handles missing data.
+        var details = PackageDetails()
+        if let info = response.info {
+            details.latestVersion = info.version
+            details.summary = info.summary
+            // `home_page` is traditional; newer packages put homepage in
+            // `project_urls` (e.g. "Homepage": "https://..."). Check both.
+            details.homepage = info.home_page
+                ?? info.project_urls?["Homepage"]
+                ?? info.project_urls?["homepage"]
+                ?? info.project_url
+            // Repository is usually in `project_urls` under one of several keys.
+            details.repository = info.project_urls?["Source"]
+                ?? info.project_urls?["Source Code"]
+                ?? info.project_urls?["Repository"]
+                ?? info.project_urls?["source"]
+            details.license = info.license
+            if let author = info.author, !author.isEmpty {
+                details.maintainers.append(author)
+            }
+            if let maintainer = info.maintainer, !maintainer.isEmpty,
+               !details.maintainers.contains(maintainer) {
+                details.maintainers.append(maintainer)
+            }
+        }
+
         return buildPackageInfo(
             name: name,
             registry: .pypi,
             publishedDate: earliestDate,
-            downloads: nil
+            downloads: nil,
+            details: details
         )
     }
 
@@ -565,7 +719,15 @@ public actor PackageFreshnessChecker {
     /// Partial Homebrew formula/cask API response.
     private struct HomebrewResponse: Decodable {
         let name: String?
+        let desc: String?
+        let homepage: String?
+        let license: String?
+        let versions: HomebrewVersions?
         let analytics: HomebrewAnalytics?
+    }
+
+    private struct HomebrewVersions: Decodable {
+        let stable: String?
     }
 
     private struct HomebrewAnalytics: Decodable {
@@ -628,7 +790,15 @@ public actor PackageFreshnessChecker {
             isLowPopularity: isLowPopularity,
             riskLevel: riskLevel,
             description: "Homebrew \(endpoint) '\(name)' exists in public tap"
-                + (downloads.map { ", \($0) installs (30d)" } ?? "")
+                + (downloads.map { ", \($0) installs (30d)" } ?? ""),
+            latestVersion: response.versions?.stable,
+            summary: response.desc,
+            homepage: response.homepage,
+            license: response.license,
+            registryURL: Self.defaultRegistryURL(name: name, registry: registry),
+            riskReasons: isLowPopularity
+                ? ["Fewer than \(lowPopularityThreshold) installs in the last 30 days."]
+                : []
         )
     }
 
@@ -642,7 +812,15 @@ public actor PackageFreshnessChecker {
             // swiftlint:disable:next identifier_name
             let created_at: String?
             let downloads: Int?
+            // swiftlint:disable:next identifier_name
             let recent_downloads: Int?
+            let description: String?
+            let homepage: String?
+            let repository: String?
+            // swiftlint:disable:next identifier_name
+            let newest_version: String?
+            // swiftlint:disable:next identifier_name
+            let max_stable_version: String?
         }
         // The top-level key is "crate" (singular).
         let `crate`: Crate?
@@ -672,11 +850,20 @@ public actor PackageFreshnessChecker {
 
         let downloads = response.crate?.recent_downloads
 
+        var details = PackageDetails()
+        if let crate = response.crate {
+            details.latestVersion = crate.max_stable_version ?? crate.newest_version
+            details.summary = crate.description
+            details.homepage = crate.homepage
+            details.repository = crate.repository
+        }
+
         return buildPackageInfo(
             name: name,
             registry: .cargo,
             publishedDate: publishedDate,
-            downloads: downloads
+            downloads: downloads,
+            details: details
         )
     }
 
@@ -707,11 +894,25 @@ public actor PackageFreshnessChecker {
     }
 
     /// Build a ``PackageInfo`` from a publish date and download count.
+    /// Optional detail fields populated by registry-specific queries.
+    /// Keeps the `buildPackageInfo` signature small while letting the query
+    /// functions pass whatever they could parse out of the registry's JSON.
+    struct PackageDetails: Sendable {
+        var latestVersion: String?
+        var summary: String?
+        var homepage: String?
+        var repository: String?
+        var license: String?
+        var maintainers: [String] = []
+        var registryURL: String?
+    }
+
     private func buildPackageInfo(
         name: String,
         registry: Registry,
         publishedDate: Date?,
-        downloads: Int?
+        downloads: Int?,
+        details: PackageDetails = PackageDetails()
     ) -> PackageInfo {
         let now = Date()
         let ageInDays: Double? = publishedDate.map { now.timeIntervalSince($0) / 86400.0 }
@@ -726,6 +927,11 @@ public actor PackageFreshnessChecker {
             downloads: downloads,
             riskLevel: riskLevel
         )
+        let reasons = buildRiskReasons(
+            ageInDays: ageInDays, downloads: downloads,
+            isFresh: isFresh, isLowPopularity: isLowPopularity,
+            riskLevel: riskLevel
+        )
 
         return PackageInfo(
             name: name,
@@ -736,8 +942,61 @@ public actor PackageFreshnessChecker {
             isFresh: isFresh,
             isLowPopularity: isLowPopularity,
             riskLevel: riskLevel,
-            description: description
+            description: description,
+            latestVersion: details.latestVersion,
+            summary: details.summary,
+            homepage: details.homepage,
+            repository: details.repository,
+            license: details.license,
+            maintainers: details.maintainers,
+            registryURL: details.registryURL ?? Self.defaultRegistryURL(name: name, registry: registry),
+            riskReasons: reasons
         )
+    }
+
+    /// Produce one line per factor that contributed to the final risk level.
+    /// Shown in the dashboard's drill-in detail sheet.
+    private func buildRiskReasons(
+        ageInDays: Double?, downloads: Int?,
+        isFresh: Bool, isLowPopularity: Bool,
+        riskLevel: RiskLevel
+    ) -> [String] {
+        var out: [String] = []
+        if let age = ageInDays {
+            if age < 0.25 {
+                out.append(String(format: "Published in the last 6 hours (%.1f h ago) — attackers frequently publish typosquatted packages and install them during the first few hours before they can be reported.", age * 24))
+            } else if age < 1 {
+                out.append(String(format: "Published in the last 24 hours (%.1f h ago).", age * 24))
+            } else if age < freshnessThresholdDays {
+                out.append(String(format: "Published within the freshness window (%.1f days ago). Verify before installing.", age))
+            }
+        } else if riskLevel == .critical {
+            out.append("Package not found in the public registry — may be a typo, a vendor-internal name, or a brand-new publication.")
+        }
+        if let d = downloads {
+            if d < 10 {
+                out.append("Fewer than 10 recorded installs — effectively unused outside its author.")
+            } else if isLowPopularity {
+                out.append("Below the low-popularity threshold (<\(lowPopularityThreshold) weekly installs).")
+            }
+        }
+        if isFresh && (downloads ?? 0) < 10 {
+            out.append("Fresh + low-popularity combination matches the typical slopsquatting / dependency-confusion pattern.")
+        }
+        return out
+    }
+
+    /// Canonical public URL for the registry's own page for this package.
+    /// Used as the fallback `registryURL` when the query function doesn't
+    /// compute one explicitly.
+    private static func defaultRegistryURL(name: String, registry: Registry) -> String? {
+        switch registry {
+        case .npm:           return "https://www.npmjs.com/package/\(name)"
+        case .pypi:          return "https://pypi.org/project/\(name)/"
+        case .homebrew:      return "https://formulae.brew.sh/formula/\(name)"
+        case .homebrewCask:  return "https://formulae.brew.sh/cask/\(name)"
+        case .cargo:         return "https://crates.io/crates/\(name)"
+        }
     }
 
     /// Produce an ``PackageInfo`` for packages that could not be looked up.

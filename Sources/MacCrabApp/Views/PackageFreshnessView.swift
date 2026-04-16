@@ -3,10 +3,14 @@
 //
 // Supply-chain attack dashboard. Lets the user manually query a package
 // registry for freshness/risk before running it, and shows supply-chain
-// alerts that the daemon has already detected.
+// alerts that the daemon has already detected. Tapping a package row
+// opens a detail sheet with the full registry metadata: homepage,
+// repository, maintainers, license, version, and per-factor risk
+// breakdown — mirroring the browser-extension drill-in.
 
 import SwiftUI
 import MacCrabCore
+import AppKit
 
 struct PackageFreshnessView: View {
     @ObservedObject var appState: AppState
@@ -21,6 +25,15 @@ struct PackageFreshnessView: View {
     @State private var isScanning = false
     @State private var scanResults: [PackageFreshnessChecker.PackageInfo] = []
     @State private var scanProgress: String = ""
+
+    // Drill-in detail sheet. Wrap in an Identifiable struct so SwiftUI's
+    // `.sheet(item:)` can present it without requiring retroactive
+    // conformance on the core-library type.
+    struct PackageSelection: Identifiable {
+        let info: PackageFreshnessChecker.PackageInfo
+        var id: String { "\(info.registry.rawValue):\(info.name)" }
+    }
+    @State private var selectedPackage: PackageSelection?
 
     private var supplyChainAlerts: [AlertViewModel] {
         appState.dashboardAlerts.filter {
@@ -96,7 +109,12 @@ struct PackageFreshnessView: View {
                         }
 
                         if let result {
-                            PackageResultView(info: result)
+                            Button {
+                                selectedPackage = PackageSelection(info: result)
+                            } label: {
+                                PackageResultView(info: result)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(4)
@@ -155,7 +173,12 @@ struct PackageFreshnessView: View {
                                     .font(.subheadline).fontWeight(.semibold)
                                     .foregroundColor(.orange)
                                 ForEach(risky, id: \.name) { pkg in
-                                    PackageResultView(info: pkg)
+                                    Button {
+                                        selectedPackage = PackageSelection(info: pkg)
+                                    } label: {
+                                        PackageResultView(info: pkg)
+                                    }
+                                    .buttonStyle(.plain)
                                     Divider()
                                 }
                             }
@@ -165,22 +188,31 @@ struct PackageFreshnessView: View {
                                     "\(safe.count) packages OK"
                                 ) {
                                     ForEach(safe, id: \.name) { pkg in
-                                        HStack(spacing: 8) {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .foregroundColor(.green)
-                                                .font(.caption)
-                                            Text(pkg.name)
-                                                .font(.caption)
-                                            Text("(\(pkg.registry.rawValue))")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                            Spacer()
-                                            if let age = pkg.ageInDays {
-                                                Text("\(Int(age))d old")
+                                        Button {
+                                            selectedPackage = PackageSelection(info: pkg)
+                                        } label: {
+                                            HStack(spacing: 8) {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .foregroundColor(.green)
+                                                    .font(.caption)
+                                                Text(pkg.name)
+                                                    .font(.caption)
+                                                Text("(\(pkg.registry.rawValue))")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                                Spacer()
+                                                if let age = pkg.ageInDays {
+                                                    Text("\(Int(age))d old")
+                                                        .font(.caption2)
+                                                        .foregroundColor(.secondary)
+                                                }
+                                                Image(systemName: "chevron.right")
                                                     .font(.caption2)
                                                     .foregroundColor(.secondary)
                                             }
+                                            .contentShape(Rectangle())
                                         }
+                                        .buttonStyle(.plain)
                                     }
                                 }
                                 .font(.subheadline)
@@ -212,6 +244,9 @@ struct PackageFreshnessView: View {
             }
         }
         .navigationTitle("Package Freshness")
+        .sheet(item: $selectedPackage) { sel in
+            PackageDetailSheet(info: sel.info) { selectedPackage = nil }
+        }
     }
 
     private func scanAll() async {
@@ -294,6 +329,9 @@ private struct PackageResultView: View {
                         .background(riskColor.opacity(0.15))
                         .foregroundColor(riskColor)
                         .clipShape(Capsule())
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
 
                 Text(info.description)
@@ -354,5 +392,245 @@ private struct SupplyChainAlertRow: View {
         .padding(.horizontal, 8)
         .background(Color(NSColor.alternatingContentBackgroundColors[1]))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+// MARK: - Detail Sheet
+
+private struct PackageDetailSheet: View {
+    let info: PackageFreshnessChecker.PackageInfo
+    let dismiss: () -> Void
+
+    private var riskColor: Color {
+        switch info.riskLevel {
+        case .safe:     return .green
+        case .low:      return .blue
+        case .medium:   return .yellow
+        case .high:     return .orange
+        case .critical: return .red
+        }
+    }
+
+    private var riskIcon: String {
+        switch info.riskLevel {
+        case .safe:     return "checkmark.shield.fill"
+        case .low:      return "checkmark.circle.fill"
+        case .medium:   return "exclamationmark.circle.fill"
+        case .high:     return "exclamationmark.triangle.fill"
+        case .critical: return "exclamationmark.shield.fill"
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                Divider()
+                riskSection
+                if let summary = info.summary, !summary.isEmpty {
+                    sectionHeader("Summary")
+                    Text(summary).font(.body).textSelection(.enabled)
+                }
+                metadataSection
+                if !info.maintainers.isEmpty {
+                    maintainersSection
+                }
+                installSection
+                actionsSection
+            }
+            .padding(24)
+            .frame(minWidth: 540, idealWidth: 620)
+        }
+        .frame(minHeight: 460, idealHeight: 620)
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: riskIcon)
+                .font(.system(size: 40))
+                .foregroundColor(riskColor)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(info.name).font(.title2).fontWeight(.bold)
+                HStack(spacing: 8) {
+                    Text(info.registry.rawValue.uppercased())
+                        .font(.caption)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.15))
+                        .clipShape(Capsule())
+                    if let version = info.latestVersion {
+                        Text("v\(version)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if let license = info.license, !license.isEmpty {
+                        Text("·").foregroundColor(.secondary).font(.caption)
+                        Text(license).font(.caption).foregroundColor(.secondary)
+                    }
+                }
+            }
+            Spacer()
+            Button("Close", action: dismiss).keyboardShortcut(.cancelAction)
+        }
+    }
+
+    private var riskSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Text(info.riskLevel.rawValue.uppercased())
+                    .font(.callout).fontWeight(.semibold)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(riskColor.opacity(0.18))
+                    .foregroundColor(riskColor)
+                    .clipShape(Capsule())
+                if let age = info.ageInDays {
+                    if age < 1 {
+                        Label(String(format: "%.1f hours old", age * 24),
+                              systemImage: "clock.fill")
+                            .font(.callout)
+                            .foregroundColor(age < 0.25 ? .red : .orange)
+                    } else {
+                        Label(String(format: "%.0f days old", age),
+                              systemImage: "clock")
+                            .font(.callout)
+                            .foregroundColor(info.isFresh ? .orange : .secondary)
+                    }
+                }
+                if let downloads = info.downloadCount {
+                    Label("\(downloads.formatted()) installs",
+                          systemImage: "arrow.down.circle")
+                        .font(.callout)
+                        .foregroundColor(info.isLowPopularity ? .orange : .secondary)
+                }
+                Spacer()
+            }
+            if !info.riskReasons.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(info.riskReasons, id: \.self) { reason in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundColor(.orange)
+                            Text(reason).font(.caption)
+                        }
+                    }
+                }
+                .padding(8)
+                .background(Color.orange.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+    }
+
+    private var metadataSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Metadata")
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                detailRow("Registry", info.registry.rawValue)
+                detailRow("Latest version", info.latestVersion)
+                detailRow("License", info.license)
+                detailRow("Homepage", info.homepage, isLink: true)
+                detailRow("Repository", info.repository, isLink: true)
+                detailRow("Registry page", info.registryURL, isLink: true)
+                detailRow("First published", info.publishedDate?
+                    .formatted(date: .abbreviated, time: .shortened))
+                if let downloads = info.downloadCount {
+                    detailRow("Weekly installs", "\(downloads.formatted())")
+                }
+            }
+        }
+    }
+
+    private var maintainersSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Maintainers (\(info.maintainers.count))")
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(info.maintainers, id: \.self) { m in
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.circle")
+                            .font(.caption).foregroundColor(.secondary)
+                        Text(m).font(.caption).textSelection(.enabled)
+                    }
+                }
+            }
+        }
+    }
+
+    private var installSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Install command")
+            HStack {
+                Text(installCommand)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(installCommand, forType: .string)
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+            }
+        }
+    }
+
+    private var actionsSection: some View {
+        HStack(spacing: 8) {
+            if let homepage = info.homepage, let url = URL(string: homepage) {
+                Button { NSWorkspace.shared.open(url) } label: {
+                    Label("Homepage", systemImage: "safari")
+                }
+            }
+            if let repo = info.repository, let url = URL(string: repo) {
+                Button { NSWorkspace.shared.open(url) } label: {
+                    Label("Repository", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+            }
+            if let reg = info.registryURL, let url = URL(string: reg) {
+                Button { NSWorkspace.shared.open(url) } label: {
+                    Label("Registry page", systemImage: "shippingbox")
+                }
+            }
+            Spacer()
+        }
+        .padding(.top, 4)
+    }
+
+    // MARK: Helpers
+
+    private var installCommand: String {
+        switch info.registry {
+        case .npm:          return "npm install \(info.name)"
+        case .pypi:         return "pip install \(info.name)"
+        case .homebrew:     return "brew install \(info.name)"
+        case .homebrewCask: return "brew install --cask \(info.name)"
+        case .cargo:        return "cargo add \(info.name)"
+        }
+    }
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text).font(.headline)
+    }
+
+    @ViewBuilder
+    private func detailRow(
+        _ label: String, _ value: String?,
+        isLink: Bool = false
+    ) -> some View {
+        if let value, !value.isEmpty {
+            GridRow {
+                Text(label).font(.caption).foregroundColor(.secondary)
+                    .gridColumnAlignment(.trailing)
+                if isLink, let url = URL(string: value) {
+                    Link(value, destination: url)
+                        .font(.system(.caption, design: .monospaced))
+                } else {
+                    Text(value)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        }
     }
 }
