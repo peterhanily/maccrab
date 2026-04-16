@@ -457,6 +457,13 @@ struct AlertDetailView: View {
                     }
                 }
 
+                // Phase 4: structured LLM investigation (when available).
+                // Only renders if the daemon has run LLMService.investigate()
+                // against this alert and persisted the result.
+                if let investigation = alert.llmInvestigation {
+                    InvestigationSection(investigation: investigation)
+                }
+
                 // What to do — actionable guidance based on alert context
                 GroupBox(String(localized: "alertDetail.whatToDo", defaultValue: "What To Do")) {
                     VStack(alignment: .leading, spacing: 8) {

@@ -1075,6 +1075,32 @@ enum EventLoop {
                     for sink in state.additionalOutputs {
                         Task { await sink.send(alert: alert, event: enrichedEvent) }
                     }
+
+                    // Phase 4 agentic triage — auto-invoke the LLM for
+                    // HIGH and CRITICAL alerts when an LLMService is
+                    // configured. Runs in a detached Task so the detection
+                    // pipeline is never blocked by model latency. The
+                    // result is persisted via AlertStore.updateInvestigation
+                    // so the dashboard surfaces it on the next poll.
+                    if alert.severity >= .high, let llm = state.llmService {
+                        let capturedAlert = alert
+                        let capturedEvent = enrichedEvent
+                        let store = state.alertStore
+                        Task.detached(priority: .background) {
+                            if let investigation = await llm.investigate(
+                                alert: capturedAlert, event: capturedEvent
+                            ) {
+                                do {
+                                    try await store.updateInvestigation(
+                                        alertId: capturedAlert.id,
+                                        investigation: investigation
+                                    )
+                                } catch {
+                                    await StorageErrorTracker.shared.recordAlertError(error)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Batch insert all rule-match alerts in a single transaction

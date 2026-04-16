@@ -473,7 +473,8 @@ final class AppState: ObservableObject {
             processPath: a.processPath ?? "",
             description: a.description ?? "",
             mitreTechniques: a.mitreTechniques ?? "",
-            suppressed: a.suppressed
+            suppressed: a.suppressed,
+            llmInvestigation: a.llmInvestigation
         )
     }
 

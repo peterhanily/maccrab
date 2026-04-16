@@ -6,6 +6,7 @@
 // formatted strings, colors, and mock data for development.
 
 import SwiftUI
+import MacCrabCore
 
 // MARK: - Severity (local mirror for the UI layer)
 
@@ -87,6 +88,10 @@ struct AlertViewModel: Identifiable, Hashable {
     let description: String
     let mitreTechniques: String
     var suppressed: Bool
+    /// Phase 4 agentic investigation output. Nil until an LLM has
+    /// triaged this alert. Default nil so existing memberwise init
+    /// callers (mocks, previews, tests) don't need to pass it.
+    var llmInvestigation: MacCrabCore.LLMInvestigation? = nil
 
     var timeString: String {
         Self.timeFormatter.string(from: timestamp)

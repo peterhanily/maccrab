@@ -60,6 +60,17 @@ public actor AlertStore {
             name: "baseline",
             sql: []
         ),
+        // v2: Phase 4 agentic triage — persist structured LLMInvestigation
+        // JSON alongside the alert so the dashboard can show it after a
+        // daemon restart. JSON blob column keeps the store flexible as
+        // the schema evolves.
+        Migration(
+            version: 2,
+            name: "add_llm_investigation_json",
+            sql: [
+                "ALTER TABLE alerts ADD COLUMN llm_investigation_json TEXT",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -127,8 +138,9 @@ public actor AlertStore {
             INSERT OR REPLACE INTO alerts (
                 id, timestamp, rule_id, rule_title, severity,
                 event_id, process_path, process_name, description,
-                mitre_tactics, mitre_techniques, suppressed
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                mitre_tactics, mitre_techniques, suppressed,
+                llm_investigation_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -233,6 +245,14 @@ public actor AlertStore {
         bindTextOrNull(stmt, index: 11, value: alert.mitreTechniques)
         // 12: suppressed
         sqlite3_bind_int(stmt, 12, alert.suppressed ? 1 : 0)
+        // 13: llm_investigation_json — serialized structured triage output
+        if let inv = alert.llmInvestigation,
+           let data = try? Self.investigationEncoder.encode(inv),
+           let json = String(data: data, encoding: .utf8) {
+            bindText(stmt, index: 13, value: json)
+        } else {
+            sqlite3_bind_null(stmt, 13)
+        }
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
@@ -502,6 +522,17 @@ public actor AlertStore {
             let timestamp = sqlite3_column_double(stmt, 1)
             let suppressedInt = sqlite3_column_int(stmt, 11)
 
+            // Column 12: llm_investigation_json (added in schema v2).
+            // Decodes to LLMInvestigation or nil. Malformed JSON is
+            // silently dropped rather than failing the whole row.
+            var investigation: LLMInvestigation? = nil
+            if let json = columnTextOrNil(stmt, index: 12),
+               let data = json.data(using: .utf8) {
+                investigation = try? Self.investigationDecoder.decode(
+                    LLMInvestigation.self, from: data
+                )
+            }
+
             let alert = Alert(
                 id: id,
                 timestamp: Date(timeIntervalSince1970: timestamp),
@@ -514,10 +545,46 @@ public actor AlertStore {
                 description: columnTextOrNil(stmt, index: 8),
                 mitreTactics: columnTextOrNil(stmt, index: 9),
                 mitreTechniques: columnTextOrNil(stmt, index: 10),
-                suppressed: suppressedInt != 0
+                suppressed: suppressedInt != 0,
+                llmInvestigation: investigation
             )
             results.append(alert)
         }
         return results
     }
+
+    // MARK: - Investigation update
+
+    /// Attach an LLMInvestigation to an existing alert record.
+    /// Called by the daemon after agentic triage completes.
+    public func updateInvestigation(alertId: String, investigation: LLMInvestigation) throws {
+        guard let data = try? Self.investigationEncoder.encode(investigation),
+              let json = String(data: data, encoding: .utf8) else {
+            throw AlertStoreError.stepFailed("investigation encode failed")
+        }
+        let sql = "UPDATE alerts SET llm_investigation_json = ?1 WHERE id = ?2"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: json)
+        bindText(stmt, index: 2, value: alertId)
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            throw AlertStoreError.stepFailed(msg)
+        }
+    }
+
+    // MARK: - Encoders for LLMInvestigation
+
+    nonisolated static let investigationEncoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
+
+    nonisolated static let investigationDecoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
 }
