@@ -254,9 +254,10 @@ struct EventCodableBackCompatTests {
             ticketRef: "SEC-1234"
         )
         let investigation = LLMInvestigation(
-            summary: "Likely benign vendor update",
-            verdict: "likely_benign",
+            alertId: "alert-x",
             confidence: 0.8,
+            verdict: .likelyBenign,
+            summary: "Likely benign vendor update",
             modelVersion: "llama3.1:8b",
             generatedAt: Date(timeIntervalSince1970: 1_712_500_000)
         )
@@ -281,6 +282,6 @@ struct EventCodableBackCompatTests {
         #expect(decoded.analyst?.status == .investigating)
         #expect(decoded.d3fendTechniques == ["D3-EAL", "D3-PFV"])
         #expect(decoded.remediationHint == alert.remediationHint)
-        #expect(decoded.llmInvestigation?.verdict == "likely_benign")
+        #expect(decoded.llmInvestigation?.verdict == .likelyBenign)
     }
 }

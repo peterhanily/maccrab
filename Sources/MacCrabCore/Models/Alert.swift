@@ -204,30 +204,7 @@ public enum AlertStatus: String, Codable, Sendable, Hashable, CaseIterable {
     case dismissed
 }
 
-// MARK: - LLMInvestigation
-
-/// Structured investigation output produced by an LLM backend.
-///
-/// Minimal shape in Phase 1; will be expanded in Phase 4 with evidence chain,
-/// D3FEND-mapped suggested actions, and confidence penalties.
-public struct LLMInvestigation: Codable, Sendable, Hashable {
-    public let summary: String?
-    public let verdict: String?
-    public let confidence: Double?
-    public let modelVersion: String?
-    public let generatedAt: Date?
-
-    public init(
-        summary: String? = nil,
-        verdict: String? = nil,
-        confidence: Double? = nil,
-        modelVersion: String? = nil,
-        generatedAt: Date? = nil
-    ) {
-        self.summary = summary
-        self.verdict = verdict
-        self.confidence = confidence
-        self.modelVersion = modelVersion
-        self.generatedAt = generatedAt
-    }
-}
+// LLMInvestigation has moved to Sources/MacCrabCore/LLM/LLMInvestigation.swift.
+// The richer Phase 4 schema (Verdict enum, Evidence chain, SuggestedAction
+// with D3FEND mapping + blast radius, confidence penalties) lives alongside
+// the LLM service that produces it.
