@@ -12,6 +12,7 @@ enum DaemonTimers {
         let statsTimer: DispatchSourceTimer
         let pruneTimer: DispatchSourceTimer
         let maintenanceTimer: DispatchSourceTimer
+        let feedbackTimer: DispatchSourceTimer
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
@@ -234,16 +235,39 @@ enum DaemonTimers {
                 if !expired.isEmpty {
                     logger.info("Allowlist sweep expired \(expired.count) suppression(s)")
                 }
+                await state.deduplicator.prunePrcessedDismissals()
             }
         }
         maintenanceTimer.resume()
+
+        // Feedback sweep: every 60s, pull IDs of alerts the user has marked
+        // suppressed in the dashboard and feed them into the deduplicator's
+        // dismissal tracker. The deduplicator uses this signal to auto-
+        // downgrade severity for rules with a high dismissal rate on future
+        // firings. Small sweep interval so the feedback feels responsive.
+        let feedbackTimer = DispatchSource.makeTimerSource(queue: .global())
+        feedbackTimer.schedule(deadline: .now() + 60, repeating: 60)
+        feedbackTimer.setEventHandler {
+            Task {
+                do {
+                    let dismissed = try await state.alertStore.listSuppressed(limit: 500)
+                    for (alertId, ruleId) in dismissed {
+                        await state.deduplicator.recordDismissal(alertId: alertId, ruleId: ruleId)
+                    }
+                } catch {
+                    logger.error("Feedback sweep failed: \(error.localizedDescription)")
+                }
+            }
+        }
+        feedbackTimer.resume()
 
         return Handles(
             forensicTimer: forensicTimer,
             hourlyTimer: hourlyTimer,
             statsTimer: statsTimer,
             pruneTimer: pruneTimer,
-            maintenanceTimer: maintenanceTimer
+            maintenanceTimer: maintenanceTimer,
+            feedbackTimer: feedbackTimer
         )
     }
 }

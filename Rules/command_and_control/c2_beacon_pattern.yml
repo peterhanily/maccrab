@@ -62,7 +62,44 @@ detection:
             - 'softwareupdated'
             - 'nsurlsessiond'
             - 'com.apple.'
-    condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services
+    filter_dev_tools:
+        Image|contains:
+            - 'GitHub Desktop'
+            - 'git-remote-http'
+            - 'git-remote-https'
+            - '/git-core/'
+            - 'Codex Helper'
+            - 'Codex.app'
+            - 'ChatGPT Atlas'
+            - 'Claude.app'
+            - 'Claude Helper'
+            - '/.local/share/claude/'
+            - 'Cursor Helper'
+            - 'Cursor.app'
+            - 'Code Helper'
+            - 'Visual Studio Code'
+            - 'JetBrains'
+            - 'IntelliJ'
+            - 'GoLand'
+            - 'PyCharm'
+            - 'Docker Desktop'
+            - 'orbstack'
+    filter_homebrew_node:
+        Image|startswith:
+            - '/opt/homebrew/'
+            - '/usr/local/Cellar/'
+            - '/usr/local/opt/'
+            - '/opt/local/'
+            - '/Users/'
+        Image|endswith:
+            - '/node'
+            - '/deno'
+            - '/bun'
+            - '/python'
+            - '/python3'
+            - '/ruby'
+            - '/ollama'
+    condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services and not filter_dev_tools and not filter_homebrew_node
 falsepositives:
     - Legitimate heartbeat/health-check connections
     - Auto-update services

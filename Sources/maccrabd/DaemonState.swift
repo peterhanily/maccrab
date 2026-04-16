@@ -142,6 +142,22 @@ final class DaemonState {
     // MARK: - LLM
     let llmService: LLMService?
 
+    // MARK: - Lifecycle
+    /// Wall-clock timestamp captured when this state object is constructed —
+    /// i.e., at daemon startup. Used by the event loop to gate alerting
+    /// during the initial warm-up window, when one-shot inventory scans
+    /// (browser extensions, quarantine stripping, process tree baseline)
+    /// generate a burst of events that aren't live threat signals.
+    let daemonStartTime: Date = Date()
+
+    /// `true` during the first 60 seconds after daemon start. Inventory
+    /// scans complete within this window; gating non-critical alerts here
+    /// prevents startup noise from landing in the alert list as if it were
+    /// real-time activity.
+    var isWarmingUp: Bool {
+        Date().timeIntervalSince(daemonStartTime) < 60
+    }
+
     init(
         isRoot: Bool,
         supportDir: String,

@@ -69,12 +69,68 @@ public actor TLSFingerprinter {
         31337, 40056, 50050, 55553,
     ]
 
-    /// Browsers and system processes that legitimately make TLS connections.
+    /// Processes that legitimately open long-lived or periodic HTTPS
+    /// connections (browsers, chat/meeting apps, sync clients, package
+    /// managers, dev tools). The beacon detector is designed for unsigned
+    /// custom binaries connecting on tight intervals — it is not a useful
+    /// signal when it fires on Chrome Helper or GitHub Desktop, so we
+    /// allowlist the chatty processes outright.
     private static let allowedProcesses: Set<String> = [
-        "Google Chrome", "Google Chrome Helper",
-        "firefox", "Safari",
-        "com.apple.WebKit.Networking",
-        "Microsoft Edge", "Arc", "Brave Browser",
+        // Browsers
+        "Google Chrome", "Google Chrome Helper", "Google Chrome Helper (Renderer)",
+        "Google Chrome Helper (GPU)", "Google Chrome Helper (Plugin)",
+        "firefox", "Firefox", "plugin-container",
+        "Safari", "com.apple.WebKit.Networking", "com.apple.WebKit.GPU",
+        "Microsoft Edge", "Microsoft Edge Helper",
+        "Arc", "Arc Helper", "Brave Browser", "Brave Browser Helper",
+        "Vivaldi", "Opera", "Orion",
+        // Chat / meeting / sync
+        "Slack", "Slack Helper", "Discord", "Discord Helper",
+        "Telegram", "WhatsApp", "Signal", "Signal Helper",
+        "zoom.us", "Teams", "Microsoft Teams", "Webex",
+        "Dropbox", "Google Drive", "OneDrive", "Box", "iCloud",
+        // Developer tools + AI helpers (seen chatty in field)
+        "GitHub Desktop", "GitHub Desktop Helper",
+        "Codex Helper", "ChatGPT Atlas", "ChatGPT Atlas (Service)",
+        "Claude", "Claude Helper", "Cursor", "Cursor Helper",
+        "VS Code", "Code Helper", "Code Helper (Renderer)",
+        "node", "npm", "yarn", "pnpm", "cargo", "brew",
+        "git", "git-remote-http", "git-remote-https",
+        // Apple system services (com.apple.* catch-all is below)
+        "mDNSResponder", "nsurlsessiond", "softwareupdated",
+        "trustd", "GoogleSoftwareUpdate", "GoogleUpdater",
+        "Keybase", "keybase", "Spotify", "Music", "TV",
+    ]
+
+    /// Process-path prefixes that are trusted wholesale. Catches Apple
+    /// system daemons, Homebrew CLIs, and the entire Electron/Chromium
+    /// helper tree inside vendor app bundles.
+    private static let allowedPathPrefixes: [String] = [
+        "/System/",
+        "/usr/libexec/",
+        "/usr/bin/",
+        "/usr/sbin/",
+        "/opt/homebrew/",
+        "/usr/local/Cellar/",
+        "/Library/Apple/",
+        "/Applications/Google Chrome.app/",
+        "/Applications/Firefox.app/",
+        "/Applications/Safari.app/",
+        "/Applications/Arc.app/",
+        "/Applications/Microsoft Edge.app/",
+        "/Applications/Brave Browser.app/",
+        "/Applications/Slack.app/",
+        "/Applications/Discord.app/",
+        "/Applications/Signal.app/",
+        "/Applications/Telegram.app/",
+        "/Applications/zoom.us.app/",
+        "/Applications/Microsoft Teams.app/",
+        "/Applications/GitHub Desktop.app/",
+        "/Applications/Codex.app/",
+        "/Applications/ChatGPT Atlas.app/",
+        "/Applications/Claude.app/",
+        "/Applications/Cursor.app/",
+        "/Applications/Visual Studio Code.app/",
     ]
 
     // MARK: - State
@@ -106,7 +162,17 @@ public actor TLSFingerprinter {
         if Self.allowedProcesses.contains(name) || Self.allowedProcesses.contains(processName) {
             return nil
         }
-        if processPath.hasPrefix("/System/") || processPath.hasPrefix("/usr/libexec/") {
+        if processName.hasPrefix("com.apple.") || name.hasPrefix("com.apple.") {
+            return nil
+        }
+        for prefix in Self.allowedPathPrefixes {
+            if processPath.hasPrefix(prefix) { return nil }
+        }
+        // Node toolchains (nvm, volta, fnm, asdf, homebrew node) are used by
+        // countless legitimate dev workflows (LSPs, MCP servers, build
+        // watchers) that make periodic HTTPS requests. The beacon heuristic
+        // has effectively zero value on these.
+        if name == "node" || name == "deno" || name == "bun" {
             return nil
         }
 

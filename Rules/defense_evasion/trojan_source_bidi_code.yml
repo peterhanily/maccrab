@@ -35,7 +35,17 @@ detection:
             - '/usr/libexec/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_system and not filter_apple_signed
+    filter_localization:
+        TargetFilename|contains:
+            - '.lproj/'
+            - '.strings'
+            - '.xliff'
+            - '.po'
+            - '/locales/'
+            - '/_locales/'
+            - '/i18n/'
+            - '/translations/'
+    condition: selection and not filter_system and not filter_apple_signed and not filter_localization
 falsepositives:
     - Internationalized source code with legitimate RTL text
     - Arabic/Hebrew string literals in source files

@@ -120,6 +120,39 @@ public actor CrossProcessCorrelator {
         "fe80:",           // link-local v6
     ]
 
+    /// Destinations served by well-known cloud / AI-service CDNs. Multiple
+    /// processes hitting one of these is almost always a legitimate tool
+    /// family (Claude Code + its node MCP helpers + its cli wrapper, for
+    /// example) — not attacker convergence. These ranges mirror the AI
+    /// network sandbox allowlist so the two stay in sync.
+    private static let trustedCloudPrefixes: [String] = [
+        // Anthropic (Fastly)
+        "160.79.",
+        // OpenAI / Cloudflare-fronted services
+        "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.",
+        "172.64.", "172.65.", "172.66.", "172.67.",
+        // Google / GCP / Gemini
+        "34.96.", "34.97.", "34.98.", "34.99.", "34.149.", "34.150.",
+        "35.186.", "35.187.", "35.188.", "35.189.", "35.190.", "35.191.",
+        "142.250.", "142.251.", "172.217.",
+        "209.85.", "216.58.",
+        // GitHub / Copilot
+        "140.82.", "185.199.",
+        // Cloudflare
+        "162.159.", "141.101.", "108.162.",
+    ]
+
+    /// Destination domains served by trusted APIs. Used when the chain key
+    /// is domain-based rather than IP-based.
+    private static let trustedCloudDomains: [String] = [
+        "anthropic.com", "claude.ai",
+        "openai.com", "chatgpt.com", "oaiusercontent.com",
+        "github.com", "githubusercontent.com", "githubassets.com",
+        "google.com", "googleapis.com", "gstatic.com",
+        "cloudflare.com", "cloudflare-dns.com",
+        "apple.com", "icloud.com", "mzstatic.com",
+    ]
+
     // MARK: - Initialization
 
     /// Creates a new cross-process correlator.
@@ -292,6 +325,27 @@ public actor CrossProcessCorrelator {
         let distinctPIDs = Set(windowEvents.map(\.pid))
         guard distinctPIDs.count >= minChainLength else { return nil }
 
+        // Skip when the destination is a well-known cloud/AI service CDN.
+        // Multi-process fan-out to Anthropic / OpenAI / Google / GitHub is
+        // expected when a developer has several AI tools running: the cli
+        // wrapper, a node MCP helper, and an IDE plugin all talk to the same
+        // backend. Flagging that as "convergence" produced the overwhelming
+        // majority of false positives on real dev workstations.
+        if destinationIsTrustedCloud(key: key, artifactType: artifactType) { return nil }
+
+        // Skip "convergence" events where every contacting process lives in
+        // the same application bundle. Electron / Chromium apps routinely
+        // spawn 5+ helper processes that all hit the same Google / Slack /
+        // GitHub endpoint — that's architecture, not attack.
+        if allEventsShareAppBundle(windowEvents) { return nil }
+        // Also skip when every process is the same executable (e.g. multiple
+        // `node` instances making concurrent API calls) or lives in the same
+        // tool-version directory (e.g. Claude Code forks under
+        // `.local/share/claude/versions/<ver>/`). A tool calling itself in
+        // parallel isn't a convergence event.
+        if allEventsShareExecutable(windowEvents) { return nil }
+        if allEventsShareToolDirectory(windowEvents) { return nil }
+
         let severity = computeNetworkSeverity(events: windowEvents)
         let chain = buildChain(
             events: windowEvents,
@@ -304,6 +358,64 @@ public actor CrossProcessCorrelator {
             "Cross-process \(artifactType) convergence: \(chain.description) [\(chain.severity.rawValue)]"
         )
         return chain
+    }
+
+    /// True when the artifact key (ip:port or domain) belongs to a trusted
+    /// cloud / AI-service provider. Called before per-event-process filters
+    /// because the destination is a much stronger noise signal: if the
+    /// target is Anthropic or Google, multi-process fan-out to that target
+    /// is architecture regardless of which local processes are involved.
+    private func destinationIsTrustedCloud(key: String, artifactType: String) -> Bool {
+        if artifactType == "network" {
+            // key format: "ip:port"
+            let ip = key.split(separator: ":").first.map(String.init) ?? key
+            for prefix in Self.trustedCloudPrefixes where ip.hasPrefix(prefix) {
+                return true
+            }
+        } else if artifactType == "domain" {
+            let lower = key.lowercased()
+            for suffix in Self.trustedCloudDomains where lower.hasSuffix(suffix) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True when every event's process lives under the same `.app` bundle.
+    private func allEventsShareAppBundle(_ events: [ChainEvent]) -> Bool {
+        var bundles: Set<String> = []
+        for event in events {
+            guard let bundle = appBundleRoot(for: event.processPath) else { return false }
+            bundles.insert(bundle)
+            if bundles.count > 1 { return false }
+        }
+        return bundles.count == 1
+    }
+
+    /// True when every event is the same executable (same path).
+    private func allEventsShareExecutable(_ events: [ChainEvent]) -> Bool {
+        guard let first = events.first else { return false }
+        return events.allSatisfy { $0.processPath == first.processPath }
+    }
+
+    /// True when every event's process lives under the same tool-version
+    /// directory — i.e. the parent directory of the executable matches, or
+    /// they share a common ancestor that looks like `/versions/<ver>`.
+    /// Catches cases like Claude Code forking several processes under
+    /// `~/.local/share/claude/versions/2.1.111/` where there's no `.app`.
+    private func allEventsShareToolDirectory(_ events: [ChainEvent]) -> Bool {
+        guard let first = events.first else { return false }
+        let firstDir = (first.processPath as NSString).deletingLastPathComponent
+        return events.allSatisfy {
+            ($0.processPath as NSString).deletingLastPathComponent == firstDir
+        }
+    }
+
+    /// Returns the outermost `.app/` directory for an executable path, or nil
+    /// if the path isn't inside an app bundle.
+    private func appBundleRoot(for path: String) -> String? {
+        guard let range = path.range(of: ".app/") else { return nil }
+        return String(path[path.startIndex..<range.upperBound])
     }
 
     // MARK: - Severity Calculation

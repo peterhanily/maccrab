@@ -182,6 +182,11 @@ enum MonitorTasks {
         // Browser extension monitoring task
         Task {
             for await extEvent in state.browserExtMonitor.events {
+                // Browser extension monitor fires an initial inventory scan
+                // on startup — those aren't installs we just watched happen.
+                // During the warm-up window, only surface genuinely suspicious
+                // extensions.
+                if state.isWarmingUp && !extEvent.isSuspicious { continue }
                 let severity: Severity = extEvent.isSuspicious ? .high : .medium
                 let alert = Alert(
                     ruleId: "maccrab.browser.\(extEvent.isNew ? "extension-installed" : "extension-modified")",

@@ -56,7 +56,18 @@ public actor BehaviorScoring {
         var rawScore: Double = 0
         var lastUpdate: Date = Date()
         var indicators: [Indicator] = []
+        /// Per-indicator-name last-add timestamp for cooldown suppression.
+        /// Without this, a long-running AI/dev tool that triggers the same
+        /// indicator (e.g. `ai_tool_unapproved_network`) on every HTTPS
+        /// request can walk itself past the alert threshold trivially.
+        var indicatorLastAdd: [String: Date] = [:]
     }
+
+    /// Minimum time between counting the same indicator twice for the same
+    /// process. Tuned short enough that a fresh attack still accumulates
+    /// quickly (multiple distinct indicators), but long enough that a chatty
+    /// benign process does not repeatedly stack the same indicator.
+    private static let indicatorCooldown: TimeInterval = 120
 
     /// A single behavioral indicator added to a process's score.
     public struct Indicator: Sendable {
@@ -265,9 +276,21 @@ public actor BehaviorScoring {
             alerted.remove(key)
         }
 
+        // Indicator cooldown: a single indicator of the same name contributes
+        // at most once per `indicatorCooldown` seconds per process. Different
+        // indicators still accumulate freely — the goal is to prevent a single
+        // repeating benign signal (e.g. "ai_tool_unapproved_network" firing
+        // on every HTTPS request) from walking the score up on its own.
+        let now = Date()
+        if let last = entry.indicatorLastAdd[indicator.name],
+           now.timeIntervalSince(last) < Self.indicatorCooldown {
+            return nil
+        }
+        entry.indicatorLastAdd[indicator.name] = now
+
         // Add the new indicator
         entry.rawScore += indicator.weight
-        entry.lastUpdate = Date()
+        entry.lastUpdate = now
         entry.indicators.append(indicator)
 
         // Cap indicators per process

@@ -7,6 +7,7 @@
 // XProtect version, quarantine xattr scanning, BTM persistence inventory.
 
 import Foundation
+import Security
 import os.log
 
 /// Periodically scans macOS system policy and persistence state.
@@ -29,6 +30,10 @@ public actor SystemPolicyMonitor {
     private var mdmProfilesBaselined = false
     private var lastSIPStatus: String?
     private var lastXProtectVersion: String?
+    /// Paths we have already emitted a "quarantine stripped" event for.
+    /// Without this, every full scan re-alerts on the same Downloads items,
+    /// which previously accounted for the bulk of SystemPolicyMonitor noise.
+    private var quarantineAlerted: Set<String> = []
 
     // MARK: - Types
 
@@ -276,30 +281,70 @@ public actor SystemPolicyMonitor {
 
         for item in items {
             let fullPath = downloadsDir + "/" + item
+
+            // Skip items we have already alerted on. The poll cycle re-runs
+            // every 5 minutes; without this guard a single unquarantined file
+            // generates one alert per poll indefinitely.
+            if quarantineAlerted.contains(fullPath) { continue }
+
             var isDir: ObjCBool = false
             FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDir)
 
-            // Check executables and app bundles
+            // Check executables and app bundles only. Disk images (.dmg/.iso)
+            // are containers, not executables — macOS cannot codesign them
+            // directly, and Gatekeeper re-evaluates the contained app bundle
+            // when the image is mounted and its app is launched. A stripped
+            // quarantine xattr on a downloaded DMG is therefore not a
+            // meaningful bypass indicator on its own.
             let isExecutable = FileManager.default.isExecutableFile(atPath: fullPath)
             let isApp = item.hasSuffix(".app")
-            let isDMG = item.hasSuffix(".dmg") || item.hasSuffix(".iso")
 
-            guard isExecutable || isApp || isDMG else { continue }
+            guard isExecutable || isApp else { continue }
 
             // Check for quarantine xattr
             let xattrOutput = runCommand("/usr/bin/xattr", args: ["-l", fullPath])
-            if !xattrOutput.contains("com.apple.quarantine") {
-                // File in Downloads without quarantine — possible stripping
-                emit(SystemPolicyEvent(
-                    type: .quarantineStripped,
-                    description: "Executable in Downloads missing quarantine xattr: \(item). May have had Gatekeeper protection removed.",
-                    path: fullPath,
-                    severity: .high,
-                    mitreTactic: "attack.defense_evasion",
-                    mitreTechnique: "attack.t1553.001"
-                ))
+            if xattrOutput.contains("com.apple.quarantine") { continue }
+
+            // A validly-signed app with an Apple-rooted anchor is a
+            // non-issue: Gatekeeper still evaluates signed code regardless
+            // of the quarantine xattr, and legitimate apps often ship
+            // without quarantine once installed. Only flag when the target
+            // is unsigned/ad-hoc or outright fails signature validation.
+            if isSignedWithAppleAnchor(path: fullPath) {
+                quarantineAlerted.insert(fullPath)
+                continue
             }
+
+            quarantineAlerted.insert(fullPath)
+            emit(SystemPolicyEvent(
+                type: .quarantineStripped,
+                description: "Unsigned executable in Downloads missing quarantine xattr: \(item). May have had Gatekeeper protection removed.",
+                path: fullPath,
+                severity: .high,
+                mitreTactic: "attack.defense_evasion",
+                mitreTechnique: "attack.t1553.001"
+            ))
         }
+    }
+
+    /// True when the file at `path` has a valid signature rooted in Apple
+    /// (first-party, Mac App Store, or Developer ID). These files do not
+    /// represent a meaningful "stripped quarantine" risk.
+    private func isSignedWithAppleAnchor(path: String) -> Bool {
+        let url = URL(fileURLWithPath: path) as CFURL
+        var staticCodeRef: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url, [], &staticCodeRef) == errSecSuccess,
+              let staticCode = staticCodeRef else { return false }
+
+        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures)
+        guard SecStaticCodeCheckValidity(staticCode, flags, nil) == errSecSuccess else { return false }
+
+        var reqRef: SecRequirement?
+        guard SecRequirementCreateWithString(
+            "anchor apple generic" as CFString, [], &reqRef
+        ) == errSecSuccess, let requirement = reqRef else { return false }
+
+        return SecStaticCodeCheckValidity(staticCode, flags, requirement) == errSecSuccess
     }
 
     // MARK: - XPC Service Enumeration

@@ -28,16 +28,38 @@ public actor PowerAnomalyDetector {
         case sustainedCPU = "sustained_cpu"
     }
 
-    /// Processes known to legitimately hold power assertions.
+    /// Processes that legitimately hold power assertions. This is a
+    /// steady-state allowlist, not a threat heuristic — holding a sleep
+    /// assertion is completely normal for media playback, remote access,
+    /// screen sharing, and user-invoked tools like `caffeinate`.
     private static let knownLegitimate: Set<String> = [
-        "backupd", "mds", "mds_stores", "powerd", "coreaudiod",
-        "WindowServer", "loginwindow", "Music", "TV", "Spotify",
-        "zoom.us", "FaceTime", "Slack", "Teams",
+        // System / Apple daemons
+        "backupd", "mds", "mds_stores", "mdworker", "mdworker_shared",
+        "powerd", "coreaudiod", "bluetoothd", "bluetoothuserd",
+        "WindowServer", "loginwindow", "SystemUIServer",
+        "screensharingd", "ScreenSharingAgent", "AirPlayXPCHelper",
+        "wifid", "rapportd", "sharingd", "mediaremoted",
+        "soagent", "locationd", "cloudd", "bird",
+        "caffeinate", "dtrace",
+        // User-facing media / meeting / chat (media-playback assertions)
+        "Music", "TV", "Podcasts", "Spotify",
+        "QuickTime Player", "IINA", "VLC",
+        "zoom.us", "FaceTime", "Slack", "Teams", "Microsoft Teams",
+        "Discord", "WebEx", "GoToMeeting", "BlueJeans",
+        "Google Chrome", "Safari", "firefox", "Microsoft Edge", "Arc",
+        // Dev tools commonly left running under a sleep assertion
+        "Docker Desktop", "com.docker.hyperkit", "OrbStack",
+        "Xcode", "Simulator", "com.apple.dt.Xcode",
     ]
 
     /// Thermal level threshold above which we flag an anomaly.
     private let thermalWarningThreshold: Int32 = 70
     private let thermalCriticalThreshold: Int32 = 90
+
+    /// Process names we've already emitted a preventingSleep alert for in
+    /// this daemon lifetime. Re-emitting once per 5-minute poll created
+    /// most of the power-anomaly noise.
+    private var alertedSleepProcesses: Set<String> = []
 
     public init() {}
 
@@ -48,15 +70,16 @@ public actor PowerAnomalyDetector {
         // Check power assertions (processes preventing sleep)
         let assertions = getPowerAssertions()
         for assertion in assertions {
-            if !Self.knownLegitimate.contains(assertion.processName) {
-                anomalies.append(PowerAnomaly(
-                    type: .preventingSleep,
-                    processName: assertion.processName,
-                    pid: assertion.pid,
-                    detail: "Process preventing sleep: \(assertion.assertionType). Duration: \(assertion.detail)",
-                    severity: .medium
-                ))
-            }
+            if Self.knownLegitimate.contains(assertion.processName) { continue }
+            if alertedSleepProcesses.contains(assertion.processName) { continue }
+            alertedSleepProcesses.insert(assertion.processName)
+            anomalies.append(PowerAnomaly(
+                type: .preventingSleep,
+                processName: assertion.processName,
+                pid: assertion.pid,
+                detail: "Process preventing sleep: \(assertion.assertionType). Duration: \(assertion.detail)",
+                severity: .medium
+            ))
         }
 
         // Check thermal pressure

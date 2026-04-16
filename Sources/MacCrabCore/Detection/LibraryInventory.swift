@@ -8,6 +8,7 @@
 
 import Foundation
 import Darwin
+import Security
 import os.log
 
 /// Scans process memory regions to enumerate loaded libraries.
@@ -15,15 +16,33 @@ import os.log
 public actor LibraryInventory {
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "library-inventory")
 
-    /// Known legitimate library paths that are expected in most processes.
+    /// Library paths expected in most processes. Covers the macOS system
+    /// libraries AND the common third-party package-manager roots (Homebrew,
+    /// MacPorts) so that legitimately installed tools like postgres don't
+    /// generate false-positive "injected library" alerts for every Kerberos /
+    /// ICU / OpenSSL dylib they link against.
     private static let systemLibPrefixes: [String] = [
-        "/System/Library/",
+        "/System/",
         "/usr/lib/",
+        "/usr/libexec/",
         "/Library/Apple/",
         "/usr/local/lib/libSystem",
+        // Homebrew (Apple Silicon default prefix).
+        "/opt/homebrew/",
+        // Homebrew (Intel default prefix) + legacy /usr/local installs.
+        "/usr/local/Cellar/",
+        "/usr/local/opt/",
+        "/usr/local/Homebrew/",
+        "/usr/local/lib/",
+        // MacPorts.
+        "/opt/local/",
+        // Nix.
+        "/nix/store/",
     ]
 
-    /// Suspicious library locations.
+    /// Suspicious library locations. These are world-writable or user-writable
+    /// directories that should never be the source of a loaded dylib on a
+    /// healthy system.
     private static let suspiciousPathPatterns: [String] = [
         "/tmp/",
         "/private/tmp/",
@@ -31,6 +50,12 @@ public actor LibraryInventory {
         "/Downloads/",
         "/var/tmp/",
     ]
+
+    /// Signature cache: many processes load the same few dozen dylibs, so we
+    /// cache the "is this library signed by a trusted authority" verdict per
+    /// path to avoid re-running `SecStaticCodeCheckValidity` on every scan.
+    private var signatureCache: [String: Bool] = [:]
+    private let signatureCacheLimit = 4096
 
     public struct InjectedLibrary: Sendable {
         public let pid: Int32
@@ -100,21 +125,74 @@ public actor LibraryInventory {
 
             if flaggedSuspicious { continue }
 
-            // Check for unsigned dylibs (path not in standard locations)
+            // Any dylib outside the system/package-manager prefixes is only
+            // flagged if it lacks a trusted (Apple or Developer ID) signature.
+            // Legitimately signed third-party libraries in unusual locations
+            // (e.g. a Developer ID-signed app shipping a dylib under
+            // /Applications/MyApp.app/../PlugIns/) produce far more noise
+            // than signal, so we require the loader to be both off-prefix
+            // AND unsigned/ad-hoc before emitting an alert.
             if lib.hasSuffix(".dylib") &&
                 !lib.hasPrefix("/usr/") &&
                 !lib.hasPrefix("/System/") &&
                 !lib.hasPrefix("/Library/") {
-                injected.append(InjectedLibrary(
-                    pid: pid, processName: processName, processPath: processPath,
-                    libraryPath: lib,
-                    reason: "Non-system dylib loaded from unexpected location",
-                    severity: .high
-                ))
+                if !isTrustedSigned(path: lib) {
+                    injected.append(InjectedLibrary(
+                        pid: pid, processName: processName, processPath: processPath,
+                        libraryPath: lib,
+                        reason: "Unsigned dylib loaded from unexpected location",
+                        severity: .high
+                    ))
+                }
             }
         }
 
         return injected
+    }
+
+    /// Returns `true` when the library at `path` is validly signed by Apple,
+    /// the Mac App Store, or a Developer ID certificate. Results are cached
+    /// per-path to avoid repeated Security framework calls for the same dylib.
+    private func isTrustedSigned(path: String) -> Bool {
+        if let cached = signatureCache[path] { return cached }
+
+        let url = URL(fileURLWithPath: path) as CFURL
+        var staticCodeRef: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url, [], &staticCodeRef) == errSecSuccess,
+              let staticCode = staticCodeRef else {
+            storeSignatureResult(path: path, trusted: false)
+            return false
+        }
+
+        let validityFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures)
+        guard SecStaticCodeCheckValidity(staticCode, validityFlags, nil) == errSecSuccess else {
+            storeSignatureResult(path: path, trusted: false)
+            return false
+        }
+
+        // "anchor apple generic" is satisfied by Apple first-party, Mac App
+        // Store, and Developer ID signatures — exactly the set of authorities
+        // we trust for loaded libraries.
+        var requirementRef: SecRequirement?
+        guard SecRequirementCreateWithString(
+            "anchor apple generic" as CFString, [], &requirementRef
+        ) == errSecSuccess, let requirement = requirementRef else {
+            storeSignatureResult(path: path, trusted: false)
+            return false
+        }
+
+        let trusted = SecStaticCodeCheckValidity(
+            staticCode, validityFlags, requirement
+        ) == errSecSuccess
+        storeSignatureResult(path: path, trusted: trusted)
+        return trusted
+    }
+
+    private func storeSignatureResult(path: String, trusted: Bool) {
+        if signatureCache.count >= signatureCacheLimit {
+            signatureCache.removeAll(keepingCapacity: true)
+        }
+        signatureCache[path] = trusted
     }
 
     /// Scan all running processes for injected libraries.

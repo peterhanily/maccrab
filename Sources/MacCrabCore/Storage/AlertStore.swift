@@ -386,6 +386,24 @@ public actor AlertStore {
         }
     }
 
+    /// List `(id, ruleId)` pairs for alerts currently marked suppressed.
+    /// Used by the feedback-loop sweeper in DaemonTimers to plumb UI
+    /// dismissals back into the deduplicator's FP-rate tracking.
+    public func listSuppressed(limit: Int = 500) throws -> [(id: String, ruleId: String)] {
+        let sql = "SELECT id, rule_id FROM alerts WHERE suppressed = 1 ORDER BY timestamp DESC LIMIT ?1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(limit))
+        var out: [(id: String, ruleId: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = columnTextOrNil(stmt, index: 0) ?? ""
+            let rid = columnTextOrNil(stmt, index: 1) ?? ""
+            guard !id.isEmpty, !rid.isEmpty else { continue }
+            out.append((id, rid))
+        }
+        return out
+    }
+
     // MARK: - Pruning
 
     /// Deletes alerts older than the specified date for data retention.

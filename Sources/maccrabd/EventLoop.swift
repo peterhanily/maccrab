@@ -662,6 +662,35 @@ enum EventLoop {
             // Layer 1: Single-event Sigma rules
             var matches = await state.ruleEngine.evaluate(enrichedEvent)
 
+            // Drop rule hits where the event has no attributable process. Most
+            // file-event rules (cookie DB read, TCC DB write, privacy plist
+            // tamper, trojan-source unicode) ship with `Image|contains`
+            // filters designed to exclude trusted system processes — those
+            // filters fail *open* when the event arrives with `process.name ==
+            // "unknown"` (FSEvents path), causing the rule to fire on
+            // activity we cannot attribute and therefore cannot triage. An
+            // unattributable file event is a low-signal alert by construction.
+            if enrichedEvent.process.name == "unknown"
+                || enrichedEvent.process.executable.isEmpty {
+                matches.removeAll { match in
+                    // Keep only critical rules — those are worth a vague
+                    // alert even without attribution (e.g., SIP disabled,
+                    // ransomware note, known-malicious-hash writes).
+                    match.severity != .critical
+                }
+            }
+
+            // Warm-up gate: the first 60 seconds after daemon start are
+            // dominated by inventory scans (browser extensions, quarantine
+            // state, process-tree baseline) and delayed events the kernel
+            // had queued before we attached. Emitting non-critical alerts
+            // during that window mixes startup noise into the live alert
+            // stream. Critical rules still fire — a brand-new daemon shouldn't
+            // miss a ransomware note because it booted ten seconds ago.
+            if state.isWarmingUp {
+                matches.removeAll { $0.severity != .critical }
+            }
+
             // Layer 2: Temporal sequence rules (Phase 2)
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
             matches.append(contentsOf: sequenceMatches)
@@ -815,12 +844,19 @@ enum EventLoop {
 
                     alertCount += 1
 
+                    // Feedback-driven severity auto-tuning: rules the user
+                    // repeatedly dismisses get downgraded one level (critical
+                    // is never downgraded — the operator shouldn't be able to
+                    // mute ransomware or SIP alerts by swiping them away).
+                    let effectiveSeverity = await state.deduplicator.effectiveSeverity(
+                        ruleId: match.ruleId, original: match.severity)
+
                     let alert = Alert(
                         id: UUID().uuidString,
                         timestamp: Date(),
                         ruleId: match.ruleId,
                         ruleTitle: match.ruleName,
-                        severity: match.severity,
+                        severity: effectiveSeverity,
                         eventId: enrichedEvent.id.uuidString,
                         processPath: enrichedEvent.process.executable,
                         processName: enrichedEvent.process.name,
@@ -831,13 +867,19 @@ enum EventLoop {
                     )
 
                     batchAlerts.append(alert)
-                    await state.notifier.notify(alert: alert)
+                    // Only surface OS notifications for alerts that haven't
+                    // been auto-downgraded below high — otherwise noisy rules
+                    // keep popping banners after the user has indicated they
+                    // don't care.
+                    if effectiveSeverity >= .high {
+                        await state.notifier.notify(alert: alert)
+                    }
                     await state.responseEngine.execute(alert: alert, event: enrichedEvent)
 
                     // Send to external notification integrations (Slack, Teams, etc.)
                     await state.notificationIntegrations.sendAlert(
                         ruleTitle: alert.ruleTitle,
-                        severity: match.severity.rawValue,
+                        severity: effectiveSeverity.rawValue,
                         processName: alert.processName,
                         processPath: alert.processPath,
                         description: alert.description ?? "",

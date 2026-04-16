@@ -66,6 +66,33 @@ public actor AINetworkSandbox {
         "1.1.1.1", "1.0.0.1",
     ]
 
+    /// IP prefixes belonging to well-known cloud/CDN providers that host
+    /// legitimate AI service endpoints. Matched when `destinationDomain` is
+    /// not available (network events captured without DNS correlation), so
+    /// that AI tools calling `api.anthropic.com`, `openaiapi-site.azureedge.net`,
+    /// etc. via IP-only connections don't produce an alert storm.
+    ///
+    /// These are deliberately conservative — major AI backends + CDNs only.
+    /// An analyst who wants strict enforcement can set `aiNetworkSandboxStrict`
+    /// in daemon_config.json to disable this fallback.
+    public static let wellKnownCloudPrefixes: [String] = [
+        // Anthropic (Fastly-fronted)
+        "160.79.104.", "160.79.",
+        // OpenAI (Microsoft Azure Front Door) – https://openai.com/security
+        "104.18.", "104.19.", "104.20.", "104.21.", "104.22.",
+        "172.64.", "172.65.", "172.66.", "172.67.",
+        // Google / GCP / Gemini
+        "34.96.", "34.97.", "34.98.", "34.99.", "34.149.", "34.150.",
+        "35.186.", "35.187.", "35.188.", "35.189.", "35.190.", "35.191.",
+        "142.250.", "142.251.", "172.217.",
+        "209.85.", "216.58.",
+        // GitHub / Copilot
+        "140.82.", "185.199.",
+        // Cloudflare (serves many AI services)
+        "104.16.", "104.17.", "104.18.", "104.19.",
+        "162.159.", "141.101.", "108.162.",
+    ]
+
     // MARK: - Violation
 
     /// Describes an unapproved network connection from an AI tool process.
@@ -187,6 +214,13 @@ public actor AINetworkSandbox {
         // No domain — check IP allowlist
         if ipAllowlist.contains(destinationIP) {
             return nil
+        }
+
+        // Fall back to well-known cloud IP prefixes. Major AI providers front
+        // their APIs with stable CDN ranges; catching these by prefix prevents
+        // an alert per IP per hour on what is really the same service.
+        for prefix in Self.wellKnownCloudPrefixes {
+            if destinationIP.hasPrefix(prefix) { return nil }
         }
 
         // Rate-limit: only fire once per IP per hour (avoid alert storms)

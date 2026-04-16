@@ -34,7 +34,21 @@ detection:
             - '/usr/libexec/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_system and not filter_apple_signed
+    filter_localization:
+        TargetFilename|contains:
+            - '.lproj/'
+            - '.strings'
+            - '.xliff'
+            - '.po'
+            - '/locales/'
+            - '/_locales/'
+            - '/i18n/'
+            - '/translations/'
+    filter_rtl_text_files:
+        TargetFilename|contains:
+            - 'README'
+            - 'CHANGELOG'
+    condition: selection and not filter_system and not filter_apple_signed and not filter_localization and not filter_rtl_text_files
 falsepositives:
     - Rich text editors that use zero-width spaces for formatting
 level: medium
