@@ -60,3 +60,6 @@ __pycache__/
 
 # Local planning docs (not part of public repo)
 plans/
+
+# Signed rule bundle build artifacts (produced by scripts/publish-rules.sh)
+dist/
