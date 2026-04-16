@@ -691,6 +691,22 @@ enum EventLoop {
                 matches.removeAll { $0.severity != .critical }
             }
 
+            // Trusted browser/Electron-helper short circuit. Chromium-based
+            // apps spawn a wide tree of helper processes (Renderer, GPU,
+            // Plugin, Utility, Crashpad handler) doing things that individual
+            // Sigma rules flag in isolation — reading cookies files from
+            // their own profile, writing to their own cache directory,
+            // opening long-lived HTTPS connections, spawning child tools.
+            // We can't individually allowlist every helper-against-every-rule
+            // permutation, but we CAN short-circuit once: if the event's
+            // process executable sits under a known browser app bundle,
+            // only critical rules fire. This reuses the same
+            // "attacker rarely walks signed app bundles" heuristic the
+            // CrossProcessCorrelator already applies to network convergence.
+            if Self.isTrustedBrowserHelper(path: enrichedEvent.process.executable) {
+                matches.removeAll { $0.severity != .critical }
+            }
+
             // Layer 2: Temporal sequence rules (Phase 2)
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
             matches.append(contentsOf: sequenceMatches)
@@ -1193,5 +1209,61 @@ enum EventLoop {
         }
 
         logger.info("Event stream ended. Daemon exiting.")
+    }
+
+    /// Known browser / Electron app-bundle prefixes whose helper processes
+    /// are expected to do a lot of things individual Sigma rules flag in
+    /// isolation (reading their own cookie DB, writing to their own cache,
+    /// opening long-lived HTTPS, spawning child binaries for profile
+    /// migration, etc.). Anything whose executable path lives under one of
+    /// these is treated as a trusted helper — non-critical rule matches
+    /// are dropped before they become alerts. Critical rules still fire.
+    /// This complements the per-detector allowlists (TLSFingerprinter,
+    /// PowerAnomalyDetector, CrossProcessCorrelator) with a single
+    /// short-circuit that also catches rules we haven't individually
+    /// hardened.
+    private static let trustedBrowserPrefixes: [String] = [
+        "/Applications/Google Chrome.app/",
+        "/Applications/Google Chrome Canary.app/",
+        "/Applications/Chromium.app/",
+        "/Applications/Microsoft Edge.app/",
+        "/Applications/Microsoft Edge Canary.app/",
+        "/Applications/Microsoft Edge Dev.app/",
+        "/Applications/Microsoft Edge Beta.app/",
+        "/Applications/Brave Browser.app/",
+        "/Applications/Brave Browser Nightly.app/",
+        "/Applications/Brave Browser Dev.app/",
+        "/Applications/Arc.app/",
+        "/Applications/Vivaldi.app/",
+        "/Applications/Opera.app/",
+        "/Applications/Firefox.app/",
+        "/Applications/Firefox Nightly.app/",
+        "/Applications/Firefox Developer Edition.app/",
+        "/Applications/Safari.app/",
+        "/Applications/Orion.app/",
+        // Electron apps that ship a Chromium helper tree and behave
+        // identically to browsers from the detection engine's perspective.
+        "/Applications/Slack.app/",
+        "/Applications/Discord.app/",
+        "/Applications/Microsoft Teams.app/",
+        "/Applications/Visual Studio Code.app/",
+        "/Applications/Code.app/",
+        "/Applications/Cursor.app/",
+        "/Applications/Claude.app/",
+        "/Applications/ChatGPT Atlas.app/",
+        "/Applications/Codex.app/",
+        "/Applications/GitHub Desktop.app/",
+        "/Applications/Signal.app/",
+        "/Applications/Telegram.app/",
+        "/Applications/WhatsApp.app/",
+    ]
+
+    /// True when the given executable path is inside a trusted browser or
+    /// Electron-helper app bundle (see `trustedBrowserPrefixes`).
+    static func isTrustedBrowserHelper(path: String) -> Bool {
+        for prefix in Self.trustedBrowserPrefixes where path.hasPrefix(prefix) {
+            return true
+        }
+        return false
     }
 }

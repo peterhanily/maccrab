@@ -3,6 +3,46 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] — 2026-04-16
+
+Hotfix on top of 1.2.1 targeting OS-notification floods. Drop-in
+upgrade — no schema or config changes.
+
+### Fixed
+
+- **SelfDefense tamper alerts no longer re-fire every 15 seconds.** The
+  periodic integrity check correctly re-evaluates every cycle, but
+  firing a fresh critical alert each time turned a single real event
+  (e.g. a local rebuild) into 100+ identical notifications. Added a
+  per-type `alertedTamperTypes` gate — each tamper type alerts exactly
+  once per daemon lifetime. Subsequent cycles still write to the
+  forensic log (`~/.maccrab_tamper.log`, `/var/log/maccrab_tamper.log`,
+  `$TMPDIR/maccrab_tamper.log`) but don't produce new alerts.
+- **SUSTAINED TAMPERING summary fires exactly once** at the 3-failure
+  mark, not every cycle thereafter. Counter still climbs internally.
+- **Notifier dedup window: 5 min → 1 hour, per-key.** The previous
+  `sweepKeysIfNeeded` cleared *all* dedup keys every 5 minutes, so a
+  persistent condition produced a fresh OS banner every 5 min.
+  Replaced with a `[String: Date]` map that expires individual keys on
+  their own schedule. A single rule firing repeatedly from the same
+  process now produces one banner per hour max.
+
+### Added
+
+- **Trusted browser/Electron-helper short circuit** in the event loop.
+  Chromium-based apps (Chrome, Edge, Brave, Arc, Opera, Vivaldi,
+  Firefox, Safari) and Electron apps (Slack, Discord, Teams, VS Code,
+  Cursor, Claude, ChatGPT Atlas, Codex, GitHub Desktop, Signal,
+  Telegram, WhatsApp) have large helper trees that fire individual
+  Sigma rules on benign activity — reading their own cookie DB,
+  writing to their own cache, opening long-lived HTTPS, spawning
+  child tools for profile migration. Any process whose executable
+  path sits under one of these bundles has its non-critical rule
+  matches dropped at the event loop. Critical still fires. This
+  complements the per-detector allowlists in TLSFingerprinter,
+  PowerAnomalyDetector, CrossProcessCorrelator with a single
+  short-circuit that covers rules we haven't individually hardened.
+
 ## [1.2.1] — 2026-04-16
 
 Patch release focused on false-positive reduction on real dev workstations.

@@ -23,9 +23,14 @@ public actor NotificationOutput {
     private var recentTimestamps: [Date] = []
 
     /// Track recently notified rule+process combos to avoid duplicates.
-    private var recentKeys: Set<String> = []
-    private var lastKeySweep = Date()
-    private let dedupeWindow: TimeInterval = 300 // 5 minutes
+    /// Map key → last-notified timestamp so individual keys expire on their
+    /// own schedule rather than everything being wiped at once. The prior
+    /// implementation cleared the whole set every 5 min, so a persistent
+    /// condition (e.g. binary-integrity failure on every 15-second poll)
+    /// produced a fresh OS banner every 5 min. Per-key expiry keeps the
+    /// first notification and then goes silent for the full window.
+    private var recentKeys: [String: Date] = [:]
+    private let dedupeWindow: TimeInterval = 3600 // 1 hour
 
     /// Count of alerts suppressed by rate limiting since the last summary notification.
     private var rateLimitedCount: Int = 0
@@ -64,22 +69,28 @@ public actor NotificationOutput {
             rateLimitNotified = false
         }
 
-        // Deduplicate
+        // Deduplicate. Key incorporates rule + process path so an attack
+        // from the same binary firing multiple rules still notifies for
+        // each distinct rule, but a single rule re-firing repeatedly
+        // doesn't produce a banner storm.
         let key = "\(alert.ruleId):\(alert.processPath ?? "")"
-        sweepKeysIfNeeded(now: now)
-        guard !recentKeys.contains(key) else { return }
-        recentKeys.insert(key)
+        if let last = recentKeys[key], now.timeIntervalSince(last) < dedupeWindow {
+            return
+        }
+        pruneRecentKeysIfNeeded(now: now)
+        recentKeys[key] = now
         recentTimestamps.append(now)
 
         // Build and deliver notification
         deliverNotification(alert: alert)
     }
 
-    private func sweepKeysIfNeeded(now: Date) {
-        if now.timeIntervalSince(lastKeySweep) > dedupeWindow {
-            recentKeys.removeAll()
-            lastKeySweep = now
-        }
+    /// Evict dedup entries whose individual windows have expired. Amortized
+    /// across calls so a long-running daemon doesn't accumulate unbounded
+    /// history — only called when the map crosses a lightweight threshold.
+    private func pruneRecentKeysIfNeeded(now: Date) {
+        guard recentKeys.count > 256 else { return }
+        recentKeys = recentKeys.filter { now.timeIntervalSince($0.value) < dedupeWindow }
     }
 
     private func deliverRateLimitNotification() {

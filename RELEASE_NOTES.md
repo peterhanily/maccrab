@@ -1,103 +1,84 @@
-# MacCrab 1.2.1 — Ship Notes
+# MacCrab 1.2.2 — Ship Notes
 
-**Patch release: false-positive reduction on real dev workstations,
-plus a self-tuning feedback loop and a much richer browser-extension
-detail view.**
+**Hotfix for the 1.2.1 notification flood on fresh installs.**
 
-1.2.0 users: drop-in upgrade. No schema changes, no config changes,
-existing suppressions continue to work.
-
-## Why this release
-
-On a reference developer workstation running MacCrab 1.2.0, a single
-24-hour observation period produced **2,856 alerts** — the vast
-majority from five detectors that shipped with conservative
-allowlists. After this patch landed and the daemon restarted with a
-fresh DB, the same workstation produced **3 alerts in 11 minutes**
-across two full forensic scan cycles, with the remaining 3 being
-legitimate singletons worth a look. ~99% noise reduction, zero loss
-of real signal.
+1.2.1 users: drop-in upgrade. No schema changes, no config changes.
+Upgrade specifically addresses the two noise sources observed on
+real-world deployments after 1.2.1 shipped.
 
 ## What changed
 
-### Detection tuning
+### Tamper-detection alert storm, fixed
 
-| Detector | Fix |
-|----------|-----|
-| `LibraryInventory` | Homebrew / MacPorts / Nix / `/usr/local` prefixes allowlisted. Any dylib in an unexpected location now gates on `SecStaticCodeCheckValidity` against `anchor apple generic` — validly signed libraries skipped regardless of path. |
-| `SystemPolicyMonitor` (quarantine) | Per-path dedup set (was re-alerting every 5-min poll on the same file). Apple-anchor signature check skips signed apps (Gatekeeper still evaluates them). `.dmg`/`.iso` skipped entirely. |
-| `TLSFingerprinter` (beacon) | Allowlist expanded from browsers-only to cover chat, meeting, sync, dev tools, AI helpers, package managers. `node`/`deno`/`bun` skipped outright. |
-| `PowerAnomalyDetector` | Comprehensive legitimate-holder allowlist (`screensharingd`, `bluetoothd`, `rapportd`, Xcode, Docker, etc.) + per-process-name dedup. |
-| `CrossProcessCorrelator` | Skip convergence when all events share a `.app` bundle, an exact executable, or a tool-version directory. Additionally skip by destination for well-known cloud CDNs (Anthropic, Google, Cloudflare, GitHub) — architecture, not attack. |
-| `AINetworkSandbox` | Cloud IP-prefix fallback when DNS correlation is absent. |
-| `BehaviorScoring` | 120s per-indicator cooldown per process — one chatty benign signal can no longer walk a score to threshold alone. |
-| `AlertDeduplicator.normalizePath` | End-of-path version regex added; `/.../versions/2.1.111` and `/.../versions/2.1.112` now dedup correctly. |
-| `EventLoop` | Drop non-critical rule matches when the event has no attributable process (FSEvents without process info). |
-| `EventLoop` warm-up | Suppress non-critical matches for the first 60s after daemon start. Inventory scans complete in this window; critical still fires. |
+On any machine where the `maccrabd` binary changed after the daemon
+started (a local rebuild, a Homebrew upgrade while the daemon is
+running, a signed re-notarization) the 1.2.1 SelfDefense periodic
+check fired the same `binary_modified` critical alert every 15
+seconds — 240 alerts per hour. Dashboard accurate; Apple
+Notification Center a disaster.
 
-### Rule updates
+Fix:
 
-- `c2_beacon_pattern.yml`: new `filter_dev_tools` + `filter_homebrew_node`
-  exclusions covering GitHub Desktop, Claude, Codex, Cursor, Code,
-  JetBrains, Docker, and `node`/`deno`/`bun`/`python`/`ruby`/`ollama`
-  under Homebrew/MacPorts/user paths.
-- `invisible_unicode_in_source.yml` + `trojan_source_bidi_code.yml`:
-  exempt localization paths (`.lproj/`, `.strings`, `.xliff`, `.po`,
-  `/locales/`, `/_locales/`, `/i18n/`, `/translations/`) — legitimate
-  RTL text and zero-width joiners live here.
+- Per-type `alertedTamperTypes` gate in `SelfDefense`. Each tamper
+  type (`binary_modified`, `rules_modified`, `database_modified`,
+  `debugger_attached`, `plist_removed`, `process_kill_attempt`,
+  `file_deleted`, `signal_received`, `config_modified`) alerts
+  **exactly once** per daemon lifetime.
+- The "SUSTAINED TAMPERING DETECTED: N consecutive failures" escalation
+  summary also fires only once (at the 3-failure mark).
+- Subsequent cycles keep running and keep writing to the forensic
+  logs (`~/.maccrab_tamper.log` + `/var/log/maccrab_tamper.log` +
+  `$TMPDIR/maccrab_tamper.log`) — but no longer produce new alerts
+  or OS banners.
 
-### Feedback loop (new — self-tuning severity)
+### Notifier dedup, tightened
 
-Dismissing an alert in the dashboard now does more than mark a row.
-A 60-second sweep feeds user dismissals into the deduplicator, which
-tracks per-rule dismissal rates. After ≥3 dismissals at a ≥70%
-dismissal rate, the rule's future alerts auto-downgrade one severity
-level (e.g. `high` → `medium`). `critical` is never touched — a user
-cannot mute ransomware or SIP-disabled alerts by muting their
-dashboard — and no rule goes below `medium`.
+`NotificationOutput` previously wiped its entire dedup set every 5
+minutes, so any persistent condition produced a fresh banner every
+5 minutes indefinitely.
 
-OS notifications now respect the downgraded severity: noisy rules
-stop flashing banners after the user indicates they don't care,
-without the rule itself being disabled.
+Fix:
 
-### Browser extensions — detail drill-in
+- Per-key timestamps (`[String: Date]` instead of `Set<String>`). A
+  given `(ruleId, processPath)` combination is dedup'd for its own
+  one-hour window, not for the daemon's next bulk sweep.
+- Dedup window widened from 5 minutes to 1 hour. A banner storm
+  caused by a single rule is now capped at 24/day maximum per
+  `(rule, process)` combination.
 
-The Browser Extensions tab now gets a proper detail sheet per
-extension:
+### Chrome Helper / Electron-helper noise, short-circuited
 
-- **0–100 risk score** + 4-tier label (Low risk / Caution /
-  Suspicious / High risk), replacing the binary "Suspicious" flag.
-- **Per-risk-factor breakdown** — one line per reason the rule scored
-  ("Declares webRequestBlocking — can modify requests in-flight",
-  "Update URL is not the Chrome Web Store — sideloaded").
-- **Every permission explained** — categorized (network / data /
-  execution / device / host / meta) with a plain-English description
-  of what it permits; dangerous permissions visually distinguished.
-- **Full manifest metadata** — description, version, manifest
-  version, author, homepage URL, update URL (flagged when
-  non-Web-Store), host permissions, content scripts with match
-  patterns, background service worker / script list.
-- **On-disk facts** — install date (manifest mtime), size on disk
-  (recursive), full extension path.
-- **Quick actions** — Reveal in Finder, deep-link to the browser's
-  own extension settings (`chrome://extensions/?id=…`,
-  `brave://…`, `edge://…`), open homepage.
-- **`__MSG_*` locale token resolution** — manifest name and
-  description now show the real localized value from
-  `_locales/<locale>/messages.json` instead of the raw token.
+Users reported a flood of alerts on fresh installs involving
+Google Chrome Helper, Microsoft Edge helpers, Slack, Discord, and
+similar Electron apps. These all share a Chromium-based helper tree
+that does a lot of activity individual Sigma rules flag on their
+own — reading its own cookie DB, writing to its own cache, opening
+long-lived HTTPS connections, spawning child binaries for profile
+migration.
+
+Fix:
+
+- New `EventLoop.trustedBrowserPrefixes` covering every major Chromium
+  browser (Chrome, Canary, Chromium, Edge family, Brave, Arc, Opera,
+  Vivaldi, Firefox family, Safari, Orion) and commonly-deployed
+  Electron apps (Slack, Discord, Teams, VS Code, Cursor, Claude,
+  ChatGPT Atlas, Codex, GitHub Desktop, Signal, Telegram, WhatsApp).
+- When the event's executable path lives under one of those bundles,
+  the event loop drops non-critical rule matches before they become
+  alerts. Critical rules (ransomware, SIP disabled,
+  known-malicious-hash) still fire.
+- Complements the per-detector allowlists shipped in 1.2.1 with a
+  single short-circuit that also covers rules we haven't individually
+  hardened.
 
 ## Upgrade notes
 
-- Drop-in over 1.2.0. No schema changes, no config changes.
-- Existing per-alert suppressions from 1.2.0 continue to work and now
-  contribute to the auto-tune.
-- 380 Sigma-compatible rules (unchanged count), all compiling clean.
-- 535 Swift Testing tests pass, no regressions.
-- Homebrew users: `brew upgrade --cask maccrab` picks up the new
-  notarized DMG.
+- Drop-in upgrade over 1.2.1. No schema or config changes.
+- Universal build (arm64 + x86_64), Developer ID signed, Apple
+  notarized, ticket stapled.
+- `brew upgrade --cask maccrab` picks up the new DMG.
 
 ## Credits
 
 Shipped by @peterhanily with Claude (Opus 4.7, 1M context) as
-co-author. See `CHANGELOG.md` for the full changelog entry and
-commit `c089185` for the diff.
+co-author. See `CHANGELOG.md` for the full entry.

@@ -385,6 +385,16 @@ public actor SelfDefense {
     private var lastParentPID = getppid()
     private var processStartTime = Date()
     private var consecutiveTamperCount = 0
+    /// Tamper types we have already emitted an alert for this daemon
+    /// lifetime. Without this the periodic check re-fires the same "binary
+    /// modified" event every 15 seconds until the daemon restarts, which
+    /// generates a flood of identical critical alerts (and OS notifications)
+    /// after any local rebuild. One alert is enough — the operator already
+    /// knows.
+    private var alertedTamperTypes: Set<TamperType> = []
+    /// Whether we've already emitted the "sustained tampering" escalation
+    /// summary. Once fired, don't re-fire it every cycle.
+    private var sustainedTamperAlerted = false
 
     private func startPeriodicChecks() {
         Task {
@@ -449,10 +459,15 @@ public actor SelfDefense {
                 // 7. Verify environment hasn't been tampered with
                 checkEnvironmentIntegrity()
 
-                // 8. Escalate if we see repeated tampering
+                // 8. Escalate if we see repeated tampering. The summary
+                // fires exactly once per daemon lifetime at the 3-failure
+                // mark; beyond that the internal counter keeps climbing
+                // (written to forensic log by handleTamperEvent) but we
+                // don't re-emit a fresh critical alert every 15 seconds.
                 if !events.isEmpty {
                     consecutiveTamperCount += 1
-                    if consecutiveTamperCount >= 3 {
+                    if consecutiveTamperCount >= 3 && !sustainedTamperAlerted {
+                        sustainedTamperAlerted = true
                         await handleTamperEvent(TamperEvent(
                             type: .binaryModified,
                             description: "SUSTAINED TAMPERING DETECTED: \(consecutiveTamperCount) consecutive integrity failures. Active attack in progress.",
@@ -461,6 +476,7 @@ public actor SelfDefense {
                     }
                 } else {
                     consecutiveTamperCount = 0
+                    sustainedTamperAlerted = false
                 }
             }
         }
@@ -525,9 +541,29 @@ public actor SelfDefense {
     // MARK: - Event Handling
 
     private func handleTamperEvent(_ event: TamperEvent) {
+        // Dedup by tamper type: an integrity failure that persists across
+        // poll cycles should alert exactly once, not every 15 seconds.
+        // A periodic check that confirms the bad state on subsequent cycles
+        // is useful internal signal (keeps `consecutiveTamperCount` accurate,
+        // still writes to the forensic log) but it should not produce a
+        // fresh operator alert / OS notification each time.
+        if alertedTamperTypes.contains(event.type) {
+            // Write to forensic logs only; skip the alert fan-out.
+            writeForensicLog(event)
+            return
+        }
+        alertedTamperTypes.insert(event.type)
         logger.critical("TAMPER DETECTED: [\(event.type.rawValue)] \(event.description)")
 
-        // Write to multiple forensic log locations (harder to tamper with all simultaneously)
+        writeForensicLog(event)
+        tamperHandler?(event)
+    }
+
+    /// Append a tamper event to every writable forensic log location.
+    /// Split out of `handleTamperEvent` so dedup-skipped events still get
+    /// logged to disk (useful for post-incident forensics — confirms the
+    /// condition persisted even though we stopped alerting).
+    private func writeForensicLog(_ event: TamperEvent) {
         let logLocations = [
             NSTemporaryDirectory() + "maccrab_tamper.log",
             "/var/log/maccrab_tamper.log",  // May fail without root — that's OK
@@ -546,8 +582,6 @@ public actor SelfDefense {
                 close(fd)
             }
         }
-
-        tamperHandler?(event)
     }
 
     // MARK: - Hashing
