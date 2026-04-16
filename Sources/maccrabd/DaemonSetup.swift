@@ -169,9 +169,19 @@ enum DaemonSetup {
             honeyfileManager = nil
         }
 
+        // Env-var capture (opt-in). Reads DYLD_*, SSH_*, SUDO_*, AWS_PROFILE,
+        // and a small set of context keys via sysctl on exec/fork. Secret-
+        // bearing keys (AWS_SECRET_*, *_TOKEN, *_PASSWORD) are denied by
+        // EnvCapture before allowlist resolution.
+        let captureEnv = ProcessInfo.processInfo.environment["MACCRAB_CAPTURE_ENV"] == "1"
+        if captureEnv {
+            logger.info("Env var capture enabled (MACCRAB_CAPTURE_ENV=1)")
+        }
+
         enricher = EventEnricher(
             processHasher: processHasher,
-            honeyfileManager: honeyfileManager
+            honeyfileManager: honeyfileManager,
+            captureEnv: captureEnv
         )
         ruleEngine = RuleEngine()
         let notifier = NotificationOutput(minimumSeverity: .high)

@@ -40,6 +40,11 @@ public actor EventEnricher {
     /// so the detection rule engine can fire on canary access.
     private let honeyfileManager: HoneyfileManager?
 
+    /// Opt-in: capture a filtered set of env vars from exec/fork processes
+    /// via `sysctl(KERN_PROCARGS2)`. Costs a syscall per exec — gated at
+    /// daemon startup by `MACCRAB_CAPTURE_ENV=1`.
+    private let captureEnv: Bool
+
     /// Logger scoped to the enrichment subsystem.
     private let log = Logger(
         subsystem: "com.maccrab.core",
@@ -69,12 +74,14 @@ public actor EventEnricher {
         codeSigningCache: CodeSigningCache = CodeSigningCache(),
         processHasher: ProcessHasher? = nil,
         honeyfileManager: HoneyfileManager? = nil,
+        captureEnv: Bool = false,
         pruneInterval: UInt64 = 5000
     ) {
         self.lineage = lineage
         self.codeSigningCache = codeSigningCache
         self.processHasher = processHasher
         self.honeyfileManager = honeyfileManager
+        self.captureEnv = captureEnv
         self.pruneInterval = pruneInterval
     }
 
@@ -146,7 +153,7 @@ public actor EventEnricher {
             isPlatformBinary: proc.isPlatformBinary,
             hashes: hashes,
             session: session,
-            envVars: proc.envVars
+            envVars: resolveEnvVars(for: event, existing: proc.envVars)
         )
 
         // --- 5. Build enriched Event ---
@@ -226,6 +233,21 @@ public actor EventEnricher {
             cdhash: computed.cdhash,
             md5: nil
         )
+    }
+
+    // MARK: Environment capture
+
+    /// If captureEnv is enabled and the event is an exec/fork without
+    /// pre-existing envVars, read the target process env via sysctl and
+    /// filter through EnvCapture's allowlist/deny rules.
+    private func resolveEnvVars(for event: Event, existing: [String: String]?) -> [String: String]? {
+        if let existing { return existing }
+        guard captureEnv else { return nil }
+        guard event.eventCategory == .process,
+              event.eventAction == "exec" || event.eventAction == "fork" else {
+            return nil
+        }
+        return EnvCapture.capture(pid: event.process.pid)
     }
 
     // MARK: Lineage Updates
