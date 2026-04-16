@@ -227,6 +227,13 @@ enum DaemonTimers {
                 await state.crossProcessCorrelator.purgeStale()
                 await state.campaignDetector.sweep()
                 await state.tlsFingerprinter.sweep()
+                // Allowlist v2: prune expired suppressions. The sweep
+                // appends an audit entry per expired row, so operators
+                // can reconstruct when each allow lapsed.
+                let expired = await state.suppressionManager.sweepExpired()
+                if !expired.isEmpty {
+                    logger.info("Allowlist sweep expired \(expired.count) suppression(s)")
+                }
             }
         }
         maintenanceTimer.resume()

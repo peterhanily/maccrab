@@ -156,6 +156,8 @@ struct MacCrabCtl {
             await showSecurityScore()
         case "deception":
             await runDeception(args: args)
+        case "allow":
+            await runAllow(args: args)
         case "version":
             printVersion()
         case "help", "-h", "--help":
