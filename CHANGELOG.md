@@ -3,11 +3,122 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] — 2026-04-16 (unreleased)
+## [1.2.1] — 2026-04-16
 
-First v2 cut. Models, exports, integrations, and agentic triage land
+Patch release focused on false-positive reduction on real dev workstations.
+No schema or config changes — safe to upgrade from 1.2.0 in place.
+
+### Changed
+
+**Detection tuning (false-positive reduction):**
+- `LibraryInventory` now allowlists Homebrew (`/opt/homebrew`,
+  `/usr/local/Cellar`, `/usr/local/opt`), MacPorts (`/opt/local`), and
+  Nix (`/nix/store`) roots, and gates any dylib in an unexpected
+  location on `SecStaticCodeCheckValidity` against `anchor apple
+  generic`. Signed libraries are skipped regardless of location. Per-path
+  signature cache avoids re-evaluation cost.
+- `SystemPolicyMonitor.scanDownloadsForMissingQuarantine` now dedups
+  per path (was re-alerting every 5-min poll), skips files validly
+  signed under an Apple anchor, and ignores `.dmg`/`.iso` containers
+  (Gatekeeper re-evaluates them on mount).
+- `TLSFingerprinter` beacon allowlist expanded from browsers-only to
+  cover chat (Slack, Discord, Signal, Telegram), meeting (Zoom, Teams),
+  dev tools (GitHub Desktop, VS Code, JetBrains, Docker), and AI
+  helpers (Claude, Codex, Cursor, ChatGPT Atlas). `node`/`deno`/`bun`
+  skipped outright.
+- `PowerAnomalyDetector` legitimate-holder set expanded
+  (`screensharingd`, `bluetoothd`, `rapportd`, `mediaremoted`, Xcode,
+  Docker, OrbStack, etc.) with per-process-name dedup so a single poll
+  re-entry can't double-fire.
+- `CrossProcessCorrelator` now suppresses network-convergence alerts
+  when every contacting process shares a `.app` bundle, an exact
+  executable path, or a tool-version directory. Additionally suppresses
+  by destination for well-known cloud CDNs (Anthropic, OpenAI, Google,
+  Cloudflare, GitHub) — multi-process fan-out to those is architecture.
+- `AINetworkSandbox` falls back to a cloud IP-prefix list when DNS
+  correlation is absent, so repeated AI-tool calls to the same backend
+  IP don't fire one violation per unique IP.
+- `BehaviorScoring` now applies a 120s per-indicator cooldown per
+  process. A single chatty signal can no longer walk a score to
+  threshold alone.
+- `AlertDeduplicator.normalizePath` regex now also strips
+  version-like segments at end-of-path (`/v?\d+\.\d+(\.\d+)*$`) so
+  `/.../versions/2.1.111` and `/.../versions/2.1.112` deduplicate.
+- `RuleEngine` via `EventLoop` now drops non-critical rule matches
+  when the event has no attributable process (`process.name == "unknown"`
+  or empty executable). File-event rules with `Image|contains` filters
+  fail open on FSEvents without process info, which produced
+  unattributable mediums we couldn't triage.
+- New warm-up window: non-critical rule matches are suppressed for the
+  first 60s after daemon start. Inventory scans (browser extensions,
+  quarantine state, process-tree baseline) complete in this window.
+  `DaemonState.isWarmingUp` gates the event loop; critical matches
+  still fire so a ransomware note at T+10s isn't missed.
+
+**Rule updates (YAML):**
+- `command_and_control/c2_beacon_pattern.yml`: new `filter_dev_tools`
+  and `filter_homebrew_node` exclusions.
+- `defense_evasion/invisible_unicode_in_source.yml` and
+  `trojan_source_bidi_code.yml`: exempt `.lproj/`, `.strings`,
+  `.xliff`, `.po`, `/locales/`, `/_locales/`, `/i18n/`,
+  `/translations/` paths (legitimate RTL text and zero-width joiners
+  in localization files).
+
+### Added
+
+**Feedback loop (self-tuning severity):**
+- `AlertDeduplicator.recordDismissal(alertId:ruleId:)` +
+  `dismissalCount` + `dismissalRate` + `effectiveSeverity`. Tracks
+  user dismissals idempotently by alert ID. Rules with ≥3 dismissals
+  at ≥70% rate auto-downgrade one severity level on future firings
+  (e.g. `high` → `medium`). `critical` is never downgraded and no rule
+  goes below `medium`.
+- `AlertStore.listSuppressed(limit:)` returns `(id, ruleId)` pairs for
+  alerts the user has dismissed in the dashboard.
+- New 60-second `DaemonTimers.feedbackTimer` sweeps the AlertStore
+  for new dismissals and feeds each into the deduplicator.
+- `EventLoop` consults `effectiveSeverity` when persisting the alert
+  and only surfaces OS notifications when the downgraded severity is
+  still `high` or `critical`.
+
+**Browser extensions dashboard:**
+- `BrowserExtensionsView` rows are now buttons that open a detail
+  sheet with full manifest metadata: description, version, manifest
+  version, author, homepage URL, update URL (flagged non-Web-Store),
+  host permissions, content scripts with match patterns, background
+  service worker / script list.
+- 0–100 risk score + 4-tier label (Low risk / Caution / Suspicious /
+  High risk) replaces the binary "Suspicious" flag.
+- Per-risk-factor breakdown explains why a rule scored.
+- Every permission carries a category (network / data / execution /
+  device / host / meta) and a plain-English description from an
+  internal dictionary; dangerous permissions visually distinguished.
+- On-disk facts: install date (manifest mtime), size on disk
+  (recursive), extension path. Quick actions: Reveal in Finder,
+  deep-link to `chrome://extensions/?id=…` / `brave://…` /
+  `edge://…`, open homepage.
+- `__MSG_*` locale tokens in `manifest.json` now resolve against
+  `_locales/<locale>/messages.json` instead of displaying raw.
+
+### Impact (measured)
+
+Reference workstation, 24-hour observation:
+
+- Before: **2,856 alerts / 24h**, top 5 rules accounted for ~95%.
+- After: **3 alerts / 11min** across two full forensic scan cycles
+  post-restart, with the remaining 3 being legitimate singletons.
+
+### Migration
+
+Drop-in upgrade from 1.2.0. No schema changes, no config changes.
+Existing per-alert suppressions from 1.2.0 continue to work and now
+feed the auto-tune.
+
+## [1.2.0] — 2026-04-16
+
+Minor release. Models, exports, integrations, and agentic triage land
 alongside the existing v1 detection stack. No destructive schema
-changes; v1 installs upgrade automatically via `PRAGMA user_version`.
+changes; earlier installs upgrade automatically via `PRAGMA user_version`.
 
 ### Added
 
