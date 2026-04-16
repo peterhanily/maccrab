@@ -67,6 +67,9 @@ struct SettingsView: View {
             generalTab
                 .tabItem { Label(String(localized: "settings.general", defaultValue: "General"), systemImage: "gear") }
 
+            appearanceTab
+                .tabItem { Label(String(localized: "settings.appearance", defaultValue: "Appearance"), systemImage: "eye") }
+
             notificationsTab
                 .tabItem { Label(String(localized: "settings.notifications", defaultValue: "Notifications"), systemImage: "bell") }
 
@@ -84,6 +87,65 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(minWidth: 480, idealWidth: 520, maxWidth: 700, minHeight: 350, idealHeight: 500, maxHeight: 800)
+    }
+
+    // MARK: - Appearance
+
+    @AppStorage(UIMode.storageKey) private var uiModeRaw: String = UIMode.advanced.rawValue
+
+    private var uiMode: Binding<UIMode> {
+        Binding(
+            get: { UIMode(rawValue: self.uiModeRaw) ?? .advanced },
+            set: { self.uiModeRaw = $0.rawValue }
+        )
+    }
+
+    private var appearanceTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(String(localized: "appearance.title", defaultValue: "Dashboard complexity"))
+                    .font(.headline)
+
+                Text(String(localized: "appearance.hint", defaultValue: "Hide views you don't use. Every mode keeps detection fully active — this only affects the sidebar."))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Picker(
+                    String(localized: "appearance.mode", defaultValue: "Mode"),
+                    selection: uiMode
+                ) {
+                    ForEach(UIMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(UIMode.allCases, id: \.self) { mode in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: uiMode.wrappedValue == mode ? "largecircle.fill.circle" : "circle")
+                                .foregroundColor(uiMode.wrappedValue == mode ? .accentColor : .secondary)
+                                .font(.caption)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(mode.displayName).font(.subheadline).fontWeight(.medium)
+                                Text(mode.summary).font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 4)
+
+                Divider().padding(.vertical, 6)
+
+                Text(String(localized: "appearance.note", defaultValue: "Tip: detection, prevention, and response are always on regardless of mode. Only the dashboard navigation changes."))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .italic()
+
+                Spacer()
+            }
+            .padding(4)
+        }
     }
 
     // MARK: - General

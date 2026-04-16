@@ -46,6 +46,43 @@ struct MainView: View {
         case permissions = "Permissions"
         case esHealth = "ES Health"
         case docs = "Docs"
+
+        /// Whether this section should be shown in the sidebar at the
+        /// given complexity mode. Used by MainView to hide analyst-heavy
+        /// views for Basic/Standard users while leaving Advanced untouched.
+        func visible(in mode: UIMode) -> Bool {
+            switch mode {
+            case .basic:
+                switch self {
+                case .overview, .alerts, .prevention, .permissions, .docs:
+                    return true
+                default:
+                    return false
+                }
+            case .standard:
+                switch self {
+                case .rules, .threatIntel, .packageFreshness, .aiAnalysis, .esHealth:
+                    return false
+                default:
+                    return true
+                }
+            case .advanced:
+                return true
+            }
+        }
+    }
+
+    @AppStorage(UIMode.storageKey) private var uiModeRaw: String = UIMode.advanced.rawValue
+
+    private var uiMode: UIMode {
+        UIMode(rawValue: uiModeRaw) ?? .advanced
+    }
+
+    /// True when at least one item in the group would be visible in the
+    /// current mode — used to hide Section headers that would otherwise
+    /// render empty.
+    private func groupHasVisibleItems(_ items: [SidebarSection]) -> Bool {
+        items.contains { $0.visible(in: uiMode) }
     }
 
     private var browserExtensionAlertCount: Int {
@@ -65,52 +102,90 @@ struct MainView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedSection) {
-                Section(String(localized: "sidebar.monitor", defaultValue: "Monitor")) {
-                    Label(String(localized: "sidebar.overview", defaultValue: "Overview"), systemImage: "gauge.with.dots.needle.33percent")
-                        .tag(SidebarSection.overview)
-                    Label(String(localized: "sidebar.alerts", defaultValue: "Alerts"), systemImage: "exclamationmark.triangle")
-                        .badge(appState.totalAlerts)
-                        .foregroundColor(hasCriticalAlerts ? .red : nil)
-                        .tag(SidebarSection.alerts)
-                    Label(String(localized: "sidebar.campaigns", defaultValue: "Campaigns"), systemImage: "link.circle")
-                        .badge(campaignCount)
-                        .tag(SidebarSection.campaigns)
-                    Label(String(localized: "sidebar.events", defaultValue: "Events"), systemImage: "list.bullet.rectangle")
-                        .tag(SidebarSection.events)
-                    Label(String(localized: "sidebar.rules", defaultValue: "Rules"), systemImage: "shield.checkered")
-                        .badge(appState.rulesLoaded)
-                        .tag(SidebarSection.rules)
+                if groupHasVisibleItems([.overview, .alerts, .campaigns, .events, .rules]) {
+                    Section(String(localized: "sidebar.monitor", defaultValue: "Monitor")) {
+                        if SidebarSection.overview.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.overview", defaultValue: "Overview"), systemImage: "gauge.with.dots.needle.33percent")
+                                .tag(SidebarSection.overview)
+                        }
+                        if SidebarSection.alerts.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.alerts", defaultValue: "Alerts"), systemImage: "exclamationmark.triangle")
+                                .badge(appState.totalAlerts)
+                                .foregroundColor(hasCriticalAlerts ? .red : nil)
+                                .tag(SidebarSection.alerts)
+                        }
+                        if SidebarSection.campaigns.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.campaigns", defaultValue: "Campaigns"), systemImage: "link.circle")
+                                .badge(campaignCount)
+                                .tag(SidebarSection.campaigns)
+                        }
+                        if SidebarSection.events.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.events", defaultValue: "Events"), systemImage: "list.bullet.rectangle")
+                                .tag(SidebarSection.events)
+                        }
+                        if SidebarSection.rules.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.rules", defaultValue: "Rules"), systemImage: "shield.checkered")
+                                .badge(appState.rulesLoaded)
+                                .tag(SidebarSection.rules)
+                        }
+                    }
                 }
 
-                Section(String(localized: "sidebar.protection", defaultValue: "Protection")) {
-                    Label(String(localized: "sidebar.prevention", defaultValue: "Prevention"), systemImage: "hand.raised")
-                        .tag(SidebarSection.prevention)
-                    Label(String(localized: "sidebar.aiGuard", defaultValue: "AI Guard"), systemImage: "brain")
-                        .tag(SidebarSection.aiGuard)
-                    Label(String(localized: "sidebar.browserExtensions", defaultValue: "Browser Extensions"), systemImage: "puzzlepiece.extension.fill")
-                        .badge(browserExtensionAlertCount)
-                        .tag(SidebarSection.browserExtensions)
+                if groupHasVisibleItems([.prevention, .aiGuard, .browserExtensions]) {
+                    Section(String(localized: "sidebar.protection", defaultValue: "Protection")) {
+                        if SidebarSection.prevention.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.prevention", defaultValue: "Prevention"), systemImage: "hand.raised")
+                                .tag(SidebarSection.prevention)
+                        }
+                        if SidebarSection.aiGuard.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.aiGuard", defaultValue: "AI Guard"), systemImage: "brain")
+                                .tag(SidebarSection.aiGuard)
+                        }
+                        if SidebarSection.browserExtensions.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.browserExtensions", defaultValue: "Browser Extensions"), systemImage: "puzzlepiece.extension.fill")
+                                .badge(browserExtensionAlertCount)
+                                .tag(SidebarSection.browserExtensions)
+                        }
+                    }
                 }
 
-                Section(String(localized: "sidebar.intelligence", defaultValue: "Intelligence")) {
-                    Label(String(localized: "sidebar.threatIntel", defaultValue: "Threat Intel"), systemImage: "binoculars")
-                        .tag(SidebarSection.threatIntel)
-                    Label(String(localized: "sidebar.packageFreshness", defaultValue: "Package Freshness"), systemImage: "shippingbox.fill")
-                        .tag(SidebarSection.packageFreshness)
-                    Label(String(localized: "sidebar.aiAnalysis", defaultValue: "AI Analysis"), systemImage: "brain.head.profile")
-                        .badge(appState.aiAnalysisAlerts.count)
-                        .tag(SidebarSection.aiAnalysis)
-                    Label(String(localized: "sidebar.integrations", defaultValue: "Integrations"), systemImage: "puzzlepiece.extension")
-                        .tag(SidebarSection.integrations)
+                if groupHasVisibleItems([.threatIntel, .packageFreshness, .aiAnalysis, .integrations]) {
+                    Section(String(localized: "sidebar.intelligence", defaultValue: "Intelligence")) {
+                        if SidebarSection.threatIntel.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.threatIntel", defaultValue: "Threat Intel"), systemImage: "binoculars")
+                                .tag(SidebarSection.threatIntel)
+                        }
+                        if SidebarSection.packageFreshness.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.packageFreshness", defaultValue: "Package Freshness"), systemImage: "shippingbox.fill")
+                                .tag(SidebarSection.packageFreshness)
+                        }
+                        if SidebarSection.aiAnalysis.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.aiAnalysis", defaultValue: "AI Analysis"), systemImage: "brain.head.profile")
+                                .badge(appState.aiAnalysisAlerts.count)
+                                .tag(SidebarSection.aiAnalysis)
+                        }
+                        if SidebarSection.integrations.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.integrations", defaultValue: "Integrations"), systemImage: "puzzlepiece.extension")
+                                .tag(SidebarSection.integrations)
+                        }
+                    }
                 }
 
-                Section(String(localized: "sidebar.system", defaultValue: "System")) {
-                    Label(String(localized: "sidebar.permissions", defaultValue: "Permissions"), systemImage: "lock.shield")
-                        .tag(SidebarSection.permissions)
-                    Label(String(localized: "sidebar.esHealth", defaultValue: "ES Health"), systemImage: "waveform.path.ecg.rectangle.fill")
-                        .tag(SidebarSection.esHealth)
-                    Label(String(localized: "sidebar.docs", defaultValue: "Docs"), systemImage: "book")
-                        .tag(SidebarSection.docs)
+                if groupHasVisibleItems([.permissions, .esHealth, .docs]) {
+                    Section(String(localized: "sidebar.system", defaultValue: "System")) {
+                        if SidebarSection.permissions.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.permissions", defaultValue: "Permissions"), systemImage: "lock.shield")
+                                .tag(SidebarSection.permissions)
+                        }
+                        if SidebarSection.esHealth.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.esHealth", defaultValue: "ES Health"), systemImage: "waveform.path.ecg.rectangle.fill")
+                                .tag(SidebarSection.esHealth)
+                        }
+                        if SidebarSection.docs.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.docs", defaultValue: "Docs"), systemImage: "book")
+                                .tag(SidebarSection.docs)
+                        }
+                    }
                 }
             }
             .listStyle(.sidebar)
