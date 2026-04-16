@@ -7,6 +7,7 @@
 
 import Foundation
 import Security
+import CryptoKit
 
 // MARK: - CodeSigningCache
 
@@ -129,8 +130,9 @@ public actor CodeSigningCache {
         let signingId = dict[kSecCodeInfoIdentifier as String] as? String
         let flags = dict[kSecCodeInfoFlags as String] as? UInt32 ?? 0
 
-        // Certificate authority chain.
+        // Certificate authority chain — ordered leaf → root.
         var authorities: [String] = []
+        var certHashes: [String] = []
         if let certs = dict[kSecCodeInfoCertificates as String] as? [SecCertificate] {
             for cert in certs {
                 var commonName: CFString?
@@ -138,11 +140,28 @@ public actor CodeSigningCache {
                    let cn = commonName as String? {
                     authorities.append(cn)
                 }
+                // SHA-256 of the cert's DER-encoded bytes — lets threat-intel
+                // lookups match on a specific issuing CA or signing cert.
+                let derData = SecCertificateCopyData(cert) as Data
+                let digest = SHA256.hash(data: derData)
+                certHashes.append(digest.map { String(format: "%02x", $0) }.joined())
             }
         }
 
+        // Issuer chain for the leaf = every cert ABOVE the leaf in the
+        // chain, ordered nearest-issuer to root. This is just `authorities`
+        // with the leaf dropped (since each cert's issuer is the next cert's
+        // subject, in leaf-first order).
+        let issuerChain = Array(authorities.dropFirst())
+
         // --- Determine signer type via SecRequirement checks ---
         let signerType = determineSignerType(staticCode: staticCode, isValid: isValid, flags: flags)
+
+        // Ad-hoc signing: bit 0x2 in CS_FLAGS per Apple cs_blobs.h. Fall back
+        // to "signerType == .adHoc" when the flag isn't set but the signer
+        // classification inferred ad-hoc.
+        let CS_ADHOC: UInt32 = 0x00000002
+        let isAdhocSigned = (flags & CS_ADHOC) != 0 || signerType == .adHoc
 
         // --- Check notarization (ticket stapled or notarization flag in flags) ---
         let isNotarized = checkNotarization(staticCode: staticCode)
@@ -153,7 +172,11 @@ public actor CodeSigningCache {
             signingId: signingId,
             authorities: authorities,
             flags: flags,
-            isNotarized: isNotarized
+            isNotarized: isNotarized,
+            issuerChain: issuerChain.isEmpty ? nil : issuerChain,
+            certHashes: certHashes.isEmpty ? nil : certHashes,
+            isAdhocSigned: isAdhocSigned,
+            entitlements: nil  // Not extracted — opt-in via a future pass.
         )
     }
 
