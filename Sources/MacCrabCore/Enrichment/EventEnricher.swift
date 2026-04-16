@@ -116,6 +116,15 @@ public actor EventEnricher {
         // every file/network event it emits.
         let hashes = await resolveHashes(for: event, existing: proc.hashes)
 
+        // --- 3.6 Session / launch-source inference ---
+        //
+        // Pure ancestor-chain analysis: identifies whether the process
+        // was launched via SSH, Terminal, Finder, launchd, cron, etc.
+        // Feeds IsSSHLaunched / LaunchSource rule selectors. Preserves
+        // anything the collector already set.
+        let session = proc.session
+            ?? SessionEnricher.enrich(pid: proc.pid, ancestors: ancestors.isEmpty ? proc.ancestors : ancestors)
+
         // --- 4. Build enriched ProcessInfo ---
         let enrichedProcess = ProcessInfo(
             pid: proc.pid,
@@ -136,7 +145,7 @@ public actor EventEnricher {
             architecture: proc.architecture,
             isPlatformBinary: proc.isPlatformBinary,
             hashes: hashes,
-            session: proc.session,
+            session: session,
             envVars: proc.envVars
         )
 
