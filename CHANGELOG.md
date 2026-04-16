@@ -13,7 +13,7 @@ changes; v1 installs upgrade automatically via `PRAGMA user_version`.
 
 **Foundation (Phase 1):**
 - Forward-only SQLite schema migrator (`SchemaMigrator`) wired into
-  every store. v1 DBs auto-migrate on first v2 open.
+  every store. Earlier DBs auto-migrate on first 1.2.0 open.
 - `FileHasher` actor: SHA-256 with LRU cache keyed on path+mtime+size,
   256 MB cap, skips network mounts via `URL.volumeIsLocalKey`.
 - `ProcessHasher` combines SHA-256 (FileHasher) with CDHash
@@ -126,7 +126,7 @@ changes; v1 installs upgrade automatically via `PRAGMA user_version`.
 - `ResponseActionCoverageTests` covers blockNetwork / script /
   escalateNotification plus Codable round-trip for every
   `ResponseActionType`.
-- Test count grew from 326 (v1 cut) to 524 (v2.0 cut).
+- Test count grew from 326 (1.1.1 cut) to 535 (1.2.0 cut).
 
 ### Changed
 
@@ -169,17 +169,17 @@ changes; v1 installs upgrade automatically via `PRAGMA user_version`.
 
 ### Migration notes
 
-- v1 → v2 is one-way. After a v2 daemon opens events.db or suppressions
-  .json, downgrading to v1 is unsupported. Take a backup if you plan
-  to roll back.
-- `daemon_config.json` keys remain additive — every v2 option has a
-  default so existing files keep working.
-- Existing shell environments variables (`MACCRAB_WEBHOOK_URL`,
+- Schema migrations applied by 1.2.0 are one-way. After a 1.2.0
+  daemon opens `events.db` or `suppressions.json`, downgrading to
+  1.1.x is unsupported. Take a backup if you plan to roll back.
+- `daemon_config.json` keys remain additive — every new 1.2.0 option
+  has a default so existing files keep working.
+- Existing shell environment variables (`MACCRAB_WEBHOOK_URL`,
   `MACCRAB_SYSLOG_HOST`, `MACCRAB_SYSLOG_PORT`) still work as before
   and coexist with the new `outputs[]` array.
 
 ## [1.1.1] — 2026-04-08
 
-See git history for pre-v2 entries. Individual v1.x releases were
+See git history for pre-1.2 entries. Individual 1.1.x releases were
 tracked in `RELEASE_NOTES.md` and commit messages rather than this
 changelog.

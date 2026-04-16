@@ -1,18 +1,18 @@
-# MacCrab v2.0.0 — Ship Notes
+# MacCrab 1.2.0 — Ship Notes
 
 **Local-first macOS threat detection engine, now with OCSF-native
 exports, agentic LLM triage, deception tier, and UEBA.**
 
-v1 users: this is a drop-in upgrade. Schema migrates automatically;
+1.1.x users: this is a drop-in upgrade. Schema migrates automatically;
 existing config keeps working; every new capability is opt-in.
 
 ## Highlights
 
 **OCSF 1.3 on the wire.** Every alert can now ship as a vendor-neutral
 OCSF Security Finding to any SIEM that speaks OCSF — Amazon Security
-Lake, Splunk, Elastic, Wazuh, SentinelOne, Datadog. Three new sinks
-(file NDJSON, Splunk HEC, Elastic Bulk API, Datadog Logs) behind a
-shared `Output` protocol.
+Lake, Splunk, Elastic, Wazuh, SentinelOne, Datadog. Five new sinks
+(file NDJSON, Splunk HEC, Elastic Bulk API, Datadog Logs, Wazuh
+Manager API, Amazon S3, SFTP) behind a shared `Output` protocol.
 
 **Agentic LLM triage.** Every HIGH/CRITICAL alert auto-invokes the
 configured LLM backend, which produces a structured investigation —
@@ -38,16 +38,23 @@ Advanced surface (15 views). Settings > Appearance.
 
 **UEBA.** Per-user baseline (login hours, SSH source IPs, tool usage)
 with anomaly detection after a cold-start window. Addresses the 80%
-of attacks that are malware-free / credential abuse.
+of attacks that are malware-free / credential abuse. Profiles persist
+across daemon restarts.
 
 **Integration bundles** in `integrations/`: Wazuh decoder + rules XML,
 Elastic index template + Kibana saved-objects, osquery pack with 12
 macOS posture queries.
 
+**AWS S3 + SFTP exports.** Hand-rolled SigV4 signer (no AWS SDK
+dependency) pushes batched NDJSON to date-partitioned S3 keys,
+Athena/Security-Lake query-friendly. SFTP output shells out to the
+system `sftp` binary with StrictHostKeyChecking for data-diode
+deployments.
+
 ## Stats
 
-- 524 tests (up from 326 at v1.0) — zero regressions across the v2
-  development cycle.
+- 535 tests (up from 326 at 1.1.1) — zero regressions across the
+  1.2.0 development cycle.
 - 379 Sigma-compatible YAML rules, each with positive + negative test
   fixtures for the hash-aware additions.
 - 10 D3FEND-annotated prevention modules.
@@ -58,21 +65,23 @@ macOS posture queries.
 brew upgrade maccrab    # when the Homebrew formula is updated
 ```
 
-Schema migrates automatically on first v2 daemon start.
+Schema migrates automatically on first 1.2.0 daemon start.
 `daemon_config.json` keys are additive — existing files keep working.
 
-## What's next (v2.1)
+## What's next (1.3.0)
 
-- `S3Output` / `SFTPOutput` sinks.
-- Actually executing confirmed investigation suggested-actions.
-- LLM eval harness with 50 labeled scenarios per backend.
-- UEBA baseline persistence across daemon restarts.
-- Native macOS 15.4+ TCC ESF event (pending ES entitlement).
+- Executing confirmed investigation suggested-actions (daemon ↔
+  dashboard IPC — currently UI-only).
+- Osquery **producer** extension so analysts can JOIN MacCrab's
+  `maccrab_alerts` / `maccrab_events` / `maccrab_campaigns` tables
+  inside `osqueryi`.
+- Native macOS 15.4+ `ES_EVENT_TYPE_NOTIFY_TCC_MODIFY` for the TCC
+  monitor (pending an ES-entitlement-signed provisioning profile).
 
 ## Credits
 
 All releases so far shipped by @peterhanily with Claude (Opus 4.6,
-1M context) as co-author across the v2 development cycle.
+1M context) as co-author across the 1.2.0 development cycle.
 
 ---
 
