@@ -65,35 +65,8 @@ struct VulnScannerTests {
     }
 }
 
-@Suite("Panic Button")
-struct PanicButtonTests {
-    @Test("Initializes without crash")
-    func initOK() async {
-        let _ = PanicButton()
-        // Can't test activate() as it kills processes
-    }
-}
-
-@Suite("Travel Mode")
-struct TravelModeTests {
-    @Test("Default status is inactive")
-    func defaultInactive() async {
-        let travel = TravelMode()
-        let status = await travel.status()
-        #expect(status.isActive == false)
-    }
-
-    @Test("Activate returns active status")
-    func activateWorks() async {
-        let travel = TravelMode()
-        let status = await travel.activate(networkName: "Test WiFi")
-        #expect(status.isActive == true)
-        #expect(status.networkName == "Test WiFi")
-        #expect(!status.protections.isEmpty)
-        // Deactivate to clean up
-        let _ = await travel.deactivate()
-    }
-}
+// Panic Button and Travel Mode test suites moved to
+// PanicButtonTests.swift and TravelModeTests.swift in Phase 6.
 
 @Suite("Security Digest")
 struct SecurityDigestTests {
