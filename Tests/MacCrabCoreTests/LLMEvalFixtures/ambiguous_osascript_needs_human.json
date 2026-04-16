@@ -1,0 +1,16 @@
+{
+  "label": "needs_human",
+  "alert": {
+    "id": "eval-03",
+    "ruleId": "execution.osascript_shell",
+    "ruleTitle": "osascript invokes shell",
+    "severity": "medium",
+    "processPath": "/usr/bin/osascript",
+    "processName": "osascript",
+    "description": "osascript -e 'do shell script \"whoami\"' observed. Parent was a user's Terminal session.",
+    "mitreTactics": "TA0002",
+    "mitreTechniques": "T1059.002"
+  },
+  "expectedVerdict": "needs_human",
+  "description": "Could be user automation or an attacker piggybacking on legitimate tooling — LLM should defer."
+}

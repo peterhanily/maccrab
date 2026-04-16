@@ -986,7 +986,7 @@ enum DaemonSetup {
                 maxArchives: maxArch
             )
 
-        case "splunk_hec", "elastic_bulk", "datadog_logs":
+        case "splunk_hec", "elastic_bulk", "datadog_logs", "wazuh_api":
             guard let urlStr = spec.url, let url = URL(string: urlStr) else {
                 logger.warning("StreamOutput spec missing valid 'url'")
                 return nil
@@ -1004,10 +1004,56 @@ enum DaemonSetup {
                 timeout: spec.timeoutSeconds ?? 10
             )
 
+        case "s3":
+            guard let bucket = spec.bucket, let region = spec.region else {
+                logger.warning("S3Output spec missing 'bucket' or 'region'")
+                return nil
+            }
+            guard let accessKey = resolveEnv(spec.accessKeyEnv),
+                  let secretKey = resolveEnv(spec.secretKeyEnv) else {
+                logger.warning("S3Output spec missing accessKeyEnv/secretKeyEnv values in environment")
+                return nil
+            }
+            let endpoint = spec.endpoint.flatMap { URL(string: $0) }
+            return S3Output(
+                bucket: bucket,
+                region: region,
+                accessKey: accessKey,
+                secretKey: secretKey,
+                keyPrefix: spec.keyPrefix ?? "maccrab/alerts",
+                endpoint: endpoint,
+                sessionToken: resolveEnv(spec.sessionTokenEnv),
+                maxBatchBytes: spec.maxBatchBytes ?? 1_048_576
+            )
+
+        case "sftp":
+            guard let host = spec.host, let user = spec.user,
+                  let keyPath = spec.keyPath,
+                  let remotePath = spec.remotePath else {
+                logger.warning("SFTPOutput spec missing host/user/keyPath/remotePath")
+                return nil
+            }
+            return SFTPOutput(
+                host: host,
+                port: spec.port ?? 22,
+                user: user,
+                privateKeyPath: keyPath,
+                remotePath: remotePath,
+                flushIntervalSeconds: spec.flushIntervalSeconds ?? 300
+            )
+
         default:
             logger.warning("Unknown output type '\(spec.type)'")
             return nil
         }
+    }
+
+    /// Resolve an env-var reference to its value, returning nil if the
+    /// env name is missing or the variable isn't set.
+    private static func resolveEnv(_ name: String?) -> String? {
+        guard let name, !name.isEmpty else { return nil }
+        let value = Foundation.ProcessInfo.processInfo.environment[name]
+        return (value?.isEmpty == false) ? value : nil
     }
 
     /// Prefer tokenEnv lookup over a literal token — keeps secrets out

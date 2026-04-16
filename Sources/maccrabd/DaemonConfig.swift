@@ -52,7 +52,8 @@ struct DaemonConfig: Codable {
     var outputs: [OutputSpec] = []
 
     struct OutputSpec: Codable {
-        /// "file" | "splunk_hec" | "elastic_bulk" | "datadog_logs"
+        /// "file" | "splunk_hec" | "elastic_bulk" | "datadog_logs" |
+        /// "wazuh_api" | "s3" | "sftp"
         var type: String
         // file-specific
         var path: String?
@@ -67,6 +68,22 @@ struct DaemonConfig: Codable {
         var indexName: String?
         var retryCount: Int?
         var timeoutSeconds: Double?
+        // s3-specific
+        var bucket: String?
+        var region: String?
+        var keyPrefix: String?
+        var accessKeyEnv: String?      // env var name for AWS access key
+        var secretKeyEnv: String?      // env var name for AWS secret key
+        var sessionTokenEnv: String?   // env var name for AWS STS session token
+        var endpoint: String?          // S3-compatible endpoint (MinIO, R2)
+        var maxBatchBytes: Int?
+        // sftp-specific
+        var host: String?
+        var port: Int?
+        var user: String?
+        var keyPath: String?           // path to SSH private key on disk
+        var remotePath: String?
+        var flushIntervalSeconds: Double?
     }
 
     // MARK: - Loading

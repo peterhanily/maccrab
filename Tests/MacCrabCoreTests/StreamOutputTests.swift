@@ -124,6 +124,23 @@ struct StreamOutputFramingTests {
         #expect(msg["class_uid"] as? Int == 2004)
     }
 
+    // MARK: - Wazuh API
+
+    @Test("Wazuh API body wraps the finding as a stringified events array")
+    func wazuhFrame() async throws {
+        let out = StreamOutput(
+            kind: .wazuhAPI,
+            url: URL(string: "https://wazuh.example.com:55000/events")!,
+            token: "jwt-xyz"
+        )
+        let (a, e) = alertAndEvent()
+        let data = try #require(await out.buildBody(alert: a, event: e))
+        let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let events = try #require(obj["events"] as? [String])
+        #expect(events.count == 1)
+        #expect(events[0].contains("\"class_uid\":2004"))
+    }
+
     // MARK: - Protocol conformance
 
     @Test("StreamOutput conforms to Output with kind-derived name")

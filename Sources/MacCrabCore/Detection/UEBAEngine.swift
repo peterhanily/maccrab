@@ -100,12 +100,61 @@ public actor UEBAEngine {
 
     private var profiles: [String: UserEntityProfile] = [:]
 
+    /// Optional on-disk path for profile persistence. When set, load()
+    /// is called during init and save() can be invoked periodically by
+    /// a daemon timer.
+    private let persistencePath: String?
+
     public init(
         minObservationsForScoring: Int = 100,
-        hourAnomalyThreshold: Double = 0.02
+        hourAnomalyThreshold: Double = 0.02,
+        persistencePath: String? = nil
     ) {
         self.minObservationsForScoring = minObservationsForScoring
         self.hourAnomalyThreshold = hourAnomalyThreshold
+        self.persistencePath = persistencePath
+        if let path = persistencePath {
+            Task { await self.load(from: path) }
+        }
+    }
+
+    // MARK: - Persistence
+
+    /// Serialize every profile to JSON at `persistencePath`. Daemon
+    /// timer should call this every 5 minutes or on graceful shutdown.
+    public func save() async {
+        guard let path = persistencePath else { return }
+        let list = Array(profiles.values)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        do {
+            let data = try encoder.encode(list)
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: path
+            )
+        } catch {
+            logger.error("UEBA save failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Load profiles from disk. Called during init when a
+    /// persistencePath is provided.
+    private func load(from path: String) async {
+        guard FileManager.default.fileExists(atPath: path),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        do {
+            let list = try decoder.decode([UserEntityProfile].self, from: data)
+            profiles = Dictionary(uniqueKeysWithValues: list.map { ($0.userName, $0) })
+            logger.info("UEBA loaded \(list.count) profiles from disk")
+        } catch {
+            logger.error("UEBA load failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Observation

@@ -21,12 +21,14 @@ public actor StreamOutput: Output {
         case splunkHEC    = "splunk_hec"
         case elasticBulk  = "elastic_bulk"
         case datadogLogs  = "datadog_logs"
+        case wazuhAPI     = "wazuh_api"
 
         public var displayName: String {
             switch self {
             case .splunkHEC:   return "Splunk HEC"
             case .elasticBulk: return "Elasticsearch Bulk"
             case .datadogLogs: return "Datadog Logs"
+            case .wazuhAPI:    return "Wazuh Manager API"
             }
         }
     }
@@ -148,6 +150,20 @@ public actor StreamOutput: Output {
             return try? JSONSerialization.data(
                 withJSONObject: envelope, options: []
             )
+
+        case .wazuhAPI:
+            // Wazuh Manager `/events` endpoint: {"events": ["<raw JSON>"]}
+            // Each event is a stringified JSON payload. Single-alert
+            // framing keeps the plumbing simple; bulk is a v2.2 concern.
+            guard let findingJSON = try? OCSFMapper.encodeJSON(finding) else {
+                return nil
+            }
+            let envelope: [String: Any] = [
+                "events": [findingJSON],
+            ]
+            return try? JSONSerialization.data(
+                withJSONObject: envelope, options: []
+            )
         }
     }
 
@@ -198,8 +214,8 @@ public actor StreamOutput: Output {
 
     private var contentType: String {
         switch kind {
-        case .splunkHEC, .datadogLogs: return "application/json"
-        case .elasticBulk:             return "application/x-ndjson"
+        case .splunkHEC, .datadogLogs, .wazuhAPI: return "application/json"
+        case .elasticBulk:                         return "application/x-ndjson"
         }
     }
 
@@ -215,6 +231,11 @@ public actor StreamOutput: Output {
             return ("Authorization", token)
         case .datadogLogs:
             return ("DD-API-KEY", token)
+        case .wazuhAPI:
+            // Wazuh Manager API uses JWT bearer tokens obtained from
+            // /security/user/authenticate. The caller passes the JWT
+            // directly in tokenEnv.
+            return ("Authorization", "Bearer \(token)")
         }
     }
 
@@ -223,6 +244,7 @@ public actor StreamOutput: Output {
         case .splunkHEC:   return "maccrab:alert"
         case .elasticBulk: return "maccrab-alerts"
         case .datadogLogs: return "maccrab"
+        case .wazuhAPI:    return "maccrab"
         }
     }
 }

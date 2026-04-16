@@ -185,4 +185,37 @@ struct UEBAEngineTests {
         #expect(anomalies.isEmpty)
         #expect(await engine.stats().users == 0)
     }
+
+    // MARK: - Persistence
+
+    @Test("Profiles persist to disk and reload in a new engine")
+    func persistence() async throws {
+        let path = NSTemporaryDirectory() + "maccrab_ueba_\(UUID().uuidString).json"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let first = UEBAEngine(minObservationsForScoring: 5, persistencePath: path)
+        for _ in 0..<10 {
+            _ = await first.observe(event: procEvent(user: "alice", sshIP: "10.0.0.5"))
+        }
+        await first.save()
+
+        let second = UEBAEngine(minObservationsForScoring: 5, persistencePath: path)
+        // Give the init Task a moment to load.
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let profile = await second.profile(for: "alice")
+        #expect(profile?.totalObservations == 10)
+        #expect(profile?.sshRemoteIPs.contains("10.0.0.5") == true)
+    }
+
+    @Test("save() with no persistencePath is a safe no-op")
+    func saveWithoutPath() async {
+        let engine = UEBAEngine(minObservationsForScoring: 5)
+        for _ in 0..<3 {
+            _ = await engine.observe(event: procEvent())
+        }
+        // Shouldn't crash or error.
+        await engine.save()
+        #expect(await engine.stats().totalObservations == 3)
+    }
 }

@@ -1,0 +1,16 @@
+{
+  "label": "likely_benign",
+  "alert": {
+    "id": "eval-02",
+    "ruleId": "persistence.launch_agent_created",
+    "ruleTitle": "LaunchAgent plist created",
+    "severity": "high",
+    "processPath": "/opt/homebrew/bin/brew",
+    "processName": "brew",
+    "description": "A new LaunchAgent was written to ~/Library/LaunchAgents during Homebrew install of a known-good formula.",
+    "mitreTactics": "TA0003",
+    "mitreTechniques": "T1543.001"
+  },
+  "expectedVerdict": "likely_benign",
+  "description": "Homebrew legitimately drops LaunchAgents for services like mysql/redis — should be likely_benign."
+}
