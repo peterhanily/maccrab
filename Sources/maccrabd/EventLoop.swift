@@ -1067,6 +1067,14 @@ enum EventLoop {
                     if let syslog = state.syslogOutput {
                         Task { await syslog.send(alert: alert) }
                     }
+
+                    // Phase 7 additional outputs (FileOutput, StreamOutput
+                    // Splunk HEC / Elastic Bulk / Datadog). Fire-and-forget
+                    // per sink — a slow or failing sink never blocks the
+                    // detection pipeline.
+                    for sink in state.additionalOutputs {
+                        Task { await sink.send(alert: alert, event: enrichedEvent) }
+                    }
                 }
 
                 // Batch insert all rule-match alerts in a single transaction

@@ -37,6 +37,38 @@ struct DaemonConfig: Codable {
     // MARK: - LLM Backend
     var llm: LLMConfig = LLMConfig()
 
+    // MARK: - Outputs
+    //
+    // Additional alert sinks beyond the existing webhook / syslog /
+    // notification paths. Each entry becomes a `FileOutput` or
+    // `StreamOutput` instance in DaemonSetup.
+    //
+    // Example daemon_config.json.outputs:
+    //   "outputs": [
+    //     {"type": "file", "path": "/var/log/maccrab/alerts.jsonl", "format": "ocsf", "maxMb": 100},
+    //     {"type": "splunk_hec", "url": "https://hec.example.com", "tokenEnv": "SPLUNK_HEC_TOKEN"},
+    //     {"type": "elastic_bulk", "url": "https://es.example.com/_bulk", "tokenEnv": "ES_AUTH_HEADER", "indexName": "sec-alerts"}
+    //   ]
+    var outputs: [OutputSpec] = []
+
+    struct OutputSpec: Codable {
+        /// "file" | "splunk_hec" | "elastic_bulk" | "datadog_logs"
+        var type: String
+        // file-specific
+        var path: String?
+        var format: String?        // "ocsf" | "native"
+        var maxMb: Int?
+        var maxAgeHours: Double?
+        var maxArchives: Int?
+        // stream-specific
+        var url: String?
+        var token: String?         // literal value (avoid — prefer tokenEnv)
+        var tokenEnv: String?      // env var name to read the token from
+        var indexName: String?
+        var retryCount: Int?
+        var timeoutSeconds: Double?
+    }
+
     // MARK: - Loading
 
     /// Load config from a JSON file, falling back to defaults for missing keys.

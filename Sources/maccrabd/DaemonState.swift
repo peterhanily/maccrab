@@ -35,6 +35,9 @@ final class DaemonState {
     let responseEngine: ResponseEngine
     let webhookOutput: WebhookOutput?
     let syslogOutput: SyslogOutput?
+    /// Phase 7 outputs built from daemon_config.json.outputs[]. Each alert
+    /// is fanned out to every entry here via the Output protocol.
+    let additionalOutputs: [any Output]
     let notificationIntegrations: NotificationIntegrations
 
     // MARK: - Self-Defense
@@ -163,6 +166,7 @@ final class DaemonState {
         responseEngine: ResponseEngine,
         webhookOutput: WebhookOutput?,
         syslogOutput: SyslogOutput?,
+        additionalOutputs: [any Output] = [],
         notificationIntegrations: NotificationIntegrations,
         selfDefense: SelfDefense,
         esHealthMonitor: ESClientMonitor,
@@ -257,6 +261,7 @@ final class DaemonState {
         self.responseEngine = responseEngine
         self.webhookOutput = webhookOutput
         self.syslogOutput = syslogOutput
+        self.additionalOutputs = additionalOutputs
         self.notificationIntegrations = notificationIntegrations
         self.selfDefense = selfDefense
         self.esHealthMonitor = esHealthMonitor

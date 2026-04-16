@@ -728,6 +728,19 @@ enum DaemonSetup {
             }
         }
 
+        // Phase 7 outputs: FileOutput and StreamOutput (Splunk HEC /
+        // Elastic Bulk / Datadog Logs) built from daemon_config.json.outputs[].
+        var additionalOutputs: [any Output] = []
+        for spec in config.outputs {
+            if let out = Self.buildOutput(spec: spec, logger: logger) {
+                additionalOutputs.append(out)
+            }
+        }
+        if !additionalOutputs.isEmpty {
+            logger.info("Configured \(additionalOutputs.count) additional output(s)")
+            print("Additional outputs: \(additionalOutputs.map { $0.name }.joined(separator: ", "))")
+        }
+
         // Initialize optional YARA enrichment (Phase 3)
         let yaraRulesPath = supportDir + "/yara_rules"
         let yaraEnricher = YARAEnricher(rulesPath: yaraRulesPath)
@@ -876,6 +889,7 @@ enum DaemonSetup {
             responseEngine: responseEngine,
             webhookOutput: webhookOutput,
             syslogOutput: syslogOutput,
+            additionalOutputs: additionalOutputs,
             notificationIntegrations: notificationIntegrations,
             selfDefense: selfDefense,
             esHealthMonitor: esHealthMonitor,
@@ -947,5 +961,63 @@ enum DaemonSetup {
             fleetClient: fleetClient,
             llmService: llmService
         )
+    }
+
+    // MARK: - Phase 7 output factory
+
+    /// Convert a `DaemonConfig.OutputSpec` into a concrete `any Output`.
+    /// Returns nil for malformed specs; each failure is logged.
+    static func buildOutput(spec: DaemonConfig.OutputSpec, logger: os.Logger) -> (any Output)? {
+        switch spec.type {
+        case "file":
+            guard let path = spec.path else {
+                logger.warning("FileOutput spec missing 'path'")
+                return nil
+            }
+            let format = FileOutput.Format(rawValue: spec.format ?? "ocsf") ?? .ocsf
+            let maxBytes = Int64((spec.maxMb ?? 100) * 1024 * 1024)
+            let maxAge = (spec.maxAgeHours ?? 24) * 3600
+            let maxArch = spec.maxArchives ?? 10
+            return FileOutput(
+                path: path,
+                format: format,
+                maxBytes: maxBytes,
+                maxAgeSeconds: maxAge,
+                maxArchives: maxArch
+            )
+
+        case "splunk_hec", "elastic_bulk", "datadog_logs":
+            guard let urlStr = spec.url, let url = URL(string: urlStr) else {
+                logger.warning("StreamOutput spec missing valid 'url'")
+                return nil
+            }
+            guard let kind = StreamOutput.Kind(rawValue: spec.type) else {
+                return nil
+            }
+            let token = resolveToken(spec: spec)
+            return StreamOutput(
+                kind: kind,
+                url: url,
+                token: token,
+                indexName: spec.indexName,
+                retryCount: spec.retryCount ?? 2,
+                timeout: spec.timeoutSeconds ?? 10
+            )
+
+        default:
+            logger.warning("Unknown output type '\(spec.type)'")
+            return nil
+        }
+    }
+
+    /// Prefer tokenEnv lookup over a literal token — keeps secrets out
+    /// of the on-disk config file.
+    private static func resolveToken(spec: DaemonConfig.OutputSpec) -> String? {
+        if let envVar = spec.tokenEnv,
+           let value = Foundation.ProcessInfo.processInfo.environment[envVar],
+           !value.isEmpty {
+            return value
+        }
+        return spec.token
     }
 }
