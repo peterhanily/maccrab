@@ -1,0 +1,109 @@
+<!--
+  MacCrab rules for Wazuh Manager.
+
+  Install path: /var/ossec/etc/rules/0600-maccrab_rules.xml
+  Restart: systemctl restart wazuh-manager
+
+  Severity mapping (MacCrab → Wazuh level):
+    informational → 1
+    low           → 3
+    medium        → 7
+    high          → 10
+    critical      → 12
+
+  Rule IDs 100200–100299 are reserved for MacCrab here. Adjust if your
+  environment uses this range for something else.
+-->
+<group name="maccrab,">
+
+  <!-- Base rule: any MacCrab finding (we narrow severity in children) -->
+  <rule id="100200" level="3">
+    <decoded_as>maccrab-json</decoded_as>
+    <field name="metadata.product.name">MacCrab</field>
+    <description>MacCrab: $(finding.title)</description>
+    <options>no_full_log</options>
+    <group>maccrab,security_finding,</group>
+  </rule>
+
+  <!-- Informational — routine events, usually suppressed downstream -->
+  <rule id="100201" level="1">
+    <if_sid>100200</if_sid>
+    <field name="severity">Informational</field>
+    <description>MacCrab informational: $(finding.title)</description>
+    <group>maccrab,informational,</group>
+  </rule>
+
+  <!-- Low — noise floor, still worth indexing -->
+  <rule id="100202" level="3">
+    <if_sid>100200</if_sid>
+    <field name="severity">Low</field>
+    <description>MacCrab low severity: $(finding.title)</description>
+    <group>maccrab,low,</group>
+  </rule>
+
+  <!-- Medium -->
+  <rule id="100203" level="7">
+    <if_sid>100200</if_sid>
+    <field name="severity">Medium</field>
+    <description>MacCrab medium severity: $(finding.title)</description>
+    <group>maccrab,medium,</group>
+  </rule>
+
+  <!-- High — pager-worthy in most SOCs -->
+  <rule id="100204" level="10">
+    <if_sid>100200</if_sid>
+    <field name="severity">High</field>
+    <description>MacCrab HIGH severity: $(finding.title)</description>
+    <group>maccrab,high,pci_dss_10.6.1,</group>
+  </rule>
+
+  <!-- Critical — incident response trigger -->
+  <rule id="100205" level="12">
+    <if_sid>100200</if_sid>
+    <field name="severity">Critical</field>
+    <description>MacCrab CRITICAL: $(finding.title)</description>
+    <group>maccrab,critical,pci_dss_10.6.1,</group>
+  </rule>
+
+  <!-- Deception tier: any honeyfile access is always critical -->
+  <rule id="100210" level="14">
+    <if_sid>100200</if_sid>
+    <match>Deception Honeyfile Accessed</match>
+    <description>MacCrab DECEPTION TRIP: honeyfile accessed — active intrusion signal</description>
+    <group>maccrab,deception,critical,</group>
+  </rule>
+
+  <!-- Campaign detection: multi-alert kill chain -->
+  <rule id="100211" level="13">
+    <if_sid>100200</if_sid>
+    <field name="class_uid">2004</field>
+    <match>campaign</match>
+    <description>MacCrab campaign detected: $(finding.title)</description>
+    <group>maccrab,campaign,critical,</group>
+  </rule>
+
+  <!-- Credential access MITRE tactic (TA0006) -->
+  <rule id="100220" level="11">
+    <if_sid>100200</if_sid>
+    <field name="attacks.tactic.uid">TA0006</field>
+    <description>MacCrab credential access: $(finding.title)</description>
+    <group>maccrab,mitre_credential_access,attack.t1003,</group>
+  </rule>
+
+  <!-- Defense evasion (TA0005) -->
+  <rule id="100221" level="9">
+    <if_sid>100200</if_sid>
+    <field name="attacks.tactic.uid">TA0005</field>
+    <description>MacCrab defense evasion: $(finding.title)</description>
+    <group>maccrab,mitre_defense_evasion,</group>
+  </rule>
+
+  <!-- Persistence (TA0003) -->
+  <rule id="100222" level="9">
+    <if_sid>100200</if_sid>
+    <field name="attacks.tactic.uid">TA0003</field>
+    <description>MacCrab persistence: $(finding.title)</description>
+    <group>maccrab,mitre_persistence,</group>
+  </rule>
+
+</group>

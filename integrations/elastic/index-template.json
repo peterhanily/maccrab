@@ -1,0 +1,129 @@
+{
+  "_comment": "Index template for MacCrab OCSF findings ingested via Elasticsearch Bulk API (StreamOutput kind=elastic_bulk). Install with: PUT _index_template/maccrab-alerts",
+  "index_patterns": ["maccrab-alerts*"],
+  "priority": 500,
+  "template": {
+    "settings": {
+      "index": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic": "true",
+      "date_detection": false,
+      "properties": {
+        "time": { "type": "date", "format": "epoch_millis" },
+        "class_uid": { "type": "integer" },
+        "class_name": { "type": "keyword" },
+        "category_uid": { "type": "integer" },
+        "category_name": { "type": "keyword" },
+        "type_uid": { "type": "integer" },
+        "activity_id": { "type": "integer" },
+        "activity_name": { "type": "keyword" },
+        "severity": { "type": "keyword" },
+        "severity_id": { "type": "integer" },
+        "state": { "type": "keyword" },
+        "state_id": { "type": "integer" },
+        "metadata": {
+          "properties": {
+            "version": { "type": "keyword" },
+            "uid": { "type": "keyword", "ignore_above": 128 },
+            "log_name": { "type": "keyword" },
+            "product": {
+              "properties": {
+                "name":        { "type": "keyword" },
+                "vendor_name": { "type": "keyword" },
+                "version":     { "type": "keyword" }
+              }
+            }
+          }
+        },
+        "finding": {
+          "properties": {
+            "uid":   { "type": "keyword", "ignore_above": 128 },
+            "title": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 512 } } },
+            "desc":  { "type": "text" },
+            "types": { "type": "keyword" },
+            "related_events": {
+              "properties": {
+                "uid": { "type": "keyword" }
+              }
+            }
+          }
+        },
+        "attacks": {
+          "properties": {
+            "tactic": {
+              "properties": {
+                "uid":  { "type": "keyword" },
+                "name": { "type": "keyword" }
+              }
+            },
+            "technique": {
+              "properties": {
+                "uid":  { "type": "keyword" },
+                "name": { "type": "keyword" }
+              }
+            }
+          }
+        },
+        "remediation": {
+          "properties": { "desc": { "type": "text" } }
+        },
+        "actor": {
+          "properties": {
+            "process": {
+              "properties": {
+                "pid":          { "type": "integer" },
+                "name":         { "type": "keyword" },
+                "cmd_line":     { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 1024 } } },
+                "created_time": { "type": "date", "format": "epoch_millis" },
+                "file": {
+                  "properties": {
+                    "path":          { "type": "keyword", "ignore_above": 1024 },
+                    "name":          { "type": "keyword" },
+                    "parent_folder": { "type": "keyword" },
+                    "hashes": {
+                      "properties": {
+                        "algorithm": { "type": "keyword" },
+                        "value":     { "type": "keyword" }
+                      }
+                    },
+                    "size": { "type": "long" }
+                  }
+                },
+                "user": {
+                  "properties": {
+                    "name": { "type": "keyword" },
+                    "uid":  { "type": "keyword" }
+                  }
+                },
+                "parent_process": {
+                  "properties": {
+                    "pid":  { "type": "integer" },
+                    "name": { "type": "keyword" },
+                    "file": {
+                      "properties": {
+                        "path": { "type": "keyword", "ignore_above": 1024 },
+                        "name": { "type": "keyword" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "process": {
+          "properties": {
+            "pid":      { "type": "integer" },
+            "name":     { "type": "keyword" },
+            "cmd_line": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 1024 } } }
+          }
+        }
+      }
+    }
+  }
+}

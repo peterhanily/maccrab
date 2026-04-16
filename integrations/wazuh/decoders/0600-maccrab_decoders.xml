@@ -1,0 +1,23 @@
+<!--
+  MacCrab decoder for Wazuh Manager.
+
+  Place this file at /var/ossec/etc/decoders/0600-maccrab_decoders.xml on
+  the Wazuh manager and restart the manager. The decoder parses the
+  OCSF-formatted NDJSON that MacCrab's FileOutput writes to
+  /var/log/maccrab/alerts.jsonl (via `"type": "file"` in daemon_config).
+
+  Wazuh 4.x ships a built-in JSON decoder, so all we need to do is tag
+  the source and pull out the few fields the rules reference.
+
+  Naming: files in /var/ossec/etc/decoders/ are processed in alphabetical
+  order. `0600-` keeps us out of Wazuh's built-in number ranges.
+-->
+<decoder name="maccrab">
+  <prematch>^\{.*"metadata".*"product".*"MacCrab"</prematch>
+</decoder>
+
+<decoder name="maccrab-json">
+  <parent>maccrab</parent>
+  <type>json</type>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
