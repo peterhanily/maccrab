@@ -33,7 +33,12 @@ detection:
             - 'readpl'
     selection_ssh:
         IsSSHLaunched: 'true'
-    condition: selection_tool and selection_action and selection_ssh
+    filter_maccrab:
+        Image|contains:
+            - '/maccrabd'
+            - '/maccrabctl'
+            - '/MacCrab.app/'
+    condition: selection_tool and selection_action and selection_ssh and not filter_maccrab
 falsepositives:
     - Remote admin tooling run manually by an authorized operator
     - Automation over SSH that legitimately rotates or reads credentials
