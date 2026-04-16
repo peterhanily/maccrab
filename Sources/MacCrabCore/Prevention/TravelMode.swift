@@ -4,6 +4,9 @@ import os.log
 /// Heightened security mode for untrusted networks (hotels, airports, coffee shops).
 /// Increases monitoring sensitivity and enables additional protections.
 public actor TravelMode {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.travelMode
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "travel-mode")
 
     public struct TravelModeStatus: Sendable {

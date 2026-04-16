@@ -19,6 +19,9 @@ import os.log
 
 public actor HoneyfileManager {
 
+    /// MITRE D3FEND technique: D3-DF (Decoy File).
+    public nonisolated static let d3fend = D3FENDMapping.honeyfile
+
     // MARK: - Types
 
     /// Kind of credential store being imitated. Lets consumers (SOC

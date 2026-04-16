@@ -4,6 +4,9 @@ import os.log
 /// Prevents C2 callbacks by sinkholing malicious domains to localhost.
 /// Writes entries to /etc/hosts that redirect threat-intel domains to 127.0.0.1.
 public actor DNSSinkhole {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.dnsSinkhole
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "dns-sinkhole")
 
     /// Marker comment in /etc/hosts to identify MacCrab-managed entries

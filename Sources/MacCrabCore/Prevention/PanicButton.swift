@@ -5,6 +5,9 @@ import os.log
 /// Emergency response: one-click breach containment.
 /// Kills suspicious processes, blocks network, locks screen, logs everything.
 public actor PanicButton {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.panicButton
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "panic-button")
 
     public struct PanicResult: Sendable {

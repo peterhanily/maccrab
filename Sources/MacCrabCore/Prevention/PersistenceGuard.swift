@@ -5,6 +5,9 @@ import os.log
 /// Protects persistence directories from unauthorized modification
 /// using chflags system immutable flag (schg).
 public actor PersistenceGuard {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.persistenceGuard
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "persistence-guard")
 
     /// Directories to protect

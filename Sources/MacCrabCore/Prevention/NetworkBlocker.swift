@@ -5,6 +5,9 @@ import os.log
 /// Supports bulk IP blocking from threat intel feeds, bidirectional rules,
 /// and auto-expiration.
 public actor NetworkBlocker {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.networkBlocker
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "network-blocker")
 
     private let anchorName = "com.maccrab"

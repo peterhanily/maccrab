@@ -4,6 +4,9 @@ import os.log
 /// Blocks installation of suspiciously fresh packages by killing the
 /// installer process when the package freshness check returns critical risk.
 public actor SupplyChainGate {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.supplyChainGate
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "supply-chain-gate")
 
     public struct BlockedInstall: Sendable {

@@ -4,6 +4,9 @@ import os.log
 /// Auto-revokes TCC permissions when anomalous grants are detected.
 /// Uses `tccutil` to reset permissions for specific services and bundle IDs.
 public actor TCCRevocation {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.tccRevocation
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "tcc-revocation")
 
     public struct RevocationEvent: Sendable {

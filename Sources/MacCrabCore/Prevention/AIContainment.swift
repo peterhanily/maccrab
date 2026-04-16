@@ -6,6 +6,9 @@ import os.log
 /// Uses file ACLs to deny read access to credential paths for specific users/processes.
 /// Moves from "detect and alert" to "detect and prevent".
 public actor AIContainment {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.aiContainment
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "ai-containment")
 
     /// Paths to protect from AI tool access

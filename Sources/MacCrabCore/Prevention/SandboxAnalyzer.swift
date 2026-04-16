@@ -5,6 +5,9 @@ import os.log
 /// Uses sandbox-exec (deprecated but functional on macOS 26) to restrict
 /// network access, file writes, and process spawning during analysis.
 public actor SandboxAnalyzer {
+
+    /// MITRE D3FEND defensive technique this module implements.
+    public nonisolated static let d3fend = D3FENDMapping.sandboxAnalyzer
     private let logger = Logger(subsystem: "com.maccrab.prevention", category: "sandbox-analyzer")
 
     /// Analysis result
