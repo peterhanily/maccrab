@@ -9,6 +9,7 @@ import SwiftUI
 
 struct OverviewDashboard: View {
     @ObservedObject var appState: AppState
+    @ObservedObject var sysextManager: SystemExtensionManager
     @Binding var selectedSection: MainView.SidebarSection?
     @AppStorage("prevention.dnsSinkhole") private var dnsSinkholeEnabled = false
     @AppStorage("prevention.networkBlocker") private var networkBlockerEnabled = false
@@ -40,6 +41,15 @@ struct OverviewDashboard: View {
                 .padding(40)
             } else {
                 VStack(alignment: .leading, spacing: 20) {
+                    // === System Extension state ===
+                    // Surface the ES activation state prominently on
+                    // first launch (and any time it's not active) so
+                    // users know why detection coverage is degraded.
+                    // Hidden once protection is active — no clutter.
+                    if sysextManager.state != .activated {
+                        SystemExtensionPanel(manager: sysextManager)
+                    }
+
                     // === Call to Action Banner (clickable → navigates to Alerts) ===
                     Button { selectedSection = .alerts } label: {
                         HStack(spacing: 12) {
