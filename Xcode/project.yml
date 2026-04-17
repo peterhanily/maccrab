@@ -1,0 +1,132 @@
+# project.yml — XcodeGen spec for MacCrab app + system extension.
+#
+# Why this exists: SPM alone cannot build .systemextension bundles. Apple's
+# SystemExtension framework is the only supported delivery mechanism for
+# com.apple.developer.endpoint-security.client outside the Mac App Store
+# (see research notes in plans/ and CHANGELOG 1.3.0). The app target gains
+# OSSystemExtensionRequest activation; the extension target embeds the
+# daemon bootstrap.
+#
+# Canonical SPM targets (maccrabctl, maccrab-mcp, MacCrabCore, MacCrabCoreTests)
+# stay in Package.swift and keep building with `swift build`. Only the
+# UI-bearing + entitlement-bearing targets live here.
+#
+# To regenerate: `cd Xcode && xcodegen`. .xcodeproj is gitignored; this
+# yml is the source of truth.
+
+name: MacCrab
+options:
+  minimumXcodeGenVersion: "2.40"
+  deploymentTarget:
+    macOS: "13.0"
+  bundleIdPrefix: com.maccrab
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+packages:
+  MacCrabCore:
+    # The SPM package lives one directory up. Both targets consume
+    # MacCrabCore as a library dependency; no duplication of sources.
+    path: ..
+
+targets:
+  # ─── Main app (dashboard + sysext activator) ──────────────────────
+  MacCrabApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: ../Sources/MacCrabApp
+    dependencies:
+      - package: MacCrabCore
+        product: MacCrabCore
+      # Embed + sign the system extension inside the app bundle so
+      # MacCrab.app/Contents/Library/SystemExtensions/
+      #   com.maccrab.agent.systemextension ships with the app.
+      - target: MacCrabAgent
+        embed: true
+        codeSign: true
+    info:
+      path: Resources/MacCrabApp-Info.plist
+      properties:
+        CFBundleName: MacCrab
+        CFBundleDisplayName: MacCrab
+        CFBundleIdentifier: com.maccrab.app
+        CFBundleExecutable: MacCrab
+        CFBundleVersion: "1.3.0"
+        CFBundleShortVersionString: "1.3.0"
+        CFBundlePackageType: APPL
+        CFBundleIconFile: AppIcon
+        CFBundleIconName: AppIcon
+        LSMinimumSystemVersion: "13.0"
+        LSUIElement: true
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        NSSystemExtensionUsageDescription: "MacCrab uses an Endpoint Security system extension to detect threats in real time. The extension runs at the kernel event boundary and observes process, file, and network activity on your Mac."
+        NSMicrophoneUsageDescription: "MacCrab monitors for ultrasonic voice injection attacks."
+    entitlements:
+      path: Resources/MacCrabApp.entitlements
+      properties:
+        # The app itself does not run ES code. It needs only the
+        # system-extension.install entitlement so OSSystemExtensionRequest
+        # can activate the embedded sysext.
+        com.apple.developer.system-extension.install: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.maccrab.app
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: 79S425CW99
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+    preBuildScripts:
+      - name: Compile rules
+        script: |
+          set -e
+          python3 "${SRCROOT}/../Compiler/compile_rules.py" \
+            --input-dir "${SRCROOT}/../Rules" \
+            --output-dir "${SRCROOT}/../.build/compiled_rules" 2>/dev/null || true
+
+  # ─── Endpoint Security system extension (the daemon) ───────────────
+  MacCrabAgent:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: ../Sources/MacCrabAgent
+    dependencies:
+      - package: MacCrabCore
+        product: MacCrabCore
+    info:
+      path: Resources/MacCrabAgent-Info.plist
+      properties:
+        CFBundleName: MacCrabAgent
+        CFBundleDisplayName: MacCrab Endpoint Security Extension
+        CFBundleIdentifier: com.maccrab.agent
+        CFBundleExecutable: com.maccrab.agent
+        CFBundleVersion: "1.3.0"
+        CFBundleShortVersionString: "1.3.0"
+        CFBundlePackageType: SYEX
+        LSMinimumSystemVersion: "13.0"
+        NSSystemExtensionUsageDescription: "MacCrab's endpoint security extension watches kernel events (process, file, network) to detect threats. Approve once in System Settings > General > Login Items & Extensions."
+    entitlements:
+      path: Resources/MacCrabAgent.entitlements
+      properties:
+        # Core Endpoint Security client entitlement. Honoured by AMFI
+        # only when the binary is loaded via OSSystemExtensionRequest
+        # from an approved .systemextension bundle inside the containing
+        # app — which is the whole point of this refactor.
+        com.apple.developer.endpoint-security.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.maccrab.agent
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: 79S425CW99
+        PROVISIONING_PROFILE_SPECIFIER: MacCrab ES Distribution
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+        # System extensions use a bare Mach-O layout under
+        # com.maccrab.agent.systemextension/Contents/MacOS/<id>
+        EXECUTABLE_NAME: com.maccrab.agent
