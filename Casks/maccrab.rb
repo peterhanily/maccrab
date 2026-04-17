@@ -116,7 +116,9 @@ cask "maccrab" do
 
     Grant Full Disk Access for complete detection coverage:
       1. Open System Settings > Privacy & Security > Full Disk Access
-      2. Click + and add /opt/homebrew/bin/maccrabd (or /usr/local/bin/maccrabd)
+      2. Click + and add /Applications/MacCrab.app (drag it in, or
+         click + and browse). FDA granted to the app bundle covers
+         the daemon at Contents/Library/LaunchDaemons/maccrabd too.
       3. Restart: sudo launchctl unload /Library/LaunchDaemons/com.maccrab.agent.plist
                   sudo launchctl load /Library/LaunchDaemons/com.maccrab.agent.plist
 
