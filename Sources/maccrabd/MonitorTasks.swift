@@ -13,13 +13,19 @@ enum MonitorTasks {
                     // Route FSEvents through the enrichment + detection pipeline
                     let enriched = await state.enricher.enrich(event)
                     try? await state.eventStore.insert(event: enriched)
-                    let matches = await state.ruleEngine.evaluate(enriched)
+                    var matches = await state.ruleEngine.evaluate(enriched)
+                    // Apply the same noise filters the main EventLoop uses
+                    // so FSEvents-triggered rule hits don't bypass
+                    // unknown-process / warm-up / trusted-browser gates.
+                    EventLoop.applyNoiseFilters(&matches, event: enriched, state: state)
                     for match in matches {
                         if await state.suppressionManager.isSuppressed(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
                         if await state.deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
                         await state.deduplicator.recordAlert(ruleId: match.ruleId, processPath: enriched.process.executable)
+                        let effective = await state.deduplicator.effectiveSeverity(
+                            ruleId: match.ruleId, original: match.severity)
                         let alert = Alert(
-                            ruleId: match.ruleId, ruleTitle: match.ruleName, severity: match.severity,
+                            ruleId: match.ruleId, ruleTitle: match.ruleName, severity: effective,
                             eventId: enriched.id.uuidString, processPath: enriched.process.executable,
                             processName: enriched.process.name, description: match.description,
                             mitreTactics: match.tags.filter { $0.hasPrefix("attack.") && !$0.contains("t1") }.joined(separator: ","),
@@ -27,7 +33,9 @@ enum MonitorTasks {
                             suppressed: false
                         )
                         try? await state.alertStore.insert(alert: alert)
-                        await state.notifier.notify(alert: alert)
+                        if effective >= .high {
+                            await state.notifier.notify(alert: alert)
+                        }
                         print("[FS] \(match.ruleName) | \(enriched.file?.path ?? "?")")
                     }
                 }

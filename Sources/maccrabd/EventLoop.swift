@@ -662,50 +662,10 @@ enum EventLoop {
             // Layer 1: Single-event Sigma rules
             var matches = await state.ruleEngine.evaluate(enrichedEvent)
 
-            // Drop rule hits where the event has no attributable process. Most
-            // file-event rules (cookie DB read, TCC DB write, privacy plist
-            // tamper, trojan-source unicode) ship with `Image|contains`
-            // filters designed to exclude trusted system processes — those
-            // filters fail *open* when the event arrives with `process.name ==
-            // "unknown"` (FSEvents path), causing the rule to fire on
-            // activity we cannot attribute and therefore cannot triage. An
-            // unattributable file event is a low-signal alert by construction.
-            if enrichedEvent.process.name == "unknown"
-                || enrichedEvent.process.executable.isEmpty {
-                matches.removeAll { match in
-                    // Keep only critical rules — those are worth a vague
-                    // alert even without attribution (e.g., SIP disabled,
-                    // ransomware note, known-malicious-hash writes).
-                    match.severity != .critical
-                }
-            }
-
-            // Warm-up gate: the first 60 seconds after daemon start are
-            // dominated by inventory scans (browser extensions, quarantine
-            // state, process-tree baseline) and delayed events the kernel
-            // had queued before we attached. Emitting non-critical alerts
-            // during that window mixes startup noise into the live alert
-            // stream. Critical rules still fire — a brand-new daemon shouldn't
-            // miss a ransomware note because it booted ten seconds ago.
-            if state.isWarmingUp {
-                matches.removeAll { $0.severity != .critical }
-            }
-
-            // Trusted browser/Electron-helper short circuit. Chromium-based
-            // apps spawn a wide tree of helper processes (Renderer, GPU,
-            // Plugin, Utility, Crashpad handler) doing things that individual
-            // Sigma rules flag in isolation — reading cookies files from
-            // their own profile, writing to their own cache directory,
-            // opening long-lived HTTPS connections, spawning child tools.
-            // We can't individually allowlist every helper-against-every-rule
-            // permutation, but we CAN short-circuit once: if the event's
-            // process executable sits under a known browser app bundle,
-            // only critical rules fire. This reuses the same
-            // "attacker rarely walks signed app bundles" heuristic the
-            // CrossProcessCorrelator already applies to network convergence.
-            if Self.isTrustedBrowserHelper(path: enrichedEvent.process.executable) {
-                matches.removeAll { $0.severity != .critical }
-            }
+            // Apply shared noise filters — also called from the FSEvents
+            // path in MonitorTasks so behavior stays consistent across the
+            // two rule-evaluation entry points.
+            Self.applyNoiseFilters(&matches, event: enrichedEvent, state: state)
 
             // Layer 2: Temporal sequence rules (Phase 2)
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
@@ -1265,5 +1225,28 @@ enum EventLoop {
             return true
         }
         return false
+    }
+
+    /// Apply the standard low-signal noise filters to a batch of rule
+    /// matches. Mutates `matches` in place. Called from both the main
+    /// EventLoop and the FSEvents-only path in MonitorTasks so both
+    /// entry points behave identically.
+    ///
+    /// Three gates, each drops non-`.critical` matches:
+    /// - event has no attributable process (FSEvents without ES context)
+    /// - daemon is still in the warm-up window (first 60s after start)
+    /// - event's executable lives under a trusted browser / Electron bundle
+    static func applyNoiseFilters(
+        _ matches: inout [RuleMatch], event: Event, state: DaemonState
+    ) {
+        if event.process.name == "unknown" || event.process.executable.isEmpty {
+            matches.removeAll { $0.severity != .critical }
+        }
+        if state.isWarmingUp {
+            matches.removeAll { $0.severity != .critical }
+        }
+        if Self.isTrustedBrowserHelper(path: event.process.executable) {
+            matches.removeAll { $0.severity != .critical }
+        }
     }
 }

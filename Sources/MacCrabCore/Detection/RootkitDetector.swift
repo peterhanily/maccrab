@@ -51,7 +51,7 @@ public actor RootkitDetector {
         continuation.finish()
     }
 
-    private func scan() {
+    private func scan() async {
         // Method 1: proc_listallpids
         let procPids = getPidsViaProcList()
 
@@ -63,20 +63,33 @@ public actor RootkitDetector {
         let sysctlOnly = sysctlPids.subtracting(procPids)
 
         let myPid = getpid()
+        let suspects = procOnly.union(sysctlOnly).filter { $0 != 0 && $0 != myPid }
+        guard !suspects.isEmpty else { return }
 
-        for pid in procOnly {
-            // Skip PID 0 (kernel) and our own PID
-            if pid == 0 || pid == myPid { continue }
+        // The two APIs are not snapshotted atomically — we call them
+        // back-to-back, so any process that exits or starts in the gap
+        // between the two calls appears in one set but not the other.
+        // That race was producing the bulk of `hidden-process` alerts on
+        // a busy workstation (a short-lived `grep`, `git`, IDE subprocess,
+        // etc.). Re-query both APIs after a short delay and only alert on
+        // PIDs where the discrepancy persists. A true userland rootkit
+        // hides the process for its entire lifetime; a race does not.
+        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+        let verifyProc = getPidsViaProcList()
+        let verifySysctl = getPidsViaSysctl()
+
+        for pid in procOnly where suspects.contains(pid) {
+            guard verifyProc.contains(pid), !verifySysctl.contains(pid) else { continue }
             let event = HiddenProcess(pid: pid, source: "proc_only", timestamp: Date())
             continuation.yield(event)
-            logger.critical("Hidden process detected: PID \(pid) visible to proc_listallpids but not sysctl")
+            logger.critical("Hidden process detected: PID \(pid) visible to proc_listallpids but not sysctl (verified)")
         }
 
-        for pid in sysctlOnly {
-            if pid == 0 || pid == myPid { continue }
+        for pid in sysctlOnly where suspects.contains(pid) {
+            guard verifySysctl.contains(pid), !verifyProc.contains(pid) else { continue }
             let event = HiddenProcess(pid: pid, source: "sysctl_only", timestamp: Date())
             continuation.yield(event)
-            logger.critical("Hidden process detected: PID \(pid) visible to sysctl but not proc_listallpids")
+            logger.critical("Hidden process detected: PID \(pid) visible to sysctl but not proc_listallpids (verified)")
         }
     }
 

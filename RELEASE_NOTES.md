@@ -1,82 +1,83 @@
-# MacCrab 1.2.2 — Ship Notes
+# MacCrab 1.2.3 — Ship Notes
 
-**Hotfix for the 1.2.1 notification flood on fresh installs.**
+**24-hour observation hotfix.** Four noise sources that survived 1.2.2
+and fired on normal workstation activity overnight.
 
-1.2.1 users: drop-in upgrade. No schema changes, no config changes.
-Upgrade specifically addresses the two noise sources observed on
-real-world deployments after 1.2.1 shipped.
+1.2.x users: drop-in upgrade. No schema changes, no config changes.
 
 ## What changed
 
-### Tamper-detection alert storm, fixed
+Twelve-hour observation of 1.2.2 on a real dev workstation produced
+94 alerts — not a flood, but four specific offenders accounted for
+~95% of it, all from code paths that didn't go through the noise
+filters we added in 1.2.1 / 1.2.2.
 
-On any machine where the `maccrabd` binary changed after the daemon
-started (a local rebuild, a Homebrew upgrade while the daemon is
-running, a signed re-notarization) the 1.2.1 SelfDefense periodic
-check fired the same `binary_modified` critical alert every 15
-seconds — 240 alerts per hour. Dashboard accurate; Apple
-Notification Center a disaster.
+### FSEvents bypass fixed
 
-Fix:
+`MonitorTasks.swift` runs a separate rule-evaluation loop for
+FSEvents (the non-root fallback file source) that didn't consult the
+unknown-process / warm-up / trusted-browser gates added in 1.2.1.
+That meant Sigma rules fired on every file write even when the
+event had no process attribution — including `/Codex/sentry/*.json`,
+`/AddressBook/Metadata/.info`, and Firefox profile state files.
 
-- Per-type `alertedTamperTypes` gate in `SelfDefense`. Each tamper
-  type (`binary_modified`, `rules_modified`, `database_modified`,
-  `debugger_attached`, `plist_removed`, `process_kill_attempt`,
-  `file_deleted`, `signal_received`, `config_modified`) alerts
-  **exactly once** per daemon lifetime.
-- The "SUSTAINED TAMPERING DETECTED: N consecutive failures" escalation
-  summary also fires only once (at the 3-failure mark).
-- Subsequent cycles keep running and keep writing to the forensic
-  logs (`~/.maccrab_tamper.log` + `/var/log/maccrab_tamper.log` +
-  `$TMPDIR/maccrab_tamper.log`) — but no longer produce new alerts
-  or OS banners.
+Extracted the filter logic into `EventLoop.applyNoiseFilters` and
+call it from both paths. Also re-used it for the SIGHUP retroactive
+scan, so re-detection after a rule reload applies the same gates.
 
-### Notifier dedup, tightened
+### RootkitDetector dual-API race fixed
 
-`NotificationOutput` previously wiped its entire dedup set every 5
-minutes, so any persistent condition produced a fresh banner every
-5 minutes indefinitely.
+The rootkit detector compares two snapshots of the process table
+(`proc_listallpids()` vs. `sysctl(KERN_PROC_ALL)`). Those calls
+aren't atomic — any process that exits or spawns in the 1–2 ms gap
+appears in one set but not the other. On a busy workstation that
+produced **46 false-positive hidden-process alerts in one day**, all
+with the same `sysctl_only` marker (process exited between the two
+calls).
 
-Fix:
+Added second-chance verification: after a 300 ms delay, re-query both
+APIs. Only alert when the discrepancy persists. A real userland
+rootkit hides a process for its entire lifetime; an exit-timing race
+doesn't.
 
-- Per-key timestamps (`[String: Date]` instead of `Set<String>`). A
-  given `(ruleId, processPath)` combination is dedup'd for its own
-  one-hour window, not for the daemon's next bulk sweep.
-- Dedup window widened from 5 minutes to 1 hour. A banner storm
-  caused by a single rule is now capped at 24/day maximum per
-  `(rule, process)` combination.
+### AI sandbox: Google IP ranges completed
 
-### Chrome Helper / Electron-helper noise, short-circuited
+11 alerts for "AI tool connected to unapproved IP" on `74.125.x` and
+`172.253.x` — both Google-owned ranges we hadn't listed in
+`AINetworkSandbox.wellKnownCloudPrefixes`. Added the full Google
+IP block list from `gstatic.com/ipranges/goog.json`:
 
-Users reported a flood of alerts on fresh installs involving
-Google Chrome Helper, Microsoft Edge helpers, Slack, Discord, and
-similar Electron apps. These all share a Chromium-based helper tree
-that does a lot of activity individual Sigma rules flag on their
-own — reading its own cookie DB, writing to its own cache, opening
-long-lived HTTPS connections, spawning child binaries for profile
-migration.
+```
+64.233  66.102  66.249  72.14
+74.125  108.177  172.217  172.253
+173.194  209.85  216.58  216.239
+```
 
-Fix:
+Synced the identical list into `CrossProcessCorrelator.trustedCloudPrefixes`.
 
-- New `EventLoop.trustedBrowserPrefixes` covering every major Chromium
-  browser (Chrome, Canary, Chromium, Edge family, Brave, Arc, Opera,
-  Vivaldi, Firefox family, Safari, Orion) and commonly-deployed
-  Electron apps (Slack, Discord, Teams, VS Code, Cursor, Claude,
-  ChatGPT Atlas, Codex, GitHub Desktop, Signal, Telegram, WhatsApp).
-- When the event's executable path lives under one of those bundles,
-  the event loop drops non-critical rule matches before they become
-  alerts. Critical rules (ransomware, SIP disabled,
-  known-malicious-hash) still fire.
-- Complements the per-detector allowlists shipped in 1.2.1 with a
-  single short-circuit that also covers rules we haven't individually
-  hardened.
+### `runningboardd` added to power allowlist
+
+Core macOS daemon that manages process lifecycles and holds power
+assertions on behalf of other processes. Fires
+`maccrab.forensic.power-preventing_sleep` on every poll. Added
+alongside `assertiond` and `ContextStoreAgent` for completeness.
+
+## Measured impact (reference workstation)
+
+| Rule | 1.2.2 (24h) | 1.2.3 (expected) |
+|------|-----------:|-----------------:|
+| `forensic.hidden-process` | 46 | 0 (race-verified) |
+| `invisible_unicode_in_source` | 12 | 0 (FSEvents filter) |
+| `ai-guard.network-sandbox` | 11 | ≤1 (Google ranges) |
+| `browser_cookie_access` | 8 | 0 (FSEvents filter) |
+| `contacts_database_access` | 8 | 0 (FSEvents filter) |
+| `trojan_source_bidi_code` | 6 | 0 (FSEvents filter) |
+| `power-preventing_sleep` | 3 | 0 (runningboardd) |
 
 ## Upgrade notes
 
-- Drop-in upgrade over 1.2.1. No schema or config changes.
-- Universal build (arm64 + x86_64), Developer ID signed, Apple
-  notarized, ticket stapled.
-- `brew upgrade --cask maccrab` picks up the new DMG.
+Drop-in over 1.2.2. `brew upgrade --cask maccrab` picks up the new
+notarized DMG.
 
 ## Credits
 

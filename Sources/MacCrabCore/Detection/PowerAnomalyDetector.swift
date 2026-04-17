@@ -39,6 +39,7 @@ public actor PowerAnomalyDetector {
         "WindowServer", "loginwindow", "SystemUIServer",
         "screensharingd", "ScreenSharingAgent", "AirPlayXPCHelper",
         "wifid", "rapportd", "sharingd", "mediaremoted",
+        "runningboardd", "assertiond", "ContextStoreAgent",
         "soagent", "locationd", "cloudd", "bird",
         "caffeinate", "dtrace",
         // User-facing media / meeting / chat (media-playback assertions)

@@ -3,6 +3,43 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] — 2026-04-17
+
+24-hour observation hotfix. Four specific noise sources identified by
+running 1.2.2 against a real dev workstation overnight.
+
+### Fixed
+
+- **FSEvents path bypassed the noise filters.** `MonitorTasks` runs a
+  separate rule-evaluation loop for FSEvents-sourced events (non-root
+  fallback) that didn't go through `EventLoop`'s unknown-process /
+  warm-up / trusted-browser filters, so Sigma rules fired on every
+  file event even when the event had no process attribution. Extracted
+  the filter logic into `EventLoop.applyNoiseFilters` and call it from
+  both paths. Eliminates the 34 overnight alerts for invisible-unicode,
+  trojan-source, cookie-DB-access, and contacts-DB-access firing on
+  file writes from unknown processes.
+- **RootkitDetector dual-API race.** `proc_listallpids()` and
+  `sysctl(KERN_PROC_ALL)` are called sequentially, so any process that
+  exits or spawns in the 1–2 ms gap appears in one set but not the
+  other. That race was producing 100% of the `hidden-process`
+  detections on a busy machine (46 in one day). Added second-chance
+  verification: after a 300 ms delay we re-query both APIs and only
+  alert when the discrepancy persists. A userland rootkit hides a
+  process for its entire lifetime; an exit-timing race does not.
+- **AI-guard cloud IP prefix list was incomplete.** Google serves
+  several user-facing APIs from `74.125./16` and `172.253./16` ranges
+  that weren't in the allowlist (only `142.250`, `142.251`, `172.217`,
+  `209.85`, `216.58` were). Added the full Google-owned block set from
+  gstatic.com/ipranges/goog.json (64.233, 66.102, 66.249, 72.14,
+  74.125, 108.177, 172.253, 173.194, 216.239) to both the
+  `AINetworkSandbox` fallback and the `CrossProcessCorrelator` cloud
+  filter.
+- **`runningboardd` missing from PowerAnomalyDetector allowlist.** Core
+  macOS daemon that manages process lifecycles and holds power
+  assertions on behalf of other processes. Added alongside
+  `assertiond` and `ContextStoreAgent` for completeness.
+
 ## [1.2.2] — 2026-04-16
 
 Hotfix on top of 1.2.1 targeting OS-notification floods. Drop-in
