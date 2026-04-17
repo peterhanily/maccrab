@@ -26,14 +26,35 @@ struct OverviewDashboard: View {
 
     var body: some View {
         ScrollView {
-            if !appState.isConnected && appState.rulesLoaded == 0 {
+            // While the system extension isn't activated, the sysext
+            // panel is the ONLY useful thing on this page — it's how
+            // the user starts protection. Show it unconditionally at
+            // the top so we never hide the activation control behind
+            // a "connecting to daemon" spinner that can never resolve
+            // (the daemon is the sysext; activating it *is* the
+            // connection). Once the sysext is active, fall through to
+            // the normal "connecting" spinner (brief, while the
+            // dashboard reads its first rows from the DB) and then
+            // the full overview.
+            if sysextManager.state != .activated {
+                VStack(alignment: .leading, spacing: 20) {
+                    SystemExtensionPanel(manager: sysextManager)
+                    if !appState.isConnected {
+                        Text("Enable protection above to start the detection engine.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 4)
+                    }
+                }
+                .padding()
+            } else if !appState.isConnected && appState.rulesLoaded == 0 {
                 VStack(spacing: 12) {
                     ProgressView()
                         .scaleEffect(1.5)
-                    Text(String(localized: "overview.connecting", defaultValue: "Connecting to MacCrab daemon\u{2026}"))
+                    Text(String(localized: "overview.connecting", defaultValue: "Connecting to the detection engine\u{2026}"))
                         .font(.headline)
                         .foregroundColor(.secondary)
-                    Text(String(localized: "overview.startDaemon", defaultValue: "Start the daemon: sudo maccrabd"))
+                    Text("The extension is active — populating the dashboard.")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -41,15 +62,6 @@ struct OverviewDashboard: View {
                 .padding(40)
             } else {
                 VStack(alignment: .leading, spacing: 20) {
-                    // === System Extension state ===
-                    // Surface the ES activation state prominently on
-                    // first launch (and any time it's not active) so
-                    // users know why detection coverage is degraded.
-                    // Hidden once protection is active — no clutter.
-                    if sysextManager.state != .activated {
-                        SystemExtensionPanel(manager: sysextManager)
-                    }
-
                     // === Call to Action Banner (clickable → navigates to Alerts) ===
                     Button { selectedSection = .alerts } label: {
                         HStack(spacing: 12) {
