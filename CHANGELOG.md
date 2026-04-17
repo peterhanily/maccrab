@@ -3,6 +3,30 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-04-18
+
+Hotfix for 1.3.0. The Overview tab hid the "Enable Protection"
+activation control behind a `!appState.isConnected` spinner that
+told the user to run `sudo maccrabd` — but 1.3.0 removed that
+command entirely. The activation card became unreachable in
+exactly the state it was meant for (first launch after install).
+
+### Fixed
+
+- `OverviewDashboard` now shows `SystemExtensionPanel` at the top
+  unconditionally when `sysextManager.state != .activated`.
+  Previously the panel was nested inside the `isConnected` branch,
+  so on a fresh install (no connection, no rules yet) the user
+  saw only the obsolete "Start the daemon: sudo maccrabd" message
+  and could never reach the Enable Protection button.
+- Replaced "Start the daemon: sudo maccrabd" with a message
+  pointing at the activation panel. The follow-up "Connecting to
+  the detection engine…" state only appears after the sysext is
+  actively running but the dashboard hasn't read its first rows
+  yet — a genuinely brief window, not a deadlock.
+
+Drop-in upgrade over 1.3.0. No schema/config changes.
+
 ## [1.3.0] — 2026-04-18
 
 Native Endpoint Security via a proper system extension. Ends the
