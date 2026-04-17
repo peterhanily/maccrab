@@ -9,7 +9,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 PREFIX="${PREFIX:-/usr/local}"
 SUPPORT_DIR="/Library/Application Support/MacCrab"
-PLIST_NAME="com.maccrab.daemon"
+PLIST_NAME="com.maccrab.agent"
 PLIST_DIR="/Library/LaunchDaemons"
 
 RED='\033[0;31m'
@@ -135,6 +135,50 @@ find "$SUPPORT_DIR/compiled_rules" -type d -exec chmod 755 {} \;
 
 RULE_COUNT=$(find "$SUPPORT_DIR/compiled_rules" -name '*.json' | wc -l | tr -d ' ')
 info "Installed $RULE_COUNT compiled rules."
+
+# Upgrade path from the pre-1.2.4 identifier. The daemon was previously
+# labelled com.maccrab.daemon; Apple bound the Endpoint Security
+# entitlement to com.maccrab.agent, so we moved the LaunchDaemon label
+# and plist filename to match. Unload and remove any lingering old plist
+# before installing the new one so the user doesn't end up with two
+# competing daemons trying to claim the same binary.
+OLD_PLIST="$PLIST_DIR/com.maccrab.daemon.plist"
+if [ -f "$OLD_PLIST" ]; then
+    warn "Detected pre-1.2.4 com.maccrab.daemon.plist — migrating to com.maccrab.agent.plist..."
+    launchctl unload "$OLD_PLIST" 2>/dev/null || true
+    rm -f "$OLD_PLIST"
+fi
+
+# Install provisioning profile system-wide (needed for Endpoint Security
+# entitlement to be honoured on this machine). Profile ships next to
+# install.sh inside the DMG; name is whatever Apple issued it under.
+PROFILE_SRC=""
+if [ -f "$PROJECT_DIR/MacCrab.provisionprofile" ]; then
+    PROFILE_SRC="$PROJECT_DIR/MacCrab.provisionprofile"
+elif [ -f "$PROJECT_DIR/embedded.provisionprofile" ]; then
+    PROFILE_SRC="$PROJECT_DIR/embedded.provisionprofile"
+fi
+if [ -n "$PROFILE_SRC" ]; then
+    info "Installing provisioning profile (Endpoint Security entitlement)..."
+    PROFILE_DIR="/Library/MobileDevice/Provisioning Profiles"
+    mkdir -p "$PROFILE_DIR"
+    # Extract the UUID from the profile so we can name the target file
+    # correctly — macOS indexes profiles by UUID, not by arbitrary name.
+    PROFILE_UUID=$(security cms -D -i "$PROFILE_SRC" 2>/dev/null \
+        | /usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin 2>/dev/null \
+        || echo "")
+    if [ -n "$PROFILE_UUID" ]; then
+        cp -f "$PROFILE_SRC" "$PROFILE_DIR/$PROFILE_UUID.provisionprofile"
+        chown root:wheel "$PROFILE_DIR/$PROFILE_UUID.provisionprofile"
+        chmod 644 "$PROFILE_DIR/$PROFILE_UUID.provisionprofile"
+        info "Profile installed: $PROFILE_UUID"
+    else
+        warn "Could not extract UUID from provisioning profile — ES may not work"
+    fi
+else
+    warn "No provisioning profile found next to install.sh. Endpoint Security will"
+    warn "fall back to eslogger/kdebug/FSEvents. Detection still works, just slower."
+fi
 
 # Install launchd plist (update binary path to match PREFIX)
 info "Installing launchd daemon plist..."

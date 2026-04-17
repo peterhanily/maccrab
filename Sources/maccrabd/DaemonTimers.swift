@@ -197,7 +197,7 @@ enum DaemonTimers {
                     if staleness > 300 {
                         let staleMinutes = Int(staleness / 60)
                         logger.warning("Event flow stalled: no new events stored for \(staleMinutes)m — collectors may need restart")
-                        logger.warning("Check: log stream --predicate 'subsystem==\"com.maccrab.daemon\" AND category==\"EventStream\"'")
+                        logger.warning("Check: log stream --predicate 'subsystem==\"com.maccrab.agent\" AND category==\"EventStream\"'")
                     }
                 }
             }

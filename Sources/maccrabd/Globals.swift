@@ -3,7 +3,7 @@ import os.log
 import MacCrabCore
 
 /// Shared logger for the daemon process.
-let logger = Logger(subsystem: "com.maccrab.daemon", category: "main")
+let logger = Logger(subsystem: "com.maccrab.agent", category: "main")
 
 /// Track and throttle storage error logging to avoid log spam on persistent failures.
 actor StorageErrorTracker {

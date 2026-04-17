@@ -120,7 +120,7 @@ public actor SelfDefense {
         ))
 
         // LaunchDaemon plist
-        let plistPath = "/Library/LaunchDaemons/com.maccrab.daemon.plist"
+        let plistPath = "/Library/LaunchDaemons/com.maccrab.agent.plist"
         if FileManager.default.fileExists(atPath: plistPath) {
             paths.append(MonitoredPath(
                 path: plistPath,
@@ -442,7 +442,7 @@ public actor SelfDefense {
                 }
 
                 // 5. LaunchDaemon plist restoration check
-                let plistPath = "/Library/LaunchDaemons/com.maccrab.daemon.plist"
+                let plistPath = "/Library/LaunchDaemons/com.maccrab.agent.plist"
                 if monitoredPaths.contains(where: { $0.path == plistPath })
                     && !FileManager.default.fileExists(atPath: plistPath) {
                     await handleTamperEvent(TamperEvent(

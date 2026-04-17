@@ -5,7 +5,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
 SUPPORT_DIR="/Library/Application Support/MacCrab"
-PLIST_NAME="com.maccrab.daemon"
+PLIST_NAME="com.maccrab.agent"
 PLIST_DIR="/Library/LaunchDaemons"
 
 RED='\033[0;31m'
