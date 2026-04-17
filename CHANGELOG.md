@@ -3,6 +3,143 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-04-18
+
+Native Endpoint Security via a proper system extension. Ends the
+1.1.1 → 1.2.5 investigation arc — the daemon now runs where Apple's
+AMFI expects, and the `-413 "No matching profile found"` error is
+gone.
+
+### What changed architecturally
+
+The detection engine no longer runs as a LaunchDaemon. On macOS Catalina
+and later, Apple's AMFI refuses the
+`com.apple.developer.endpoint-security.client` entitlement on any
+binary that isn't loaded through `OSSystemExtensionRequest`. This was
+the root cause of the SIGKILL + `-413` error on every 1.2.4/1.2.5
+install. Every commercial ES product (CrowdStrike, SentinelOne, Jamf
+Protect, Microsoft Defender, Objective-See LuLu/BlockBlock) ships as
+a `.systemextension` for exactly this reason.
+
+1.3.0 follows that pattern:
+
+```
+/Applications/MacCrab.app/
+  Contents/
+    MacOS/MacCrab                                       (dashboard + activator)
+    embedded.provisionprofile
+    Library/SystemExtensions/
+      com.maccrab.agent.systemextension/
+        Contents/
+          Info.plist                                    (SYEX, ES entitlement)
+          embedded.provisionprofile
+          MacOS/com.maccrab.agent                       (the daemon)
+          _CodeSignature/
+```
+
+The app bundle signs with `system-extension.install`; the sysext
+signs with `endpoint-security.client`. AMFI matches the sysext
+identifier against the provisioning profile automatically.
+
+### User-facing flow
+
+- Install (via Homebrew cask or DMG): `MacCrab.app` is copied to
+  `/Applications`.
+- First launch of the app: the new "Enable Protection" card on the
+  Overview tab invokes `OSSystemExtensionRequest.activationRequest`.
+- macOS prompts the user to approve the extension in **System
+  Settings > General > Login Items & Extensions > Endpoint Security
+  Extensions**.
+- After approval the sysext becomes active. The activation card
+  disappears; detection starts.
+- Subsequent app launches: no prompt, no user action.
+
+### Changed (internal restructure)
+
+- New `MacCrabAgentKit` SPM library target holds the daemon bootstrap
+  (DaemonSetup, DaemonState, EventLoop, MonitorTasks, DaemonTimers,
+  SignalHandlers, StartupBanner, Globals, DaemonBootstrap). Extracted
+  out of `Sources/maccrabd/` so both the legacy `maccrabd` executable
+  and the new `MacCrabAgent` sysext can share identical logic — only
+  `main.swift` differs between the two.
+- New `MacCrabAgent` SPM executable target — compiles to the binary
+  that gets wrapped into the `.systemextension` bundle by
+  `build-release.sh`. Thin `main.swift` calls
+  `DaemonBootstrap.runForever()`.
+- `Xcode/project.yml` + `Xcode/Resources/*.entitlements` added as an
+  alternative build path for anyone with full Xcode installed.
+  `scripts/build-release.sh` uses SPM + manual bundle assembly so
+  full Xcode isn't required.
+
+### Added
+
+- `SystemExtensionManager` in `Sources/MacCrabApp/` — ObservableObject
+  wrapping `OSSystemExtensionRequest` with `@Published state`.
+  Handles the full delegate protocol: `actionForReplacingExtension`
+  (always `.replace` on upgrade), `requestNeedsUserApproval`
+  (transitions to `.awaitingApproval`), `didFinishWithResult`,
+  `didFailWithError`.
+- `SystemExtensionPanel` in `Sources/MacCrabApp/Views/` — banner-style
+  card on the Overview tab that shows the activation state with
+  plain-English body text, state icon, and contextual actions:
+  "Enable Protection" initially, "Open System Settings" while
+  awaiting approval (falls through three URL variants because Apple
+  has moved the pane between macOS 13/14/15), "Try again" for
+  failures. Hides itself once the extension is active.
+
+### Removed
+
+- LaunchDaemon path. `com.maccrab.agent.plist` is no longer shipped
+  in the DMG or installed to `/Library/LaunchDaemons/`. `launchctl`
+  doesn't manage MacCrab anymore — `sysextd` does.
+- Standalone `maccrabd` binary from the installed layout. The SPM
+  target still builds (useful for `swift run maccrabd` during local
+  development without ES), but it isn't part of the release DMG
+  and isn't symlinked into `$HOMEBREW_PREFIX/bin/`.
+- System-wide provisioning profile install. 1.2.4/1.2.5 copied the
+  profile to `/Library/MobileDevice/Provisioning Profiles/` —
+  1.3.0's upgrade path actively removes any MacCrab-related
+  profile from that directory since the sysext embeds its own copy.
+
+### Upgrade path
+
+Automated in both the Homebrew cask postflight and `install.sh`:
+
+1. Unload + remove `/Library/LaunchDaemons/com.maccrab.daemon.plist`
+2. Unload + remove `/Library/LaunchDaemons/com.maccrab.agent.plist`
+3. Remove stale `/opt/homebrew/bin/maccrabd` and
+   `/usr/local/bin/maccrabd` symlinks
+4. Remove any `com.maccrab.*` provisioning profile from
+   `/Library/MobileDevice/Provisioning Profiles/`
+5. Install the 1.3.0 rules + CLI tools + `MacCrab.app`
+
+Users upgrading from 1.2.x need to **launch `MacCrab.app` and
+approve the extension** in System Settings after the upgrade, since
+the old LaunchDaemon is gone.
+
+For a clean uninstall of the extension:
+
+```bash
+systemextensionsctl uninstall 79S425CW99 com.maccrab.agent
+```
+
+### Known limitations
+
+- **No MDM silent-approve path yet.** Every fresh user sees the
+  System Settings prompt. A future MDM configuration profile would
+  pre-authorize the team ID + bundle ID combination; not shipping
+  that in 1.3.0.
+- **First-launch-from-Downloads gotcha.** On macOS 15+ the
+  extension activation silently fails with code 4 if `MacCrab.app`
+  is opened from `~/Downloads/` instead of `/Applications/`. The
+  installer handles this; Homebrew cask users are covered
+  automatically. Manual DMG installers need to drag the app to
+  `/Applications` before first launch.
+- **Dashboard ↔ daemon IPC still file-based.** The sysext writes
+  SQLite under `/Library/Application Support/MacCrab/`; the
+  dashboard reads from there. A proper XPC control plane is v1.4.0
+  work.
+
 ## [1.2.5] — 2026-04-17
 
 Hotfix for 1.2.4. The 1.2.4 daemon was signed with the ES entitlement
