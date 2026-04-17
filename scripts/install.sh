@@ -162,12 +162,17 @@ if [ -n "$PROFILE_SRC" ]; then
     info "Installing provisioning profile (Endpoint Security entitlement)..."
     PROFILE_DIR="/Library/MobileDevice/Provisioning Profiles"
     mkdir -p "$PROFILE_DIR"
-    # Extract the UUID from the profile so we can name the target file
-    # correctly — macOS indexes profiles by UUID, not by arbitrary name.
-    PROFILE_UUID=$(security cms -D -i "$PROFILE_SRC" 2>/dev/null \
-        | /usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin 2>/dev/null \
-        || echo "")
-    if [ -n "$PROFILE_UUID" ]; then
+    # Extract the UUID via a temp plist file. Piping `security cms` into
+    # `PlistBuddy /dev/stdin` is unreliable — PlistBuddy sometimes emits
+    # "Error Reading File: /dev/stdin" to stdout, which would otherwise
+    # contaminate the target filename.
+    PROFILE_TMP=$(mktemp)
+    security cms -D -i "$PROFILE_SRC" -o "$PROFILE_TMP" 2>/dev/null
+    PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$PROFILE_TMP" 2>/dev/null || echo "")
+    rm -f "$PROFILE_TMP"
+    # Validate: real UUIDs are 8-4-4-4-12 hex. Reject anything else so
+    # we never run cp with a garbage filename.
+    if [[ "$PROFILE_UUID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
         cp -f "$PROFILE_SRC" "$PROFILE_DIR/$PROFILE_UUID.provisionprofile"
         chown root:wheel "$PROFILE_DIR/$PROFILE_UUID.provisionprofile"
         chmod 644 "$PROFILE_DIR/$PROFILE_UUID.provisionprofile"

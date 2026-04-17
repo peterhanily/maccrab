@@ -41,8 +41,21 @@ cask "maccrab" do
     profile_src = "#{staged_path}/MacCrab.provisionprofile"
     if File.exist?(profile_src)
       system_command "/bin/mkdir", args: ["-p", "/Library/MobileDevice/Provisioning Profiles"], sudo: true
-      uuid = `security cms -D -i "#{profile_src}" 2>/dev/null | /usr/libexec/PlistBuddy -c "Print :UUID" /dev/stdin 2>/dev/null`.strip
-      unless uuid.empty?
+      # Extract UUID via a temp plist file — piping `security cms | PlistBuddy
+      # /dev/stdin` is unreliable in Ruby backticks (PlistBuddy reads
+      # "/dev/stdin" literally and frequently emits "Error Reading File"
+      # into stdout, which would then contaminate the destination filename).
+      tmp_plist = "/tmp/maccrab-profile-#{Process.pid}.plist"
+      system("/usr/bin/security cms -D -i '#{profile_src}' -o '#{tmp_plist}' 2>/dev/null")
+      uuid = ""
+      if File.exist?(tmp_plist)
+        uuid = `/usr/libexec/PlistBuddy -c "Print :UUID" "#{tmp_plist}" 2>/dev/null`.strip
+        File.delete(tmp_plist) rescue nil
+      end
+      # Sanity-check: real UUIDs are 36 chars in the 8-4-4-4-12 pattern.
+      # Anything else (including stderr leakage) is rejected before we let
+      # it reach a filesystem operation.
+      if uuid.match?(/\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z/)
         system_command "/bin/cp", args: [profile_src, "/Library/MobileDevice/Provisioning Profiles/#{uuid}.provisionprofile"], sudo: true
         system_command "/usr/sbin/chown", args: ["root:wheel", "/Library/MobileDevice/Provisioning Profiles/#{uuid}.provisionprofile"], sudo: true
         system_command "/bin/chmod", args: ["644", "/Library/MobileDevice/Provisioning Profiles/#{uuid}.provisionprofile"], sudo: true
