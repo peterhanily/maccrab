@@ -232,7 +232,7 @@ public actor FileOutput: Output {
 
         init(alert: Alert, event: Event?) {
             self.schema = "maccrab.alert.v1"
-            self.version = "1.2.4"
+            self.version = "1.2.5"
             self.timestamp = Date()
             self.alert = AlertPayload(from: alert)
             self.event = event.map(EventPayload.init)

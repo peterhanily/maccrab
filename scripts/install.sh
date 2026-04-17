@@ -82,12 +82,15 @@ info "Set MacCrab dashboard language to $LANG_NAME"
 echo ""
 
 # Locate pre-built binaries or build from source
-# Priority: 1) DMG mount (bin/), 2) .build/release/, 3) build from source
+# Priority: 1) DMG mount (bin/), 2) .build/release/, 3) build from source.
+# The daemon binary (maccrabd) lives inside MacCrab.app/Contents/Library/
+# LaunchDaemons in 1.2.5+ — we only need maccrabctl here; the .app is
+# installed further down.
 BIN_SOURCE=""
-if [ -x "$PROJECT_DIR/bin/maccrabd" ] && [ -x "$PROJECT_DIR/bin/maccrabctl" ]; then
+if [ -x "$PROJECT_DIR/bin/maccrabctl" ]; then
     BIN_SOURCE="$PROJECT_DIR/bin"
     info "Using pre-built binaries from DMG."
-elif [ -x "$PROJECT_DIR/.build/release/maccrabd" ] && [ -x "$PROJECT_DIR/.build/release/maccrabctl" ]; then
+elif [ -x "$PROJECT_DIR/.build/release/maccrabctl" ]; then
     BIN_SOURCE="$PROJECT_DIR/.build/release"
     info "Using pre-built binaries from .build/release."
 else
@@ -105,11 +108,25 @@ mkdir -p "$SUPPORT_DIR"/{compiled_rules/sequences,logs}
 chmod 755 "$SUPPORT_DIR"
 mkdir -p "$PREFIX/bin"
 
-# Install binaries
-info "Installing binaries to $PREFIX/bin..."
-cp -f "$BIN_SOURCE/maccrabd" "$PREFIX/bin/maccrabd"
+# Clean up any stale standalone maccrabd binary from pre-1.2.5 installs
+# (1.2.4 shipped maccrabd at $PREFIX/bin/maccrabd but AMFI couldn't
+# discover the provisioning profile there; 1.2.5 moved it inside the .app).
+for stale in "$PREFIX/bin/maccrabd" "/usr/local/bin/maccrabd" "/opt/homebrew/bin/maccrabd"; do
+    if [ -L "$stale" ] || [ -f "$stale" ]; then
+        rm -f "$stale"
+    fi
+done
+
+# Install CLI binaries. The daemon binary lives inside MacCrab.app
+# (see "Install app" below) — AMFI only honours the ES entitlement
+# when the binary is inside an app bundle.
+info "Installing CLI binaries to $PREFIX/bin..."
 cp -f "$BIN_SOURCE/maccrabctl" "$PREFIX/bin/maccrabctl"
-chmod 755 "$PREFIX/bin/maccrabd" "$PREFIX/bin/maccrabctl"
+chmod 755 "$PREFIX/bin/maccrabctl"
+if [ -f "$BIN_SOURCE/maccrab-mcp" ]; then
+    cp -f "$BIN_SOURCE/maccrab-mcp" "$PREFIX/bin/maccrab-mcp"
+    chmod 755 "$PREFIX/bin/maccrab-mcp"
+fi
 
 # Install entitlements (for reference; codesigning must be done separately)
 cp -f entitlements.plist "$SUPPORT_DIR/entitlements.plist" 2>/dev/null || true
@@ -185,16 +202,16 @@ else
     warn "fall back to eslogger/kdebug/FSEvents. Detection still works, just slower."
 fi
 
-# Install launchd plist (update binary path to match PREFIX)
+# Install launchd plist. The plist's ProgramArguments already points to
+# /Applications/MacCrab.app/Contents/Library/LaunchDaemons/maccrabd so no
+# path rewriting is needed.
 info "Installing launchd daemon plist..."
 if launchctl list "$PLIST_NAME" &>/dev/null; then
     warn "Stopping existing daemon..."
     launchctl unload "$PLIST_DIR/$PLIST_NAME.plist" 2>/dev/null || true
 fi
 
-# Generate plist with correct binary path from PREFIX
-sed "s|/usr/local/bin/maccrabd|$PREFIX/bin/maccrabd|g" \
-    "$PLIST_NAME.plist" > "$PLIST_DIR/$PLIST_NAME.plist"
+cp "$PLIST_NAME.plist" "$PLIST_DIR/$PLIST_NAME.plist"
 chown root:wheel "$PLIST_DIR/$PLIST_NAME.plist"
 chmod 644 "$PLIST_DIR/$PLIST_NAME.plist"
 
@@ -215,8 +232,9 @@ else
     VERIFY_OK=false
 fi
 
-if [ ! -x "$PREFIX/bin/maccrabd" ]; then
-    warn "Binary not found or not executable: $PREFIX/bin/maccrabd"
+DAEMON_PATH="/Applications/MacCrab.app/Contents/Library/LaunchDaemons/maccrabd"
+if [ ! -x "$DAEMON_PATH" ]; then
+    warn "Daemon not found or not executable: $DAEMON_PATH"
     VERIFY_OK=false
 fi
 
@@ -238,7 +256,7 @@ fi
 
 echo ""
 info "Installation complete!"
-echo "  Daemon:   $PREFIX/bin/maccrabd"
+echo "  Daemon:   $DAEMON_PATH"
 echo "  CLI:      $PREFIX/bin/maccrabctl"
 echo "  Rules:    $SUPPORT_DIR/compiled_rules/"
 echo "  Logs:     $SUPPORT_DIR/maccrabd.log"
@@ -257,7 +275,9 @@ echo "║  threat detection coverage.                       ║"
 echo "║                                                  ║"
 echo "║  1. Open System Settings                          ║"
 echo "║  2. Privacy & Security > Full Disk Access         ║"
-echo "║  3. Click + and add: $PREFIX/bin/maccrabd"
+echo "║  3. Click + and add MacCrab.app (drag it in,      ║"
+echo "║     or click + and browse to /Applications/       ║"
+echo "║     MacCrab.app)                                  ║"
 echo "║  4. Restart the daemon: sudo launchctl unload     ║"
 echo "║     $PLIST_DIR/$PLIST_NAME.plist"
 echo "║     && sudo launchctl load                        ║"
