@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import MacCrabCore
+import MacCrabAgentKit
 import os.log
 
 // Disable stdout buffering so output appears immediately in log files
@@ -73,40 +74,8 @@ if args.contains("--background") || args.contains("--bg") || args.contains("-b")
     exit(result == 0 ? 0 : 1)
 }
 
-logger.info("MacCrab daemon starting...")
-
-// 1. Initialize all components
-let state = await DaemonSetup.initialize()
-
-// 2. Print startup banner
-await StartupBanner.print(state: state)
-
-// 3. Install signal handlers (SIGHUP, SIGTERM, SIGINT)
-let signalHandles = SignalHandlers.install(state: state)
-
-// 4. Start background monitor tasks
-MonitorTasks.start(state: state)
-
-// 5. Start periodic timers
-var eventCount: UInt64 = 0
-var alertCount: UInt64 = 0
-let startTime = Date()
-let timerHandles = DaemonTimers.start(
-    state: state,
-    eventCount: { eventCount },
-    alertCount: { alertCount },
-    startTime: startTime
-)
-
-// 6. Merge event sources and run the main event processing loop
-let eventStream = state.mergedEventStream()
-await EventLoop.run(
-    state: state,
-    eventStream: eventStream,
-    eventCount: &eventCount,
-    alertCount: &alertCount
-)
-
-// Keep handles alive (prevents ARC from deallocating dispatch sources)
-_ = signalHandles
-_ = timerHandles
+// LaunchDaemon / manual-invocation entry point. The actual daemon
+// bootstrap (component wiring, timers, event loop) lives in
+// DaemonBootstrap so the MacCrabAgent system extension target can
+// share identical behaviour without maintaining a parallel copy.
+await DaemonBootstrap.runForever(printBanner: true)

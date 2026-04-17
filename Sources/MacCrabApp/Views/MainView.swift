@@ -11,6 +11,7 @@ import MacCrabCore
 
 struct MainView: View {
     @ObservedObject var appState: AppState
+    @ObservedObject var sysextManager: SystemExtensionManager
     @State private var selectedSection: SidebarSection? = .overview
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
@@ -193,7 +194,7 @@ struct MainView: View {
         } detail: {
             switch selectedSection {
             case .overview:
-                OverviewDashboard(appState: appState, selectedSection: $selectedSection)
+                OverviewDashboard(appState: appState, sysextManager: sysextManager, selectedSection: $selectedSection)
             case .alerts:
                 AlertDashboard(appState: appState)
             case .campaigns:
@@ -223,7 +224,7 @@ struct MainView: View {
             case .docs:
                 DocsView()
             case nil:
-                OverviewDashboard(appState: appState, selectedSection: $selectedSection)
+                OverviewDashboard(appState: appState, sysextManager: sysextManager, selectedSection: $selectedSection)
             }
         }
         .frame(minWidth: 950, minHeight: 600)

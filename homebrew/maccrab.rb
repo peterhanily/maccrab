@@ -1,6 +1,6 @@
 cask "maccrab" do
-  version "1.2.5"
-  sha256 "cfc099d9a8a84582ed1a4e32ddaca206bc19ee7bc61055800593427dabe8b31a"
+  version "1.3.0"
+  sha256 "0c51c4e9f4594849831fbc5cba633c3f2046028df39418311ff13e072a011c40"
 
   url "https://github.com/peterhanily/maccrab/releases/download/v#{version}/MacCrab-v#{version}.dmg"
   name "MacCrab"
@@ -14,38 +14,49 @@ cask "maccrab" do
   binary "bin/maccrab-mcp"
 
   postflight do
-    # Upgrade path: the 1.2.4 install (and earlier) shipped maccrabd as a
-    # standalone binary at $HOMEBREW_PREFIX/bin/maccrabd. macOS AMFI
-    # couldn't discover the embedded provisioning profile for a binary
-    # outside a .app bundle, so ES attempts resulted in SIGKILL. 1.2.5
-    # relocated the daemon to MacCrab.app/Contents/Library/LaunchDaemons/
-    # — remove the stale symlinks / plist paths that pointed at the old
-    # location before starting the new daemon.
-    ["#{HOMEBREW_PREFIX}/bin/maccrabd",
-     "/usr/local/bin/maccrabd"].each do |path|
+    # ── Clean up pre-1.3.0 artefacts ────────────────────────────────
+    # 1.2.x shipped maccrabd as a LaunchDaemon with a system-wide
+    # provisioning profile. 1.3.0 moved the detection engine into a
+    # SystemExtension activated from inside MacCrab.app on first
+    # launch. Strip the old plumbing so the two models don't fight.
+    ["/Library/LaunchDaemons/com.maccrab.daemon.plist",
+     "/Library/LaunchDaemons/com.maccrab.agent.plist"].each do |plist|
+      if File.exist?(plist)
+        label = File.basename(plist, ".plist")
+        system_command "/bin/launchctl", args: ["unload", plist], sudo: true, must_succeed: false
+        system_command "/bin/rm", args: ["-f", plist], sudo: true
+        _ = label
+      end
+    end
+
+    # Legacy standalone maccrabd symlinks
+    ["#{HOMEBREW_PREFIX}/bin/maccrabd", "/usr/local/bin/maccrabd"].each do |path|
       if File.symlink?(path) || File.exist?(path)
         system_command "/bin/rm", args: ["-f", path], sudo: true
       end
     end
 
-    # Upgrade path from pre-1.2.4: the daemon was labelled com.maccrab.daemon
-    # before Apple bound the ES entitlement to com.maccrab.agent. Unload +
-    # remove the old plist so the new one isn't shadowed.
-    old_plist = "/Library/LaunchDaemons/com.maccrab.daemon.plist"
-    if File.exist?(old_plist)
-      system_command "/bin/launchctl", args: ["unload", old_plist], sudo: true, must_succeed: false
-      system_command "/bin/rm", args: ["-f", old_plist], sudo: true
+    # Legacy system-wide provisioning profile — the sysext embeds its
+    # own copy inside MacCrab.app, so we don't need one at the system
+    # location any more.
+    profile_dir = "/Library/MobileDevice/Provisioning Profiles"
+    if Dir.exist?(profile_dir)
+      Dir.glob("#{profile_dir}/*.provisionprofile").each do |profile|
+        tmp = "/tmp/maccrab-cask-profile-#{Process.pid}.plist"
+        system("/usr/bin/security cms -D -i '#{profile}' -o '#{tmp}' 2>/dev/null")
+        next unless File.exist?(tmp)
+        app_id = `/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' '#{tmp}' 2>/dev/null`.strip
+        File.delete(tmp) rescue nil
+        if app_id.include?("com.maccrab.")
+          system_command "/bin/rm", args: ["-f", profile], sudo: true
+        end
+      end
     end
 
-    # Also unload any running 1.2.4 com.maccrab.agent daemon that was
-    # trying to launch the now-gone /opt/homebrew/bin/maccrabd binary.
-    stale_agent = "/Library/LaunchDaemons/com.maccrab.agent.plist"
-    if File.exist?(stale_agent)
-      system_command "/bin/launchctl", args: ["unload", stale_agent], sudo: true, must_succeed: false
-    end
-
-    # Install compiled rules
-    system_command "/bin/mkdir", args: ["-p", "/Library/Application Support/MacCrab/compiled_rules/sequences"], sudo: true
+    # ── Install rules ───────────────────────────────────────────────
+    system_command "/bin/mkdir",
+                   args: ["-p", "/Library/Application Support/MacCrab/compiled_rules/sequences"],
+                   sudo: true
     Dir.glob("#{staged_path}/compiled_rules/*.json").each do |f|
       system_command "/bin/cp", args: [f, "/Library/Application Support/MacCrab/compiled_rules/"], sudo: true
     end
@@ -53,46 +64,10 @@ cask "maccrab" do
       system_command "/bin/cp", args: [f, "/Library/Application Support/MacCrab/compiled_rules/sequences/"], sudo: true
     end
 
-    # Install provisioning profile (Endpoint Security entitlement grant).
-    # macOS indexes profiles by UUID under /Library/MobileDevice/... — the
-    # embedded copy inside MacCrab.app is also honoured, but shipping both
-    # is belt-and-braces so the daemon's standalone /usr/local/bin/maccrabd
-    # invocation can also prove the entitlement grant.
-    profile_src = "#{staged_path}/MacCrab.provisionprofile"
-    if File.exist?(profile_src)
-      system_command "/bin/mkdir", args: ["-p", "/Library/MobileDevice/Provisioning Profiles"], sudo: true
-      # Extract UUID via a temp plist file — piping `security cms | PlistBuddy
-      # /dev/stdin` is unreliable in Ruby backticks (PlistBuddy reads
-      # "/dev/stdin" literally and frequently emits "Error Reading File"
-      # into stdout, which would then contaminate the destination filename).
-      tmp_plist = "/tmp/maccrab-profile-#{Process.pid}.plist"
-      system("/usr/bin/security cms -D -i '#{profile_src}' -o '#{tmp_plist}' 2>/dev/null")
-      uuid = ""
-      if File.exist?(tmp_plist)
-        uuid = `/usr/libexec/PlistBuddy -c "Print :UUID" "#{tmp_plist}" 2>/dev/null`.strip
-        File.delete(tmp_plist) rescue nil
-      end
-      # Sanity-check: real UUIDs are 36 chars in the 8-4-4-4-12 pattern.
-      # Anything else (including stderr leakage) is rejected before we let
-      # it reach a filesystem operation.
-      if uuid.match?(/\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z/)
-        system_command "/bin/cp", args: [profile_src, "/Library/MobileDevice/Provisioning Profiles/#{uuid}.provisionprofile"], sudo: true
-        system_command "/usr/sbin/chown", args: ["root:wheel", "/Library/MobileDevice/Provisioning Profiles/#{uuid}.provisionprofile"], sudo: true
-        system_command "/bin/chmod", args: ["644", "/Library/MobileDevice/Provisioning Profiles/#{uuid}.provisionprofile"], sudo: true
-      end
-    end
-
-    # Install LaunchDaemon for auto-start on boot. The plist's
-    # ProgramArguments already points at
-    # /Applications/MacCrab.app/Contents/Library/LaunchDaemons/maccrabd
-    # — no path rewriting needed regardless of Homebrew prefix.
-    plist_src = "#{staged_path}/com.maccrab.agent.plist"
-    if File.exist?(plist_src)
-      system_command "/bin/cp", args: [plist_src, "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
-      system_command "/usr/sbin/chown", args: ["root:wheel", "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
-      system_command "/bin/chmod", args: ["644", "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
-      system_command "/bin/launchctl", args: ["load", "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
-    end
+    # The system extension itself is not installed here. It ships
+    # inside MacCrab.app/Contents/Library/SystemExtensions/ and is
+    # registered with sysextd the first time the user opens the app
+    # and clicks "Enable Protection" (see SystemExtensionPanel.swift).
   end
 
   uninstall launchctl: ["com.maccrab.agent", "com.maccrab.daemon"],
@@ -105,23 +80,27 @@ cask "maccrab" do
   zap trash: [
     "~/Library/Application Support/MacCrab",
     "~/Library/Preferences/com.maccrab.app.plist",
+    "~/Library/Preferences/com.maccrab.agent.plist",
   ]
 
   caveats <<~EOS
-    MacCrab daemon starts automatically on boot.
+    MacCrab protects the system via an Endpoint Security system
+    extension. To activate:
 
-    Quick start:
-      open /Applications/MacCrab.app   # Open dashboard
-      maccrabctl status                # Check status
+      1. Open /Applications/MacCrab.app
+      2. Click "Enable Protection" on the Overview tab
+      3. Approve the extension in System Settings > General >
+         Login Items & Extensions > Endpoint Security Extensions
 
-    Grant Full Disk Access for complete detection coverage:
-      1. Open System Settings > Privacy & Security > Full Disk Access
-      2. Click + and add /Applications/MacCrab.app (drag it in, or
-         click + and browse). FDA granted to the app bundle covers
-         the daemon at Contents/Library/LaunchDaemons/maccrabd too.
-      3. Restart: sudo launchctl unload /Library/LaunchDaemons/com.maccrab.agent.plist
-                  sudo launchctl load /Library/LaunchDaemons/com.maccrab.agent.plist
+    For full detection coverage also grant Full Disk Access to
+    MacCrab.app in System Settings > Privacy & Security > Full
+    Disk Access.
 
-    Without FDA, MacCrab detects ~70% of threats. With FDA, 100%.
+    After upgrading from v1.2.x: your prior install's LaunchDaemon
+    was removed automatically. Approve the new extension in System
+    Settings to restart protection.
+
+    To uninstall the extension completely:
+      systemextensionsctl uninstall 79S425CW99 com.maccrab.agent
   EOS
 end
