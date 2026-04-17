@@ -3,6 +3,32 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] — 2026-04-18
+
+Hotfix for 1.3.1. The system extension bundled correctly and signed
+correctly, but macOS refused to activate it:
+
+    Invalid extension configuration in Info.plist and/or entitlements:
+    System extension com.maccrab.agent.systemextension does not
+    appear to belong to any extension categories
+
+Missing `NSSystemExtensionPointIdentifier` key in the sysext's
+Info.plist. Without it macOS can't categorize the bundle as an
+Endpoint Security extension, so `sysextd` rejects activation.
+
+### Fixed
+
+- `scripts/build-release.sh` now emits
+  `NSSystemExtensionPointIdentifier =
+  com.apple.system_extension.endpoint_security` in the sysext's
+  Info.plist. This is the category key every commercial ES
+  product sets; omitting it was an oversight on my part when I
+  wrote the 1.3.0 bundle template.
+
+Drop-in upgrade. `brew upgrade --cask maccrab` → relaunch
+MacCrab.app → Enable Protection. Extension should now activate
+cleanly through the System Settings approval flow.
+
 ## [1.3.1] — 2026-04-18
 
 Hotfix for 1.3.0. The Overview tab hid the "Enable Protection"
