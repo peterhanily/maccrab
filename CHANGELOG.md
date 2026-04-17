@@ -3,6 +3,32 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] — 2026-04-18
+
+Second hotfix for the same sysext categorization error. 1.3.2 added
+`NSSystemExtensionPointIdentifier` but `sysextd` still rejected
+activation with "does not appear to belong to any extension
+categories". The real bug was a `CFBundlePackageType` typo: I wrote
+`SYEX` back in 1.3.0 and carried it through every release. `sysextd`
+specifically checks for `DEXT` (DriverKit) or `SYSX` (system
+extension) and silently fails anything else.
+
+### Fixed
+
+- `CFBundlePackageType = SYEX` → `SYSX` in the sysext Info.plist
+  template in `build-release.sh`.
+
+The diagnostic log is unambiguous:
+
+    sysextd: ...com.maccrab.agent.systemextension: package type not `DEXT`
+    sysextd: ...com.maccrab.agent.systemextension: package type not `SYSX`
+    sysextd: system extension does not appear to belong to any extension categories
+
+1.3.2's `NSSystemExtensionPointIdentifier` change was a no-op —
+`sysextd` rejects the bundle at the package-type check before
+looking at the category key. Both keys are technically required, so
+1.3.2's change stays.
+
 ## [1.3.2] — 2026-04-18
 
 Hotfix for 1.3.1. The system extension bundled correctly and signed
