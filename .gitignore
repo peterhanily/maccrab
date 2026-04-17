@@ -33,13 +33,50 @@ events.jsonl
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
 
 # Entitlements for local dev signing (may contain team-specific info)
 *.entitlements
 
-# Code signing artifacts
+# -----------------------------------------------------------------------------
+# Signing, release, and notarization artifacts
+# -----------------------------------------------------------------------------
+# Provisioning profiles carry the Developer ID cert chain + bundle-ID grants —
+# never commit.
 *.mobileprovision
 *.provisionprofile
+
+# Certificates and private keys in every format we're likely to see
+*.cer
+*.crt
+*.der
+*.p12
+*.pfx
+*.pkcs12
+*.key
+*.pem
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# Apple notarytool / altool credentials + session state
+notarization-history.json
+*.notarization-response
+
+# Keychain dumps / backups (never belong in a repo)
+*.keychain
+*.keychain-db
+
+# Release artifacts (outputs, not source)
+*.dmg
+*.pkg
+*.zip
+*.tar.gz
+*.tgz
 
 # Release scripts (private build/sign/notarize tooling)
 scripts/build-release.sh
@@ -47,19 +84,110 @@ scripts/build-pkg.sh
 scripts/notarize.sh
 scripts/release.sh
 
+# MacCrab-specific signing/release home-dir artifacts. Kept outside the repo
+# under ~/.maccrab-*/ — but add the names so an accidental copy into the repo
+# tree still gets blocked.
+.maccrab-release-env
+.maccrab-signing/
+maccrab-release-env*
+
+# -----------------------------------------------------------------------------
+# Generic secret file patterns
+# -----------------------------------------------------------------------------
+# .env files in every common variant
+.env
+.env.*
+!.env.example
+!.env.template
+*.env
+*.env.local
+
+# Credential blobs and secret folders
+secrets/
+credentials/
+credentials.json
+credentials.yaml
+credentials.yml
+.credentials/
+.secrets/
+
+# Cloud vendor credential caches
+.aws/
+.gcloud/
+.netrc
+.npmrc
+.pypirc
+service-account*.json
+firebase-adminsdk*.json
+
+# SSH
+.ssh/
+known_hosts
+
+# -----------------------------------------------------------------------------
 # Python
+# -----------------------------------------------------------------------------
 __pycache__/
 *.pyc
 *.pyo
 .venv/
+venv/
+.pytest_cache/
+.mypy_cache/
 
+# -----------------------------------------------------------------------------
 # IDE and editor files
+# -----------------------------------------------------------------------------
 .idea/
 .vscode/
 *.code-workspace
+.history/
+.cursor/
+.zed/
 
+# -----------------------------------------------------------------------------
+# Logs, crash reports, and debug output
+# -----------------------------------------------------------------------------
+*.log
+*.log.*
+crash-*.txt
+*.crash
+*.ips
+core
+core.*
+*.core
+*.dSYM/
+
+# -----------------------------------------------------------------------------
+# Coverage / profiling output
+# -----------------------------------------------------------------------------
+coverage/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+
+# -----------------------------------------------------------------------------
+# Personal / local-only files
+# -----------------------------------------------------------------------------
 # Local planning docs (not part of public repo)
 plans/
 
+# Scratch-work patterns
+TODO.local.md
+NOTES.local.md
+*.local
+*.local.md
+SCRATCH.md
+scratch/
+tmp/
+
+# Editor / tool backups
+*.bak
+*.orig
+*.rej
+
+# -----------------------------------------------------------------------------
 # Signed rule bundle build artifacts (produced by scripts/publish-rules.sh)
+# -----------------------------------------------------------------------------
 dist/

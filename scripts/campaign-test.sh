@@ -501,7 +501,7 @@ else
     echo -e "  1. Most process rules require Endpoint Security (run: sudo make run-root)"
     echo -e "  2. File-event rules are most reliable without root — check alerts above"
     echo -e "  3. Campaign window is 600s — verify timing with: maccrabctl status"
-    echo -e "  4. Check daemon logs: log stream --predicate 'subsystem==\"com.maccrab.daemon\"'"
+    echo -e "  4. Check daemon logs: log stream --predicate 'subsystem==\"com.maccrab.agent\"'"
 fi
 
 # Tactic coverage summary

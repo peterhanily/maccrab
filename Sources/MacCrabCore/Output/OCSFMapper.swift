@@ -28,7 +28,7 @@ public enum OCSFMapper {
     public static let product = OCSFProduct(
         name: "MacCrab",
         vendorName: "MacCrab",
-        version: "1.2.3"
+        version: "1.2.4"
     )
 
     /// Map a MacCrab Event to the appropriate OCSF class based on category.

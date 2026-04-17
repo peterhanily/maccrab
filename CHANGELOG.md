@@ -3,6 +3,69 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] — 2026-04-17
+
+Native Endpoint Security unlock. Apple approved the ES client
+entitlement under bundle ID `com.maccrab.agent`; this release adopts
+the new identifier, embeds the provisioning profile, and ships the
+daemon signed with the real ES entitlement instead of relying on the
+eslogger/kdebug/FSEvents fallback chain.
+
+### Changed
+
+- **LaunchDaemon label renamed** `com.maccrab.daemon` → `com.maccrab.agent`.
+  Apple bound the Endpoint Security entitlement to the new identifier
+  during their approval process, so we moved to match. All code paths,
+  scripts, plist filenames, Homebrew cask actions, and log-stream
+  subsystem names updated. The plist filename is now
+  `com.maccrab.agent.plist`.
+- **Daemon is now signed with `com.apple.developer.endpoint-security.client`.**
+  `build-release.sh` picks up the provisioning profile from
+  `~/.maccrab-signing/MacCrab.provisionprofile` (override via
+  `PROVISION_PROFILE`) and signs `maccrabd` with `--entitlements
+  entitlements.plist --identifier com.maccrab.agent`. Other binaries
+  (`maccrabctl`, `maccrab-mcp`) stay unentitled.
+- **Provisioning profile shipped in two places:**
+  `MacCrab.app/Contents/embedded.provisionprofile` for app-scope
+  verification + `/Library/MobileDevice/Provisioning Profiles/
+  <UUID>.provisionprofile` for the standalone
+  `/usr/local/bin/maccrabd` invocation.
+
+### Added
+
+- **Upgrade-path migration** in `install.sh` and the Homebrew cask:
+  detects a pre-1.2.4 `com.maccrab.daemon.plist` on disk, unloads it,
+  and removes it before installing the new `com.maccrab.agent.plist`.
+  No duplicate competing daemons.
+- **`scripts/verify-profile.sh`** — operator utility that inspects a
+  `.provisionprofile` file (team, bundle ID, expiry, entitlements,
+  profile type, provisioned devices) so you can confirm before
+  shipping.
+- **Hardened `.gitignore`** — broader coverage for private keys
+  (every format), certs, env files in every variant, cloud vendor
+  credential caches, SSH keys, keychain dumps, release artifacts,
+  coverage data, crash dumps, scratch files.
+
+### User-visible
+
+- Daemon startup banner now reads "Endpoint Security: native client"
+  on clean installs instead of "eslogger proxy".
+- Dashboard ES Health view stops showing the "degraded" banner on
+  fresh installs.
+- `log stream --predicate 'subsystem=="com.maccrab.agent"'` replaces
+  the previous `com.maccrab.daemon` predicate. Old predicate will
+  stop matching after upgrade.
+
+### Upgrade notes
+
+- Drop-in over 1.2.3 via `brew upgrade --cask maccrab`. The cask
+  `postflight` handles the plist migration and profile install.
+- Manual installs (DMG + `install.sh`): run the 1.2.4 installer; it
+  detects the old plist and removes it before proceeding.
+- **If you're already running 1.2.3 with `com.maccrab.daemon.plist`
+  loaded**: the 1.2.4 install gracefully unloads + replaces it, no
+  user action needed.
+
 ## [1.2.3] — 2026-04-17
 
 24-hour observation hotfix. Four specific noise sources identified by

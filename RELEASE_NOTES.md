@@ -1,83 +1,98 @@
-# MacCrab 1.2.3 — Ship Notes
+# MacCrab 1.2.4 — Ship Notes
 
-**24-hour observation hotfix.** Four noise sources that survived 1.2.2
-and fired on normal workstation activity overnight.
+**Native Endpoint Security on every machine.** Apple approved the ES
+client entitlement; this release ships the daemon signed with it
+instead of falling back to `eslogger` / `kdebug` / `FSEvents`.
 
-1.2.x users: drop-in upgrade. No schema changes, no config changes.
+1.2.3 users: drop-in upgrade. Installer handles the identifier rename
+and provisioning-profile install automatically.
 
 ## What changed
 
-Twelve-hour observation of 1.2.2 on a real dev workstation produced
-94 alerts — not a flood, but four specific offenders accounted for
-~95% of it, all from code paths that didn't go through the noise
-filters we added in 1.2.1 / 1.2.2.
+### The daemon now runs as a real ES client
 
-### FSEvents bypass fixed
+All previous releases (1.1.1 – 1.2.3) shipped with the ES entitlement
+stripped because signing it into the binary without a provisioning
+profile caused macOS to SIGKILL on launch. The daemon compensated by
+falling back through three alternative kernel-event sources:
+`eslogger` proxy, `kdebug` via `fs_usage`, and `FSEvents`.
 
-`MonitorTasks.swift` runs a separate rule-evaluation loop for
-FSEvents (the non-root fallback file source) that didn't consult the
-unknown-process / warm-up / trusted-browser gates added in 1.2.1.
-That meant Sigma rules fired on every file write even when the
-event had no process attribution — including `/Codex/sentry/*.json`,
-`/AddressBook/Metadata/.info`, and Firefox profile state files.
+With the entitlement approved, `maccrabd` is now signed directly with
+`com.apple.developer.endpoint-security.client` and runs the real
+`es_new_client` path. Benefits:
 
-Extracted the filter logic into `EventLoop.applyNoiseFilters` and
-call it from both paths. Also re-used it for the SIGHUP retroactive
-scan, so re-detection after a rule reload applies the same gates.
+- **Faster detection loop.** ES events arrive synchronously from the
+  kernel; no subprocess parse latency.
+- **AUTH-class events available.** Detect + authoritatively block an
+  exec before it runs, rather than observing after the fact.
+- **Richer event attribution.** No more `process.name == "unknown"`
+  FSEvents fallbacks — every event carries full process lineage.
+- **No Terminal-FDA dance on install.** The eslogger path required a
+  one-time Full Disk Access grant to Terminal; the native ES client
+  doesn't.
 
-### RootkitDetector dual-API race fixed
+### LaunchDaemon renamed: `com.maccrab.daemon` → `com.maccrab.agent`
 
-The rootkit detector compares two snapshots of the process table
-(`proc_listallpids()` vs. `sysctl(KERN_PROC_ALL)`). Those calls
-aren't atomic — any process that exits or spawns in the 1–2 ms gap
-appears in one set but not the other. On a busy workstation that
-produced **46 false-positive hidden-process alerts in one day**, all
-with the same `sysctl_only` marker (process exited between the two
-calls).
+Apple bound the ES entitlement to `com.maccrab.agent` during their
+approval flow, so we moved the daemon label + plist filename + code-
+signing identifier + `os.log` subsystem strings to match. The change
+is purely organisational — behaviour is identical — but every moving
+part had to move together.
 
-Added second-chance verification: after a 300 ms delay, re-query both
-APIs. Only alert when the discrepancy persists. A real userland
-rootkit hides a process for its entire lifetime; an exit-timing race
-doesn't.
-
-### AI sandbox: Google IP ranges completed
-
-11 alerts for "AI tool connected to unapproved IP" on `74.125.x` and
-`172.253.x` — both Google-owned ranges we hadn't listed in
-`AINetworkSandbox.wellKnownCloudPrefixes`. Added the full Google
-IP block list from `gstatic.com/ipranges/goog.json`:
-
+**If you filter logs by subsystem**:
 ```
-64.233  66.102  66.249  72.14
-74.125  108.177  172.217  172.253
-173.194  209.85  216.58  216.239
+log stream --predicate 'subsystem=="com.maccrab.agent"'
+```
+The old `com.maccrab.daemon` predicate stops matching after upgrade.
+
+### Upgrade path is handled automatically
+
+Both the Homebrew cask and the DMG installer detect a pre-1.2.4
+`/Library/LaunchDaemons/com.maccrab.daemon.plist`, unload it, and
+remove it before installing the new `com.maccrab.agent.plist`. No
+user action needed; no duplicate competing daemons.
+
+### Provisioning profile shipped in both canonical locations
+
+- **Inside the `.app` bundle** at
+  `MacCrab.app/Contents/embedded.provisionprofile` — picked up by the
+  dashboard app's entitlement check.
+- **System-wide** at
+  `/Library/MobileDevice/Provisioning Profiles/<UUID>.provisionprofile`
+  — picked up when the standalone `/usr/local/bin/maccrabd` tries to
+  assert its ES entitlement grant.
+
+Belt-and-braces — some AMFI code paths check each location, so shipping
+both is strictly safer than choosing one.
+
+### Operator tooling
+
+New `scripts/verify-profile.sh` takes a path to a `.provisionprofile`
+and prints the team, bundle ID, expiry, type (development / distribution /
+Developer ID), and the full entitlements list. Run it on any profile
+before wiring it into a build.
+
+### Hardened `.gitignore`
+
+Broader coverage for anything that could accidentally leak:
+
+- Private keys in every format (`*.key`, `*.pem`, `*.p12`, `*.pfx`,
+  `*.pkcs12`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`)
+- Certificates (`*.cer`, `*.crt`, `*.der`)
+- `.env` files in every variant (with `.env.example` allowlist)
+- Cloud credential caches (`.aws/`, `.gcloud/`, `.netrc`, `.npmrc`,
+  `.pypirc`, `service-account*.json`, `firebase-adminsdk*.json`)
+- SSH (`.ssh/`, `known_hosts`)
+- Keychain dumps, release artifacts, notarization state, coverage
+  data, crash dumps, scratch files
+
+## Upgrade
+
+```bash
+brew upgrade --cask maccrab
 ```
 
-Synced the identical list into `CrossProcessCorrelator.trustedCloudPrefixes`.
-
-### `runningboardd` added to power allowlist
-
-Core macOS daemon that manages process lifecycles and holds power
-assertions on behalf of other processes. Fires
-`maccrab.forensic.power-preventing_sleep` on every poll. Added
-alongside `assertiond` and `ContextStoreAgent` for completeness.
-
-## Measured impact (reference workstation)
-
-| Rule | 1.2.2 (24h) | 1.2.3 (expected) |
-|------|-----------:|-----------------:|
-| `forensic.hidden-process` | 46 | 0 (race-verified) |
-| `invisible_unicode_in_source` | 12 | 0 (FSEvents filter) |
-| `ai-guard.network-sandbox` | 11 | ≤1 (Google ranges) |
-| `browser_cookie_access` | 8 | 0 (FSEvents filter) |
-| `contacts_database_access` | 8 | 0 (FSEvents filter) |
-| `trojan_source_bidi_code` | 6 | 0 (FSEvents filter) |
-| `power-preventing_sleep` | 3 | 0 (runningboardd) |
-
-## Upgrade notes
-
-Drop-in over 1.2.2. `brew upgrade --cask maccrab` picks up the new
-notarized DMG.
+or grab `MacCrab-v1.2.4.dmg` from the release page and run `install.sh`.
 
 ## Credits
 

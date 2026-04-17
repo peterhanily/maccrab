@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.maccrab.daemon</string>
+    <string>com.maccrab.agent</string>
 
     <key>ProgramArguments</key>
     <array>

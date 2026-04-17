@@ -40,7 +40,7 @@ extension MacCrabCtl {
                 if daemonRunning && Date().timeIntervalSince(latest.timestamp) > 300 {
                     let minutes = Int(Date().timeIntervalSince(latest.timestamp) / 60)
                     print("                 ⚠  No new events for \(minutes)m — collectors may have stalled")
-                    print("                    Check: log stream --predicate 'subsystem==\"com.maccrab.daemon\"'")
+                    print("                    Check: log stream --predicate 'subsystem==\"com.maccrab.agent\"'")
                 }
             } else {
                 print("Last Event:      None recorded")

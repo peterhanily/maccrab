@@ -350,7 +350,7 @@ final class DaemonState {
         self.llmService = llmService
     }
 
-    private let mergedStreamLogger = Logger(subsystem: "com.maccrab.daemon", category: "EventStream")
+    private let mergedStreamLogger = Logger(subsystem: "com.maccrab.agent", category: "EventStream")
 
     /// Merges all event sources into a single async stream.
     /// Each source runs in a restart loop — if the underlying AsyncStream ends
