@@ -1,100 +1,94 @@
-# MacCrab 1.2.4 — Ship Notes
+# MacCrab 1.2.5 — Ship Notes
 
-**Native Endpoint Security on every machine.** Apple approved the ES
-client entitlement; this release ships the daemon signed with it
-instead of falling back to `eslogger` / `kdebug` / `FSEvents`.
+**Hotfix: the 1.2.4 daemon couldn't actually use the ES entitlement.**
+macOS AMFI only discovers `embedded.provisionprofile` when the binary
+lives inside an `.app` bundle; a standalone daemon at
+`/opt/homebrew/bin/maccrabd` failed with `Error Code=-413 "No matching
+profile found"` and got SIGKILLed on launch.
 
-1.2.3 users: drop-in upgrade. Installer handles the identifier rename
-and provisioning-profile install automatically.
+1.2.4 users will see install failures when `sudo maccrabd` is invoked
+(or silently — the LaunchDaemon retries and fails, logs show
+`LastExitStatus = 9`). 1.2.5 restructures the install so this works.
 
 ## What changed
 
-### The daemon now runs as a real ES client
+### The daemon binary moved into `MacCrab.app`
 
-All previous releases (1.1.1 – 1.2.3) shipped with the ES entitlement
-stripped because signing it into the binary without a provisioning
-profile caused macOS to SIGKILL on launch. The daemon compensated by
-falling back through three alternative kernel-event sources:
-`eslogger` proxy, `kdebug` via `fs_usage`, and `FSEvents`.
+Before (1.2.4): `/opt/homebrew/bin/maccrabd` (symlink) → `/opt/homebrew/Caskroom/maccrab/.../bin/maccrabd`
 
-With the entitlement approved, `maccrabd` is now signed directly with
-`com.apple.developer.endpoint-security.client` and runs the real
-`es_new_client` path. Benefits:
+After (1.2.5): `/Applications/MacCrab.app/Contents/Library/LaunchDaemons/maccrabd`
 
-- **Faster detection loop.** ES events arrive synchronously from the
-  kernel; no subprocess parse latency.
-- **AUTH-class events available.** Detect + authoritatively block an
-  exec before it runs, rather than observing after the fact.
-- **Richer event attribution.** No more `process.name == "unknown"`
-  FSEvents fallbacks — every event carries full process lineage.
-- **No Terminal-FDA dance on install.** The eslogger path required a
-  one-time Full Disk Access grant to Terminal; the native ES client
-  doesn't.
+The daemon lives inside the `.app` bundle so AMFI can walk up the
+filesystem, find `MacCrab.app/Contents/embedded.provisionprofile`,
+and honour the ES entitlement. This is the canonical Apple pattern
+used by Little Snitch, Objective-See tools, and every other
+Developer ID-signed ES daemon.
 
-### LaunchDaemon renamed: `com.maccrab.daemon` → `com.maccrab.agent`
+### LaunchDaemon plist path updated
 
-Apple bound the ES entitlement to `com.maccrab.agent` during their
-approval flow, so we moved the daemon label + plist filename + code-
-signing identifier + `os.log` subsystem strings to match. The change
-is purely organisational — behaviour is identical — but every moving
-part had to move together.
+`com.maccrab.agent.plist` now hard-codes
+`/Applications/MacCrab.app/Contents/Library/LaunchDaemons/maccrabd`.
+No per-install path rewriting; same plist works on every Homebrew
+prefix and direct-DMG install.
 
-**If you filter logs by subsystem**:
-```
-log stream --predicate 'subsystem=="com.maccrab.agent"'
-```
-The old `com.maccrab.daemon` predicate stops matching after upgrade.
+### Homebrew cask cleanup
 
-### Upgrade path is handled automatically
+- Dropped the `binary "bin/maccrabd"` declaration (daemon no longer
+  standalone)
+- Postflight removes any stale `/opt/homebrew/bin/maccrabd` or
+  `/usr/local/bin/maccrabd` from 1.2.4 before loading the new plist
+- `maccrabctl` and `maccrab-mcp` still symlink into
+  `$HOMEBREW_PREFIX/bin/`
 
-Both the Homebrew cask and the DMG installer detect a pre-1.2.4
-`/Library/LaunchDaemons/com.maccrab.daemon.plist`, unload it, and
-remove it before installing the new `com.maccrab.agent.plist`. No
-user action needed; no duplicate competing daemons.
+### App icon bundled
 
-### Provisioning profile shipped in both canonical locations
+The generic macOS app icon that was showing in every release from
+1.2.1 to 1.2.4 is replaced with the real MacCrab crab icon.
+`build-release.sh` now copies `AppIcon.icns` into
+`MacCrab.app/Contents/Resources/` and sets `CFBundleIconFile` /
+`CFBundleIconName` keys in `Info.plist`.
 
-- **Inside the `.app` bundle** at
-  `MacCrab.app/Contents/embedded.provisionprofile` — picked up by the
-  dashboard app's entitlement check.
-- **System-wide** at
-  `/Library/MobileDevice/Provisioning Profiles/<UUID>.provisionprofile`
-  — picked up when the standalone `/usr/local/bin/maccrabd` tries to
-  assert its ES entitlement grant.
+### Cask postflight UUID extraction (mid-1.2.4 hotfix)
 
-Belt-and-braces — some AMFI code paths check each location, so shipping
-both is strictly safer than choosing one.
+The provisioning-profile UUID extraction was piping
+`security cms -D` into `PlistBuddy /dev/stdin`. That's unreliable in
+Ruby backticks — PlistBuddy sometimes emits
+`"Error Reading File: /dev/stdin"` to stdout, which then
+contaminated the target filename. Replaced with a temp-file
+round-trip plus a UUID regex validator so nothing but a real UUID
+can reach a filesystem operation.
 
-### Operator tooling
-
-New `scripts/verify-profile.sh` takes a path to a `.provisionprofile`
-and prints the team, bundle ID, expiry, type (development / distribution /
-Developer ID), and the full entitlements list. Run it on any profile
-before wiring it into a build.
-
-### Hardened `.gitignore`
-
-Broader coverage for anything that could accidentally leak:
-
-- Private keys in every format (`*.key`, `*.pem`, `*.p12`, `*.pfx`,
-  `*.pkcs12`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`)
-- Certificates (`*.cer`, `*.crt`, `*.der`)
-- `.env` files in every variant (with `.env.example` allowlist)
-- Cloud credential caches (`.aws/`, `.gcloud/`, `.netrc`, `.npmrc`,
-  `.pypirc`, `service-account*.json`, `firebase-adminsdk*.json`)
-- SSH (`.ssh/`, `known_hosts`)
-- Keychain dumps, release artifacts, notarization state, coverage
-  data, crash dumps, scratch files
-
-## Upgrade
+## Upgrade from 1.2.4
 
 ```bash
-brew upgrade --cask maccrab
+brew uninstall --cask maccrab --force   # removes the broken 1.2.4 install
+brew update
+brew install --cask maccrab
 ```
 
-or grab `MacCrab-v1.2.4.dmg` from the release page and run `install.sh`.
+The `--force` is because brew treats the failed 1.2.4 state as
+"still installed" and normal uninstall sometimes balks.
+
+After install, verify ES is actually running:
+
+```bash
+sudo launchctl list com.maccrab.agent
+# Expect: "LastExitStatus" = 0 (not 9), and a numeric PID field
+tail -5 "/Library/Application Support/MacCrab/maccrabd.log"
+# Expect: "Endpoint Security: native client"
+```
+
+If you see `LastExitStatus = 9` or `eslogger proxy` in the log,
+check:
+
+```bash
+log show --last 2m --predicate 'sender == "amfid"' --info | tail -5
+```
+
+A "No matching profile found" line here means the profile install
+still failed — tell me and I'll dig in.
 
 ## Credits
 
 Shipped by @peterhanily with Claude (Opus 4.7, 1M context) as
-co-author. See `CHANGELOG.md` for the full entry.
+co-author.

@@ -10,11 +10,24 @@ cask "maccrab" do
   depends_on macos: ">= :ventura"
 
   app "MacCrab.app"
-  binary "bin/maccrabd"
   binary "bin/maccrabctl"
   binary "bin/maccrab-mcp"
 
   postflight do
+    # Upgrade path: the 1.2.4 install (and earlier) shipped maccrabd as a
+    # standalone binary at $HOMEBREW_PREFIX/bin/maccrabd. macOS AMFI
+    # couldn't discover the embedded provisioning profile for a binary
+    # outside a .app bundle, so ES attempts resulted in SIGKILL. 1.2.5
+    # relocated the daemon to MacCrab.app/Contents/Library/LaunchDaemons/
+    # — remove the stale symlinks / plist paths that pointed at the old
+    # location before starting the new daemon.
+    ["#{HOMEBREW_PREFIX}/bin/maccrabd",
+     "/usr/local/bin/maccrabd"].each do |path|
+      if File.symlink?(path) || File.exist?(path)
+        system_command "/bin/rm", args: ["-f", path], sudo: true
+      end
+    end
+
     # Upgrade path from pre-1.2.4: the daemon was labelled com.maccrab.daemon
     # before Apple bound the ES entitlement to com.maccrab.agent. Unload +
     # remove the old plist so the new one isn't shadowed.
@@ -22,6 +35,13 @@ cask "maccrab" do
     if File.exist?(old_plist)
       system_command "/bin/launchctl", args: ["unload", old_plist], sudo: true, must_succeed: false
       system_command "/bin/rm", args: ["-f", old_plist], sudo: true
+    end
+
+    # Also unload any running 1.2.4 com.maccrab.agent daemon that was
+    # trying to launch the now-gone /opt/homebrew/bin/maccrabd binary.
+    stale_agent = "/Library/LaunchDaemons/com.maccrab.agent.plist"
+    if File.exist?(stale_agent)
+      system_command "/bin/launchctl", args: ["unload", stale_agent], sudo: true, must_succeed: false
     end
 
     # Install compiled rules
@@ -62,13 +82,13 @@ cask "maccrab" do
       end
     end
 
-    # Install LaunchDaemon for auto-start on boot
+    # Install LaunchDaemon for auto-start on boot. The plist's
+    # ProgramArguments already points at
+    # /Applications/MacCrab.app/Contents/Library/LaunchDaemons/maccrabd
+    # — no path rewriting needed regardless of Homebrew prefix.
     plist_src = "#{staged_path}/com.maccrab.agent.plist"
     if File.exist?(plist_src)
       system_command "/bin/cp", args: [plist_src, "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
-      # Fix binary path for this machine's Homebrew prefix
-      maccrabd_path = "#{HOMEBREW_PREFIX}/bin/maccrabd"
-      system_command "/usr/bin/sed", args: ["-i", "", "s|/usr/local/bin/maccrabd|#{maccrabd_path}|g", "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
       system_command "/usr/sbin/chown", args: ["root:wheel", "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
       system_command "/bin/chmod", args: ["644", "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true
       system_command "/bin/launchctl", args: ["load", "/Library/LaunchDaemons/com.maccrab.agent.plist"], sudo: true

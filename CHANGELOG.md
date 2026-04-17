@@ -3,6 +3,57 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] — 2026-04-17
+
+Hotfix for 1.2.4. The 1.2.4 daemon was signed with the ES entitlement
+but AMFI refused to honour it because the binary sat outside an app
+bundle — macOS only discovers `embedded.provisionprofile` inside an
+`.app`. 1.2.5 moves the daemon into `MacCrab.app/Contents/Library/
+LaunchDaemons/` so the profile is findable.
+
+### Fixed
+
+- **Daemon SIGKILL on 1.2.4 install** — AMFI emitted `Error
+  Domain=AppleMobileFileIntegrityError Code=-413 "No matching profile
+  found"` when launching `/opt/homebrew/bin/maccrabd`. Relocated the
+  daemon binary into `MacCrab.app/Contents/Library/LaunchDaemons/
+  maccrabd`; AMFI walks up from any contained Mach-O and finds the
+  app's `embedded.provisionprofile`. This is the canonical Apple
+  pattern used by Little Snitch, Objective-See tools, and every other
+  Developer-ID-signed ES daemon on macOS.
+- **LaunchDaemon plist path** updated from `/usr/local/bin/maccrabd`
+  to `/Applications/MacCrab.app/Contents/Library/LaunchDaemons/
+  maccrabd`. No per-install path rewriting; the plist is now
+  Homebrew-prefix-independent.
+- **Cask postflight UUID extraction** (carried over from
+  mid-1.2.4-release hotfix): `security cms | PlistBuddy /dev/stdin`
+  was unreliable in Ruby backticks; replaced with temp-file
+  round-trip and UUID regex validator.
+
+### Added
+
+- **App icon bundled** — `AppIcon.icns` now copies into
+  `MacCrab.app/Contents/Resources/` with `CFBundleIconFile` and
+  `CFBundleIconName` keys set in `Info.plist`. The generic macOS app
+  icon that was shipping in 1.2.1-1.2.4 is replaced with the real
+  MacCrab crab icon.
+- **Upgrade-path cleanup** in cask + `install.sh`: any stale
+  `/opt/homebrew/bin/maccrabd` or `/usr/local/bin/maccrabd` symlinks
+  from 1.2.4 are removed before installing 1.2.5. Any running
+  `com.maccrab.agent` LaunchDaemon pointing at the defunct path is
+  unloaded first.
+
+### Internal
+
+- `scripts/build-release.sh`: new signing order — sign bin/
+  CLI tools, relocate `maccrabd` into app bundle, sign the daemon
+  inside the app with ES entitlement + `com.maccrab.agent` identifier,
+  sign inner app executable, sign outer app bundle (seals the
+  provisioning profile).
+- Cask no longer declares `binary "bin/maccrabd"` — the daemon lives
+  in the app now. `maccrabctl` and `maccrab-mcp` still symlink into
+  `$HOMEBREW_PREFIX/bin/`.
+
 ## [1.2.4] — 2026-04-17
 
 Native Endpoint Security unlock. Apple approved the ES client
