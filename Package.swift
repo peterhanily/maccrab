@@ -13,6 +13,12 @@ let package = Package(
         .executable(name: "maccrabctl", targets: ["maccrabctl"]),
         .executable(name: "MacCrabApp", targets: ["MacCrabApp"]),
         .executable(name: "maccrab-mcp", targets: ["maccrab-mcp"]),
+        // MacCrabAgent is built as a regular executable and then wrapped
+        // into a .systemextension bundle by scripts/build-release.sh.
+        // xcodebuild would do this automatically but we don't require
+        // full Xcode — the bundle layout is just a directory with
+        // Info.plist + MacOS/<binary> + codesign-generated _CodeSignature.
+        .executable(name: "MacCrabAgent", targets: ["MacCrabAgent"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-testing.git", branch: "release/6.2"),
@@ -31,7 +37,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "maccrabd",
-            dependencies: ["MacCrabCore"]
+            dependencies: ["MacCrabCore", "MacCrabAgentKit"]
         ),
         .executableTarget(
             name: "maccrabctl",
@@ -47,6 +53,23 @@ let package = Package(
         .executableTarget(
             name: "maccrab-mcp",
             dependencies: ["MacCrabCore"]
+        ),
+        // Shared daemon bootstrap — wraps everything that used to sit
+        // inside the `maccrabd` executable target except for the entry
+        // point. Both `maccrabd` (the legacy/standalone LaunchDaemon
+        // fallback) and `MacCrabAgent` (the Endpoint Security sysext)
+        // link this library and only differ in their outermost main.swift.
+        .target(
+            name: "MacCrabAgentKit",
+            dependencies: ["MacCrabCore"]
+        ),
+        // System Extension target. Compiles to a plain Mach-O; the
+        // build-release.sh script wraps it into a .systemextension
+        // bundle at MacCrab.app/Contents/Library/SystemExtensions/
+        // com.maccrab.agent.systemextension.
+        .executableTarget(
+            name: "MacCrabAgent",
+            dependencies: ["MacCrabAgentKit"]
         ),
         .testTarget(
             name: "MacCrabCoreTests",

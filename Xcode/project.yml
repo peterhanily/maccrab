@@ -93,7 +93,15 @@ targets:
     type: system-extension
     platform: macOS
     sources:
+      # Sysext-specific entry point + XPC listener lives here.
       - path: ../Sources/MacCrabAgent
+      # Reuse the daemon bootstrap (DaemonSetup, DaemonState, EventLoop,
+      # MonitorTasks, DaemonTimers, SignalHandlers, StartupBanner,
+      # Globals, DaemonBootstrap) — but skip the SPM executable's
+      # own main.swift since this target has its own.
+      - path: ../Sources/maccrabd
+        excludes:
+          - main.swift
     dependencies:
       - package: MacCrabCore
         product: MacCrabCore
