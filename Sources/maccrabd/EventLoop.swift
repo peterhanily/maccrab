@@ -663,9 +663,10 @@ enum EventLoop {
             var matches = await state.ruleEngine.evaluate(enrichedEvent)
 
             // Apply shared noise filters — also called from the FSEvents
-            // path in MonitorTasks so behavior stays consistent across the
-            // two rule-evaluation entry points.
-            Self.applyNoiseFilters(&matches, event: enrichedEvent, state: state)
+            // path in MonitorTasks and the SIGHUP retroactive scan in
+            // SignalHandlers, so behavior stays consistent across every
+            // rule-evaluation entry point.
+            NoiseFilter.apply(&matches, event: enrichedEvent, isWarmingUp: state.isWarmingUp)
 
             // Layer 2: Temporal sequence rules (Phase 2)
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
@@ -1171,82 +1172,6 @@ enum EventLoop {
         logger.info("Event stream ended. Daemon exiting.")
     }
 
-    /// Known browser / Electron app-bundle prefixes whose helper processes
-    /// are expected to do a lot of things individual Sigma rules flag in
-    /// isolation (reading their own cookie DB, writing to their own cache,
-    /// opening long-lived HTTPS, spawning child binaries for profile
-    /// migration, etc.). Anything whose executable path lives under one of
-    /// these is treated as a trusted helper — non-critical rule matches
-    /// are dropped before they become alerts. Critical rules still fire.
-    /// This complements the per-detector allowlists (TLSFingerprinter,
-    /// PowerAnomalyDetector, CrossProcessCorrelator) with a single
-    /// short-circuit that also catches rules we haven't individually
-    /// hardened.
-    private static let trustedBrowserPrefixes: [String] = [
-        "/Applications/Google Chrome.app/",
-        "/Applications/Google Chrome Canary.app/",
-        "/Applications/Chromium.app/",
-        "/Applications/Microsoft Edge.app/",
-        "/Applications/Microsoft Edge Canary.app/",
-        "/Applications/Microsoft Edge Dev.app/",
-        "/Applications/Microsoft Edge Beta.app/",
-        "/Applications/Brave Browser.app/",
-        "/Applications/Brave Browser Nightly.app/",
-        "/Applications/Brave Browser Dev.app/",
-        "/Applications/Arc.app/",
-        "/Applications/Vivaldi.app/",
-        "/Applications/Opera.app/",
-        "/Applications/Firefox.app/",
-        "/Applications/Firefox Nightly.app/",
-        "/Applications/Firefox Developer Edition.app/",
-        "/Applications/Safari.app/",
-        "/Applications/Orion.app/",
-        // Electron apps that ship a Chromium helper tree and behave
-        // identically to browsers from the detection engine's perspective.
-        "/Applications/Slack.app/",
-        "/Applications/Discord.app/",
-        "/Applications/Microsoft Teams.app/",
-        "/Applications/Visual Studio Code.app/",
-        "/Applications/Code.app/",
-        "/Applications/Cursor.app/",
-        "/Applications/Claude.app/",
-        "/Applications/ChatGPT Atlas.app/",
-        "/Applications/Codex.app/",
-        "/Applications/GitHub Desktop.app/",
-        "/Applications/Signal.app/",
-        "/Applications/Telegram.app/",
-        "/Applications/WhatsApp.app/",
-    ]
-
-    /// True when the given executable path is inside a trusted browser or
-    /// Electron-helper app bundle (see `trustedBrowserPrefixes`).
-    static func isTrustedBrowserHelper(path: String) -> Bool {
-        for prefix in Self.trustedBrowserPrefixes where path.hasPrefix(prefix) {
-            return true
-        }
-        return false
-    }
-
-    /// Apply the standard low-signal noise filters to a batch of rule
-    /// matches. Mutates `matches` in place. Called from both the main
-    /// EventLoop and the FSEvents-only path in MonitorTasks so both
-    /// entry points behave identically.
-    ///
-    /// Three gates, each drops non-`.critical` matches:
-    /// - event has no attributable process (FSEvents without ES context)
-    /// - daemon is still in the warm-up window (first 60s after start)
-    /// - event's executable lives under a trusted browser / Electron bundle
-    static func applyNoiseFilters(
-        _ matches: inout [RuleMatch], event: Event, state: DaemonState
-    ) {
-        if event.process.name == "unknown" || event.process.executable.isEmpty {
-            matches.removeAll { $0.severity != .critical }
-        }
-        if state.isWarmingUp {
-            matches.removeAll { $0.severity != .critical }
-        }
-        if Self.isTrustedBrowserHelper(path: event.process.executable) {
-            matches.removeAll { $0.severity != .critical }
-        }
-    }
+    // NoiseFilter logic lives in MacCrabCore/Detection/NoiseFilter.swift
+    // so the test target can exercise it directly. See FPRegressionTests.
 }

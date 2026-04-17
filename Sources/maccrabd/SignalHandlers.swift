@@ -33,7 +33,7 @@ enum SignalHandlers {
                     var retroMatches = 0
                     for event in recentEvents {
                         var matches = await state.ruleEngine.evaluate(event)
-                        EventLoop.applyNoiseFilters(&matches, event: event, state: state)
+                        NoiseFilter.apply(&matches, event: event, isWarmingUp: state.isWarmingUp)
                         for match in matches {
                             // Skip if already deduplicated
                             if await state.deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: event.process.executable) {

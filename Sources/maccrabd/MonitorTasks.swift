@@ -17,7 +17,7 @@ enum MonitorTasks {
                     // Apply the same noise filters the main EventLoop uses
                     // so FSEvents-triggered rule hits don't bypass
                     // unknown-process / warm-up / trusted-browser gates.
-                    EventLoop.applyNoiseFilters(&matches, event: enriched, state: state)
+                    NoiseFilter.apply(&matches, event: enriched, isWarmingUp: state.isWarmingUp)
                     for match in matches {
                         if await state.suppressionManager.isSuppressed(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
                         if await state.deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: enriched.process.executable) { continue }
