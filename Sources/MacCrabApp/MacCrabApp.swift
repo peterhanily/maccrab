@@ -7,6 +7,7 @@ import AppKit
 @main
 struct MacCrabApp: App {
     @StateObject private var appState = AppState()
+    @StateObject private var sysextManager = SystemExtensionManager()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage("hasCompletedSetup") private var hasCompletedSetup = false
     @State private var showWelcome = false
@@ -14,10 +15,16 @@ struct MacCrabApp: App {
     var body: some Scene {
         // Main dashboard window — opens on launch.
         WindowGroup("MacCrab Dashboard") {
-            MainView(appState: appState)
+            MainView(appState: appState, sysextManager: sysextManager)
                 .frame(minWidth: 950, minHeight: 600)
                 .onAppear {
                     appDelegate.setupStatusBar(appState: appState)
+                    // Kick off system-extension activation on first
+                    // launch. The manager dedups against an already-
+                    // activated extension, so this is also safe on
+                    // repeated launches — the request returns
+                    // immediately with .completed.
+                    sysextManager.activate()
                     if !hasCompletedSetup {
                         showWelcome = true
                     }
