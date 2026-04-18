@@ -752,7 +752,7 @@ struct SettingsView: View {
                 Text(String(localized: "settings.aboutTagline", defaultValue: "Local-first macOS threat detection engine"))
                     .foregroundColor(.secondary)
 
-                Text("v1.3.3")
+                Text("v1.3.4")
                     .font(.caption)
                     .foregroundColor(.secondary)
 

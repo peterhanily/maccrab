@@ -369,6 +369,143 @@ struct CrossProcessCorrelatorTests {
         #expect(chain == nil, "Same PID should not form a cross-process chain")
     }
 
+    @Test("Chrome Helper + Google Drive + GSU fan-out is suppressed")
+    func chromeFamilyFanOutSuppressed() async {
+        // Real-world FP: Chrome Helper, Google Drive, and Google Software
+        // Update all chatter to the same Google endpoint within seconds.
+        // Three distinct .app bundles — `allEventsShareAppBundle` can't
+        // catch it. `allEventsAreTrustedHelpers` should.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 3)
+        let now = Date()
+
+        await correlator.recordNetworkEvent(
+            destinationIP: "198.51.100.42",     // not in trustedCloudPrefixes
+            destinationPort: 443,
+            pid: 100,
+            processName: "Google Chrome Helper",
+            processPath: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper",
+            timestamp: now
+        )
+        await correlator.recordNetworkEvent(
+            destinationIP: "198.51.100.42",
+            destinationPort: 443,
+            pid: 200,
+            processName: "Slack Helper",
+            processPath: "/Applications/Slack.app/Contents/Frameworks/Slack Helper.app/Contents/MacOS/Slack Helper",
+            timestamp: now.addingTimeInterval(3)
+        )
+        let chain = await correlator.recordNetworkEvent(
+            destinationIP: "198.51.100.42",
+            destinationPort: 443,
+            pid: 300,
+            processName: "Code Helper",
+            processPath: "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper",
+            timestamp: now.addingTimeInterval(6)
+        )
+
+        #expect(chain == nil, "Cross-bundle trusted-helper fan-out should be suppressed")
+    }
+
+    @Test("Unrelated non-browser processes still trigger convergence")
+    func unrelatedProcessesStillConverge() async {
+        // Sanity: the new filter must not paper over real convergence.
+        // curl + python + bash hitting the same non-cloud IP is the exact
+        // pattern the rule is designed to catch.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 3)
+        let now = Date()
+
+        await correlator.recordNetworkEvent(
+            destinationIP: "198.51.100.7",
+            destinationPort: 443,
+            pid: 100,
+            processName: "curl",
+            processPath: "/usr/bin/curl",
+            timestamp: now
+        )
+        await correlator.recordNetworkEvent(
+            destinationIP: "198.51.100.7",
+            destinationPort: 443,
+            pid: 200,
+            processName: "python3",
+            processPath: "/usr/bin/python3",
+            timestamp: now.addingTimeInterval(2)
+        )
+        let chain = await correlator.recordNetworkEvent(
+            destinationIP: "198.51.100.7",
+            destinationPort: 443,
+            pid: 300,
+            processName: "bash",
+            processPath: "/bin/bash",
+            timestamp: now.addingTimeInterval(4)
+        )
+
+        #expect(chain != nil, "Genuine multi-process convergence must still fire")
+        #expect(chain?.processCount == 3)
+    }
+
+    @Test("Expanded Google domain list suppresses Chrome update chatter")
+    func googleUpdateDomainSuppressed() async {
+        // `tools.google.com`, `gvt1.com`, `googleusercontent.com` all
+        // receive Chrome update / user-content traffic. None of these ended
+        // in `google.com` or matched the old suffix list.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 3)
+        let now = Date()
+
+        for (i, domain) in ["gvt1.com", "googleusercontent.com", "youtube.com"].enumerated() {
+            let chain = await correlator.recordNetworkEvent(
+                destinationIP: "203.0.113.\(10 + i)",   // deliberately non-Google IPs
+                destinationPort: 443,
+                destinationDomain: domain,
+                pid: Int32(100 + i),
+                processName: "curl",
+                processPath: "/usr/bin/curl-\(i)",    // distinct paths so helpers filter doesn't trigger
+                timestamp: now.addingTimeInterval(Double(i) * 2)
+            )
+            // The IP-key chain may fire (non-Google IPs); assert the
+            // *domain*-key chain doesn't. Domain suppression is what
+            // stops Chrome update noise when DNS is attached to events.
+            if i == 2 {
+                #expect(
+                    chain?.artifactType != "domain",
+                    "Trusted Google domain \(domain) must not produce a domain-type chain"
+                )
+            }
+        }
+    }
+
+    @Test("Empty destination IP never produces a convergence chain")
+    func emptyDestinationIPIgnored() async {
+        // Regression: network events that arrive before DNS / flow
+        // enrichment resolves carry an empty `destinationIP`. Without a
+        // guard, every one of them keys into the artifact map as `":443"`
+        // and collapses every HTTPS flow on the host into one bucket.
+        // Observed in the field: syspolicyd + Google Chrome Helper +
+        // WeatherWidget + mDNSResponder all reported as "unrelated
+        // processes contacted :443" — they weren't, they just lacked IPs.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 3)
+        let now = Date()
+
+        for (i, (name, path)) in [
+            ("syspolicyd", "/usr/libexec/syspolicyd"),
+            ("Google Chrome Helper", "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/147.0.7727.56/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper"),
+            ("WeatherWidget", "/System/Applications/Weather.app/Contents/PlugIns/WeatherWidget.appex/Contents/MacOS/WeatherWidget"),
+            ("mDNSResponder", "/usr/sbin/mDNSResponder"),
+        ].enumerated() {
+            let chain = await correlator.recordNetworkEvent(
+                destinationIP: "",                 // unresolved
+                destinationPort: 443,
+                pid: Int32(100 + i),
+                processName: name,
+                processPath: path,
+                timestamp: now.addingTimeInterval(Double(i))
+            )
+            #expect(chain == nil, "Empty IP event must never form a chain (i=\(i))")
+        }
+
+        let tracked = await correlator.trackedNetworkCount
+        #expect(tracked == 0, "Unresolved-IP events should not be tracked at all, got \(tracked)")
+    }
+
     @Test("Stale events are purged")
     func staleEventsPurged() async {
         let window: TimeInterval = 10  // short window for testing

@@ -151,14 +151,45 @@ public actor CrossProcessCorrelator {
     ]
 
     /// Destination domains served by trusted APIs. Used when the chain key
-    /// is domain-based rather than IP-based.
+    /// is domain-based rather than IP-based. Suffix-matched, so
+    /// `clients2.google.com` matches `google.com`.
+    ///
+    /// Google's browser + update + drive + media stack fans out across
+    /// several TLDs — adding only `google.com` wasn't enough, since Chrome
+    /// chatters to `gvt1.com`, `googleusercontent.com`, `googlevideo.com`,
+    /// etc. These are all Google-owned CDNs and were the dominant source of
+    /// Chrome-Helper convergence false positives on real workstations.
     private static let trustedCloudDomains: [String] = [
+        // AI APIs
         "anthropic.com", "claude.ai",
         "openai.com", "chatgpt.com", "oaiusercontent.com",
+        "mistral.ai", "groq.com", "perplexity.ai",
+        // Source forges
         "github.com", "githubusercontent.com", "githubassets.com",
+        "gitlab.com", "bitbucket.org",
+        // Google — browser + update + services + media
         "google.com", "googleapis.com", "gstatic.com",
-        "cloudflare.com", "cloudflare-dns.com",
-        "apple.com", "icloud.com", "mzstatic.com",
+        "gvt1.com", "gvt2.com",                 // Google Update / CRX
+        "googleusercontent.com",                // User content CDN
+        "googlevideo.com", "ytimg.com", "youtube.com", "youtu.be",
+        "doubleclick.net", "googlesyndication.com",
+        "google-analytics.com", "googletagmanager.com", "googleadservices.com",
+        "goog.gl", "goo.gl",
+        // Microsoft — Edge, Teams, OneDrive, Windows Update equivalents
+        "microsoft.com", "microsoftonline.com", "office.com", "office365.com",
+        "azureedge.net", "azure.com", "live.com", "windows.net",
+        "msn.com", "bing.com",
+        // Mozilla
+        "mozilla.org", "mozilla.net", "firefox.com",
+        // Apple CDNs
+        "apple.com", "icloud.com", "mzstatic.com", "apple-cloudkit.com",
+        "apple-mapkit.com", "apple-livephotoskit.com", "cdn-apple.com",
+        // Cloudflare
+        "cloudflare.com", "cloudflare-dns.com", "cloudflareinsights.com",
+        // Collab / messaging Electron apps — same fan-out pattern as browsers
+        "slack.com", "slack-edge.com", "slack-msgs.com",
+        "discord.com", "discordapp.com", "discord.gg",
+        "zoom.us", "zoomgov.com",
     ]
 
     // MARK: - Initialization
@@ -353,6 +384,14 @@ public actor CrossProcessCorrelator {
         // parallel isn't a convergence event.
         if allEventsShareExecutable(windowEvents) { return nil }
         if allEventsShareToolDirectory(windowEvents) { return nil }
+        // And skip when every chain participant is a known browser or
+        // Electron helper — even if they span *different* bundles. A fan-out
+        // of `Google Chrome Helper` + `Google Drive` + `Google Software
+        // Update` to a Google endpoint is three distinct `.app`s but one
+        // vendor stack; the bundle-match above can't see that. This is the
+        // single biggest source of Chrome-Helper `network-convergence` noise
+        // on workstations where the user runs the Google suite end-to-end.
+        if allEventsAreTrustedHelpers(windowEvents) { return nil }
 
         let severity = computeNetworkSeverity(events: windowEvents)
         let chain = buildChain(
@@ -416,6 +455,19 @@ public actor CrossProcessCorrelator {
         let firstDir = (first.processPath as NSString).deletingLastPathComponent
         return events.allSatisfy {
             ($0.processPath as NSString).deletingLastPathComponent == firstDir
+        }
+    }
+
+    /// True when every event's process sits under one of the
+    /// `NoiseFilter.trustedBrowserPrefixes` bundles. This allows a chain to
+    /// be suppressed when participants cross bundle boundaries but all
+    /// belong to widely-deployed browsers / Electron apps (Chrome + Chrome
+    /// Helper + Slack, all talking to Google's CDN). The bundle-identity
+    /// filter above can't catch cross-bundle cases like that on its own.
+    private func allEventsAreTrustedHelpers(_ events: [ChainEvent]) -> Bool {
+        guard !events.isEmpty else { return false }
+        return events.allSatisfy {
+            NoiseFilter.isTrustedBrowserHelper(path: $0.processPath)
         }
     }
 
@@ -521,10 +573,28 @@ public actor CrossProcessCorrelator {
         return false
     }
 
-    /// Whether a network destination should be ignored (localhost, link-local).
+    /// Whether a network destination should be ignored (localhost, link-local,
+    /// or unresolved / sentinel values).
+    ///
+    /// Unresolved IP is the most important guard here: the network collector
+    /// emits events the instant a connection is observed, which can land
+    /// before DNS / flow-enrichment completes. Those events arrive with an
+    /// empty `destinationIp`, and without this guard every one of them keys
+    /// into the artifact map as `":443"` — collapsing every HTTPS flow on
+    /// the box into a single bucket and producing a permanent flood of
+    /// "N unrelated processes contacted :443" convergence alerts. The fix
+    /// is to drop these at ingress; DNS-correlated events will still be
+    /// recorded under the domain key via `destinationDomain`.
     private func shouldIgnoreNetworkDestination(_ ip: String) -> Bool {
+        // Empty / unresolved / wildcard IPs can never belong to a real
+        // convergence signal — they're the product of enrichment gaps.
+        let trimmed = ip.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return true }
+        if trimmed == "::" || trimmed == "0.0.0.0" { return true }
+        // Must look like an IP: contain a dot (IPv4) or colon (IPv6).
+        if !trimmed.contains(".") && !trimmed.contains(":") { return true }
         for prefix in Self.ignoredNetworkPrefixes {
-            if ip.hasPrefix(prefix) { return true }
+            if trimmed.hasPrefix(prefix) { return true }
         }
         return false
     }
