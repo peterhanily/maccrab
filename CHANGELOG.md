@@ -3,6 +3,43 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] — 2026-04-18
+
+Fixes a flood of `maccrab.correlator.network-convergence` alerts on
+hosts with active Chrome / Electron usage. Field diagnosis from a
+noisy box showed every alert description read `N unrelated processes
+contacted :443 over Ns` — no IP, just the port. Network events that
+arrived before DNS / flow enrichment carried an empty
+`destinationIp`, which the correlator keyed under `":443"`, collapsing
+every HTTPS flow on the host into one artifact bucket. `syspolicyd`,
+`Google Chrome Helper`, `WeatherWidget`, `mDNSResponder`, and
+`Keynote` all got lumped together as "convergence" simply because
+they opened HTTPS before the IP resolved.
+
+### Fixed
+
+- `CrossProcessCorrelator.shouldIgnoreNetworkDestination` now rejects
+  empty, whitespace-only, `0.0.0.0`, `::`, and any string that
+  doesn't look like an IP. This is the fix that actually stops the
+  flood — no cloud-prefix list could match an absent IP.
+- Expanded `trustedCloudDomains` from 15 → 49 suffixes to cover
+  Google's full browser/update/media stack (`gvt1.com`,
+  `googleusercontent.com`, `youtube.com`, `doubleclick.net`, …) plus
+  Microsoft, Mozilla, Apple CDN, and Slack/Discord/Zoom. These help
+  the domain-keyed path when DNS *is* attached.
+- New `allEventsAreTrustedHelpers` gate reuses
+  `NoiseFilter.trustedBrowserPrefixes` to suppress cross-bundle
+  fan-out (Chrome Helper + Slack Helper + Code Helper all to one
+  destination) — the existing bundle-identity filter couldn't see
+  across bundles.
+
+### Tests
+
+Four new regressions in `CrossProcessCorrelatorTests`:
+`emptyDestinationIPIgnored`, `chromeFamilyFanOutSuppressed`,
+`unrelatedProcessesStillConverge`, `googleUpdateDomainSuppressed`.
+All 7 correlator tests pass.
+
 ## [1.3.3] — 2026-04-18
 
 Second hotfix for the same sysext categorization error. 1.3.2 added
