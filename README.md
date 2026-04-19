@@ -3,13 +3,14 @@
 **Real-time threat detection for macOS -- no cloud, no SIEM, no telemetry.**
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-559%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-1.3.4-blue)](https://github.com/peterhanily/maccrab/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
-[![Rules](https://img.shields.io/badge/detection%20rules-376-orange)]()
+[![Rules](https://img.shields.io/badge/detection%20rules-380-orange)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
-MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, 376 Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a single daemon -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS with a SwiftUI dashboard.
+MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, 380 Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS.
 
 **Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine.
 
@@ -21,16 +22,20 @@ MacCrab is an on-device security engine that monitors your Mac in real time usin
 
 ```bash
 # 1. Install
-brew install --cask https://raw.githubusercontent.com/peterhanily/maccrab/main/homebrew/maccrab.rb
+brew tap peterhanily/maccrab https://github.com/peterhanily/maccrab
+brew install --cask maccrab
 
-# 2. Start the daemon (requires root for kernel events)
-sudo maccrabd
-
-# 3. Open the dashboard
+# 2. Open the dashboard
 open /Applications/MacCrab.app
+
+# 3. Click "Enable Protection" on the Overview screen, then approve the
+#    extension in System Settings → General → Login Items & Extensions →
+#    Endpoint Security Extensions.
 ```
 
-### Option B: Build from source
+> **Note:** Full Endpoint Security coverage requires granting Full Disk Access to MacCrab.app in **System Settings > Privacy & Security > Full Disk Access**.
+
+### Option B: Build from source (developers)
 
 ```bash
 # 1. Clone and build
@@ -44,7 +49,7 @@ make dev    # builds, codesigns, compiles rules, starts daemon
 make app
 ```
 
-> **Note:** Full Endpoint Security coverage requires granting Full Disk Access to Terminal in **System Settings > Privacy & Security > Full Disk Access**.
+> **Note:** `make dev` runs `maccrabd` directly from `.build/` without the SystemExtension wrapper -- event coverage falls back through `eslogger` → `kdebug` → FSEvents. Native ES requires the approved provisioning profile that ships in release builds. The fallback chain is a first-class code path and is fully supported for development.
 
 ---
 
@@ -67,7 +72,7 @@ Once running, MacCrab gives you:
 | Capability | MacCrab | Santa | osquery | Commercial EDR |
 |------------|:-------:|:-----:|:-------:|:--------------:|
 | Real-time kernel events (90+ ES types) | Yes | Exec only | Scheduled | Yes |
-| Sigma-compatible rules | **376** | No | No | Varies |
+| Sigma-compatible rules | **380** | No | No | Varies |
 | Temporal sequence detection | **Yes** | No | No | Some |
 | Behavioral scoring | **Yes** | No | No | Yes |
 | AI coding tool guardrails | **Yes** | No | No | No |
@@ -93,11 +98,27 @@ Read the full [Privacy Policy](PRIVACY.md).
 
 ## Security
 
-MacCrab's daemon runs as root (required for Endpoint Security) but the CLI and dashboard run as your user with read-only database access. The daemon protects itself with 8 layers of tamper detection including binary integrity checks, anti-debug, and process injection detection.
+MacCrab's detection engine runs as a System Extension (a sandboxed userspace process managed by `sysextd`, as required for Endpoint Security). The CLI and dashboard run as your user with read-only database access. The engine protects its own integrity with 8 layers of tamper detection including binary integrity checks, anti-debug, and process injection detection.
 
-To report a vulnerability, **do not open a public issue** -- email security@maccrab.dev instead.
+To report a vulnerability, **do not open a public issue** -- email security@maccrab.com instead.
 
 Read the full [Security Policy](SECURITY.md).
+
+---
+
+## Documentation
+
+| Document | What's in it |
+|---|---|
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Sysext approval failures, FDA silent drops, `make compile-rules` errors, "Protection active but no alerts", webhook validation rejections, Homebrew upgrade cleanup |
+| [UPGRADE.md](UPGRADE.md) | v1.2 LaunchDaemon → v1.3 SystemExtension migration, within-family upgrade notes, rollback guidance |
+| [FAQ.md](FAQ.md) | Top 14 questions: custom rules, data that leaves the machine, air-gapped use, SIEM export, license, macOS versions, Apple Silicon |
+| [Rules/README.md](Rules/README.md) | Sigma YAML rule authoring, field mappings, sequence rule syntax |
+| [docs/daemon_config.example.json](docs/daemon_config.example.json) | Annotated reference config with every tunable knob and every output-sink type |
+| [docs/suppressions.example.json](docs/suppressions.example.json) | Per-rule process allowlist format |
+| [PRIVACY.md](PRIVACY.md) | Data inventory — what's collected, what leaves, what's redacted |
+| [SECURITY.md](SECURITY.md) | Threat model, privilege boundaries, vulnerability disclosure |
+| [CHANGELOG.md](CHANGELOG.md) | Dated version history |
 
 ---
 
@@ -110,7 +131,7 @@ Read the full [Security Policy](SECURITY.md).
  |   Event Sources    |     |    Enrichment       |     |     Detection        |
  |                    |     |                     |     |                      |
  | ES Framework  ----------> Process Lineage DAG  |     | Single-Event Rules   |
- | Unified Log   ----------> Code Signing Cache   |     |   (349 Sigma YAML)   |
+ | Unified Log   ----------> Code Signing Cache   |     |   (353 Sigma YAML)   |
  | TCC Monitor   ----------> Quarantine Origin    +---->| Sequence Rules (27)  |
  | Network Coll. ----------> Threat Intel Feeds   |     | Baseline Anomaly     |
  | DNS Collector ----------> Cert Transparency    |     | Statistical Anomaly  |
@@ -162,8 +183,10 @@ maccrabctl extensions --suspicious      # Browser extension scan
 ### Homebrew
 
 ```bash
-brew uninstall maccrab
+brew uninstall --cask maccrab
 ```
+
+The cask's uninstall block deactivates the System Extension via `systemextensionsctl` and removes MacCrab.app, the CLI binaries, and any pre-1.3 LaunchDaemon artefacts.
 
 ### Manual / source build
 
@@ -171,7 +194,7 @@ brew uninstall maccrab
 sudo ./scripts/uninstall.sh
 ```
 
-The uninstall script stops the daemon, removes binaries and the launchd plist, and asks before deleting your data (events, rules, logs). Pass `-y` to skip the prompt.
+The uninstall script stops the daemon (if running from a dev build), removes binaries, deactivates the System Extension, and asks before deleting your data (events, rules, logs). Pass `-y` to skip the prompt.
 
 To remove user-level data as well:
 
@@ -188,27 +211,30 @@ MacCrab evaluates events through a 5-tier detection hierarchy:
 
 | Tier | Description |
 |------|-------------|
-| **1. Rules** | 376 Sigma-compatible YAML rules compiled to JSON. Category-indexed for O(1) dispatch. |
-| **2. Anomaly** | Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators). |
-| **3. Sequences** | 27 temporal multi-step rules with process lineage correlation and time windows. |
-| **4. Campaigns** | Kill chain, alert storm, AI compromise, coordinated attack, and lateral movement detection. |
-| **5. Cross-process** | Correlation across the full process lineage graph. |
+| **1. Rules** | 353 Sigma-compatible YAML rules compiled to JSON. Category-indexed for O(1) dispatch; rules exceeding 50 ms are logged for profiling. |
+| **2. Anomaly** | Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights). |
+| **3. Sequences** | 27 temporal multi-step rules with process lineage correlation, 10K partial match cap, LRU regex cache. |
+| **4. Campaigns** | Kill chain, alert storm, AI compromise, coordinated attack, and lateral movement detection with incremental O(1) indexes. |
+| **5. Cross-process** | Correlation across the full process lineage graph with trusted-helper and unresolved-destination sentinels. |
 
 <details>
 <summary><strong>Event Sources (click to expand)</strong></summary>
 
-MacCrab ingests from eight real-time event sources, covering kernel-level process activity through application-layer permissions:
+MacCrab ingests from 19 real-time event sources, covering kernel-level process activity through application-layer permissions. The top-level collectors include:
 
 | Source | What it captures |
 |--------|------------------|
 | **Endpoint Security framework** | 90+ kernel event types: process exec/fork/exit, file create/write/rename/unlink, signal delivery, kext loading, mmap, iokit operations |
-| **Unified Log** | Real-time streaming from 12 subsystems (`com.apple.securityd`, `com.apple.authd`, `com.apple.xpc`, `com.apple.install`, and 8 more) |
-| **TCC permission monitor** | Polls system and user TCC databases for grants/revocations to accessibility, full disk access, screen recording, camera, microphone, and more |
+| **Unified Log** | Real-time streaming from 18 subsystems (`com.apple.securityd`, `com.apple.authd`, `com.apple.xpc`, `com.apple.install`, Bluetooth, Wi-Fi, AirDrop, and more) |
+| **TCC permission monitor** | Watches system and user TCC databases for grants/revocations to accessibility, full disk access, screen recording, camera, microphone, and more |
 | **Network connection collector** | Outbound TCP/UDP connections with destination IP, port, hostname resolution, and owning process attribution |
-| **DNS collector** | DNS query/response monitoring for DGA detection, tunneling, and domain reputation checks |
+| **DNS collector** | DNS query/response monitoring via BPF for DGA detection, tunneling, and domain reputation checks |
 | **Event Tap monitor** | CGEvent tap monitoring for keylogger detection and suspicious input recording |
-| **System Policy monitor** | Gatekeeper, XProtect, and notarization enforcement activity |
+| **System Policy monitor** | Gatekeeper, XProtect, SIP, MDM, and auth-plugin enforcement activity |
 | **FSEvents fallback** | File system event stream for coverage when ES file events are unavailable |
+| **eslogger / kdebug** | Fallback ES event streams when the native ES client is unavailable |
+
+See the Monitors and Collectors table below for the full list including USB, clipboard, ultrasonic, rootkit, browser extension, MCP, EDR/RMM, and TEMPEST/SDR monitors.
 
 </details>
 
@@ -376,28 +402,28 @@ Rules can trigger configurable response actions ranging from passive to active:
 ## Rule Coverage by MITRE ATT&CK Tactic
 
 <details>
-<summary><strong>Full rule breakdown (376 rules across 17 tactics)</strong></summary>
+<summary><strong>Full rule breakdown (380 rules across 17 tactics)</strong></summary>
 
 | Tactic | Directory | Single-Event | Sequences | Total |
 |--------|-----------|:------------:|:---------:|:-----:|
-| Defense Evasion | `defense_evasion/` | 55 | -- | 55 |
-| Credential Access | `credential_access/` | 32 | -- | 32 |
+| Defense Evasion | `defense_evasion/` | 62 | -- | 62 |
+| Credential Access | `credential_access/` | 35 | -- | 35 |
+| Persistence | `persistence/` | 34 | -- | 34 |
 | Supply Chain | `supply_chain/` | 31 | -- | 31 |
-| Persistence | `persistence/` | 30 | -- | 30 |
-| Execution | `execution/` | 28 | -- | 28 |
+| Execution | `execution/` | 31 | -- | 31 |
+| Discovery | `discovery/` | 24 | -- | 24 |
+| Privilege Escalation | `privilege_escalation/` | 21 | -- | 21 |
 | AI Safety | `ai_safety/` | 19 | -- | 19 |
 | Command and Control | `command_and_control/` | 17 | -- | 17 |
-| Privilege Escalation | `privilege_escalation/` | 16 | -- | 16 |
 | Lateral Movement | `lateral_movement/` | 16 | -- | 16 |
-| Discovery | `discovery/` | 16 | -- | 16 |
 | Collection | `collection/` | 15 | -- | 15 |
-| Exfiltration | `exfiltration/` | 11 | -- | 11 |
-| Initial Access | `initial_access/` | 10 | -- | 10 |
-| Container | `container/` | 8 | -- | 8 |
+| Exfiltration | `exfiltration/` | 12 | -- | 12 |
+| Initial Access | `initial_access/` | 11 | -- | 11 |
 | TCC Abuse | `tcc/` | 9 | -- | 9 |
+| Container | `container/` | 8 | -- | 8 |
 | Impact | `impact/` | 8 | -- | 8 |
 | Temporal Sequences | `sequences/` | -- | 27 | 27 |
-| **Total** | | **349** | **27** | **376** |
+| **Total** | | **353** | **27** | **380** |
 
 </details>
 
@@ -447,17 +473,31 @@ Additional views: Settings > AI Backend (LLM provider configuration), Response A
 
 ---
 
-## What's New in v1.0.0
+## What's New
 
 <details>
-<summary><strong>Full changelog (click to expand)</strong></summary>
+<summary><strong>v1.3 — native Endpoint Security via SystemExtension (2026-04)</strong></summary>
 
-- 376 Sigma-compatible detection rules (349 single-event + 27 sequences)
+v1.3 is the biggest architectural change since v1.0. MacCrab now runs as a native Endpoint Security **System Extension** activated from inside `MacCrab.app` -- matching the architecture every commercial macOS EDR uses (CrowdStrike, SentinelOne, Jamf Protect, Microsoft Defender). On macOS Catalina+, AMFI grants `com.apple.developer.endpoint-security.client` only to binaries loaded via `OSSystemExtensionRequest` from an approved `.systemextension` bundle -- LaunchDaemons are categorically rejected regardless of profile validity.
+
+- **SystemExtension activation** -- no more `sudo maccrabd`; open MacCrab.app and click Enable Protection. `sysextd` manages the lifecycle from there.
+- **Native ES client** -- `com.apple.developer.endpoint-security.client` approved under bundle ID `com.maccrab.agent`. The 3-level fallback chain (eslogger → kdebug → FSEvents) is still first-class for developer builds.
+- **Network-convergence hardening (1.3.4)** -- unresolved destination IPs no longer bucket benign HTTPS traffic under `:443`; new trusted-helper fan-out gate; 49-entry trusted-cloud suffix list.
+- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **559 tests in 127 suites**, FP regressions blocked at CI.
+- **Noise reduction arc (1.2.1 → 1.2.4)** -- reference workstation dropped from 2,856 alerts/24h to ~3/day (99.9% reduction) without degrading detection fidelity.
+- **Notarized Developer ID distribution** -- signed DMG, Homebrew cask tap (`peterhanily/maccrab`), reproducible release pipeline.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
+
+</details>
+
+<details>
+<summary><strong>v1.0.0 — initial release</strong></summary>
+
 - 5-tier detection hierarchy (rules, sequences, anomaly, campaigns, cross-process)
 - LLM reasoning backends: Ollama, Claude, OpenAI-compatible, Gemini, Mistral
 - NL threat hunting, LLM investigation summaries, active defense recommendations
 - AI Guard monitoring 8 coding tools + MCP servers
-- Zero-entitlement kernel events via eslogger proxy
 - Package freshness checking (npm, PyPI, Homebrew, Cargo)
 - Ultrasonic attack detection (DolphinAttack, NUIT, SurfingAttack)
 - Clipboard, browser extension, USB monitoring
@@ -772,58 +812,48 @@ The baseline anomaly engine builds a profile of normal activity over a configura
 |-------------|---------|
 | **macOS** | 13.0+ (Ventura or later) |
 | **Swift** | 5.9+ |
-| **Root access** | Required for the Endpoint Security framework (`es_new_client` requires euid 0) |
-| **ES entitlement** | `com.apple.developer.endpoint-security.client` (provisioning profile for production; self-signed for development) |
-| **Full Disk Access** | Grant to Terminal.app or your terminal emulator for TCC database monitoring |
+| **SystemExtension approval** | One-time user approval in System Settings → General → Login Items & Extensions → Endpoint Security Extensions (release builds). Dev builds skip this via the fallback chain. |
+| **ES entitlement** | `com.apple.developer.endpoint-security.client` -- ships in release DMGs via an approved provisioning profile; dev builds use the `eslogger` / `kdebug` / FSEvents fallback chain |
+| **Full Disk Access** | Grant to MacCrab.app (release) or your terminal emulator (dev) for TCC database monitoring |
 | **Python** | 3.9+ with PyYAML (`pip install pyyaml`) for the rule compiler |
 
 ---
 
-## Self-Signing for Development
+## Signing and Distribution
 
 <details>
-<summary><strong>Instructions for code signing (click to expand)</strong></summary>
+<summary><strong>Local development (click to expand)</strong></summary>
 
-Apple restricts the Endpoint Security entitlement to signed binaries. For local development:
+Apple restricts the Endpoint Security entitlement to binaries loaded via `OSSystemExtensionRequest` from an approved `.systemextension` bundle -- LaunchDaemons and standalone binaries are rejected by AMFI regardless of profile validity. For local development, MacCrab's daemon has a 3-level fallback chain (`eslogger` subprocess → `kdebug` → FSEvents), so dev builds work fully without your own ES entitlement approval.
 
-### 1. Create an entitlements file
-
-Create `maccrabd.entitlements`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.developer.endpoint-security.client</key>
-    <true/>
-</dict>
-</plist>
-```
-
-### 2. Sign the binary
+### Quick dev cycle
 
 ```bash
-swift build
-codesign --sign - --entitlements maccrabd.entitlements \
-    --force .build/debug/maccrabd
+make dev          # build, ad-hoc codesign, compile rules, restart
+make dev-no-es    # same without sudo (no eslogger proxy)
+make status       # daemon status
+make stop         # stop daemon and app
 ```
 
-### 3. Approve in System Settings
+### Approving the ad-hoc-signed daemon
 
-On first launch, macOS will block the unsigned binary. Go to **System Settings > Privacy & Security** and click **Allow Anyway**. Add Terminal (or your terminal emulator) to **Full Disk Access** for TCC monitoring.
+On first launch, macOS may block the ad-hoc-signed `maccrabd` binary. Go to **System Settings → Privacy & Security** and click **Allow Anyway**. Grant **Full Disk Access** to your terminal (or to MacCrab.app for production installs) for TCC database monitoring.
 
-### 4. Production signing
+</details>
 
-For distribution, sign with a Developer ID certificate and a provisioning profile that includes the ES entitlement:
+<details>
+<summary><strong>Production release builds (click to expand)</strong></summary>
 
-```bash
-codesign --sign "Developer ID Application: Your Name (TEAM_ID)" \
-    --entitlements maccrabd.entitlements \
-    --options runtime \
-    .build/release/maccrabd
-```
+Release DMGs are produced by `scripts/build-release.sh` (gitignored -- contains local paths and identities). The pipeline:
+
+1. Compile rules to JSON with `Compiler/compile_rules.py`
+2. Build all 5 SPM targets (`MacCrabCore`, `maccrabd`, `maccrabctl`, `MacCrabApp`, `maccrab-mcp`, `MacCrabAgent`) with `swift build -c release`
+3. Wrap `MacCrabAgent` into a `.systemextension` bundle with `Info.plist` carrying `CFBundlePackageType=SYSX` and `NSSystemExtensionPointIdentifier=com.apple.system_extension.endpoint_security`
+4. Sign the sysext with Developer ID Application + embedded provisioning profile carrying the ES entitlement
+5. Sign `MacCrab.app` with hardened runtime; notarize and staple the DMG
+6. Update appcast entry, bump Homebrew cask
+
+If you have your own approved ES entitlement (Apple Developer Program required), you can re-sign `MacCrabAgent` with your own provisioning profile.
 
 </details>
 
@@ -907,11 +937,16 @@ maccrab/
 │   │   └── Models/
 │   │       └── Alert.swift              #   Alert model
 │   │
-│   ├── maccrabd/                        # Daemon executable
+│   ├── MacCrabAgentKit/                 # Shared daemon bootstrap library
+│   ├── MacCrabAgent/                    # SystemExtension executable (ships in .systemextension bundle)
+│   │   └── main.swift
+│   ├── maccrabd/                        # Legacy standalone daemon (dev-only fallback)
 │   │   └── main.swift
 │   ├── maccrabctl/                      # CLI control tool
 │   │   └── main.swift
-│   └── MacCrabApp/                      # SwiftUI status bar app
+│   ├── maccrab-mcp/                     # MCP server for AI agent integration
+│   │   └── main.swift
+│   └── MacCrabApp/                      # SwiftUI menubar app + SystemExtension activator
 │       ├── MacCrabApp.swift
 │       ├── AppState.swift
 │       ├── Views/
@@ -930,22 +965,22 @@ maccrab/
 │       └── ViewModels/
 │           └── ViewModels.swift
 │
-├── Rules/                               # 376 Sigma-compatible detection rules
-│   ├── defense_evasion/    (55)
-│   ├── credential_access/  (32)
+├── Rules/                               # 380 Sigma-compatible detection rules
+│   ├── defense_evasion/    (62)
+│   ├── credential_access/  (35)
+│   ├── persistence/        (34)
 │   ├── supply_chain/       (31)
-│   ├── persistence/        (30)
-│   ├── execution/          (28)
+│   ├── execution/          (31)
+│   ├── discovery/          (24)
+│   ├── privilege_escalation/ (21)
 │   ├── ai_safety/          (19)
 │   ├── command_and_control/ (17)
-│   ├── discovery/          (16)
-│   ├── privilege_escalation/ (16)
 │   ├── lateral_movement/   (16)
 │   ├── collection/         (15)
-│   ├── exfiltration/       (11)
-│   ├── initial_access/     (10)
-│   ├── container/          (8)
+│   ├── exfiltration/       (12)
+│   ├── initial_access/     (11)
 │   ├── tcc/                (9)
+│   ├── container/          (8)
 │   ├── impact/             (8)
 │   └── sequences/          (27)
 │

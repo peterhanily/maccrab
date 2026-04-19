@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (326 tests)
+swift test                     # Unit tests (559 tests in 127 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -27,12 +27,15 @@ make lint-rules                # Rule linting
 
 ## Architecture
 
-MacCrab is a local-first macOS threat detection engine with four targets:
+MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026), the detection engine ships as a native Endpoint Security **System Extension** activated from inside `MacCrab.app`. Seven SPM targets:
 
 - **MacCrabCore** (`Sources/MacCrabCore/`) -- Shared library: detection engines, collectors, enrichment, storage, prevention
-- **maccrabd** (`Sources/maccrabd/`) -- Detection daemon. Runs the event loop, processes events through the pipeline
+- **MacCrabAgentKit** (`Sources/MacCrabAgentKit/`) -- Shared daemon bootstrap wrapping the event loop, monitors, timers, and signal handlers. Linked by both the sysext and the legacy standalone daemon
+- **MacCrabAgent** (`Sources/MacCrabAgent/`) -- System Extension executable. Wrapped into `com.maccrab.agent.systemextension` bundle by `scripts/build-release.sh` and activated via `OSSystemExtensionRequest`. Ships in release DMGs
+- **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard. Reads from the daemon's SQLite DB
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 7 tools for AI agent integration
+- **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
 
@@ -50,17 +53,17 @@ Sources/MacCrabCore/
   Output/         Notifications, webhooks, syslog, reports
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            376 Sigma-compatible YAML detection rules (17 tactic directories)
+Rules/            380 Sigma-compatible YAML detection rules (17 tactic directories)
   sequences/      27 multi-step sequence rules
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (326 tests in 85 suites)
+Tests/            Swift Testing unit tests (559 tests in 127 suites)
 ```
 
 ## Detection Stack (5 tiers)
 
-1. **Rules** -- 376 Sigma-compatible YAML rules compiled to JSON predicates. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
+1. **Rules** -- 353 single-event Sigma-compatible YAML rules compiled to JSON predicates. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
 3. **Sequences** -- 27 temporal multi-step rules with process lineage correlation, 10K partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.
@@ -70,8 +73,10 @@ Tests/            Swift Testing unit tests (326 tests in 85 suites)
 
 1. Write YAML rules in `Rules/<tactic>/`
 2. Compile: `make compile-rules`
-3. Daemon loads compiled JSON from `<support-dir>/compiled_rules/`
-4. Send SIGHUP to daemon to reload rules without restart: `pkill -HUP maccrabd`
+3. Detection engine loads compiled JSON from `<support-dir>/compiled_rules/`
+4. Send SIGHUP to reload rules without restart:
+   - Dev (standalone `maccrabd`): `pkill -HUP maccrabd`
+   - Release (System Extension): `pkill -HUP com.maccrab.agent`
 
 ### Rule Compiler Validation
 
@@ -241,8 +246,8 @@ All keys are optional — missing keys use defaults from `DaemonConfig.swift`.
 
 ## Data Locations
 
-- **Root daemon:** `/Library/Application Support/MacCrab/`
-- **Non-root daemon:** `~/Library/Application Support/MacCrab/`
+- **System Extension / root daemon:** `/Library/Application Support/MacCrab/` (release builds use this via sysextd-granted privileges; dev `sudo maccrabd` writes here too)
+- **Non-root dev daemon:** `~/Library/Application Support/MacCrab/` (dev `swift run maccrabd` without sudo)
 - Database: `events.db` (SQLite with WAL mode, 64MB cache, 256MB mmap)
 - Compiled rules: `compiled_rules/*.json` (0o700 permissions)
 - Auto-generated rules: `compiled_rules/auto_generated/`

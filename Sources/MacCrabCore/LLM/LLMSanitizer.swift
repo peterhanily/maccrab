@@ -8,6 +8,18 @@ import Foundation
 
 public enum LLMSanitizer {
 
+    // Precompiled once at load. Patterns are static literals — safe to force-try.
+    private static let userPathRegex = try! NSRegularExpression(pattern: #"/Users/([^/\s]+)/"#)
+    private static let hostnameRegex = try! NSRegularExpression(
+        pattern: #"\b[a-zA-Z][\w\-]*\.(local|internal|corp|lan)\b"#
+    )
+    private static let privateIPRegex = try! NSRegularExpression(
+        pattern: #"\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})\b"#
+    )
+    private static let emailRegex = try! NSRegularExpression(
+        pattern: #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#
+    )
+
     /// Sanitize a prompt payload for cloud API submission.
     public static func sanitize(_ text: String) -> String {
         var result = CommandSanitizer.sanitize(text)
@@ -19,39 +31,28 @@ public enum LLMSanitizer {
     }
 
     private static func redactUserPaths(_ text: String) -> String {
-        let regex = try! NSRegularExpression(pattern: #"/Users/([^/\s]+)/"#)
-        return regex.stringByReplacingMatches(
+        userPathRegex.stringByReplacingMatches(
             in: text, range: NSRange(text.startIndex..., in: text),
             withTemplate: "/Users/[USER]/"
         )
     }
 
     private static func redactHostnames(_ text: String) -> String {
-        let regex = try! NSRegularExpression(
-            pattern: #"\b[a-zA-Z][\w\-]*\.(local|internal|corp|lan)\b"#
-        )
-        return regex.stringByReplacingMatches(
+        hostnameRegex.stringByReplacingMatches(
             in: text, range: NSRange(text.startIndex..., in: text),
             withTemplate: "[HOSTNAME]"
         )
     }
 
     private static func redactPrivateIPs(_ text: String) -> String {
-        // RFC1918 + loopback + link-local
-        let regex = try! NSRegularExpression(
-            pattern: #"\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})\b"#
-        )
-        return regex.stringByReplacingMatches(
+        privateIPRegex.stringByReplacingMatches(
             in: text, range: NSRange(text.startIndex..., in: text),
             withTemplate: "[PRIVATE_IP]"
         )
     }
 
     private static func redactEmails(_ text: String) -> String {
-        let regex = try! NSRegularExpression(
-            pattern: #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#
-        )
-        return regex.stringByReplacingMatches(
+        emailRegex.stringByReplacingMatches(
             in: text, range: NSRange(text.startIndex..., in: text),
             withTemplate: "[EMAIL]"
         )

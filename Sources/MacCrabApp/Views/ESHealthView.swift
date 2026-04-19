@@ -49,11 +49,11 @@ struct ESHealthView: View {
                 // Status grid
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                     HealthCard(
-                        title: "Daemon",
+                        title: "Detection Engine",
                         value: appState.isConnected ? "Running" : "Offline",
                         icon: "antenna.radiowaves.left.and.right",
                         color: appState.isConnected ? .green : .red,
-                        detail: appState.isConnected ? "Events being collected" : "Start with: sudo maccrabd"
+                        detail: appState.isConnected ? "Events being collected" : "Click Enable Protection on the Overview tab"
                     )
 
                     HealthCard(
@@ -63,7 +63,7 @@ struct ESHealthView: View {
                         color: fdaGranted ? .green : .orange,
                         detail: fdaGranted
                             ? "Complete detection coverage enabled"
-                            : "Grant FDA to maccrabd in System Settings > Privacy for full coverage"
+                            : "Grant FDA to MacCrab.app in System Settings > Privacy > Full Disk Access"
                     )
 
                     HealthCard(

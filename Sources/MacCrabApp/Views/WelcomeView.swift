@@ -187,11 +187,11 @@ struct WelcomeView: View {
                     text: "Language: \(languages.first { $0.code == selectedLanguage }?.native ?? "English")")
 
                 SetupRow(icon: "exclamationmark.shield", color: .orange,
-                    text: String(localized: "welcome.setup.fda", defaultValue: "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add maccrabd"))
+                    text: String(localized: "welcome.setup.fda", defaultValue: "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add MacCrab.app"))
                 SetupRow(icon: "exclamationmark.shield", color: .orange,
-                    text: String(localized: "welcome.setup.es", defaultValue: "Endpoint Security: approve the system extension prompt on first daemon launch"))
+                    text: String(localized: "welcome.setup.es", defaultValue: "Endpoint Security: approve the System Extension when prompted by System Settings"))
                 SetupRow(icon: "info.circle", color: .blue,
-                    text: String(localized: "overview.startDaemon", defaultValue: "Start the daemon: sudo maccrabd"))
+                    text: String(localized: "overview.startDaemon", defaultValue: "Start detection: click Enable Protection on the Overview tab"))
                 SetupRow(icon: "info.circle", color: .blue,
                     text: String(localized: "welcome.setup.prevention", defaultValue: "Enable prevention in the Prevention tab"))
             }

@@ -85,10 +85,16 @@ extension MacCrabCtl {
         let configDir = maccrabDataDir()
         let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
 
-        // Load existing suppressions
+        // Load existing suppressions. File absence is expected on first use.
+        // Parse failure is not — surface it so the user knows the file is corrupt.
         var suppressions: [String: [String]] = [:]
         if let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)) {
-            suppressions = (try? JSONDecoder().decode([String: [String]].self, from: data)) ?? [:]
+            do {
+                suppressions = try JSONDecoder().decode([String: [String]].self, from: data)
+            } catch {
+                print("WARNING: \(suppressFile) exists but could not be parsed: \(error)")
+                print("         Treating as empty. Existing suppressions will be OVERWRITTEN on save.")
+            }
         }
 
         // Add suppression
@@ -118,7 +124,13 @@ extension MacCrabCtl {
 
         var suppressions: [String: [String]] = [:]
         if let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)) {
-            suppressions = (try? JSONDecoder().decode([String: [String]].self, from: data)) ?? [:]
+            do {
+                suppressions = try JSONDecoder().decode([String: [String]].self, from: data)
+            } catch {
+                print("ERROR: \(suppressFile) exists but could not be parsed: \(error)")
+                print("       Refusing to unsuppress — fix or delete the file first.")
+                return
+            }
         }
 
         guard suppressions[ruleId] != nil else {
@@ -153,9 +165,21 @@ extension MacCrabCtl {
         let configDir = maccrabDataDir()
         let suppressFile = (configDir as NSString).appendingPathComponent("suppressions.json")
 
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)),
-              let suppressions = try? JSONDecoder().decode([String: [String]].self, from: data),
-              !suppressions.isEmpty else {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)) else {
+            print("No suppressions configured.")
+            print("Use 'maccrabctl suppress <rule-id> <process-path>' to add one.")
+            return
+        }
+
+        let suppressions: [String: [String]]
+        do {
+            suppressions = try JSONDecoder().decode([String: [String]].self, from: data)
+        } catch {
+            print("ERROR: \(suppressFile) exists but could not be parsed: \(error)")
+            return
+        }
+
+        guard !suppressions.isEmpty else {
             print("No suppressions configured.")
             print("Use 'maccrabctl suppress <rule-id> <process-path>' to add one.")
             return

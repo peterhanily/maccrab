@@ -248,11 +248,11 @@ struct MainView: View {
                         .controlSize(.small)
                     }
                     HStack(spacing: 4) {
-                        Text(String(localized: "status.daemonHint", defaultValue: "Start with:"))
+                        Text(String(localized: "status.daemonHint", defaultValue: "Next step:"))
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text("sudo maccrabd")
-                            .font(.system(.caption, design: .monospaced))
+                        Text(String(localized: "status.daemonAction", defaultValue: "Click Enable Protection in the Overview tab"))
+                            .font(.caption)
                             .foregroundColor(.secondary)
                             .textSelection(.enabled)
                         Spacer()
@@ -265,7 +265,7 @@ struct MainView: View {
                     Divider()
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Daemon offline. Start with sudo maccrabd.")
+                .accessibilityLabel("Detection engine offline. Click Enable Protection in the Overview tab.")
             }
         }
         .toolbar {

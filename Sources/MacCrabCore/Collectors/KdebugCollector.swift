@@ -196,10 +196,10 @@ public actor KdebugCollector {
         let parts = line.split(omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace })
 
         // Need at least: timestamp, syscall, processName.PID
-        guard parts.count >= 3 else { return nil }
+        guard let lastPart = parts.last, parts.count >= 3 else { return nil }
 
         // Last field is processName.PID
-        let procField = String(parts.last!)
+        let procField = String(lastPart)
         guard let dotIdx = procField.lastIndex(of: "."),
               dotIdx > procField.startIndex,
               let pid = Int32(procField[procField.index(after: dotIdx)...]) else { return nil }

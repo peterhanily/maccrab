@@ -15,7 +15,7 @@ If you discover a security vulnerability in MacCrab, please report it responsibl
 
 ### How to Report
 
-1. Email **security@maccrab.dev** with:
+1. Email **security@maccrab.com** with:
    - A description of the vulnerability
    - Steps to reproduce
    - Affected versions
@@ -51,7 +51,7 @@ MacCrab assumes the following trust boundaries:
 - The macOS kernel and Endpoint Security framework
 - Apple-signed system binaries (`/System/`, `/usr/libexec/`)
 - The user who installed and configured MacCrab
-- LaunchDaemon plist integrity (protected by SIP)
+- System Extension bundle integrity (enforced by AMFI + notarization ticket; the `.systemextension` is signed with Developer ID and an embedded provisioning profile)
 
 ### Untrusted
 
@@ -75,9 +75,10 @@ MacCrab does **not** protect against:
 
 ### Privilege Model
 
-- **maccrabd** runs as root (required for Endpoint Security framework)
+- **MacCrabAgent** (System Extension) runs under `sysextd` with the ES entitlement, in a sandboxed userspace context elevated by Apple. On release builds this replaces the legacy root-daemon model
+- **maccrabd** (legacy) runs as root — retained only for local development when no ES entitlement is available; falls back through `eslogger` → `kdebug` → FSEvents
 - **maccrabctl** runs as the invoking user (reads database only)
-- **MacCrab.app** runs as the logged-in user (reads database only)
+- **MacCrab.app** runs as the logged-in user (reads database; activates and replaces the System Extension)
 - **maccrab-mcp** runs as the invoking user (reads database, can suppress alerts)
 
 ### Data Protection
