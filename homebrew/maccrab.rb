@@ -1,6 +1,6 @@
 cask "maccrab" do
-  version "1.3.4"
-  sha256 "fc530a7f04f7cd436ac9fe51be731c8a0624470c89834329dd2f568c1fa01bfd"
+  version "1.3.5"
+  sha256 "43ef10bdeb84912e9022db7e4847235175f8573d7068b09186aa437c1d1db387"
 
   url "https://github.com/peterhanily/maccrab/releases/download/v#{version}/MacCrab-v#{version}.dmg"
   name "MacCrab"

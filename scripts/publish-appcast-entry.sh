@@ -64,25 +64,36 @@ if echo "$CURRENT_XML" | grep -qE "<sparkle:version>${VERSION}</sparkle:version>
     exit 3
 fi
 
-# Insert item. Anchor after <language> or <description> — whichever is present
-# in the current channel header. We use python for the XML work because bash
-# sed across newlines is a path of pain.
-NEW_XML=$(python3 - "$ITEM" <<PY
+# Insert item. Anchor after <language> or <description> — whichever is
+# present in the current channel header. We use Python for the XML work
+# because sed across newlines is a path of pain. Pass the current XML
+# through a temp file (not a Python heredoc literal) because the XML can
+# contain backslashes, triple-quotes, or unbalanced quotes from the CDATA
+# release notes, any of which would corrupt a heredoc interpolation.
+CURRENT_XML_FILE=$(mktemp -t maccrab-appcast-current.XXXXXX)
+trap 'rm -f "$CURRENT_XML_FILE"' EXIT
+printf '%s' "$CURRENT_XML" > "$CURRENT_XML_FILE"
+
+NEW_XML=$(python3 -c '
 import sys, re
-item = open(sys.argv[1]).read().strip()
-xml = """$CURRENT_XML"""
+item_path, current_path = sys.argv[1], sys.argv[2]
+item = open(item_path).read().strip()
+xml  = open(current_path).read()
+# re.sub treats backslashes + digits in the replacement as backrefs,
+# so escape any in the item before substitution.
+def inject(m):
+    return m.group(1) + "\n    " + item
 anchors = [
-    (r"(<language>[^<]*</language>)", r"\1\n    " + item.replace("\\", "\\\\")),
-    (r"(<description>[^<]*</description>)", r"\1\n    " + item.replace("\\", "\\\\")),
-    (r"(<channel>)", r"\1\n    " + item.replace("\\", "\\\\")),
+    r"(<language>[^<]*</language>)",
+    r"(<description>[^<]*</description>)",
+    r"(<channel>)",
 ]
-for pat, repl in anchors:
+for pat in anchors:
     if re.search(pat, xml):
-        xml = re.sub(pat, repl, xml, count=1)
+        xml = re.sub(pat, inject, xml, count=1)
         break
 sys.stdout.write(xml)
-PY
-)
+' "$ITEM" "$CURRENT_XML_FILE")
 
 # Base64 the new content and PUT via Contents API
 NEW_B64=$(echo -n "$NEW_XML" | base64)
