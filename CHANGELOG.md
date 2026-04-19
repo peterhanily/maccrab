@@ -3,6 +3,172 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5] — 2026-04-19
+
+First release after the v1.3 SystemExtension migration settled. Lands
+the auto-update channel via Sparkle, moves API keys out of
+world-readable preferences into the macOS Keychain, and sweeps up a
+backlog of UX safety rails, localization gaps, documentation, and
+runtime hardening flagged by a post-v1.3.4 multi-domain audit. From
+this version onward, `brew upgrade --cask maccrab` is optional — the
+app checks for updates itself and offers them via the application
+menu's *Check for Updates…* item.
+
+### Added
+
+- **Auto-update channel via Sparkle 2.** MacCrab now polls
+  `https://maccrab.com/appcast.xml` daily (configurable) and surfaces
+  new versions through the app menu. Updates are verified with EdDSA
+  signatures against a public key embedded in the app bundle —
+  downgrade or tampered-DMG attacks can't install on existing
+  installs. Sysext updates cascade via
+  `OSSystemExtensionRequest(.replace)` on relaunch, so no
+  re-approval prompt for same-team-ID upgrades.
+- **MonitorSupervisor for clean shutdown.** All 12 background monitor
+  tasks now register with a supervisor that SIGTERM cancels and
+  awaits cleanly before process exit, with a 3-second deadline. The
+  Sparkle "Install and Relaunch" flow now unwinds collectors without
+  losing in-flight SQLite writes.
+- **API keys move to the macOS Keychain.** A new `SecretsStore`
+  (`Sources/MacCrabCore/Storage/SecretsStore.swift`) wraps
+  `SecItemAdd/Copy/Delete` with a typed `SecretKey` enum covering
+  every secret the dashboard handles (5 LLM providers + 7 threat-
+  intel APIs + 3 output transports). Keys are encrypted at rest
+  under your login password; the Settings UI reads and writes
+  through it transparently.
+- **Full Disk Access warning banner** on the Overview tab. Clicks
+  through to System Settings via three URL variants that cover
+  macOS 13 / 14 / 15 pane reshuffles. Closes the #1 UX failure mode
+  from the audit — "protection enabled but TCCMonitor is blind".
+- **Undo button on suppression toast.** 5-second window, bound to
+  ⌘Z, with a monotonic-token pattern so rapid double-suppresses
+  don't cancel each other's timers.
+- **Filter persistence.** Alert dashboard severity filter and "show
+  suppressed" toggle now survive tab switches and app restarts via
+  `@AppStorage`.
+- **Severity differentiator via SF Symbol.** Filter chips and
+  menubar status dots now carry a shape, not just color.
+  Colourblind and VoiceOver users can distinguish severity levels
+  without relying on hue.
+- **Webhook SSRF policy.** `MACCRAB_WEBHOOK_URL` now requires
+  `https` (loopback `http` excepted), blocks cloud metadata IPs
+  unconditionally (AWS `169.254.169.254`, AWS IPv6
+  `fd00:ec2::254`, Alibaba `100.100.100.200`), and rejects RFC1918
+  / IPv6 link-local / unique-local unless
+  `MACCRAB_WEBHOOK_ALLOW_PRIVATE=1` is set. 10-test suite in
+  `WebhookValidationTests.swift`.
+- **Rule compiler archive.** `Compiler/compile_rules.py` snapshots
+  the previous `compiled_rules/` into
+  `compiled_rules.archive/<YYYYMMDD-HHMMSS>/` (keeps last 5) before
+  overwriting. Rollback on a bad compile is `cp -R` — no git
+  history required.
+- **Release pipeline scripts** in `scripts/`:
+  `generate-appcast-entry.sh` (signs a DMG with `sign_update` and
+  emits a Sparkle `<item>`), `publish-appcast-entry.sh` (PUT's the
+  item into the the site repo repo via a scoped PAT),
+  `bump-cask.sh` (syncs `version` + `sha256` across both cask
+  files).
+- **User-facing documentation.** `TROUBLESHOOTING.md` covers
+  sysext approval hangs with the real rejection signatures from
+  1.3.0–1.3.3, FDA silent drops, compile failures, webhook
+  rejections, and Homebrew upgrade cleanup. `UPGRADE.md` explains
+  the v1.2 → v1.3 migration. `FAQ.md` has 14 common questions.
+- **Annotated example configs.** `docs/daemon_config.example.json`
+  and `docs/suppressions.example.json` document every tunable and
+  every output-sink type with `_comment_*` keys the decoder
+  ignores.
+- **Module-level doc headers** on `AlertStore.swift` (schema table,
+  concurrency notes, read-only degradation) and `ESCollector.swift`
+  (ASCII event-pipeline diagram, required-privileges block).
+- Localization catch-up: 40 new `en.lproj` keys covering
+  destructive-action confirmations (kill / quarantine / block),
+  the `SystemExtensionPanel` end-to-end, Overview stray strings
+  (with Apple's automatic inflection syntax for locale-safe
+  pluralization), and the ThreatIntel API-key UX refactored 7→1.
+- CLI secret resolution now prefers the Keychain over
+  `llm_config.json` + env vars (env still wins as the override for
+  CI and one-off invocations).
+
+### Fixed
+
+- **Retention policy now honors `config.retentionDays`.** Previously
+  hardcoded to 30 days regardless of `daemon_config.json`. Clamped
+  to [1, 3650] at the timer site so a typo (`"retentionDays": 0`)
+  can't wipe the database on next tick.
+- **`EventStore` and `AlertStore` reject symlinks on the DB path +
+  `-wal` / `-shm` / `-journal` sidecars** before `sqlite3_open_v2`.
+  Closes the symlink-redirect attack class the rules directory
+  already had protection against.
+- **Merged event stream now uses `.bufferingNewest(100 000)`** —
+  previously unbounded. Under pathological burst the oldest events
+  drop instead of the resident set growing without limit.
+- **Destructive-action confirmation dialogs localize.** The
+  kill / quarantine / block prompts no longer render in English
+  only for the 14 locales MacCrab ships.
+- **SystemExtensionPanel fully localized** (15 keys covering
+  headlines, body states, state chips, buttons).
+- **`LLMSanitizer` regex compilations hoisted to `static let`.**
+  Previously recompiled on every sanitize call; now compiled once
+  at module load.
+- **`KdebugCollector` force-unwrap guarded.** `parts.last!` at
+  line 202 now uses a safe `guard let`. No crash path under any
+  observed input.
+- **`maccrabctl suppress` JSON decode now logs parse errors**
+  instead of silently treating a corrupt `suppressions.json` as
+  empty. `unsuppressRule` refuses to write on parse failure to
+  avoid overwriting user state.
+- **Stale "sudo maccrabd" guidance replaced** in 6 user-visible
+  strings: `StatusCommand`, `SecurityScorer`, `ESHealthView`,
+  `MainView`, `WelcomeView`, and the `DaemonSetup` startup
+  banner — now point at "Open MacCrab.app → Enable Protection"
+  which is the v1.3+ shipping path.
+
+### Changed
+
+- **`WebhookOutput` uses `SecureURLSession.makeGeneric`** for the
+  same TLS 1.2+ floor, ephemeral config, and cookie/credential
+  scrubbing as the LLM + threat-intel sessions. Pinning doesn't
+  apply to user-supplied URLs, but everything else does.
+- Bundle versions bumped 1.3.0 → 1.3.5 across
+  `MacCrabApp-Info.plist`, `MacCrabAgent-Info.plist`, and
+  `Xcode/project.yml`. `CFBundlePackageType` corrected from `SYEX`
+  → `SYSX` in the checked-in `MacCrabAgent-Info.plist` (the
+  release build pipeline had been overriding this; now the checked-
+  in file matches).
+- `ThreatIntelView` API-key boxes refactored from seven
+  copy-pasted `GroupBox` blocks into a single `apiKeyRow(...)`
+  helper — ~50 lines of duplication removed.
+
+### Infrastructure
+
+- Security contact: `maccrab@peterhanily.com` (was
+  `security@maccrab.dev`; the former never resolved).
+- Distribution domain: `maccrab.com` (Cloudflare Pages serving
+  the site repo). Permanent URLs:
+  `https://maccrab.com/appcast.xml`,
+  `https://maccrab.com/maccrab.mobileconfig` (the MDM profile
+  ships in v1.4).
+- **Apple Developer Team ID**: 79S425CW99 (unchanged).
+- **Sparkle EdDSA public key**:
+  `de+dzPjBve7LP5qxoE7nR6shThsjubkVasi+i8ehT4E=`.
+- **Minimum macOS**: 13.0 Ventura (unchanged).
+- Detection rules: 380 total (353 single-event + 27 sequences)
+  across 17 MITRE tactic directories.
+- Tests: **583 in 130 suites passing**.
+
+### Upgrade notes
+
+- Users on v1.3.0–v1.3.4 upgrading via Homebrew cask or manual DMG
+  will see the sysext replace itself silently on first launch
+  (same team ID — no System Settings re-approval needed).
+- API keys previously stored in `llm_config.json` continue to work
+  unchanged; newly-entered keys via Settings → AI Backend land in
+  the Keychain. Until the shared `keychain-access-groups`
+  entitlement ships (targeted for v1.4), the sysext still reads
+  API keys from `llm_config.json` — the Dashboard writes both.
+- Env vars (`MACCRAB_LLM_*_KEY` etc.) continue to override Keychain
+  and JSON, so CI / automation flows are unchanged.
+
 ## [1.3.4] — 2026-04-18
 
 Fixes a flood of `maccrab.correlator.network-convergence` alerts on
