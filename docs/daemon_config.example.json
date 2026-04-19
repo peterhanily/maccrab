@@ -1,0 +1,93 @@
+{
+  "_comment_1": "daemon_config.json — optional overrides for the detection engine.",
+  "_comment_2": "Drop this file at /Library/Application Support/MacCrab/daemon_config.json (release)",
+  "_comment_3": "or ~/Library/Application Support/MacCrab/daemon_config.json (dev). Every key is",
+  "_comment_4": "optional — unspecified keys use the in-source default. JSON keys use snake_case;",
+  "_comment_5": "the loader converts to Swift camelCase automatically. The _comment_* keys are",
+  "_comment_6": "ignored by the decoder and exist only as documentation here.",
+
+  "_comment_behavior": "BehavioralScoring: sum of weighted indicators per process tree.",
+  "behavior_alert_threshold": 10.0,
+  "behavior_critical_threshold": 20.0,
+
+  "_comment_incident": "Incident grouper — how long alerts can be correlated into a single campaign.",
+  "incident_correlation_window": 300,
+  "incident_stale_window": 600,
+
+  "_comment_statistical": "Welford z-score: flag events whose per-process frequency deviates beyond threshold.",
+  "statistical_z_threshold": 3.0,
+  "statistical_min_samples": 50,
+
+  "_comment_poll": "Monitor poll intervals in seconds. Lower = more responsive, higher = less overhead.",
+  "es_health_poll_interval": 60,
+  "usb_poll_interval": 10,
+  "clipboard_poll_interval": 3,
+  "browser_extension_poll_interval": 120,
+  "ultrasonic_poll_interval": 60,
+  "_comment_ultrasonic": "Ultrasonic monitor is opt-in because it requires microphone access.",
+  "ultrasonic_enabled": false,
+  "rootkit_poll_interval": 120,
+  "event_tap_poll_interval": 30,
+  "system_policy_poll_interval": 300,
+
+  "_comment_prompt_injection": "Minimum confidence (0-100) for prompt-injection patterns in AIGuard to alert.",
+  "prompt_injection_confidence": 40,
+
+  "_comment_storage": "Database ceiling and retention. Events older than retention_days are candidates for pruning.",
+  "max_database_size_mb": 500,
+  "retention_days": 30,
+
+  "_comment_llm": "LLM reasoning backend. Matches the MACCRAB_LLM_PROVIDER env var.",
+  "_comment_llm2": "Keys here override env vars. Leave null to use env-var config.",
+  "llm": {
+    "enabled": false,
+    "provider": "ollama",
+    "model": "llama3.1:8b",
+    "api_key_env": "MACCRAB_LLM_CLAUDE_KEY",
+    "temperature": 0.2,
+    "max_tokens": 2048,
+    "timeout_seconds": 30
+  },
+
+  "_comment_outputs": "Additional alert sinks. Each entry becomes a FileOutput or StreamOutput.",
+  "_comment_outputs2": "Use `tokenEnv` (env var name) rather than `token` (literal) to avoid committing secrets.",
+  "outputs": [
+    {
+      "type": "file",
+      "path": "/var/log/maccrab/alerts.jsonl",
+      "format": "ocsf",
+      "maxMb": 100,
+      "maxAgeHours": 168,
+      "maxArchives": 10
+    },
+    {
+      "type": "splunk_hec",
+      "url": "https://hec.example.com:8088/services/collector/event",
+      "tokenEnv": "SPLUNK_HEC_TOKEN",
+      "indexName": "maccrab-alerts",
+      "retryCount": 3,
+      "timeoutSeconds": 10
+    },
+    {
+      "type": "elastic_bulk",
+      "url": "https://elastic.example.com:9200/_bulk",
+      "tokenEnv": "ES_AUTH_HEADER",
+      "indexName": "sec-alerts"
+    },
+    {
+      "type": "datadog_logs",
+      "url": "https://http-intake.logs.datadoghq.com/api/v2/logs",
+      "tokenEnv": "DD_API_KEY"
+    },
+    {
+      "type": "s3",
+      "bucket": "my-security-bucket",
+      "region": "us-west-2",
+      "keyPrefix": "maccrab/alerts/",
+      "accessKeyEnv": "AWS_ACCESS_KEY_ID",
+      "secretKeyEnv": "AWS_SECRET_ACCESS_KEY",
+      "sessionTokenEnv": "AWS_SESSION_TOKEN",
+      "maxBatchBytes": 5242880
+    }
+  ]
+}

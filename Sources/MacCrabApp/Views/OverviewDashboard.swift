@@ -40,10 +40,13 @@ struct OverviewDashboard: View {
                 VStack(alignment: .leading, spacing: 20) {
                     SystemExtensionPanel(manager: sysextManager)
                     if !appState.isConnected {
-                        Text("Enable protection above to start the detection engine.")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 4)
+                        Text(String(
+                            localized: "overview.enableAbove",
+                            defaultValue: "Enable protection above to start the detection engine."
+                        ))
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 4)
                     }
                 }
                 .padding()
@@ -54,14 +57,26 @@ struct OverviewDashboard: View {
                     Text(String(localized: "overview.connecting", defaultValue: "Connecting to the detection engine\u{2026}"))
                         .font(.headline)
                         .foregroundColor(.secondary)
-                    Text("The extension is active — populating the dashboard.")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    Text(String(
+                        localized: "overview.populating",
+                        defaultValue: "The extension is active \u{2014} populating the dashboard."
+                    ))
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(40)
             } else {
                 VStack(alignment: .leading, spacing: 20) {
+                    // === FDA Warning Banner ===
+                    // Surfaced prominently because the silent failure mode
+                    // ("protection enabled but half the events are dropped")
+                    // is the single biggest ease-of-use risk in the product.
+                    if !appState.fullDiskAccessGranted {
+                        FullDiskAccessWarningBanner()
+                            .padding(.horizontal)
+                    }
+
                     // === Call to Action Banner (clickable → navigates to Alerts) ===
                     Button { selectedSection = .alerts } label: {
                         HStack(spacing: 12) {
@@ -71,16 +86,26 @@ struct OverviewDashboard: View {
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 4) {
                                 if criticalCount > 0 {
-                                    Text("\(criticalCount) critical alert\(criticalCount == 1 ? "" : "s") need\(criticalCount == 1 ? "s" : "") investigation")
-                                        .font(.system(.body, weight: .semibold))
-                                        .foregroundColor(.white)
+                                    // Pluralization is handled by the .stringsdict for
+                                    // this key; the defaultValue here is the English
+                                    // fallback for the singular-1 case plus an explicit
+                                    // `count` substitution.
+                                    Text(String(
+                                        localized: "overview.critical.count",
+                                        defaultValue: "^[\(criticalCount) critical alert](inflect: true) needs investigation"
+                                    ))
+                                    .font(.system(.body, weight: .semibold))
+                                    .foregroundColor(.white)
                                     Text(String(localized: "overview.reviewAlerts", defaultValue: "Click to review in Alerts"))
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.8))
                                 } else if highCount > 0 {
-                                    Text("\(highCount) high-severity alert\(highCount == 1 ? "" : "s") to review")
-                                        .font(.system(.body, weight: .semibold))
-                                        .foregroundColor(.white)
+                                    Text(String(
+                                        localized: "overview.high.count",
+                                        defaultValue: "^[\(highCount) high-severity alert](inflect: true) to review"
+                                    ))
+                                    .font(.system(.body, weight: .semibold))
+                                    .foregroundColor(.white)
                                     Text(String(localized: "overview.reviewAlerts", defaultValue: "Click to review in Alerts"))
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.8))
@@ -88,9 +113,12 @@ struct OverviewDashboard: View {
                                     Text(String(localized: "overview.allClear", defaultValue: "All clear \u{2014} no critical alerts"))
                                         .font(.system(.body, weight: .semibold))
                                         .foregroundColor(.white)
-                                    Text("\(appState.eventsPerSecond) events/sec monitored")
-                                        .font(.subheadline)
-                                        .foregroundColor(.white.opacity(0.8))
+                                    Text(String(
+                                        localized: "overview.eventsRate",
+                                        defaultValue: "\(appState.eventsPerSecond) events/sec monitored"
+                                    ))
+                                    .font(.subheadline)
+                                    .foregroundColor(.white.opacity(0.8))
                                 }
                             }
                             Spacer()
@@ -286,6 +314,81 @@ struct SeverityCount: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(count) \(label)")
+    }
+}
+
+// MARK: - Full Disk Access Warning Banner
+
+/// Prominent banner shown on the Overview when MacCrab.app lacks Full Disk
+/// Access. Without FDA, TCC monitoring is blind and ES file events for
+/// protected paths silently drop. This is the product's worst silent-failure
+/// mode ("enabled but half-dark") — surfacing it loudly is intentional.
+struct FullDiskAccessWarningBanner: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "lock.slash.fill")
+                .font(.title2)
+                .foregroundColor(.white)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(
+                    localized: "overview.fda.title",
+                    defaultValue: "Full Disk Access is not granted"
+                ))
+                .font(.system(.body, weight: .semibold))
+                .foregroundColor(.white)
+
+                Text(String(
+                    localized: "overview.fda.body",
+                    defaultValue: "MacCrab needs Full Disk Access to monitor TCC permissions and protected file paths. Detection coverage is currently incomplete."
+                ))
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer()
+
+            Button {
+                openFullDiskAccessPane()
+            } label: {
+                Text(String(
+                    localized: "overview.fda.openSettings",
+                    defaultValue: "Open Settings"
+                ))
+                .fontWeight(.semibold)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.white)
+                .foregroundColor(Color(red: 0.75, green: 0.22, blue: 0.22))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(Text("Opens System Settings → Privacy & Security → Full Disk Access"))
+        }
+        .padding()
+        .background(Color(red: 0.75, green: 0.22, blue: 0.22))
+        .cornerRadius(12)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func openFullDiskAccessPane() {
+        // Apple has moved this URL scheme between macOS releases; walk the
+        // known variants in order and return on the first success.
+        let urls = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
+        ]
+        for raw in urls {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                return
+            }
+        }
+        // Last-ditch fallback: open the pane chooser.
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
+            _ = NSWorkspace.shared.open(url)
+        }
     }
 }
 

@@ -13,7 +13,7 @@ enum DaemonSetup {
         if !isRoot {
             print("Note: Running without root. Endpoint Security events unavailable.")
             print("      Other sources (Unified Log, TCC, Network) will still work.")
-            print("      For full coverage: sudo maccrabd")
+            print("      For full coverage: run as root (dev) or install MacCrab.app and click Enable Protection (release).")
         }
 
         // Check Full Disk Access by probing a TCC-protected path.
@@ -24,8 +24,8 @@ enum DaemonSetup {
                 print("Full Disk Access: granted (complete ES coverage)")
             } else {
                 print("WARNING: Full Disk Access not granted — detection at ~70% coverage.")
-                print("         Grant FDA to maccrabd in System Settings > Privacy & Security")
-                print("         > Full Disk Access, then restart the daemon.")
+                print("         Grant FDA to MacCrab.app (release) or your terminal emulator (dev)")
+                print("         in System Settings > Privacy & Security > Full Disk Access, then restart.")
             }
         }
 
@@ -707,11 +707,23 @@ enum DaemonSetup {
 
         // Initialize optional outputs (Phase 3)
         var webhookOutput: WebhookOutput? = nil
-        if let webhookURLStr = Foundation.ProcessInfo.processInfo.environment["MACCRAB_WEBHOOK_URL"],
-           let webhookURL = URL(string: webhookURLStr) {
-            webhookOutput = WebhookOutput(url: webhookURL)
-            logger.info("Webhook output enabled: \(webhookURLStr)")
-            print("Webhook output: \(webhookURLStr)")
+        if let webhookURLStr = Foundation.ProcessInfo.processInfo.environment["MACCRAB_WEBHOOK_URL"] {
+            if let webhookURL = URL(string: webhookURLStr) {
+                let allowPrivate = Foundation.ProcessInfo.processInfo.environment["MACCRAB_WEBHOOK_ALLOW_PRIVATE"] == "1"
+                do {
+                    try WebhookOutput.validate(url: webhookURL, allowPrivate: allowPrivate)
+                    webhookOutput = WebhookOutput(url: webhookURL)
+                    logger.info("Webhook output enabled: \(webhookURLStr)")
+                    print("Webhook output: \(webhookURLStr)")
+                } catch {
+                    logger.error("Webhook URL rejected: \(error.localizedDescription)")
+                    print("ERROR: MACCRAB_WEBHOOK_URL rejected: \(error)")
+                    print("       Webhook output disabled. Fix MACCRAB_WEBHOOK_URL and restart.")
+                }
+            } else {
+                logger.error("MACCRAB_WEBHOOK_URL is not a valid URL")
+                print("ERROR: MACCRAB_WEBHOOK_URL is not a valid URL — webhook output disabled")
+            }
         }
 
         var syslogOutput: SyslogOutput? = nil
@@ -865,7 +877,7 @@ enum DaemonSetup {
         let startupMs = Double(DispatchTime.now().uptimeNanoseconds - startupBegin.uptimeNanoseconds) / 1_000_000
         print(String(format: "Startup complete in %.0fms", startupMs))
 
-        return DaemonState(
+        let state = DaemonState(
             isRoot: isRoot,
             supportDir: supportDir,
             compiledRulesDir: compiledRulesDir,
@@ -961,6 +973,12 @@ enum DaemonSetup {
             fleetClient: fleetClient,
             llmService: llmService
         )
+
+        // Apply configured retention so the daily prune timer uses the
+        // operator's chosen window rather than the hardcoded default.
+        state.retentionDays = config.retentionDays
+
+        return state
     }
 
     // MARK: - Phase 7 output factory

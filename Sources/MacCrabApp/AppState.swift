@@ -19,6 +19,13 @@ final class AppState: ObservableObject {
     @Published var eventsPerSecond: Int = 0
     @Published var rulesLoaded: Int = 0
     @Published var totalAlerts: Int = 0
+
+    /// Full Disk Access state. When false, TCC monitoring is blind and ES
+    /// file events for protected paths are silently dropped (~30% of coverage).
+    /// Probed at refresh() via readability of the user's TCC.db.
+    /// Defaults to true so the dashboard doesn't flash a warning on launch
+    /// before the first probe runs.
+    @Published var fullDiskAccessGranted: Bool = true
     @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
     @Published var events: [EventViewModel] = []
@@ -163,6 +170,12 @@ final class AppState: ObservableObject {
         let dbExists = fm.isReadableFile(atPath: dbPath)
         let walExists = fm.fileExists(atPath: dbPath + "-wal")
         isConnected = dbExists && (walExists || fm.fileExists(atPath: dbPath + "-shm"))
+
+        // FDA probe — readability of the user TCC.db requires Full Disk Access
+        // granted to this .app bundle. Without it, TCCMonitor is blind and
+        // ~30% of ES file events for protected paths are silently dropped.
+        let tccPath = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db"
+        fullDiskAccessGranted = fm.isReadableFile(atPath: tccPath)
 
         // Check fleet configuration
         let fleetURL = ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] ?? ""

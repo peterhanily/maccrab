@@ -204,15 +204,18 @@ enum DaemonTimers {
         }
         statsTimer.resume()
 
-        // Retention pruning (daily)
+        // Retention pruning (daily). Clamp retentionDays to [1, 3650] so a
+        // misconfigured value can't delete everything on the next tick or
+        // overflow the TimeInterval math.
+        let retentionDays = max(1, min(state.retentionDays, 3650))
         let pruneTimer = DispatchSource.makeTimerSource(queue: .global())
         pruneTimer.schedule(deadline: .now() + 3600, repeating: 86400) // First at 1h, then daily
         pruneTimer.setEventHandler {
             Task {
-                let cutoff = Date().addingTimeInterval(-30 * 86400) // 30 days
-                _ = try? await state.eventStore.prune(olderThan: cutoff)
-                _ = try? await state.alertStore.prune(olderThan: cutoff)
-                logger.info("Pruned events older than 30 days")
+                let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86400)
+                let prunedEvents = (try? await state.eventStore.prune(olderThan: cutoff)) ?? 0
+                let prunedAlerts = (try? await state.alertStore.prune(olderThan: cutoff)) ?? 0
+                logger.info("Retention sweep: \(prunedEvents) events + \(prunedAlerts) alerts older than \(retentionDays)d pruned")
             }
         }
         pruneTimer.resume()

@@ -4,9 +4,43 @@
 // Wraps Apple's Endpoint Security framework to collect security-relevant
 // kernel events and normalise them into MacCrab `Event` objects.
 //
+// # Event pipeline
+//
+//   ES framework                                 MacCrab pipeline
+//   ────────────                                 ────────────────
+//   es_new_client     ──▶  ESCollector.start()
+//                          │
+//   es_subscribe      ──▶  │  (process exec/fork/exit, file
+//                          │   create/write/rename/unlink, signal,
+//                          │   kext, mmap, iokit, auth, tcc, …)
+//                          │
+//   kernel callback   ──▶  │  on ES serial queue:
+//                          │    ESHelpers.parse(msg) → Event
+//                          │    stream.yield(event)
+//                          ▼
+//                      AsyncStream<Event>  ──▶  EventLoop → Enricher → RuleEngine
+//
+// # Queueing model
+//
 // The ES client callback runs on a private serial queue managed by the
-// framework, so the class opts into `@unchecked Sendable` rather than
-// adding a lock around every field.
+// framework. We copy every field we need out of the `es_message_t` on
+// that thread (because the struct is reclaimed the moment the callback
+// returns), then yield into a user-space `AsyncStream<Event>` consumed
+// on the detection pipeline's own executor. This means no lock around
+// collector state; the class opts into `@unchecked Sendable`.
+//
+// # Required privileges
+//
+//   - euid 0 (ES framework rejects non-root)
+//   - `com.apple.developer.endpoint-security.client` entitlement,
+//     signed by an approved provisioning profile bound to the
+//     `.systemextension` bundle (AMFI rejects LaunchDaemons since
+//     macOS Catalina — see UPGRADE.md)
+//   - Full Disk Access to see file events for TCC-protected paths
+//
+// Without the entitlement, `es_new_client` returns
+// `ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED`. `maccrabd`'s fallback chain
+// (eslogger → kdebug → FSEvents) handles that case for developer builds.
 
 import Foundation
 import EndpointSecurity

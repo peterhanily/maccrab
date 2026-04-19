@@ -158,6 +158,14 @@ final class DaemonState {
         Date().timeIntervalSince(daemonStartTime) < 60
     }
 
+    /// Retention window for persisted events and alerts, in days.
+    /// Populated by DaemonSetup from `DaemonConfig.retentionDays` so the
+    /// retention timer in DaemonTimers uses the operator's configured
+    /// value rather than a hardcoded constant.
+    /// Outside the init path to avoid churning the enormous designated
+    /// initializer signature.
+    var retentionDays: Int = 30
+
     init(
         isRoot: Bool,
         supportDir: String,
@@ -352,12 +360,23 @@ final class DaemonState {
 
     private let mergedStreamLogger = Logger(subsystem: "com.maccrab.agent", category: "EventStream")
 
+    /// Upper bound on in-flight events queued to the detection pipeline.
+    /// Past this depth, AsyncStream's `.bufferingNewest` policy drops the
+    /// *oldest* event to make room. At 10k events/sec this cap represents
+    /// ~10 seconds of buffered backlog, which is an order of magnitude more
+    /// than any healthy enrichment + rule-match cycle, so normal workloads
+    /// never reach the cap. Bursts above it lose the oldest events rather
+    /// than growing the resident set unboundedly — an explicit choice because
+    /// an OOM'd daemon detects nothing. Sequence rules tolerate a sparse
+    /// drop via the partial-match timeout; a memory blow-up wouldn't.
+    private static let mergedStreamCap = 100_000
+
     /// Merges all event sources into a single async stream.
     /// Each source runs in a restart loop — if the underlying AsyncStream ends
     /// (subprocess exit, actor error, buffer overflow), the Task re-attaches
     /// after a 2-second back-off so the source recovers without a daemon restart.
     func mergedEventStream() -> AsyncStream<Event> {
-        AsyncStream<Event> { continuation in
+        AsyncStream<Event>(bufferingPolicy: .bufferingNewest(Self.mergedStreamCap)) { continuation in
             // Source 1a: Native Endpoint Security events (if available)
             if let es = collector {
                 Task {

@@ -100,7 +100,7 @@ Read the full [Privacy Policy](PRIVACY.md).
 
 MacCrab's detection engine runs as a System Extension (a sandboxed userspace process managed by `sysextd`, as required for Endpoint Security). The CLI and dashboard run as your user with read-only database access. The engine protects its own integrity with 8 layers of tamper detection including binary integrity checks, anti-debug, and process injection detection.
 
-To report a vulnerability, **do not open a public issue** -- email security@maccrab.com instead.
+To report a vulnerability, **do not open a public issue** -- email maccrab@peterhanily.com instead.
 
 Read the full [Security Policy](SECURITY.md).
 

@@ -299,89 +299,112 @@ struct ThreatIntelView: View {
                 .foregroundColor(.secondary)
 
             GroupBox("VirusTotal") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "threatintel.vtDesc", defaultValue: "Multi-engine file, URL, and domain scanning")).font(.caption).foregroundColor(.secondary)
-                    SecureField("API Key", text: $virusTotalKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.caption, design: .monospaced))
-                        .accessibilityLabel("VirusTotal API Key")
-                    Link("Get a free API key \u{2192}", destination: URL(string: "https://www.virustotal.com/gui/join-us")!)
-                        .font(.caption2)
-                }.padding(4)
+                apiKeyRow(
+                    description: String(localized: "threatintel.vtDesc", defaultValue: "Multi-engine file, URL, and domain scanning"),
+                    binding: $virusTotalKey,
+                    provider: "VirusTotal",
+                    signupURL: "https://www.virustotal.com/gui/join-us",
+                    linkKind: .free
+                )
             }
 
             GroupBox("AbuseIPDB") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "threatintel.abuseDesc", defaultValue: "IP address reputation and abuse reports")).font(.caption).foregroundColor(.secondary)
-                    SecureField("API Key", text: $abuseIPDBKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.caption, design: .monospaced))
-                        .accessibilityLabel("AbuseIPDB API Key")
-                    Link("Get a free API key \u{2192}", destination: URL(string: "https://www.abuseipdb.com/register")!)
-                        .font(.caption2)
-                }.padding(4)
+                apiKeyRow(
+                    description: String(localized: "threatintel.abuseDesc", defaultValue: "IP address reputation and abuse reports"),
+                    binding: $abuseIPDBKey,
+                    provider: "AbuseIPDB",
+                    signupURL: "https://www.abuseipdb.com/register",
+                    linkKind: .free
+                )
             }
 
             GroupBox("AlienVault OTX") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "threatintel.otxDesc", defaultValue: "Open Threat Exchange community intelligence")).font(.caption).foregroundColor(.secondary)
-                    SecureField("API Key", text: $otxKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.caption, design: .monospaced))
-                        .accessibilityLabel("AlienVault OTX API Key")
-                    Link("Get a free API key \u{2192}", destination: URL(string: "https://otx.alienvault.com/api")!)
-                        .font(.caption2)
-                }.padding(4)
+                apiKeyRow(
+                    description: String(localized: "threatintel.otxDesc", defaultValue: "Open Threat Exchange community intelligence"),
+                    binding: $otxKey,
+                    provider: "AlienVault OTX",
+                    signupURL: "https://otx.alienvault.com/api",
+                    linkKind: .free
+                )
             }
 
             GroupBox("Shodan") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "threatintel.shodanDesc", defaultValue: "Internet-wide host and service intelligence")).font(.caption).foregroundColor(.secondary)
-                    SecureField("API Key", text: $shodanKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.caption, design: .monospaced))
-                        .accessibilityLabel("Shodan API Key")
-                    Link("Get a free API key \u{2192}", destination: URL(string: "https://account.shodan.io/register")!)
-                        .font(.caption2)
-                }.padding(4)
+                apiKeyRow(
+                    description: String(localized: "threatintel.shodanDesc", defaultValue: "Internet-wide host and service intelligence"),
+                    binding: $shodanKey,
+                    provider: "Shodan",
+                    signupURL: "https://account.shodan.io/register",
+                    linkKind: .free
+                )
             }
 
             GroupBox("URLScan.io") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "threatintel.urlscanDesc", defaultValue: "URL scanning, screenshots, and threat verdicts")).font(.caption).foregroundColor(.secondary)
-                    SecureField("API Key", text: $urlscanKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.caption, design: .monospaced))
-                        .accessibilityLabel("URLScan.io API Key")
-                    Link("Get a free API key \u{2192}", destination: URL(string: "https://urlscan.io/user/signup")!)
-                        .font(.caption2)
-                }.padding(4)
+                apiKeyRow(
+                    description: String(localized: "threatintel.urlscanDesc", defaultValue: "URL scanning, screenshots, and threat verdicts"),
+                    binding: $urlscanKey,
+                    provider: "URLScan.io",
+                    signupURL: "https://urlscan.io/user/signup",
+                    linkKind: .free
+                )
             }
 
             GroupBox("GreyNoise") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "threatintel.grenoiseDesc", defaultValue: "IP noise and threat classification \u{2014} identify scanners vs targeted attacks")).font(.caption).foregroundColor(.secondary)
-                    SecureField("API Key", text: $greynoiseKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.caption, design: .monospaced))
-                        .accessibilityLabel("GreyNoise API Key")
-                    Link("Get a free API key \u{2192}", destination: URL(string: "https://viz.greynoise.io/signup")!)
-                        .font(.caption2)
-                }.padding(4)
+                apiKeyRow(
+                    description: String(localized: "threatintel.grenoiseDesc", defaultValue: "IP noise and threat classification \u{2014} identify scanners vs targeted attacks"),
+                    binding: $greynoiseKey,
+                    provider: "GreyNoise",
+                    signupURL: "https://viz.greynoise.io/signup",
+                    linkKind: .free
+                )
             }
 
             GroupBox("Have I Been Pwned") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "threatintel.hibpDesc", defaultValue: "Credential breach detection \u{2014} check if accounts appear in known breaches")).font(.caption).foregroundColor(.secondary)
-                    SecureField("API Key", text: $hibpKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.caption, design: .monospaced))
-                        .accessibilityLabel("Have I Been Pwned API Key")
-                    Link("Get an API key \u{2192}", destination: URL(string: "https://haveibeenpwned.com/API/Key")!)
-                        .font(.caption2)
-                }.padding(4)
+                apiKeyRow(
+                    description: String(localized: "threatintel.hibpDesc", defaultValue: "Credential breach detection \u{2014} check if accounts appear in known breaches"),
+                    binding: $hibpKey,
+                    provider: "Have I Been Pwned",
+                    signupURL: "https://haveibeenpwned.com/API/Key",
+                    linkKind: .paid
+                )
             }
         }
+    }
+
+    // Localized factory so every provider box uses the same strings and
+    // translators only need to supply one copy of "API Key" / "Get a free
+    // API key →". Product names (VirusTotal, Shodan …) stay in English.
+    private enum APIKeyLinkKind { case free, paid }
+
+    @ViewBuilder
+    private func apiKeyRow(
+        description: String,
+        binding: Binding<String>,
+        provider: String,
+        signupURL: String,
+        linkKind: APIKeyLinkKind
+    ) -> some View {
+        let placeholder = String(localized: "threatintel.apiKey.placeholder", defaultValue: "API Key")
+        let accessibility = String(
+            localized: "threatintel.apiKey.accessibility",
+            defaultValue: "\(provider) API Key"
+        )
+        let linkText: String = {
+            switch linkKind {
+            case .free: return String(localized: "threatintel.apiKey.getFree", defaultValue: "Get a free API key \u{2192}")
+            case .paid: return String(localized: "threatintel.apiKey.getPaid", defaultValue: "Get an API key \u{2192}")
+            }
+        }()
+
+        VStack(alignment: .leading, spacing: 4) {
+            Text(description).font(.caption).foregroundColor(.secondary)
+            SecureField(placeholder, text: binding)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+                .accessibilityLabel(accessibility)
+            Link(linkText, destination: URL(string: signupURL)!)
+                .font(.caption2)
+        }
+        .padding(4)
     }
 
     // MARK: - Import Logic

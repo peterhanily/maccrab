@@ -33,6 +33,44 @@ public enum AlertStoreError: Error, LocalizedError {
 /// Alerts are produced by the rule engine when an event matches a detection
 /// rule. Each alert references the originating event by ID and records
 /// the rule metadata, severity, and optional MITRE ATT&CK mappings.
+///
+/// ## Schema
+///
+/// One table, `alerts`:
+///
+/// | Column                    | Type    | Notes                                              |
+/// |---------------------------|---------|----------------------------------------------------|
+/// | `id`                      | TEXT PK | Alert UUID                                         |
+/// | `timestamp`               | REAL    | Unix seconds with fractional precision             |
+/// | `rule_id`                 | TEXT    | e.g. `maccrab.persistence.launch-agent`            |
+/// | `rule_title`              | TEXT    | Human-readable rule name                           |
+/// | `severity`                | TEXT    | `critical`/`high`/`medium`/`low`/`informational`   |
+/// | `event_id`                | TEXT    | FK into `EventStore.events.id`                     |
+/// | `process_path`            | TEXT?   | Absolute executable path of the triggering process |
+/// | `process_name`            | TEXT?   | Basename of `process_path`                         |
+/// | `description`             | TEXT?   | Rule-authored or formatted alert summary           |
+/// | `mitre_tactics`           | TEXT?   | Comma-separated ATT&CK tactic IDs                  |
+/// | `mitre_techniques`        | TEXT?   | Comma-separated ATT&CK technique IDs               |
+/// | `suppressed`              | INTEGER | 0 = visible, 1 = hidden by user (default 0)        |
+/// | `llm_investigation_json`  | TEXT?   | Phase-4 agentic triage (v2 migration)              |
+///
+/// Indexes cover the common query patterns: time-range, rule, severity,
+/// and the composite triage path `(timestamp, severity, suppressed)`.
+///
+/// ## Concurrency
+///
+/// The store is a Swift actor; all reads and writes are serialized at the
+/// actor level. SQLite itself uses `SQLITE_OPEN_FULLMUTEX` + WAL mode so
+/// concurrent readers from other processes (e.g. `maccrabctl` and the
+/// dashboard) do not block writers.
+///
+/// ## Read-only degradation
+///
+/// If the file can't be opened read-write (disk-full, SIP-protected path,
+/// running unprivileged against the system DB), the store silently retries
+/// read-only and sets `isReadOnly = true`. `suppress` / `unsuppress`
+/// writes throw `SQLITE_READONLY` in that mode, which the CLI and dashboard
+/// treat as non-fatal.
 public actor AlertStore {
 
     // MARK: Properties
@@ -75,9 +113,29 @@ public actor AlertStore {
 
     // MARK: Initialization
 
+    /// Throw `AlertStoreError.databaseOpenFailed` if `path` exists and is a
+    /// symbolic link. A missing file is always OK — SQLite will create it.
+    private static func rejectIfSymlink(_ path: String) throws {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
+            return // does not exist yet — safe
+        }
+        if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            throw AlertStoreError.databaseOpenFailed("refusing to open: \(path) is a symlink")
+        }
+    }
+
     /// Opens a SQLite database, creates schema, and prepares statements before
     /// actor isolation begins. Returns all handles so init can assign directly.
     private static func openDatabase(at path: String) throws -> (OpaquePointer, Bool, OpaquePointer?) {
+        // Reject symlinks on the DB path and its WAL/SHM/journal sidecars.
+        // `sqlite3_open_v2` follows symlinks, so a privileged attacker who can
+        // swap the DB file for a symlink could redirect writes to an arbitrary
+        // target. `lstat` (attributesOfItem) does NOT follow.
+        try rejectIfSymlink(path)
+        try rejectIfSymlink(path + "-wal")
+        try rejectIfSymlink(path + "-shm")
+        try rejectIfSymlink(path + "-journal")
+
         var db: OpaquePointer?
         var isReadOnly = false
         var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX

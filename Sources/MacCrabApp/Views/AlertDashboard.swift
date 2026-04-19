@@ -8,15 +8,27 @@ import MacCrabCore
 
 struct AlertDashboard: View {
     @ObservedObject var appState: AppState
-    @State private var selectedSeverity: Severity? = nil
+    // Persisted across tab switches and app restarts. Empty string = no filter.
+    @AppStorage("alerts.selectedSeverity") private var selectedSeverityRaw: String = ""
+    @AppStorage("alerts.showSuppressed") private var showSuppressed: Bool = false
     @State private var searchText: String = ""
-    @State private var showSuppressed: Bool = false
     @State private var selectedAlerts: Set<AlertViewModel> = []
     @State private var suppressedAlertName: String?
     @State private var showUndoToast = false
+    /// IDs to unsuppress if the user taps Undo on the toast (single, bulk, or pattern).
+    @State private var undoAlertIDs: [String] = []
     @State private var exportInProgress = false
     @State private var showSuppressionManager = false
     @Environment(\.accessibilityReduceMotion) var reduceMotion
+
+    /// Derived severity filter from the persisted raw value.
+    private var selectedSeverity: Severity? {
+        get { Severity(rawValue: selectedSeverityRaw) }
+    }
+
+    private func setSelectedSeverity(_ sev: Severity?) {
+        selectedSeverityRaw = sev?.rawValue ?? ""
+    }
 
     /// Single selected alert for the detail panel (last selected)
     private var detailAlert: AlertViewModel? {
@@ -76,7 +88,7 @@ struct AlertDashboard: View {
 
                 ForEach([Severity.critical, .high, .medium, .low], id: \.self) { sev in
                     SeverityChip(severity: sev, isSelected: selectedSeverity == sev) {
-                        selectedSeverity = selectedSeverity == sev ? nil : sev
+                        setSelectedSeverity(selectedSeverity == sev ? nil : sev)
                     }
                 }
 
@@ -138,7 +150,7 @@ struct AlertDashboard: View {
                         .foregroundColor(.secondary)
                     if selectedSeverity != nil || !searchText.isEmpty {
                         Button(String(localized: "alerts.clearFilters", defaultValue: "Clear Filters")) {
-                            selectedSeverity = nil
+                            setSelectedSeverity(nil)
                             searchText = ""
                         }
                     }
@@ -199,13 +211,8 @@ struct AlertDashboard: View {
                         // Alert list with multi-selection (Cmd+click, Shift+click, Cmd+A)
                         List(filteredAlerts, selection: $selectedAlerts) { alert in
                             AlertRow(alert: alert) {
-                                suppressedAlertName = alert.ruleTitle
-                                showUndoToast = true
+                                presentSuppressToast(names: [alert.ruleTitle], ids: [alert.id])
                                 Task { await appState.suppressAlert(alert.id) }
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                                    showUndoToast = false
-                                    suppressedAlertName = nil
-                                }
                             }
                             .tag(alert)
                         }
@@ -215,13 +222,8 @@ struct AlertDashboard: View {
                     if let alert = detailAlert {
                         Divider()
                         AlertDetailView(alert: alert, onSuppress: {
-                            suppressedAlertName = alert.ruleTitle
-                            showUndoToast = true
+                            presentSuppressToast(names: [alert.ruleTitle], ids: [alert.id])
                             Task { await appState.suppressAlert(alert.id) }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                                showUndoToast = false
-                                suppressedAlertName = nil
-                            }
                         }, onUnsuppress: {
                             Task { await appState.unsuppressAlert(alert.id) }
                         }, onSuppressPattern: {
@@ -235,16 +237,34 @@ struct AlertDashboard: View {
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: detailAlert)
             }
             if showUndoToast, let name = suppressedAlertName {
-                HStack {
-                    Text(name)
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .foregroundColor(.secondary)
+                        .accessibilityHidden(true)
+                    Text(String(localized: "alerts.suppressedToast", defaultValue: "Suppressed: \(name)"))
                         .font(.caption)
                     Spacer()
-                    Button("Dismiss") {
-                        showUndoToast = false
-                        suppressedAlertName = nil
+                    if !undoAlertIDs.isEmpty {
+                        Button {
+                            undoLastSuppress()
+                        } label: {
+                            Label(
+                                String(localized: "alerts.undoSuppress", defaultValue: "Undo"),
+                                systemImage: "arrow.uturn.backward"
+                            )
+                        }
+                        .font(.caption)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut("z", modifiers: .command)
                     }
-                    .font(.caption)
-                    .buttonStyle(.bordered)
+                    Button {
+                        dismissSuppressToast()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(String(localized: "alerts.dismissToast", defaultValue: "Dismiss"))
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
@@ -257,39 +277,82 @@ struct AlertDashboard: View {
         }
     }
 
+    // MARK: - Toast & Undo
+
+    /// Monotonic token that invalidates the auto-dismiss timer of a prior toast
+    /// when a new toast is shown. Without this, a fast double-suppress fires two
+    /// 5 s timers; the first closes the second toast early.
+    @State private var toastGeneration: Int = 0
+
+    /// Show the suppression toast. `ids` are the alert IDs that Undo will
+    /// revert. Empty `ids` hides the Undo button (pure "info" toast).
+    private func presentSuppressToast(names: [String], ids: [String]) {
+        suppressedAlertName = names.count <= 1
+            ? (names.first ?? "")
+            : String(localized: "alerts.suppressedCount", defaultValue: "\(names.count) alerts")
+        undoAlertIDs = ids
+        showUndoToast = true
+        toastGeneration &+= 1
+        let gen = toastGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            if gen == toastGeneration {
+                dismissSuppressToast()
+            }
+        }
+    }
+
+    private func dismissSuppressToast() {
+        showUndoToast = false
+        suppressedAlertName = nil
+        undoAlertIDs = []
+    }
+
+    /// Undo the most recent suppression (single or bulk). Safe to call repeatedly.
+    private func undoLastSuppress() {
+        let ids = undoAlertIDs
+        guard !ids.isEmpty else { return }
+        dismissSuppressToast()
+        Task {
+            for id in ids {
+                await appState.unsuppressAlert(id)
+            }
+        }
+    }
+
     // MARK: - Bulk Actions
 
     private func bulkSuppress() {
-        let count = selectedAlerts.count
-        suppressedAlertName = "\(count) alerts"
-        showUndoToast = true
-        let alertsToSuppress = selectedAlerts
+        let alertsToSuppress = Array(selectedAlerts)
+        let ids = alertsToSuppress.map(\.id)
+        let names = alertsToSuppress.map(\.ruleTitle)
         selectedAlerts = []
         Task {
             for alert in alertsToSuppress {
                 await appState.suppressAlert(alert.id)
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-            showUndoToast = false
-            suppressedAlertName = nil
-        }
+        presentSuppressToast(names: names, ids: ids)
     }
 
     private func bulkUnsuppress() {
-        let count = selectedAlerts.filter { $0.suppressed }.count
         let alertsToUnsuppress = selectedAlerts.filter { $0.suppressed }
+        let count = alertsToUnsuppress.count
         selectedAlerts = []
         Task {
             for alert in alertsToUnsuppress {
                 await appState.unsuppressAlert(alert.id)
             }
         }
-        suppressedAlertName = "Unsuppressed \(count) alerts"
+        // Info-only toast (no Undo — undoing an unsuppress would re-suppress, confusing).
+        suppressedAlertName = String(localized: "alerts.unsuppressedCount", defaultValue: "Unsuppressed \(count) alerts")
+        undoAlertIDs = []
         showUndoToast = true
+        toastGeneration &+= 1
+        let gen = toastGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            showUndoToast = false
-            suppressedAlertName = nil
+            if gen == toastGeneration {
+                dismissSuppressToast()
+            }
         }
     }
 
@@ -508,7 +571,10 @@ struct AlertDetailView: View {
                                     Label(String(localized: "action.suppressAll", defaultValue: "Suppress All Like This"), systemImage: "eye.slash.circle")
                                 }
                                 .controlSize(.large)
-                                .help("Suppress all alerts matching '\(alert.ruleTitle)' from '\(alert.processName)'")
+                                .help(String(
+                                    localized: "action.suppressAll.hint",
+                                    defaultValue: "Suppress all alerts matching '\(alert.ruleTitle)' from '\(alert.processName)'"
+                                ))
                             } else {
                                 Button { onUnsuppress?() } label: {
                                     Label(String(localized: "action.unsuppress", defaultValue: "Unsuppress"), systemImage: "eye")
@@ -529,7 +595,10 @@ struct AlertDetailView: View {
                                     Label(String(localized: "action.kill", defaultValue: "Kill Process"), systemImage: "xmark.circle.fill")
                                 }
                                 .controlSize(.large)
-                                .help("Terminate \(alert.processName)")
+                                .help(String(
+                                    localized: "action.kill.hint",
+                                    defaultValue: "Terminate \(alert.processName)"
+                                ))
                                 .confirmationDialog(
                                     "\(String(localized: "action.kill", defaultValue: "Kill Process")) — \(alert.processName)?",
                                     isPresented: $showKillConfirm,
@@ -546,7 +615,10 @@ struct AlertDetailView: View {
                                         }
                                     }
                                 } message: {
-                                    Text("This will terminate \(alert.processName) at \(alert.processPath). This action cannot be undone.")
+                                    Text(String(
+                                        localized: "action.kill.message",
+                                        defaultValue: "This will terminate \(alert.processName) at \(alert.processPath). This action cannot be undone."
+                                    ))
                                 }
                             }
 
@@ -602,7 +674,10 @@ struct AlertDetailView: View {
                                         }
                                     }
                                 } message: {
-                                    Text("This will block the network destination associated with \(alert.processName). Applications will no longer be able to reach this endpoint.")
+                                    Text(String(
+                                        localized: "action.block.message",
+                                        defaultValue: "This will block the network destination associated with \(alert.processName). Applications will no longer be able to reach this endpoint."
+                                    ))
                                 }
                             }
 
@@ -623,7 +698,10 @@ struct AlertDetailView: View {
                                 Label(String(localized: "action.copyDetails", defaultValue: "Copy Details"), systemImage: "doc.on.doc")
                             }
                             .controlSize(.large)
-                            .accessibilityHint("Copies alert details to clipboard")
+                            .accessibilityHint(String(
+                                localized: "action.copyDetails.hint",
+                                defaultValue: "Copies alert details to clipboard"
+                            ))
                         }
 
                         if let feedback = actionFeedback {

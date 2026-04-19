@@ -15,7 +15,7 @@ If you discover a security vulnerability in MacCrab, please report it responsibl
 
 ### How to Report
 
-1. Email **security@maccrab.com** with:
+1. Email **maccrab@peterhanily.com** with:
    - A description of the vulnerability
    - Steps to reproduce
    - Affected versions

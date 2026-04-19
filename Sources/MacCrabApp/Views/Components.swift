@@ -9,6 +9,9 @@ import SwiftUI
 // MARK: - SeverityChip
 
 /// A colored pill-shaped button for filtering by severity level.
+///
+/// Severity is conveyed by color AND SF Symbol, so the control remains
+/// distinguishable under color-blindness, high-contrast mode, and VoiceOver.
 struct SeverityChip: View {
     let severity: Severity
     let isSelected: Bool
@@ -16,23 +19,29 @@ struct SeverityChip: View {
 
     var body: some View {
         Button(action: action) {
-            Text(severity.label)
-                .font(.caption)
-                .fontWeight(isSelected ? .bold : .regular)
-                .minimumScaleFactor(0.8)
-                .lineLimit(1)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(isSelected ? severity.color.opacity(0.25) : Color.clear)
-                .foregroundColor(isSelected ? severity.color : .secondary)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .strokeBorder(severity.color.opacity(isSelected ? 0.8 : 0.3), lineWidth: 1)
-                )
+            HStack(spacing: 4) {
+                Image(systemName: severity.sfSymbol)
+                    .font(.caption2)
+                    .accessibilityHidden(true)
+                Text(severity.label)
+                    .font(.caption)
+                    .fontWeight(isSelected ? .bold : .regular)
+                    .minimumScaleFactor(0.8)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(isSelected ? severity.color.opacity(0.25) : Color.clear)
+            .foregroundColor(isSelected ? severity.color : .secondary)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(severity.color.opacity(isSelected ? 0.8 : 0.3), lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(severity.label) severity filter")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 }
 
@@ -133,9 +142,12 @@ struct AlertMenuItem: View {
             NSApplication.shared.activate(ignoringOtherApps: true)
         } label: {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(alert.severityColor)
-                    .frame(width: 8, height: 8)
+                // Severity conveyed by both color AND SF Symbol so the indicator
+                // is distinguishable under color-blindness or VoiceOver.
+                Image(systemName: alert.severity.sfSymbol)
+                    .font(.caption)
+                    .foregroundColor(alert.severityColor)
+                    .frame(width: 12, height: 12)
                     .accessibilityLabel(Text("\(alert.severity.rawValue) severity"))
 
                 VStack(alignment: .leading, spacing: 1) {

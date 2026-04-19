@@ -1,0 +1,25 @@
+{
+  "__": "suppressions.json — per-rule process path allowlist.",
+  "__comment_location": "Lives at /Library/Application Support/MacCrab/suppressions.json (release) or ~/Library/Application Support/MacCrab/suppressions.json (dev).",
+  "__comment_format": "Keys are rule IDs. Values are lists of process paths that should NOT trigger the rule.",
+  "__comment_edit": "Prefer `maccrabctl suppress <rule-id> <process-path>` — it writes here and reloads the daemon.",
+  "__comment_reload": "Send SIGHUP after editing: pkill -HUP com.maccrab.agent (release) or pkill -HUP maccrabd (dev).",
+
+  "maccrab.deep.event-tap-keylogger": [
+    "/usr/libexec/universalaccessd",
+    "/System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer"
+  ],
+
+  "maccrab.network.c2-beacon-pattern": [
+    "/Applications/Xcode.app/Contents/MacOS/Xcode",
+    "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
+  ],
+
+  "maccrab.persistence.launch-agent": [
+    "/usr/local/bin/brew",
+    "/opt/homebrew/bin/brew"
+  ],
+
+  "__comment_hint": "Keys starting with '__' are ignored by the loader and exist only for documentation in this file. Real entries don't need them.",
+  "__comment_pattern": "For pattern-based suppressions (ruleTitle + processName tuples) the dashboard's 'Suppress All Like This' button writes to a separate file managed by AppState."
+}

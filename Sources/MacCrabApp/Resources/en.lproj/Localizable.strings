@@ -496,3 +496,67 @@
 "severity.high" = "High";
 "severity.critical" = "Critical";
 
+
+/* ── Bundle A + B additions (v1.3.5) ──
+   New keys introduced by the safety-rails + localization polish rounds.
+   Translators: copy these into your .lproj/Localizable.strings and localize
+   the values. Keys missing from a locale fall through to the in-source
+   defaultValue, so omissions are safe but lose the translation. */
+
+/* Suppression toast — Undo flow */
+"alerts.undoSuppress" = "Undo";
+"alerts.dismissToast" = "Dismiss";
+"alerts.suppressedCount" = "%@ alerts";
+"alerts.unsuppressedCount" = "Unsuppressed %@ alerts";
+
+/* Destructive-action confirmation messages */
+"action.kill.message" = "This will terminate %1$@ at %2$@. This action cannot be undone.";
+"action.block.message" = "This will block the network destination associated with %@. Applications will no longer be able to reach this endpoint.";
+"action.suppressAll.hint" = "Suppress all alerts matching '%1$@' from '%2$@'";
+"action.kill.hint" = "Terminate %@";
+"action.copyDetails.hint" = "Copies alert details to clipboard";
+
+/* SystemExtension panel — headlines */
+"sysext.headline.enable" = "Enable Endpoint Security protection";
+"sysext.headline.activating" = "Activating protection";
+"sysext.headline.pending" = "Approval required";
+"sysext.headline.active" = "Protection active";
+"sysext.headline.failed" = "Activation failed";
+
+/* SystemExtension panel — body copy */
+"sysext.body.checking" = "Checking extension state…";
+"sysext.body.notActivated" = "MacCrab's detection engine runs as a macOS system extension so it can observe kernel events at the source. The first time you enable it, macOS will ask for your approval in System Settings.";
+"sysext.body.activating" = "Registering the extension with sysextd. If a prompt appears in System Settings, approve it to continue.";
+"sysext.body.awaitingApproval" = "Open System Settings > General > Login Items & Extensions > Endpoint Security Extensions and enable MacCrab's extension. Detection won't start until you approve.";
+"sysext.body.activated" = "Kernel events are flowing through the MacCrab agent. All detection tiers are online.";
+
+/* SystemExtension panel — state chip */
+"sysext.state.unknown" = "Unknown";
+"sysext.state.disabled" = "Disabled";
+"sysext.state.activating" = "Activating";
+"sysext.state.pending" = "Pending";
+"sysext.state.active" = "Active";
+"sysext.state.failed" = "Failed";
+
+/* SystemExtension panel — buttons */
+"sysext.action.enable" = "Enable Protection";
+"sysext.action.openSettings" = "Open System Settings";
+"sysext.action.tryAgain" = "Try again";
+
+/* Overview — additional fallbacks */
+"overview.enableAbove" = "Enable protection above to start the detection engine.";
+"overview.populating" = "The extension is active — populating the dashboard.";
+"overview.critical.count" = "%@ critical alerts need investigation";
+"overview.high.count" = "%@ high-severity alerts to review";
+"overview.eventsRate" = "%@ events/sec monitored";
+
+/* Overview — Full Disk Access warning banner */
+"overview.fda.title" = "Full Disk Access is not granted";
+"overview.fda.body" = "MacCrab needs Full Disk Access to monitor TCC permissions and protected file paths. Detection coverage is currently incomplete.";
+"overview.fda.openSettings" = "Open Settings";
+
+/* Threat intel — shared API-key strings */
+"threatintel.apiKey.placeholder" = "API Key";
+"threatintel.apiKey.accessibility" = "%@ API Key";
+"threatintel.apiKey.getFree" = "Get a free API key →";
+"threatintel.apiKey.getPaid" = "Get an API key →";

@@ -1251,12 +1251,78 @@ def compile_sequence_rule(rule_data: dict, source_file: str):
     }
 
 
+def _snapshot_previous_output(output_dir: str, archive_root: str, keep: int = 5) -> None:
+    """
+    Snapshot the current contents of output_dir into
+    archive_root/<timestamp>/ before overwriting. Retains the most recent
+    `keep` snapshots; older ones are deleted.
+
+    No-op when output_dir is empty or does not exist — there's nothing
+    useful to preserve yet.
+
+    Why: `make compile-rules` overwrites compiled_rules/ wholesale. If the
+    new corpus has a bug (broken rule, accidentally deleted detection),
+    we want a trivial rollback path. A timestamped archive gives ops
+    `cp -R compiled_rules.archive/<ts> compiled_rules` as the recovery
+    command, with no git history required.
+    """
+    import shutil
+    import time
+
+    if not os.path.isdir(output_dir):
+        return
+    try:
+        entries = os.listdir(output_dir)
+    except OSError:
+        return
+    entries = [e for e in entries if not e.startswith(".")]
+    if not entries:
+        return
+
+    os.makedirs(archive_root, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    snapshot = os.path.join(archive_root, ts)
+
+    # If two compiles run in the same second, disambiguate with a counter.
+    i = 1
+    while os.path.exists(snapshot):
+        snapshot = os.path.join(archive_root, f"{ts}-{i}")
+        i += 1
+
+    try:
+        shutil.copytree(output_dir, snapshot,
+                        ignore=shutil.ignore_patterns("*.tmp"))
+    except Exception as exc:
+        print(f"  WARN  Rule archive skipped: {exc}", file=sys.stderr)
+        return
+
+    # Prune older snapshots beyond `keep`.
+    try:
+        snapshots = sorted(
+            os.path.join(archive_root, d)
+            for d in os.listdir(archive_root)
+            if os.path.isdir(os.path.join(archive_root, d))
+        )
+        for stale in snapshots[:-keep]:
+            shutil.rmtree(stale, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
     """
     Compile all Sigma YAML rules from input_dir and write JSON to output_dir.
 
+    Before overwriting output_dir, snapshot its previous contents into
+    `<output_dir>.archive/<timestamp>/` — keeps the last 5 snapshots so
+    a bad compile can be rolled back with `cp -R`.
+
     Returns (total_found, compiled, skipped).
     """
+    # Snapshot the previous compiled corpus (best-effort).
+    archive_root = output_dir.rstrip(os.sep) + ".archive"
+    _snapshot_previous_output(output_dir, archive_root, keep=5)
+
     os.makedirs(output_dir, exist_ok=True)
 
     yaml_files = find_yaml_files(input_dir)

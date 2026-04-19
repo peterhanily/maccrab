@@ -72,9 +72,29 @@ public actor EventStore {
 
     // MARK: Initialization
 
+    /// Throw `EventStoreError.databaseOpenFailed` if `path` exists and is a
+    /// symbolic link. A missing file is always OK — SQLite will create it.
+    private static func rejectIfSymlink(_ path: String) throws {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
+            return // does not exist yet — safe
+        }
+        if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            throw EventStoreError.databaseOpenFailed("refusing to open: \(path) is a symlink")
+        }
+    }
+
     /// Opens a SQLite database before actor isolation begins.
     /// Returns (db handle, isReadOnly) so init can assign to stored properties.
     private static func openDatabase(at path: String) throws -> (OpaquePointer, Bool, OpaquePointer?) {
+        // Reject symlinks on the DB path and its WAL/SHM/journal sidecars.
+        // `sqlite3_open_v2` follows symlinks, so a privileged attacker who can
+        // swap the DB file for a symlink could redirect writes to an arbitrary
+        // target. `lstat` (attributesOfItem) does NOT follow.
+        try rejectIfSymlink(path)
+        try rejectIfSymlink(path + "-wal")
+        try rejectIfSymlink(path + "-shm")
+        try rejectIfSymlink(path + "-journal")
+
         var db: OpaquePointer?
         var isReadOnly = false
         var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX

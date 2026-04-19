@@ -48,31 +48,44 @@ public struct SystemExtensionPanel: View {
     private var headline: String {
         switch manager.state {
         case .unknown, .notActivated:
-            return "Enable Endpoint Security protection"
+            return String(localized: "sysext.headline.enable", defaultValue: "Enable Endpoint Security protection")
         case .activating:
-            return "Activating protection"
+            return String(localized: "sysext.headline.activating", defaultValue: "Activating protection")
         case .awaitingApproval:
-            return "Approval required"
+            return String(localized: "sysext.headline.pending", defaultValue: "Approval required")
         case .activated:
-            return "Protection active"
+            return String(localized: "sysext.headline.active", defaultValue: "Protection active")
         case .failed:
-            return "Activation failed"
+            return String(localized: "sysext.headline.failed", defaultValue: "Activation failed")
         }
     }
 
     private func body(for state: SystemExtensionState) -> String {
         switch state {
         case .unknown:
-            return "Checking extension state…"
+            return String(localized: "sysext.body.checking", defaultValue: "Checking extension state\u{2026}")
         case .notActivated:
-            return "MacCrab's detection engine runs as a macOS system extension so it can observe kernel events at the source. The first time you enable it, macOS will ask for your approval in System Settings."
+            return String(
+                localized: "sysext.body.notActivated",
+                defaultValue: "MacCrab's detection engine runs as a macOS system extension so it can observe kernel events at the source. The first time you enable it, macOS will ask for your approval in System Settings."
+            )
         case .activating:
-            return "Registering the extension with sysextd. If a prompt appears in System Settings, approve it to continue."
+            return String(
+                localized: "sysext.body.activating",
+                defaultValue: "Registering the extension with sysextd. If a prompt appears in System Settings, approve it to continue."
+            )
         case .awaitingApproval:
-            return "Open System Settings > General > Login Items & Extensions > Endpoint Security Extensions and enable MacCrab's extension. Detection won't start until you approve."
+            return String(
+                localized: "sysext.body.awaitingApproval",
+                defaultValue: "Open System Settings > General > Login Items & Extensions > Endpoint Security Extensions and enable MacCrab's extension. Detection won't start until you approve."
+            )
         case .activated:
-            return "Kernel events are flowing through the MacCrab agent. All detection tiers are online."
+            return String(
+                localized: "sysext.body.activated",
+                defaultValue: "Kernel events are flowing through the MacCrab agent. All detection tiers are online."
+            )
         case .failed(let reason):
+            // Reason comes from OSSystemExtensionError and is system-localized.
             return reason
         }
     }
@@ -117,12 +130,12 @@ public struct SystemExtensionPanel: View {
 
     private var stateLabel: String {
         switch manager.state {
-        case .unknown: return "Unknown"
-        case .notActivated: return "Disabled"
-        case .activating: return "Activating"
-        case .awaitingApproval: return "Pending"
-        case .activated: return "Active"
-        case .failed: return "Failed"
+        case .unknown: return String(localized: "sysext.state.unknown", defaultValue: "Unknown")
+        case .notActivated: return String(localized: "sysext.state.disabled", defaultValue: "Disabled")
+        case .activating: return String(localized: "sysext.state.activating", defaultValue: "Activating")
+        case .awaitingApproval: return String(localized: "sysext.state.pending", defaultValue: "Pending")
+        case .activated: return String(localized: "sysext.state.active", defaultValue: "Active")
+        case .failed: return String(localized: "sysext.state.failed", defaultValue: "Failed")
         }
     }
 
@@ -134,18 +147,26 @@ public struct SystemExtensionPanel: View {
                 Button {
                     manager.activate()
                 } label: {
-                    Label("Enable Protection", systemImage: "shield.checkered")
+                    Label(
+                        String(localized: "sysext.action.enable", defaultValue: "Enable Protection"),
+                        systemImage: "shield.checkered"
+                    )
                 }
                 .buttonStyle(.borderedProminent)
             case .awaitingApproval:
                 Button {
                     openLoginItemsAndExtensions()
                 } label: {
-                    Label("Open System Settings", systemImage: "gearshape")
+                    Label(
+                        String(localized: "sysext.action.openSettings", defaultValue: "Open System Settings"),
+                        systemImage: "gearshape"
+                    )
                 }
                 .buttonStyle(.borderedProminent)
-                Button("Try again") { manager.activate() }
-                    .buttonStyle(.bordered)
+                Button(String(localized: "sysext.action.tryAgain", defaultValue: "Try again")) {
+                    manager.activate()
+                }
+                .buttonStyle(.bordered)
             case .activating:
                 EmptyView()
             case .activated:

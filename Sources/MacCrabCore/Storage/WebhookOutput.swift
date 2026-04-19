@@ -55,9 +55,109 @@ public actor WebhookOutput {
         return fmt
     }()
 
+    // MARK: - URL Validation
+
+    /// Reasons a webhook URL may be rejected.
+    public enum ValidationError: Error, CustomStringConvertible {
+        case missingScheme
+        case invalidScheme(String)
+        case missingHost
+        case privateHostNotAllowed(String)
+        case metadataAddressBlocked(String)
+
+        public var description: String {
+            switch self {
+            case .missingScheme:
+                return "Webhook URL must include a scheme (https://...)"
+            case .invalidScheme(let s):
+                return "Webhook URL scheme must be 'https' (or 'http' for localhost); got '\(s)'"
+            case .missingHost:
+                return "Webhook URL must include a host"
+            case .privateHostNotAllowed(let h):
+                return "Webhook URL points at private address '\(h)' — set MACCRAB_WEBHOOK_ALLOW_PRIVATE=1 to override"
+            case .metadataAddressBlocked(let h):
+                return "Webhook URL points at cloud metadata address '\(h)' — blocked unconditionally (SSRF)"
+            }
+        }
+    }
+
+    /// Validate a webhook URL against policy before construction.
+    ///
+    /// Policy:
+    /// - Require `https` scheme. `http` is accepted only for loopback hosts.
+    /// - Reject empty / missing host.
+    /// - Reject cloud metadata IPs (169.254.169.254 AWS/GCP/Azure, fd00:ec2::254 AWS IPv6) unconditionally.
+    /// - Reject RFC1918 / link-local / unique-local addresses unless `allowPrivate` is true.
+    ///
+    /// - Parameters:
+    ///   - url: The URL to validate.
+    ///   - allowPrivate: Set from `MACCRAB_WEBHOOK_ALLOW_PRIVATE=1` for intranet webhooks.
+    /// - Throws: `ValidationError` describing the specific failure.
+    public static func validate(url: URL, allowPrivate: Bool = false) throws {
+        guard let scheme = url.scheme?.lowercased() else {
+            throw ValidationError.missingScheme
+        }
+        guard let host = url.host, !host.isEmpty else {
+            throw ValidationError.missingHost
+        }
+
+        let isLoopbackHost = (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]")
+
+        switch scheme {
+        case "https":
+            break
+        case "http":
+            guard isLoopbackHost else {
+                throw ValidationError.invalidScheme(scheme)
+            }
+        default:
+            throw ValidationError.invalidScheme(scheme)
+        }
+
+        // Metadata addresses are blocked regardless of allowPrivate.
+        let blockedMetadata: Set<String> = ["169.254.169.254", "fd00:ec2::254", "100.100.100.200"]
+        if blockedMetadata.contains(host) {
+            throw ValidationError.metadataAddressBlocked(host)
+        }
+
+        if !allowPrivate && !isLoopbackHost && isPrivateAddressLiteral(host) {
+            throw ValidationError.privateHostNotAllowed(host)
+        }
+    }
+
+    /// Best-effort detection of RFC1918 / link-local / unique-local IP literals.
+    /// Hostnames (DNS names) pass through — DNS rebinding is out of scope here.
+    private static func isPrivateAddressLiteral(_ host: String) -> Bool {
+        // Strip IPv6 brackets if present.
+        let h = host.hasPrefix("[") && host.hasSuffix("]")
+            ? String(host.dropFirst().dropLast())
+            : host
+
+        // IPv4 RFC1918 + link-local
+        let ipv4Parts = h.split(separator: ".")
+        if ipv4Parts.count == 4, let a = UInt8(ipv4Parts[0]), let b = UInt8(ipv4Parts[1]) {
+            if a == 10 { return true }                              // 10.0.0.0/8
+            if a == 192 && b == 168 { return true }                 // 192.168.0.0/16
+            if a == 172 && (16...31).contains(b) { return true }    // 172.16.0.0/12
+            if a == 169 && b == 254 { return true }                 // 169.254.0.0/16 link-local
+        }
+
+        // IPv6 unique-local (fc00::/7) and link-local (fe80::/10)
+        let lower = h.lowercased()
+        if lower.hasPrefix("fc") || lower.hasPrefix("fd") || lower.hasPrefix("fe8") ||
+           lower.hasPrefix("fe9") || lower.hasPrefix("fea") || lower.hasPrefix("feb") {
+            if lower.contains(":") { return true }
+        }
+
+        return false
+    }
+
     // MARK: Initialization
 
     /// Creates a webhook output configured for the given endpoint.
+    ///
+    /// Callers should prefer `WebhookOutput.validate(url:allowPrivate:)` before
+    /// construction to reject SSRF-prone URLs early with a specific error.
     ///
     /// - Parameters:
     ///   - url: The destination URL for alert payloads.
@@ -75,11 +175,14 @@ public actor WebhookOutput {
         self.retryCount = retryCount
         self.timeout = timeout
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout * Double(retryCount + 1)
-        config.waitsForConnectivity = false
-        self.session = URLSession(configuration: config)
+        // Use the hardened generic factory so webhook connections inherit the
+        // same TLS 1.2+ floor and persistent-state scrubbing as our LLM /
+        // threat-intel sessions. Pinning doesn't apply here (user-supplied
+        // host), but everything else does.
+        self.session = SecureURLSession.makeGeneric(
+            timeout: timeout,
+            retryBudgetFactor: retryCount + 1
+        )
     }
 
     // MARK: - Public API

@@ -167,6 +167,41 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
         return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }
 
+    /// Create a hardened URLSession for user-supplied URLs (webhooks, arbitrary
+    /// outbound HTTP) where SPKI pinning can't apply because the endpoint isn't
+    /// known in advance.
+    ///
+    /// Gets the same baseline hardening as the provider-specific factory:
+    /// - TLS 1.2+ enforced
+    /// - Persistent cookie / credential storage disabled (prevents cross-request
+    ///   credential bleed and cookie-based tracking)
+    /// - Ephemeral configuration (no on-disk cache)
+    /// - Caller-provided timeout and retry budget
+    ///
+    /// What it does NOT add:
+    /// - SPKI pinning (no pin material to check against for user-supplied hosts).
+    ///   OS trust store validation still applies.
+    ///
+    /// - Parameters:
+    ///   - timeout: Per-request timeout in seconds.
+    ///   - retryBudgetFactor: Multiplier applied to timeout to compute
+    ///     `timeoutIntervalForResource`. Set to `retryCount + 1` so the total
+    ///     session budget covers all retries.
+    /// - Returns: A URLSession with no custom delegate.
+    public static func makeGeneric(
+        timeout: TimeInterval = 10,
+        retryBudgetFactor: Int = 3
+    ) -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.tlsMinimumSupportedProtocolVersion = .TLSv12
+        config.timeoutIntervalForRequest = timeout
+        config.timeoutIntervalForResource = timeout * TimeInterval(max(1, retryBudgetFactor))
+        config.waitsForConnectivity = false
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        return URLSession(configuration: config)
+    }
+
     // MARK: - URLSessionDelegate
 
     public func urlSession(
