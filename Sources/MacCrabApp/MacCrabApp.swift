@@ -3,6 +3,7 @@
 
 import SwiftUI
 import AppKit
+import Sparkle
 
 @main
 struct MacCrabApp: App {
@@ -11,6 +12,16 @@ struct MacCrabApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage("hasCompletedSetup") private var hasCompletedSetup = false
     @State private var showWelcome = false
+
+    // Sparkle auto-updater. `startingUpdater: true` kicks off the first
+    // background check about 30s after launch and then every 24h
+    // (SUScheduledCheckInterval in Info.plist). The controller retains
+    // SPUUpdater + SPUStandardUserDriver for the app's lifetime.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
 
     var body: some Scene {
         // Main dashboard window — opens on launch.
@@ -33,10 +44,53 @@ struct MacCrabApp: App {
                     WelcomeView(isPresented: $showWelcome)
                 }
         }
+        .commands {
+            // "Check for Updates…" under the application menu next to
+            // About. The button greys out while a check is in flight.
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesView(updater: updaterController.updater)
+            }
+        }
 
         // Settings window (Cmd+,).
         Settings {
             SettingsView(appState: appState)
+        }
+    }
+}
+
+// MARK: - Sparkle "Check for Updates…" menu item
+
+/// Small SwiftUI view that binds a menu button to the Sparkle updater's
+/// `canCheckForUpdates` state, so the menu item greys out while a check
+/// is already running. Lifted from Sparkle's canonical SwiftUI sample.
+private struct CheckForUpdatesView: View {
+    @ObservedObject private var viewModel: CheckForUpdatesViewModel
+    private let updater: SPUUpdater
+
+    init(updater: SPUUpdater) {
+        self.updater = updater
+        self.viewModel = CheckForUpdatesViewModel(updater: updater)
+    }
+
+    var body: some View {
+        Button(String(localized: "menu.checkForUpdates", defaultValue: "Check for Updates…")) {
+            updater.checkForUpdates()
+        }
+        .disabled(!viewModel.canCheckForUpdates)
+    }
+}
+
+/// Wraps SPUUpdater's `canCheckForUpdates` via KVO so SwiftUI redraws
+/// the menu state. NSKeyValueObservation handles the lifetime
+/// automatically — drop the `@Published` when the view is deallocated.
+private final class CheckForUpdatesViewModel: ObservableObject {
+    @Published var canCheckForUpdates = false
+    private var observation: NSKeyValueObservation?
+
+    init(updater: SPUUpdater) {
+        observation = updater.observe(\.canCheckForUpdates, options: [.initial]) { [weak self] updater, _ in
+            self?.canCheckForUpdates = updater.canCheckForUpdates
         }
     }
 }

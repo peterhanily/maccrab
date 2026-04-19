@@ -560,3 +560,6 @@
 "threatintel.apiKey.accessibility" = "%@ API Key";
 "threatintel.apiKey.getFree" = "Get a free API key →";
 "threatintel.apiKey.getPaid" = "Get an API key →";
+
+/* ── Sparkle auto-update (v1.3.5+) ── */
+"menu.checkForUpdates" = "Check for Updates…";

@@ -11,7 +11,7 @@ enum SignalHandlers {
         let sigIntSource: DispatchSourceSignal
     }
 
-    static func install(state: DaemonState) -> Handles {
+    static func install(state: DaemonState, supervisor: MonitorSupervisor) -> Handles {
         // Handle SIGHUP for rule reload
         let sigHupSource = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
         signal(SIGHUP, SIG_IGN) // Ignore default handler
@@ -69,11 +69,29 @@ enum SignalHandlers {
         }
         sigHupSource.resume()
 
-        // Handle SIGTERM/SIGINT for graceful shutdown
-        let shutdownHandler = {
+        // Handle SIGTERM/SIGINT for graceful shutdown.
+        //
+        // The OS will SIGKILL us anyway if we dawdle (sysextd has its own
+        // termination deadline, launchd has `ExitTimeOut`, Sparkle's
+        // installer doesn't wait forever), so we race supervisor.shutdown
+        // against our own 3-second deadline. If every supervised task
+        // unwinds in time, great; if not, we still exit cleanly so the
+        // OS never has to resort to SIGKILL and leave state half-written.
+        let shutdownHandler: @Sendable () -> Void = {
             logger.info("MacCrab daemon shutting down...")
             print("\nShutting down MacCrab daemon...")
-            exit(0)
+            Task {
+                await supervisor.shutdown(deadline: 3.0)
+                exit(0)
+            }
+            // Hard fallback: if the Task above gets stuck (supervisor
+            // actor deadlocked, scheduler starved), make sure we still
+            // exit within ~4s of the signal. exit() from any thread is
+            // fine once we're past the graceful window.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 4.0) {
+                logger.warning("MacCrab daemon shutdown deadline exceeded — forcing exit")
+                exit(0)
+            }
         }
 
         let sigTermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)

@@ -15,12 +15,14 @@ import MacCrabCore
 
 /// Opaque handle returned by `DaemonBootstrap.prepare`. Callers hold
 /// it for the lifetime of the daemon so ARC doesn't reclaim the
-/// dispatch-based signal and timer sources. The fields are internal
-/// on purpose — outside callers don't reach inside.
+/// dispatch-based signal and timer sources, and so the supervisor stays
+/// live for SIGTERM-triggered graceful shutdown. Fields are internal on
+/// purpose — outside callers don't reach inside.
 public struct DaemonHandles {
     let state: DaemonState
     let signalHandles: SignalHandlers.Handles
     let timerHandles: DaemonTimers.Handles
+    let supervisor: MonitorSupervisor
 }
 
 public enum DaemonBootstrap {
@@ -42,8 +44,15 @@ public enum DaemonBootstrap {
             await StartupBanner.print(state: state)
         }
 
-        let signalHandles = SignalHandlers.install(state: state)
-        MonitorTasks.start(state: state)
+        // Shared supervisor for every background monitor task. Created
+        // before signal handlers so SIGTERM can call shutdown() against
+        // it. MonitorTasks registers its 12 named tasks under this
+        // supervisor; DaemonTimers' dispatch-based timers are retained
+        // separately via timerHandles.
+        let supervisor = MonitorSupervisor()
+
+        let signalHandles = SignalHandlers.install(state: state, supervisor: supervisor)
+        await MonitorTasks.start(state: state, supervisor: supervisor)
 
         let startTime = Date()
         let timerHandles = DaemonTimers.start(
@@ -56,7 +65,8 @@ public enum DaemonBootstrap {
         return DaemonHandles(
             state: state,
             signalHandles: signalHandles,
-            timerHandles: timerHandles
+            timerHandles: timerHandles,
+            supervisor: supervisor
         )
     }
 
@@ -84,6 +94,7 @@ public enum DaemonBootstrap {
         defer {
             _ = handles.signalHandles
             _ = handles.timerHandles
+            _ = handles.supervisor
         }
         await runEventLoop(handles: handles)
     }

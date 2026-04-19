@@ -28,6 +28,12 @@ packages:
     # The SPM package lives one directory up. Both targets consume
     # MacCrabCore as a library dependency; no duplication of sources.
     path: ..
+  Sparkle:
+    # Sparkle 2 auto-update framework — used only by MacCrabApp.
+    # The sysext updates transparently via OSSystemExtensionRequest(.replace)
+    # whenever the host app updates, so it doesn't need Sparkle linked in.
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.4
 
 targets:
   # ─── Main app (dashboard + sysext activator) ──────────────────────
@@ -39,6 +45,8 @@ targets:
     dependencies:
       - package: MacCrabCore
         product: MacCrabCore
+      - package: Sparkle
+        product: Sparkle
       # Embed + sign the system extension inside the app bundle so
       # MacCrab.app/Contents/Library/SystemExtensions/
       #   com.maccrab.agent.systemextension ships with the app.
@@ -52,8 +60,8 @@ targets:
         CFBundleDisplayName: MacCrab
         CFBundleIdentifier: com.maccrab.app
         CFBundleExecutable: MacCrab
-        CFBundleVersion: "1.3.0"
-        CFBundleShortVersionString: "1.3.0"
+        CFBundleVersion: "1.3.5"
+        CFBundleShortVersionString: "1.3.5"
         CFBundlePackageType: APPL
         CFBundleIconFile: AppIcon
         CFBundleIconName: AppIcon
@@ -63,6 +71,14 @@ targets:
         NSHighResolutionCapable: true
         NSSystemExtensionUsageDescription: "MacCrab uses an Endpoint Security system extension to detect threats in real time. The extension runs at the kernel event boundary and observes process, file, and network activity on your Mac."
         NSMicrophoneUsageDescription: "MacCrab monitors for ultrasonic voice injection attacks."
+        # Sparkle auto-update configuration. SUPublicEDKey is the ed25519
+        # verification key — losing the matching private key bricks updates
+        # for every existing install.
+        SUFeedURL: "https://maccrab.com/appcast.xml"
+        SUPublicEDKey: "de+dzPjBve7LP5qxoE7nR6shThsjubkVasi+i8ehT4E="
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        SUAutomaticallyUpdate: false
     entitlements:
       path: Resources/MacCrabApp.entitlements
       properties:
@@ -112,9 +128,12 @@ targets:
         CFBundleDisplayName: MacCrab Endpoint Security Extension
         CFBundleIdentifier: com.maccrab.agent
         CFBundleExecutable: com.maccrab.agent
-        CFBundleVersion: "1.3.0"
-        CFBundleShortVersionString: "1.3.0"
-        CFBundlePackageType: SYEX
+        CFBundleVersion: "1.3.5"
+        CFBundleShortVersionString: "1.3.5"
+        # SYSX (not SYEX) — sysextd rejects any other value. The v1.3.3
+        # bug history is in CHANGELOG; don't regress.
+        CFBundlePackageType: SYSX
+        NSSystemExtensionPointIdentifier: com.apple.system_extension.endpoint_security
         LSMinimumSystemVersion: "13.0"
         NSSystemExtensionUsageDescription: "MacCrab's endpoint security extension watches kernel events (process, file, network) to detect threats. Approve once in System Settings > General > Login Items & Extensions."
     entitlements:

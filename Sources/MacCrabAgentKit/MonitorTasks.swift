@@ -4,11 +4,17 @@ import os.log
 
 /// Spawns all background monitor tasks (clipboard, browser extension, ultrasonic,
 /// USB, MCP, system policy, event tap, DNS, rootkit, FSEvents).
+///
+/// Each task is registered with `supervisor` under a stable name. On SIGTERM
+/// the daemon calls `supervisor.shutdown()` which cancels every supervised
+/// task and awaits its unwinding with a bounded deadline. The inner
+/// `for await` loops exit automatically when the enclosing Task is cancelled;
+/// no explicit `Task.checkCancellation()` is needed inside the bodies.
 enum MonitorTasks {
-    static func start(state: DaemonState) {
+    static func start(state: DaemonState, supervisor: MonitorSupervisor) async {
         // FSEvents file monitor task (non-root fallback)
         if !state.isRoot {
-            Task {
+            await supervisor.start("fsevents") {
                 for await event in state.fsEventsCollector.events {
                     // Route FSEvents through the enrichment + detection pipeline
                     let enriched = await state.enricher.enrich(event)
@@ -43,7 +49,7 @@ enum MonitorTasks {
         }
 
         // Event tap monitoring task (keylogger detection)
-        Task {
+        await supervisor.start("event-tap") {
             for await tapInfo in state.eventTapMonitor.events {
                 let alert = Alert(
                     ruleId: "maccrab.deep.event-tap-keylogger",
@@ -70,7 +76,7 @@ enum MonitorTasks {
         }
 
         // System policy monitoring task
-        Task {
+        await supervisor.start("system-policy") {
             for await policyEvent in state.systemPolicyMonitor.events {
                 let alert = Alert(
                     ruleId: "maccrab.deep.\(policyEvent.type.rawValue)",
@@ -114,7 +120,7 @@ enum MonitorTasks {
         }
 
         // MCP server monitoring task
-        Task {
+        await supervisor.start("mcp") {
             for await mcpEvent in state.mcpMonitor.events {
                 let severity: Severity = mcpEvent.eventType == .suspicious ? .critical : .high
                 let alert = Alert(
@@ -143,7 +149,7 @@ enum MonitorTasks {
         }
 
         // USB device monitoring task
-        Task {
+        await supervisor.start("usb") {
             for await usbEvent in state.usbMonitor.events {
                 let severity: Severity = usbEvent.isMassStorage ? .high : .medium
                 let alert = Alert(
@@ -168,7 +174,7 @@ enum MonitorTasks {
 
         // Clipboard monitoring task
         _ = state.clipboardInjectionDetector  // Available for dashboard/CLI on-demand scanning
-        Task {
+        await supervisor.start("clipboard") {
             for await clipEvent in state.clipboardMonitor.events {
                 if clipEvent.containsSensitiveData {
                     let alert = Alert(
@@ -188,7 +194,7 @@ enum MonitorTasks {
         }
 
         // Browser extension monitoring task
-        Task {
+        await supervisor.start("browser-extensions") {
             for await extEvent in state.browserExtMonitor.events {
                 // Browser extension monitor fires an initial inventory scan
                 // on startup — those aren't installs we just watched happen.
@@ -213,7 +219,7 @@ enum MonitorTasks {
         }
 
         // Ultrasonic attack monitoring task
-        Task {
+        await supervisor.start("ultrasonic") {
             for await usEvent in state.ultrasonicMonitor.events {
                 let alert = Alert(
                     ruleId: "maccrab.ultrasonic.\(usEvent.attackType.rawValue)",
@@ -232,7 +238,7 @@ enum MonitorTasks {
         }
 
         // Rootkit detection task
-        Task {
+        await supervisor.start("rootkit") {
             for await hidden in state.rootkitDetector.events {
                 let alert = Alert(
                     ruleId: "maccrab.forensic.hidden-process",
@@ -251,7 +257,7 @@ enum MonitorTasks {
         }
 
         // TEMPEST / Van Eck phreaking monitoring task
-        Task {
+        await supervisor.start("tempest") {
             for await tempestEvent in state.tempestMonitor.events {
                 let alert = Alert(
                     ruleId: "maccrab.tempest.\(tempestEvent.type.rawValue)",
@@ -306,7 +312,7 @@ enum MonitorTasks {
         }
 
         // EDR/RMM tool monitoring task
-        Task {
+        await supervisor.start("edr-rmm") {
             for await discovery in state.edrMonitor.events {
                 let capList = discovery.capabilities.prefix(4).joined(separator: ", ")
                 let processInfo = discovery.processName.map { " (process: \($0), PID: \(discovery.pid ?? 0))" } ?? ""
@@ -375,7 +381,7 @@ enum MonitorTasks {
         }
 
         // DNS event processing task
-        Task {
+        await supervisor.start("dns") {
             for await dnsQuery in state.dnsCollector.events {
                 // Record resolution for IP-to-domain correlation
                 if dnsQuery.isResponse && !dnsQuery.resolvedIPs.isEmpty {

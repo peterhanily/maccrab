@@ -36,5 +36,18 @@
 	<string>NSApplication</string>
 	<key>NSSystemExtensionUsageDescription</key>
 	<string>MacCrab uses an Endpoint Security system extension to detect threats in real time. The extension runs at the kernel event boundary and observes process, file, and network activity on your Mac.</string>
+	<!-- Sparkle auto-update keys. SUPublicEDKey is the EdDSA verification
+	     key for signed appcast entries; losing the matching private key
+	     bricks the update channel for every existing install. -->
+	<key>SUFeedURL</key>
+	<string>https://maccrab.com/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>de+dzPjBve7LP5qxoE7nR6shThsjubkVasi+i8ehT4E=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
 </dict>
 </plist>

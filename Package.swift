@@ -22,6 +22,12 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-testing.git", branch: "release/6.2"),
+        // Sparkle 2: auto-update framework for MacCrabApp only. Release
+        // builds poll https://maccrab.com/appcast.xml and install signed
+        // updates via SUPublicEDKey verification. Sysext updates cascade
+        // through OSSystemExtensionRequest(.replace) on host-app relaunch,
+        // so no Sparkle wiring is needed in the sysext target itself.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.4"),
     ],
     targets: [
         .target(
@@ -45,7 +51,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "MacCrabApp",
-            dependencies: ["MacCrabCore"],
+            dependencies: [
+                "MacCrabCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             resources: [
                 .process("Resources"),
             ]
@@ -75,6 +84,7 @@ let package = Package(
             name: "MacCrabCoreTests",
             dependencies: [
                 "MacCrabCore",
+                "MacCrabAgentKit",
                 .product(name: "Testing", package: "swift-testing"),
             ]
         ),
