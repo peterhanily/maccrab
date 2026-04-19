@@ -6,6 +6,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import MacCrabCore
 
 struct ThreatIntelView: View {
     @ObservedObject var appState: AppState
@@ -16,14 +17,19 @@ struct ThreatIntelView: View {
     @State private var showFileImporter = false
     @State private var importStatus: String?
 
-    // API key storage
-    @AppStorage("threatIntel.virusTotalKey") private var virusTotalKey = ""
-    @AppStorage("threatIntel.abuseIPDBKey") private var abuseIPDBKey = ""
-    @AppStorage("threatIntel.otxKey") private var otxKey = ""
-    @AppStorage("threatIntel.shodanKey") private var shodanKey = ""
-    @AppStorage("threatIntel.urlscanKey") private var urlscanKey = ""
-    @AppStorage("threatIntel.greynoiseKey") private var greynoiseKey = ""
-    @AppStorage("threatIntel.hibpKey") private var hibpKey = ""
+    // API key storage — @State backed by Keychain (SecretsStore). Previously
+    // these were @AppStorage, which wrote API keys to the world-readable
+    // `com.maccrab.app.plist`. Now the plist holds no secrets; the Keychain
+    // is authoritative. `loadAPIKeys()` populates on view appear;
+    // `keychainBinding(for:state:)` below persists every SecureField edit.
+    @State private var virusTotalKey = ""
+    @State private var abuseIPDBKey  = ""
+    @State private var otxKey        = ""
+    @State private var shodanKey     = ""
+    @State private var urlscanKey    = ""
+    @State private var greynoiseKey  = ""
+    @State private var hibpKey       = ""
+    private let secrets = SecretsStore()
 
     enum IntelSection: String, CaseIterable {
         case overview = "Overview"
@@ -77,6 +83,43 @@ struct ThreatIntelView: View {
                 .padding()
             }
         }
+        .onAppear { loadAPIKeys() }
+    }
+
+    // MARK: - Keychain plumbing
+
+    /// Populate every API-key @State field from the Keychain. Called once
+    /// on view appear — without this, the SecureFields render empty and
+    /// the user thinks no key is stored.
+    private func loadAPIKeys() {
+        virusTotalKey = keychainOrEmpty(.virusTotalKey)
+        abuseIPDBKey  = keychainOrEmpty(.abuseIPDBKey)
+        otxKey        = keychainOrEmpty(.alienVaultKey)
+        shodanKey     = keychainOrEmpty(.shodanKey)
+        urlscanKey    = keychainOrEmpty(.urlScanKey)
+        greynoiseKey  = keychainOrEmpty(.greyNoiseKey)
+        hibpKey       = keychainOrEmpty(.haveIBeenPwnedKey)
+    }
+
+    /// Read a secret from the Keychain, flattening `String??` (try?
+    /// wraps the already-optional return of `get`) down to the empty
+    /// string when either layer is nil.
+    private func keychainOrEmpty(_ key: SecretKey) -> String {
+        (try? secrets.get(key)).flatMap { $0 } ?? ""
+    }
+
+    /// A Binding<String> whose setter both updates the @State mirror and
+    /// writes to the Keychain. Every SecureField hooked through this
+    /// persists on every keystroke (which is what the user expects from
+    /// @AppStorage — same UX, different storage).
+    private func keychainBinding(for key: SecretKey, state: Binding<String>) -> Binding<String> {
+        Binding(
+            get: { state.wrappedValue },
+            set: { newValue in
+                state.wrappedValue = newValue
+                try? secrets.set(key, value: newValue)
+            }
+        )
     }
 
     // MARK: - Overview
@@ -294,14 +337,14 @@ struct ThreatIntelView: View {
             Text(String(localized: "threatIntel.apiKeys", defaultValue: "API Keys"))
                 .font(.headline)
 
-            Text(String(localized: "threatIntel.apiKeysDesc", defaultValue: "Configure API keys to enable additional threat intelligence feeds. Keys are stored securely in macOS preferences."))
+            Text(String(localized: "threatIntel.apiKeysDesc", defaultValue: "Configure API keys to enable additional threat intelligence feeds. Keys are stored in the macOS Keychain, encrypted at rest under your login password."))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             GroupBox("VirusTotal") {
                 apiKeyRow(
                     description: String(localized: "threatintel.vtDesc", defaultValue: "Multi-engine file, URL, and domain scanning"),
-                    binding: $virusTotalKey,
+                    binding: keychainBinding(for: .virusTotalKey, state: $virusTotalKey),
                     provider: "VirusTotal",
                     signupURL: "https://www.virustotal.com/gui/join-us",
                     linkKind: .free
@@ -311,7 +354,7 @@ struct ThreatIntelView: View {
             GroupBox("AbuseIPDB") {
                 apiKeyRow(
                     description: String(localized: "threatintel.abuseDesc", defaultValue: "IP address reputation and abuse reports"),
-                    binding: $abuseIPDBKey,
+                    binding: keychainBinding(for: .abuseIPDBKey, state: $abuseIPDBKey),
                     provider: "AbuseIPDB",
                     signupURL: "https://www.abuseipdb.com/register",
                     linkKind: .free
@@ -321,7 +364,7 @@ struct ThreatIntelView: View {
             GroupBox("AlienVault OTX") {
                 apiKeyRow(
                     description: String(localized: "threatintel.otxDesc", defaultValue: "Open Threat Exchange community intelligence"),
-                    binding: $otxKey,
+                    binding: keychainBinding(for: .alienVaultKey, state: $otxKey),
                     provider: "AlienVault OTX",
                     signupURL: "https://otx.alienvault.com/api",
                     linkKind: .free
@@ -331,7 +374,7 @@ struct ThreatIntelView: View {
             GroupBox("Shodan") {
                 apiKeyRow(
                     description: String(localized: "threatintel.shodanDesc", defaultValue: "Internet-wide host and service intelligence"),
-                    binding: $shodanKey,
+                    binding: keychainBinding(for: .shodanKey, state: $shodanKey),
                     provider: "Shodan",
                     signupURL: "https://account.shodan.io/register",
                     linkKind: .free
@@ -341,7 +384,7 @@ struct ThreatIntelView: View {
             GroupBox("URLScan.io") {
                 apiKeyRow(
                     description: String(localized: "threatintel.urlscanDesc", defaultValue: "URL scanning, screenshots, and threat verdicts"),
-                    binding: $urlscanKey,
+                    binding: keychainBinding(for: .urlScanKey, state: $urlscanKey),
                     provider: "URLScan.io",
                     signupURL: "https://urlscan.io/user/signup",
                     linkKind: .free
@@ -351,7 +394,7 @@ struct ThreatIntelView: View {
             GroupBox("GreyNoise") {
                 apiKeyRow(
                     description: String(localized: "threatintel.grenoiseDesc", defaultValue: "IP noise and threat classification \u{2014} identify scanners vs targeted attacks"),
-                    binding: $greynoiseKey,
+                    binding: keychainBinding(for: .greyNoiseKey, state: $greynoiseKey),
                     provider: "GreyNoise",
                     signupURL: "https://viz.greynoise.io/signup",
                     linkKind: .free
@@ -361,7 +404,7 @@ struct ThreatIntelView: View {
             GroupBox("Have I Been Pwned") {
                 apiKeyRow(
                     description: String(localized: "threatintel.hibpDesc", defaultValue: "Credential breach detection \u{2014} check if accounts appear in known breaches"),
-                    binding: $hibpKey,
+                    binding: keychainBinding(for: .haveIBeenPwnedKey, state: $hibpKey),
                     provider: "Have I Been Pwned",
                     signupURL: "https://haveibeenpwned.com/API/Key",
                     linkKind: .paid

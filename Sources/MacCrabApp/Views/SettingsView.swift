@@ -4,6 +4,7 @@
 // Application settings view accessible via Cmd+, or the status bar menu.
 
 import SwiftUI
+import MacCrabCore
 
 // MARK: - SettingsView
 
@@ -19,14 +20,23 @@ struct SettingsView: View {
     @AppStorage("autoBlock") private var autoBlock = false
     @AppStorage("maxDatabaseSizeMB") private var maxDatabaseSizeMB: Int = 500
 
-    // LLM settings (persisted to llm_config.json for daemon access)
+    // LLM settings (provider selection + URLs persist to UserDefaults; API
+    // keys live in the Keychain via SecretsStore — see `llmAPIKey` below).
     @AppStorage("llm.provider") private var llmProvider: String = "ollama"
     @AppStorage("llm.ollamaURL") private var llmOllamaURL: String = "http://localhost:11434"
     @AppStorage("llm.ollamaModel") private var llmOllamaModel: String = "llama3.1:8b"
-    @AppStorage("llm.apiKey") private var llmAPIKey: String = ""
     @AppStorage("llm.openaiURL") private var llmOpenAIURL: String = "https://api.openai.com/v1"
     @AppStorage("llm.model") private var llmModel: String = ""
     @AppStorage("llm.enabled") private var llmEnabled: Bool = false
+
+    // API key is @State, not @AppStorage — the previous @AppStorage backing
+    // wrote secrets to `~/Library/Preferences/com.maccrab.app.plist` (default
+    // 0644, world-readable). Now the authoritative store is the Keychain
+    // (SecretsStore), keyed per-provider. The SecureField binds to this
+    // transient state; `syncLLMConfig()` persists it, `loadAPIKeyForProvider()`
+    // populates it on appear / provider change.
+    @State private var llmAPIKey: String = ""
+    private let secrets = SecretsStore()
 
     @State private var selectedLanguage: String = {
         let current = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "en"
@@ -498,7 +508,14 @@ struct SettingsView: View {
                                 Text(String(localized: "settings.llm.providerMistral", defaultValue: "Mistral AI")).tag("mistral")
                                 Text(String(localized: "settings.llm.providerGemini", defaultValue: "Google Gemini")).tag("gemini")
                             }
-                            .onChange(of: llmProvider) { _ in syncLLMConfig() }
+                            // Order matters: load the new provider's key into
+                            // llmAPIKey FIRST, otherwise syncLLMConfig below
+                            // would stamp the previous provider's key into
+                            // the newly-selected provider's Keychain slot.
+                            .onChange(of: llmProvider) { _ in
+                                loadAPIKeyForProvider()
+                                syncLLMConfig()
+                            }
 
                             Divider()
 
@@ -543,6 +560,13 @@ struct SettingsView: View {
                 Spacer()
             }
             .padding(4)
+        }
+        .onAppear {
+            // Populate the SecureField from the Keychain on first render.
+            // Without this, the field always starts blank even when the
+            // user has already configured a key — they'd be tricked into
+            // thinking nothing is stored and re-type.
+            loadAPIKeyForProvider()
         }
     }
 
@@ -694,8 +718,52 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Keychain ↔ UI plumbing
+
+    /// Map the current provider string to its SecretsStore key.
+    private func secretKeyForCurrentProvider() -> SecretKey? {
+        switch llmProvider {
+        case "ollama":  return .ollamaAPIKey
+        case "openai":  return .openaiAPIKey
+        case "claude":  return .claudeAPIKey
+        case "mistral": return .mistralAPIKey
+        case "gemini":  return .geminiAPIKey
+        default:        return nil
+        }
+    }
+
+    /// Pull the API key for the currently-selected provider out of the
+    /// Keychain into the bound @State field. Called on view appear and
+    /// whenever the provider changes. Silent on failure — UI shows
+    /// "empty" which is indistinguishable from "not set", which matches
+    /// user expectation.
+    private func loadAPIKeyForProvider() {
+        guard let key = secretKeyForCurrentProvider() else {
+            llmAPIKey = ""
+            return
+        }
+        let loaded = (try? secrets.get(key)) ?? nil
+        llmAPIKey = loaded ?? ""
+    }
+
+    /// Persist the current llmAPIKey into the Keychain for the selected
+    /// provider. Called from `syncLLMConfig()` on every config edit.
+    /// An empty value deletes the slot (matches SecretsStore.set semantics).
+    private func saveAPIKeyToKeychain() {
+        guard let key = secretKeyForCurrentProvider() else { return }
+        try? secrets.set(key, value: llmAPIKey)
+    }
+
     /// Write LLM config to a JSON file the daemon can read.
+    ///
+    /// The Keychain is the authoritative store for API keys in v1.3.5+ —
+    /// but until the sysext ships with a shared `keychain-access-groups`
+    /// entitlement, it still reads the key from this JSON file. Writing
+    /// both keeps the sysext working today and sets us up to drop the
+    /// JSON-side secret once the entitlement lands.
     private func syncLLMConfig() {
+        saveAPIKeyToKeychain()
+
         let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
         try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
         let configPath = configDir + "/llm_config.json"

@@ -174,12 +174,21 @@ extension MacCrabCtl {
     }()
 
     /// Create a transient LLM service for CLI use.
-    /// Reads from llm_config.json (dashboard settings), then env var overrides.
+    ///
+    /// Resolution order (highest priority first):
+    ///   1. Env vars — legacy / CI path, kept for backward compat
+    ///   2. Keychain (SecretsStore) — authoritative in v1.3.5+, written
+    ///      by the dashboard's Settings > AI Backend tab
+    ///   3. llm_config.json — dashboard also writes here so the sysext can
+    ///      read without the shared-keychain-access-group entitlement
+    ///
+    /// Env vars intentionally win over Keychain so CI / one-off invocations
+    /// can override without disturbing the user's stored credentials.
     static func createCLILLMService() -> LLMService? {
         var config = LLMConfig()
         var hasConfig = false
 
-        // Read dashboard-written llm_config.json
+        // Read dashboard-written llm_config.json (non-secret config + legacy key copy)
         let supportDir = maccrabDataDir()
         let configPath = supportDir + "/llm_config.json"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
@@ -203,7 +212,20 @@ extension MacCrabCtl {
             hasConfig = config.enabled
         }
 
-        // Env vars override (backward compat)
+        // Keychain overrides JSON. CLI runs as user, so the dashboard's
+        // login-keychain items are directly accessible. This is the secure
+        // path when llm_config.json might have stale / missing keys.
+        let secrets = SecretsStore()
+        func keychainValue(_ key: SecretKey) -> String? {
+            (try? secrets.get(key)).flatMap { $0 }
+        }
+        if let v = keychainValue(.ollamaAPIKey)  { config.ollamaAPIKey  = v }
+        if let v = keychainValue(.claudeAPIKey)  { config.claudeAPIKey  = v }
+        if let v = keychainValue(.openaiAPIKey)  { config.openaiAPIKey  = v }
+        if let v = keychainValue(.mistralAPIKey) { config.mistralAPIKey = v }
+        if let v = keychainValue(.geminiAPIKey)  { config.geminiAPIKey  = v }
+
+        // Env vars override everything (backward compat + CI ergonomics)
         let env = ProcessInfo.processInfo.environment
         if let p = env["MACCRAB_LLM_PROVIDER"] {
             config.provider = LLMProvider(rawValue: p) ?? config.provider
