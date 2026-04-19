@@ -75,8 +75,13 @@ if [[ -z "$RELEASE_NOTES_MD" ]]; then
             found && /^## \[/ { exit }
             found { print }
         ' CHANGELOG.md)
-    else
-        NOTES="No release notes available."
+    fi
+    # Strip leading/trailing whitespace. If still empty (no CHANGELOG,
+    # or no matching section), fall back to a placeholder so the Sparkle
+    # UI doesn't render an empty update sheet.
+    NOTES="$(echo "$NOTES" | sed -e '/./,$!d' -e ':a' -e '/^\s*$/{$d;N;ba' -e '}')"
+    if [[ -z "$NOTES" ]]; then
+        NOTES="No release notes provided for this version. See https://github.com/peterhanily/maccrab/releases/tag/v${VERSION} for details."
     fi
 else
     NOTES=$(cat "$RELEASE_NOTES_MD")
