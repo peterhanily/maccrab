@@ -3,6 +3,43 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.6] — 2026-04-20
+
+Critical hotfix: v1.3.5 shipped with a broken binary that aborted on
+launch with `dyld: Library not loaded: @rpath/Sparkle.framework`.
+Anyone who installed v1.3.5 has an app that won't open — reinstall
+v1.3.6 to recover.
+
+### Fixed
+
+- **`Sparkle.framework` now embedded in `MacCrab.app/Contents/Frameworks/`.**
+  The Wave 1 Sparkle integration (v1.3.5) added the SPM dependency + the
+  link-time requirement but the private release script never copied the
+  framework into the output bundle. SPM lacks Xcode's automatic
+  Copy-Files build phase; the framework must be manually staged. The
+  release pipeline now detects the xcframework at
+  `.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework`,
+  copies it with symlink-preserving `-R`, re-signs Sparkle's XPC
+  services + Autoupdate + the framework itself with the Developer ID,
+  then signs the outer app bundle last as before.
+- **Sparkle keys added to the release-path `Info.plist`.** `SUFeedURL`,
+  `SUPublicEDKey`, `SUEnableAutomaticChecks`, `SUScheduledCheckInterval`,
+  `SUAutomaticallyUpdate` had been added to the checked-in
+  `Xcode/Resources/MacCrabApp-Info.plist` in v1.3.5 but the release
+  script writes its own `Info.plist` via heredoc — it didn't pick up
+  the new keys. Now both paths carry the same Sparkle config.
+
+Both issues are in the private build pipeline, not in source code.
+Users with v1.3.5 should `brew uninstall --cask maccrab && brew install
+--cask maccrab` to land on v1.3.6, or download the v1.3.6 DMG directly
+from the GitHub Release.
+
+### Infrastructure
+
+- v1.3.5 appcast entry has been pulled so new installs don't pick up
+  the broken build. v1.3.6 is the first working Sparkle-enabled
+  release.
+
 ## [1.3.5] — 2026-04-19
 
 First release after the v1.3 SystemExtension migration settled. Lands
