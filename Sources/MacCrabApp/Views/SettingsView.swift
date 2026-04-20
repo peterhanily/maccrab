@@ -5,6 +5,9 @@
 
 import SwiftUI
 import MacCrabCore
+import ServiceManagement
+import Sparkle
+import os.log
 
 // MARK: - SettingsView
 
@@ -14,7 +17,13 @@ struct SettingsView: View {
     @AppStorage("alertNotifications") var alertNotifications: Bool = true
     @AppStorage("minAlertSeverity") var minAlertSeverity: String = "medium"
     @AppStorage("pollIntervalSeconds") var pollIntervalSeconds: Int = 5
-    @AppStorage("launchAtLogin") var launchAtLogin: Bool = false
+    // Launch at login is backed by macOS's ServiceManagement framework —
+    // the @AppStorage value mirrors the registration state, so we can
+    // present a SwiftUI-native Toggle while the actual login-item
+    // registration is done via SMAppService. Default `true` — new and
+    // upgrading installs get auto-start. Users who don't want it can
+    // untoggle; that removes the login item and we keep the preference.
+    @AppStorage("launchAtLogin") var launchAtLogin: Bool = true
     @AppStorage("autoQuarantine") private var autoQuarantine = false
     @AppStorage("autoKill") private var autoKill = false
     @AppStorage("autoBlock") private var autoBlock = false
@@ -260,8 +269,19 @@ struct SettingsView: View {
                 }
 
                 GroupBox(String(localized: "settings.startup", defaultValue: "Startup")) {
-                    Toggle(String(localized: "settings.launchAtLogin", defaultValue: "Launch MacCrab at login"), isOn: $launchAtLogin)
-                        .padding(8)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle(String(localized: "settings.launchAtLogin", defaultValue: "Launch MacCrab at login"), isOn: $launchAtLogin)
+                            .onChange(of: launchAtLogin) { newValue in
+                                LaunchAtLogin.setEnabled(newValue)
+                            }
+                        Text(String(
+                            localized: "settings.launchAtLoginHint",
+                            defaultValue: "On by default so your detection engine reactivates after every reboot. Turn off if you'd rather start MacCrab manually."
+                        ))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+                    .padding(8)
                 }
 
                 // Auto-Response Configuration
@@ -479,6 +499,18 @@ struct SettingsView: View {
                             Task { await appState.refresh() }
                         } label: {
                             Label(String(localized: "settings.refreshConnection", defaultValue: "Refresh Connection"), systemImage: "arrow.triangle.2.circlepath")
+                        }
+
+                        // In-UI path to trigger a Sparkle update check.
+                        // Menubar-only apps (LSUIElement=true) can't use
+                        // SwiftUI CommandGroup, so this + the statusbar
+                        // menu item are the only accessible entry points.
+                        Button {
+                            if let delegate = NSApp.delegate as? AppDelegate {
+                                delegate.triggerUpdateCheck()
+                            }
+                        } label: {
+                            Label(String(localized: "settings.checkForUpdates", defaultValue: "Check for Updates"), systemImage: "arrow.down.circle")
                         }
                     }
                     .padding(8)

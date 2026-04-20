@@ -11,6 +11,7 @@ struct MacCrabApp: App {
     @StateObject private var sysextManager = SystemExtensionManager()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage("hasCompletedSetup") private var hasCompletedSetup = false
+    @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @State private var showWelcome = false
 
     // Sparkle auto-updater. `startingUpdater: true` kicks off the first
@@ -29,13 +30,19 @@ struct MacCrabApp: App {
             MainView(appState: appState, sysextManager: sysextManager)
                 .frame(minWidth: 950, minHeight: 600)
                 .onAppear {
-                    appDelegate.setupStatusBar(appState: appState)
+                    appDelegate.setupStatusBar(appState: appState, updater: updaterController.updater)
                     // Kick off system-extension activation on first
                     // launch. The manager dedups against an already-
                     // activated extension, so this is also safe on
                     // repeated launches — the request returns
                     // immediately with .completed.
                     sysextManager.activate()
+                    // Reconcile the launch-at-login preference with the
+                    // actual SMAppService state. First run registers;
+                    // subsequent runs are no-ops unless the user changed
+                    // the preference externally (e.g., via System
+                    // Settings → Login Items directly).
+                    LaunchAtLogin.reconcile(preferenceEnabled: launchAtLogin)
                     if !hasCompletedSetup {
                         showWelcome = true
                     }
@@ -100,6 +107,11 @@ private final class CheckForUpdatesViewModel: ObservableObject {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var appState: AppState?
+    /// Sparkle updater injected from MacCrabApp so the statusbar menu's
+    /// "Check for Updates…" item can trigger a check. Menubar-only apps
+    /// (LSUIElement=true) can't receive menu commands via SwiftUI's
+    /// `CommandGroup`, so this is the only accessible path.
+    private var updater: SPUUpdater?
     private var popover: NSPopover?
     private var dismissTimer: Timer?
     private var lastPopoverAlertId: String?
@@ -110,8 +122,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         createStatusBarItem()
     }
 
-    @MainActor func setupStatusBar(appState: AppState) {
+    @MainActor func setupStatusBar(appState: AppState, updater: SPUUpdater? = nil) {
         self.appState = appState
+        if let updater { self.updater = updater }
         // Register callback for critical alert popups
         appState.onCriticalAlert = { [weak self] alert in
             self?.showAlertPopover(alert: alert)
@@ -141,11 +154,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Check for Updates… — the only in-UI path to trigger a Sparkle
+        // check on a menubar-only app. v1.3.7 shipped with this wired to
+        // SwiftUI's CommandGroup(after: .appInfo), which doesn't render
+        // in LSUIElement=true apps; v1.3.8 moves it here where users
+        // can actually reach it.
+        let updateItem = NSMenuItem(title: "Check for Updates…",
+                                    action: #selector(checkForUpdates),
+                                    keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let quitItem = NSMenuItem(title: "Quit MacCrab", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
         statusItem?.menu = menu
+    }
+
+    @objc private func checkForUpdates() {
+        updater?.checkForUpdates()
+    }
+
+    /// Callable from anywhere with an NSApp.delegate reference — used by
+    /// the Settings "Check for Updates…" button so Sparkle can be triggered
+    /// without menu-bar access on a menubar-only app.
+    @MainActor func triggerUpdateCheck() {
+        updater?.checkForUpdates()
+    }
+
+    /// Whether Sparkle is currently capable of checking — mirrors
+    /// SPUUpdater.canCheckForUpdates so a UI button can grey itself
+    /// when a check is already in flight.
+    var canCheckForUpdates: Bool {
+        updater?.canCheckForUpdates ?? false
     }
 
     // MARK: - Critical Alert Popover (Crab Speech Bubble)

@@ -60,6 +60,54 @@ public enum NoiseFilter {
         if isTrustedBrowserHelper(path: event.process.executable) {
             matches.removeAll { $0.severity != .critical }
         }
+
+        // Gate 4: MacCrab self-activity. Our install pipeline modifies its
+        // own compiled_rules/ directory, its own bundles get signed by its
+        // own Developer ID, and the sysext fires TCC + XPC events at
+        // sysextd during normal operation. Without this gate, every
+        // upgrade fires our own tamper-detection rules against ourselves,
+        // every sysext XPC interaction looks like an EDR remote-session
+        // start, and user-initiated FDA grants look like "automated TCC
+        // manipulation". Drop non-critical matches whose subject is
+        // MacCrab itself — critical still fires so a real integrity
+        // compromise against our binaries isn't hidden.
+        if isMacCrabSelf(event: event) {
+            matches.removeAll { $0.severity != .critical }
+        }
+    }
+
+    /// True when an event's subject is a MacCrab process, a MacCrab file,
+    /// or a file inside a MacCrab managed directory. Matches the three
+    /// known bundle IDs (app + sysext + legacy daemon) and the two data
+    /// dirs (system and user). Public so rule-level allowlists can reuse
+    /// the same definition.
+    public static func isMacCrabSelf(event: Event) -> Bool {
+        let name = event.process.name.lowercased()
+        if name == "maccrab" ||
+           name == "com.maccrab.agent" ||
+           name == "maccrabd" ||
+           name == "maccrabctl" ||
+           name == "maccrab-mcp" {
+            return true
+        }
+        let path = event.process.executable
+        if path.hasPrefix("/Applications/MacCrab.app/") ||
+           path.hasPrefix("/Library/SystemExtensions/") && path.contains("com.maccrab.agent") ||
+           path.contains("/maccrab.app/") ||  // ad-hoc-signed dev builds
+           path.hasSuffix("/maccrabd") ||
+           path.hasSuffix("/maccrabctl") ||
+           path.hasSuffix("/maccrab-mcp") {
+            return true
+        }
+        // File-event subjects: filesystem paths under MacCrab's managed
+        // directories. Tamper-detection rules on compiled_rules/ fire on
+        // legitimate cask postflight updates; suppress unless critical.
+        if let filePath = event.file?.path,
+           filePath.hasPrefix("/Library/Application Support/MacCrab/") ||
+           filePath.hasPrefix("\(NSHomeDirectory())/Library/Application Support/MacCrab/") {
+            return true
+        }
+        return false
     }
 
     /// True when the given executable path is inside a trusted browser or

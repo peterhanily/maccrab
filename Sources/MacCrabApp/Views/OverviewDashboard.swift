@@ -72,9 +72,14 @@ struct OverviewDashboard: View {
                     // Surfaced prominently because the silent failure mode
                     // ("protection enabled but half the events are dropped")
                     // is the single biggest ease-of-use risk in the product.
+                    // Tells the user WHICH principal is missing FDA — app,
+                    // sysext, or both — so they don't go hunting.
                     if !appState.fullDiskAccessGranted {
-                        FullDiskAccessWarningBanner()
-                            .padding(.horizontal)
+                        FullDiskAccessWarningBanner(
+                            appNeedsFDA: !appState.appHasFDA,
+                            sysextNeedsFDA: !appState.sysextHasFDA
+                        )
+                        .padding(.horizontal)
                     }
 
                     // === Call to Action Banner (clickable → navigates to Alerts) ===
@@ -326,11 +331,19 @@ struct SeverityCount: View {
 
 // MARK: - Full Disk Access Warning Banner
 
-/// Prominent banner shown on the Overview when MacCrab.app lacks Full Disk
-/// Access. Without FDA, TCC monitoring is blind and ES file events for
-/// protected paths silently drop. This is the product's worst silent-failure
-/// mode ("enabled but half-dark") — surfacing it loudly is intentional.
+/// Prominent banner shown on the Overview when FDA is missing from either
+/// MacCrab principal (the app itself, or the sysext, or both). Without FDA,
+/// TCC monitoring is blind and ES file events for protected paths silently
+/// drop. This is the product's worst silent-failure mode ("enabled but
+/// half-dark") — surfacing it loudly is intentional.
+///
+/// macOS treats `com.maccrab.app` and `com.maccrab.agent` as separate TCC
+/// principals. Each must be granted FDA independently. The banner tells the
+/// user which one is missing so they don't dig through System Settings.
 struct FullDiskAccessWarningBanner: View {
+    let appNeedsFDA: Bool
+    let sysextNeedsFDA: Bool
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "lock.slash.fill")
@@ -346,38 +359,86 @@ struct FullDiskAccessWarningBanner: View {
                 .font(.system(.body, weight: .semibold))
                 .foregroundColor(.white)
 
-                Text(String(
-                    localized: "overview.fda.body",
-                    defaultValue: "MacCrab needs Full Disk Access to monitor TCC permissions and protected file paths. Detection coverage is currently incomplete."
-                ))
-                .font(.subheadline)
-                .foregroundColor(.white.opacity(0.9))
-                .fixedSize(horizontal: false, vertical: true)
+                Text(bodyText)
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()
 
-            Button {
-                openFullDiskAccessPane()
-            } label: {
-                Text(String(
-                    localized: "overview.fda.openSettings",
-                    defaultValue: "Open Settings"
-                ))
-                .fontWeight(.semibold)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.white)
-                .foregroundColor(Color(red: 0.75, green: 0.22, blue: 0.22))
-                .clipShape(Capsule())
+            VStack(alignment: .trailing, spacing: 6) {
+                Button {
+                    openFullDiskAccessPane()
+                } label: {
+                    Text(String(
+                        localized: "overview.fda.openSettings",
+                        defaultValue: "Open Settings"
+                    ))
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.white)
+                    .foregroundColor(Color(red: 0.75, green: 0.22, blue: 0.22))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text("Opens System Settings → Privacy & Security → Full Disk Access"))
+
+                Button {
+                    // Reveal MacCrab.app in Finder so users can drag
+                    // directly into the FDA settings pane. Less ceremony
+                    // than clicking + and navigating to /Applications/.
+                    NSWorkspace.shared.selectFile(
+                        "/Applications/MacCrab.app",
+                        inFileViewerRootedAtPath: "/Applications"
+                    )
+                } label: {
+                    Text(String(
+                        localized: "overview.fda.revealInFinder",
+                        defaultValue: "Reveal MacCrab in Finder"
+                    ))
+                    .font(.caption)
+                    .foregroundColor(.white)
+                    .underline()
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text("Opens Finder with MacCrab.app selected so you can drag it into the FDA settings pane"))
             }
-            .buttonStyle(.plain)
-            .accessibilityHint(Text("Opens System Settings → Privacy & Security → Full Disk Access"))
         }
         .padding()
         .background(Color(red: 0.75, green: 0.22, blue: 0.22))
         .cornerRadius(12)
         .accessibilityElement(children: .combine)
+    }
+
+    /// Per-scenario copy. macOS treats the two principals separately — name
+    /// both when both are missing so the user knows they need two toggles.
+    private var bodyText: String {
+        switch (appNeedsFDA, sysextNeedsFDA) {
+        case (true, true):
+            return String(
+                localized: "overview.fda.body.both",
+                defaultValue: "Grant Full Disk Access to BOTH \u{201C}MacCrab\u{201D} and \u{201C}MacCrab Endpoint Security Extension\u{201D} in System Settings. Detection coverage is incomplete until both principals have access."
+            )
+        case (true, false):
+            return String(
+                localized: "overview.fda.body.appOnly",
+                defaultValue: "Grant Full Disk Access to \u{201C}MacCrab\u{201D} in System Settings. The dashboard can\u{2019}t read TCC state until this is approved."
+            )
+        case (false, true):
+            return String(
+                localized: "overview.fda.body.sysextOnly",
+                defaultValue: "Grant Full Disk Access to \u{201C}MacCrab Endpoint Security Extension\u{201D} in System Settings. The detection engine is blind to protected paths until this is approved."
+            )
+        case (false, false):
+            // Shouldn't reach here — the banner is only rendered when at least
+            // one is missing — but keep a sensible default.
+            return String(
+                localized: "overview.fda.body",
+                defaultValue: "MacCrab needs Full Disk Access to monitor TCC permissions and protected file paths."
+            )
+        }
     }
 
     private func openFullDiskAccessPane() {

@@ -42,6 +42,19 @@ public actor PowerAnomalyDetector {
         "runningboardd", "assertiond", "ContextStoreAgent",
         "soagent", "locationd", "cloudd", "bird",
         "caffeinate", "dtrace",
+        // iCloud + Contacts sync — AddressBookSourceSync holds a sleep
+        // assertion whenever it's syncing your address book with iCloud.
+        // Completely normal, fires several times a day per account.
+        "AddressBookSourceSync", "AddressBookManager",
+        "CalendarAgent", "ContactsAgent", "AccountSync",
+        "RemindersSync", "NotesMigratorService",
+        // Apple diagnostics / health telemetry — holds assertions during
+        // log collection runs.
+        "ReportCrash", "Crash Reporter", "diagnosticd",
+        "com.apple.PerformanceAnalysisCoreSkylight",
+        // Safari / WebKit extension tasks that routinely hold power
+        // assertions during background fetches.
+        "com.apple.WebKit.WebContent", "com.apple.WebKit.Networking",
         // User-facing media / meeting / chat (media-playback assertions)
         "Music", "TV", "Podcasts", "Spotify",
         "QuickTime Player", "IINA", "VLC",

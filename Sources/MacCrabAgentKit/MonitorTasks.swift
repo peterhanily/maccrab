@@ -151,7 +151,16 @@ enum MonitorTasks {
         // USB device monitoring task
         await supervisor.start("usb") {
             for await usbEvent in state.usbMonitor.events {
-                let severity: Severity = usbEvent.isMassStorage ? .high : .medium
+                // Hubs and non-storage HID are benign — the vast majority
+                // of a user's USB chatter is keyboards, mice, hubs, audio
+                // devices. Only mass-storage events are worth drawing
+                // attention to; everything else is Informational.
+                let severity: Severity
+                if usbEvent.isMassStorage {
+                    severity = .high
+                } else {
+                    severity = .informational
+                }
                 let alert = Alert(
                     ruleId: "maccrab.usb.\(usbEvent.isConnected ? "connected" : "disconnected")",
                     ruleTitle: "USB Device \(usbEvent.isConnected ? "Connected" : "Disconnected"): \(usbEvent.productName)",

@@ -72,12 +72,16 @@ cask "maccrab" do
 
   uninstall launchctl: ["com.maccrab.agent", "com.maccrab.daemon"],
             delete:    [
-              "/Library/Application Support/MacCrab",
               "/Library/LaunchDaemons/com.maccrab.agent.plist",
               "/Library/LaunchDaemons/com.maccrab.daemon.plist",
             ]
 
+  # /Library/Application Support/MacCrab is *deliberately* NOT in the
+  # uninstall delete: list. `brew upgrade` calls the uninstall stanza
+  # between versions; listing it there wiped user state on every upgrade
+  # through v1.3.7. `brew uninstall --zap maccrab` still removes it.
   zap trash: [
+    "/Library/Application Support/MacCrab",
     "~/Library/Application Support/MacCrab",
     "~/Library/Preferences/com.maccrab.app.plist",
     "~/Library/Preferences/com.maccrab.agent.plist",

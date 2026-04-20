@@ -379,3 +379,125 @@ struct SanityPositiveTests {
                 "High match on attributed non-trusted process must survive all three gates")
     }
 }
+
+// MARK: - MacCrab self-allowlist (v1.3.8)
+
+/// v1.3.7 users saw their own install fire tamper-detection, EDR-remote-
+/// session, and TCC-rate-manipulation alerts against MacCrab itself.
+/// These tests encode every known self-triggering path so future rule
+/// changes can't regress the self-allowlist.
+@Suite("FP regression: MacCrab self-allowlist")
+struct MacCrabSelfTests {
+
+    @Test("Tamper detection on /Library/Application Support/MacCrab/ is suppressed")
+    func tamperOnOwnRulesDir() async throws {
+        var matches = [
+            RuleMatch(
+                ruleId: "maccrab.self-defense.rules-dir-modified",
+                ruleName: "MacCrab Tamper Detection: Rules Modified",
+                severity: .high,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            )
+        ]
+        let event = attributedFileWrite(
+            path: "/Library/Application Support/MacCrab/compiled_rules/execution/shell_spawned_by_browser.json",
+            processPath: "/opt/homebrew/bin/brew",
+            processName: "brew"
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "Homebrew cask postflight updating our own rules must not fire tamper detection")
+    }
+
+    @Test("Process-based rule on com.maccrab.agent is suppressed")
+    func alertOnOwnSysext() async throws {
+        var matches = [
+            RuleMatch(
+                ruleId: "test.some-rule",
+                ruleName: "Some Rule",
+                severity: .medium,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            )
+        ]
+        let event = attributedFileWrite(
+            path: "/tmp/out.log",
+            processPath: "/Library/SystemExtensions/ABCD/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent",
+            processName: "com.maccrab.agent"
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "Events from our own sysext process must not fire rules on themselves")
+    }
+
+    @Test("Process-based rule on MacCrab.app is suppressed")
+    func alertOnOwnApp() async throws {
+        var matches = [
+            RuleMatch(
+                ruleId: "test.tcc-rate",
+                ruleName: "Multiple TCC Permissions Granted Rapidly",
+                severity: .medium,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            )
+        ]
+        let event = attributedFileWrite(
+            path: "/Library/Application Support/com.apple.TCC/TCC.db",
+            processPath: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
+            processName: "MacCrab"
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "User granting FDA to MacCrab must not fire TCC-manipulation rules")
+    }
+
+    @Test("CRITICAL match on MacCrab self still survives")
+    func criticalOnSelfStillFires() async throws {
+        // If a real integrity compromise hits our own binaries, we MUST
+        // still alert. The self-allowlist is scoped to non-critical only.
+        var matches = [
+            RuleMatch(
+                ruleId: "test.hash-mismatch",
+                ruleName: "MacCrab Binary Integrity Mismatch",
+                severity: .critical,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            )
+        ]
+        let event = attributedFileWrite(
+            path: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
+            processPath: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
+            processName: "MacCrab"
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "Critical self-integrity alerts must survive the self-allowlist")
+    }
+
+    @Test("Events on non-MacCrab paths still fire normally")
+    func unrelatedPathStillFires() async throws {
+        var matches = [
+            RuleMatch(
+                ruleId: "test.some-rule",
+                ruleName: "Some Rule",
+                severity: .high,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            )
+        ]
+        let event = attributedFileWrite(
+            path: "/tmp/something",
+            processPath: "/usr/local/bin/curl",
+            processName: "curl"
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "Events on non-MacCrab paths/processes must be unaffected by the self-allowlist")
+    }
+}

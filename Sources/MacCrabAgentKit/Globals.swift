@@ -15,9 +15,16 @@ actor StorageErrorTracker {
 
     func recordAlertError(_ error: Error) {
         alertInsertErrors += 1
-        // Log at most once per 60 seconds to avoid spam on disk-full scenarios
+        // Log at most once per 60 seconds to avoid spam on disk-full scenarios.
+        // Error description is marked .public so `sudo log show` on a user
+        // machine can reveal the real SQLite error — otherwise Foundation
+        // redacts the interpolation as "<private>" and operators diagnosing
+        // a broken install can't see what's actually wrong. The error text
+        // never contains user secrets (it's SQLite return codes, paths, and
+        // filesystem error strings), so .public is safe here.
         if Date().timeIntervalSince(lastAlertErrorLog) > 60 {
-            logger.error("Alert insert failed (\(self.alertInsertErrors) total): \(error.localizedDescription)")
+            let count = self.alertInsertErrors
+            logger.error("Alert insert failed (\(count, privacy: .public) total): \(error.localizedDescription, privacy: .public)")
             lastAlertErrorLog = Date()
         }
     }
@@ -25,7 +32,8 @@ actor StorageErrorTracker {
     func recordEventError(_ error: Error) {
         eventInsertErrors += 1
         if Date().timeIntervalSince(lastEventErrorLog) > 60 {
-            logger.error("Event insert failed (\(self.eventInsertErrors) total): \(error.localizedDescription)")
+            let count = self.eventInsertErrors
+            logger.error("Event insert failed (\(count, privacy: .public) total): \(error.localizedDescription, privacy: .public)")
             lastEventErrorLog = Date()
         }
     }

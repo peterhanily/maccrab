@@ -72,12 +72,19 @@ cask "maccrab" do
 
   uninstall launchctl: ["com.maccrab.agent", "com.maccrab.daemon"],
             delete:    [
-              "/Library/Application Support/MacCrab",
               "/Library/LaunchDaemons/com.maccrab.agent.plist",
               "/Library/LaunchDaemons/com.maccrab.daemon.plist",
             ]
 
+  # /Library/Application Support/MacCrab is *deliberately* NOT in the
+  # uninstall delete: list above. `brew upgrade` calls the uninstall
+  # stanza between versions, so listing it there would wipe alerts,
+  # baselines, suppressions, and LLM keys on every upgrade — which is
+  # what bit v1.3.5 → v1.3.6 testers. The `zap` stanza below removes
+  # it only on `brew uninstall --zap maccrab` for users who really
+  # want a clean slate.
   zap trash: [
+    "/Library/Application Support/MacCrab",
     "~/Library/Application Support/MacCrab",
     "~/Library/Preferences/com.maccrab.app.plist",
     "~/Library/Preferences/com.maccrab.agent.plist",

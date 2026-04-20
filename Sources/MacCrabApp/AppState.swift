@@ -20,12 +20,26 @@ final class AppState: ObservableObject {
     @Published var rulesLoaded: Int = 0
     @Published var totalAlerts: Int = 0
 
-    /// Full Disk Access state. When false, TCC monitoring is blind and ES
-    /// file events for protected paths are silently dropped (~30% of coverage).
-    /// Probed at refresh() via readability of the user's TCC.db.
+    /// Full Disk Access state.
+    ///
+    /// macOS treats `com.maccrab.app` (this process) and `com.maccrab.agent`
+    /// (the sysext) as SEPARATE TCC principals — each needs its own FDA
+    /// grant. `fullDiskAccessGranted` is the conjunction: both must be
+    /// allowed for the banner to clear. The separate booleans let the
+    /// banner say which one is missing so the user doesn't go hunting.
+    ///
     /// Defaults to true so the dashboard doesn't flash a warning on launch
     /// before the first probe runs.
     @Published var fullDiskAccessGranted: Bool = true
+    /// The app itself can read TCC.db — means Settings → Privacy & Security
+    /// → Full Disk Access has MacCrab.app allowed.
+    @Published var appHasFDA: Bool = true
+    /// The sysext can read TCC-protected paths — means FDA is granted to
+    /// "MacCrab Endpoint Security Extension". We can't probe this directly
+    /// from the app (separate process), so we infer from the presence of a
+    /// healthy events.db with recent writes: if the sysext is writing TCC
+    /// events to disk, it has FDA. Otherwise we assume it doesn't.
+    @Published var sysextHasFDA: Bool = true
     @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
     @Published var events: [EventViewModel] = []
@@ -171,11 +185,27 @@ final class AppState: ObservableObject {
         let walExists = fm.fileExists(atPath: dbPath + "-wal")
         isConnected = dbExists && (walExists || fm.fileExists(atPath: dbPath + "-shm"))
 
-        // FDA probe — readability of the user TCC.db requires Full Disk Access
-        // granted to this .app bundle. Without it, TCCMonitor is blind and
-        // ~30% of ES file events for protected paths are silently dropped.
+        // FDA probe for the APP principal — readability of the user TCC.db
+        // requires Full Disk Access granted to MacCrab.app.
         let tccPath = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db"
-        fullDiskAccessGranted = fm.isReadableFile(atPath: tccPath)
+        appHasFDA = fm.isReadableFile(atPath: tccPath)
+
+        // FDA probe for the SYSEXT principal — we can't call an API from
+        // here that directly tells us the sysext's TCC state, but we can
+        // infer it: if events.db WAL has been written to recently, the
+        // sysext is flowing ES events, which requires it to have FDA for
+        // protected paths. If the WAL hasn't been touched in the last 5
+        // minutes, assume it's missing FDA (or the sysext is wedged).
+        let walPath = dbPath + "-wal"
+        if let attrs = try? fm.attributesOfItem(atPath: walPath),
+           let mtime = attrs[.modificationDate] as? Date {
+            sysextHasFDA = Date().timeIntervalSince(mtime) < 300
+        } else {
+            // No WAL yet → sysext hasn't written anything → assume missing FDA
+            // until proven otherwise.
+            sysextHasFDA = !isConnected ? false : sysextHasFDA
+        }
+        fullDiskAccessGranted = appHasFDA && sysextHasFDA
 
         // Check fleet configuration
         let fleetURL = ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] ?? ""

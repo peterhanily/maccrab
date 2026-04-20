@@ -3,6 +3,108 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.8] — 2026-04-20
+
+Quality-of-life release following field testing of v1.3.5–v1.3.7. Seven
+fixes grouped around the rough edges a real end-to-end install flow
+surfaced: cask wiping user data on every upgrade, MacCrab's own install
+firing its own tamper-detection rules, the Sparkle "Check for Updates…"
+menu item being unreachable on a menubar-only app, and a handful of
+false-positive alert patterns on everyday Mac activity.
+
+### Fixed
+
+- **Cask preserves user data on upgrade.** The `uninstall` stanza in
+  `Casks/maccrab.rb` and `homebrew/maccrab.rb` no longer lists
+  `/Library/Application Support/MacCrab` in its `delete:` block. Every
+  `brew upgrade --cask maccrab` through v1.3.7 was wiping alerts,
+  baselines, suppressions, and LLM keys — a clean reinstall disguised
+  as an upgrade. The `zap` stanza still removes the directory on an
+  explicit `brew uninstall --zap maccrab` for users who really want
+  a clean slate.
+- **MacCrab no longer alerts on its own activity.** New gate in
+  `NoiseFilter.apply` and a `NoiseFilter.isMacCrabSelf(event:)` helper
+  drop non-`.critical` matches whose subject is a MacCrab binary
+  (`com.maccrab.app`, `com.maccrab.agent`, `maccrabd`, `maccrabctl`,
+  `maccrab-mcp`) or a file under `/Library/Application Support/
+  MacCrab/` or `~/Library/Application Support/MacCrab/`. Critical
+  matches still survive so a real integrity compromise against our
+  binaries still fires. 5 new `FPRegressionTests` encode the
+  scenarios that were noisy in the field: tamper-detection against
+  our own rules directory during `brew upgrade`, xpcproxy events
+  from our sysext firing EDR-remote-session rules, TCC-rate alerts
+  when the user grants FDA to MacCrab.
+- **Power-anomaly allowlist widened.** `AddressBookSourceSync` (normal
+  iCloud contacts sync), `CalendarAgent`, `ContactsAgent`, `NotesMigratorService`,
+  `ReportCrash`, `diagnosticd`, plus the WebKit networking helpers are
+  all added to the `knownLegitimate` set in `PowerAnomalyDetector`. None
+  of these are threat signal; all of them held sleep assertions on a
+  typical Mac and produced Medium alerts every hour.
+- **USB hub + non-mass-storage device alerts are now Informational, not
+  Medium.** A USB hub or HID (keyboard/mouse) connecting is completely
+  benign; severity floor reserved for mass-storage events where an
+  attacker could be exfiltrating. Change is in `MonitorTasks.swift`'s
+  USB handler.
+- **SQLite error messages are visible under `sudo log show`.** The
+  `.localizedDescription` interpolation in `StorageErrorTracker` was
+  default-redacted to `<private>` by Foundation. Marked `.public` so
+  operators diagnosing a broken install can see the actual SQLite
+  return code without needing an Apple developer configuration
+  profile. The message content is SQLite return codes + paths —
+  never user secrets — so `.public` is safe.
+
+### Added
+
+- **Check for Updates… in the statusbar menu AND Settings.** Previously
+  the v1.3.7 Sparkle integration wired the menu item via SwiftUI's
+  `CommandGroup(after: .appInfo)`, which doesn't render for menubar-
+  only apps (`LSUIElement=true`) — users had no in-UI way to trigger
+  a manual update check. v1.3.8 wires the updater into
+  `AppDelegate` and exposes it via two accessible entry points: the
+  🦀 statusbar dropdown ("Check for Updates…" above the separator
+  before Quit), and Settings → Daemon → Actions (a button alongside
+  Reload Rules / Refresh Connection).
+- **Launch at login defaults to on and is actually wired up.** The
+  `@AppStorage("launchAtLogin")` preference has existed in
+  `SettingsView` since v1.0 but never called anything — the toggle
+  was dead. New `LaunchAtLogin` helper uses macOS 13+'s
+  `SMAppService.mainApp.register()` / `.unregister()` to do the
+  real work. Preference default flipped from `false` to `true`:
+  MacCrab protects the system, so auto-starting after every login
+  matches the product's intent. Users who'd rather start it manually
+  can still flip it off; preference is honoured. On first launch,
+  `LaunchAtLogin.reconcile(preferenceEnabled:)` aligns the SMAppService
+  registration state with the stored preference.
+- **FDA banner is principal-aware.** Previously the banner's body text
+  was one generic "MacCrab needs FDA" message regardless of which of
+  the two principals (`com.maccrab.app` or `com.maccrab.agent`)
+  actually lacked the grant — both are separate TCC subjects on macOS.
+  v1.3.8 probes both via `AppState.appHasFDA` and
+  `AppState.sysextHasFDA` (inferred from WAL-write recency) and surfaces
+  which one the user needs to add, naming the exact principal string
+  as it appears in System Settings.
+- **"Reveal MacCrab in Finder" link on the FDA banner.** Next to the
+  existing Open Settings button. Opens Finder with MacCrab.app
+  selected so users can drag it directly into the FDA settings pane
+  — less ceremony than navigating to /Applications/ themselves.
+
+### Infrastructure
+
+- No sysext provisioning-profile, entitlement, or signing changes.
+  v1.3.7 infrastructure carries forward unchanged.
+
+### Known not-yet-fixed
+
+Remaining items from the v1.3.7 field-test report that aren't in
+this release:
+
+- **Signed `.mobileconfig` for one-click FDA** — needs an MDM-signed
+  profile for `SystemPolicyAllFiles` to auto-grant on personal Macs;
+  lives in the v1.4 MDM / enterprise scope.
+- **More rule-precision pass** — the spctl / csrutil / system_profiler /
+  Wi-Fi-tool rules need parent-process anchoring. Scheduled for
+  v1.4.x rule tuning.
+
 ## [1.3.7] — 2026-04-20
 
 Cosmetic hotfix for v1.3.6's Overview banner — users saw the literal
