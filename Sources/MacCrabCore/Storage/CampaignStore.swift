@@ -208,15 +208,16 @@ public actor CampaignStore {
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
 
         self.databasePath = dir.appendingPathComponent("events.db").path
-        let oldUmask = umask(0o022)
+        // See EventStore.init for rationale behind 0o027/0o640.
+        let oldUmask = umask(0o027)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o644)
-        chmod(databasePath + "-wal", 0o644)
-        chmod(databasePath + "-shm", 0o644)
+        chmod(databasePath, 0o640)
+        chmod(databasePath + "-wal", 0o640)
+        chmod(databasePath + "-shm", 0o640)
     }
 
     /// Open a CampaignStore at a custom path (useful for tests).

@@ -21,13 +21,22 @@ let package = Package(
         .executable(name: "MacCrabAgent", targets: ["MacCrabAgent"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/swiftlang/swift-testing.git", branch: "release/6.2"),
+        // Test-only dep. Pinned to an exact revision rather than a branch
+        // so CI can't be broken by an upstream push to release/6.2.
+        .package(
+            url: "https://github.com/swiftlang/swift-testing.git",
+            revision: "5ee435b15ad40ec1f644b5eb9d247f263ccd2170"
+        ),
         // Sparkle 2: auto-update framework for MacCrabApp only. Release
         // builds poll https://maccrab.com/appcast.xml and install signed
         // updates via SUPublicEDKey verification. Sysext updates cascade
         // through OSSystemExtensionRequest(.replace) on host-app relaunch,
         // so no Sparkle wiring is needed in the sysext target itself.
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.4"),
+        //
+        // Pinned to .exact rather than `from:` — Sparkle runs privileged
+        // update installs, so a compromised upstream release could push
+        // code to every MacCrab user. Bump deliberately, not implicitly.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.1"),
     ],
     targets: [
         .target(

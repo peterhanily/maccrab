@@ -605,13 +605,15 @@ struct AlertDetailView: View {
                                     titleVisibility: .visible
                                 ) {
                                     Button(String(localized: "action.kill", defaultValue: "Kill Process"), role: .destructive) {
-                                        let task = Process()
-                                        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-                                        task.arguments = ["-f", alert.processPath]
-                                        if (try? task.run()) != nil {
-                                            actionFeedback = String(localized: "action.kill.success", defaultValue: "Process terminated")
-                                        } else {
-                                            actionFeedback = String(localized: "action.kill.failure", defaultValue: "Failed to terminate process")
+                                        do {
+                                            let msg = try ManualResponse.killProcess(
+                                                pid: nil,
+                                                path: alert.processPath
+                                            )
+                                            actionFeedback = msg
+                                        } catch {
+                                            actionFeedback = (error as? ManualResponse.ActionError)
+                                                .map(\.description) ?? error.localizedDescription
                                         }
                                     }
                                 } message: {
@@ -636,13 +638,17 @@ struct AlertDetailView: View {
                                     titleVisibility: .visible
                                 ) {
                                     Button(String(localized: "action.quarantine", defaultValue: "Quarantine File"), role: .destructive) {
-                                        let task = Process()
-                                        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                                        task.arguments = ["-e", "display notification \"File quarantined\" with title \"MacCrab\""]
-                                        if (try? task.run()) != nil {
-                                            actionFeedback = String(localized: "action.quarantine.success", defaultValue: "File quarantined")
-                                        } else {
-                                            actionFeedback = String(localized: "action.quarantine.failure", defaultValue: "Failed to quarantine file")
+                                        do {
+                                            let msg = try ManualResponse.quarantineFile(
+                                                path: alert.processPath,
+                                                ruleId: alert.ruleId,
+                                                ruleTitle: alert.ruleTitle,
+                                                alertId: alert.id
+                                            )
+                                            actionFeedback = msg
+                                        } catch {
+                                            actionFeedback = (error as? ManualResponse.ActionError)
+                                                .map(\.description) ?? error.localizedDescription
                                         }
                                     }
                                 } message: {
@@ -664,13 +670,16 @@ struct AlertDetailView: View {
                                     titleVisibility: .visible
                                 ) {
                                     Button(String(localized: "action.block", defaultValue: "Block Destination"), role: .destructive) {
-                                        let task = Process()
-                                        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                                        task.arguments = ["-e", "display notification \"Network destination blocked\" with title \"MacCrab\""]
-                                        if (try? task.run()) != nil {
-                                            actionFeedback = String(localized: "action.block.success", defaultValue: "Network destination blocked")
-                                        } else {
-                                            actionFeedback = String(localized: "action.block.failure", defaultValue: "Failed to block destination")
+                                        guard let ip = Self.extractIP(from: alert.description) else {
+                                            actionFeedback = "No IP found in alert description"
+                                            return
+                                        }
+                                        do {
+                                            let msg = try ManualResponse.blockDestination(ip: ip)
+                                            actionFeedback = msg
+                                        } catch {
+                                            actionFeedback = (error as? ManualResponse.ActionError)
+                                                .map(\.description) ?? error.localizedDescription
                                         }
                                     }
                                 } message: {
@@ -740,6 +749,23 @@ struct AlertDetailView: View {
             return false
         }
         return rules.keys.contains(where: { alert.ruleTitle.lowercased().contains($0.lowercased()) || $0 == alert.id })
+    }
+
+    /// Pull the first IPv4 or IPv6 address out of an alert description so the
+    /// Block Destination button has something to hand to pfctl. If nothing
+    /// plausible matches, returns nil and the UI shows "No IP found".
+    fileprivate static func extractIP(from text: String) -> String? {
+        // IPv4 first — anchored on word boundaries, each octet 0-255.
+        let v4 = #"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"#
+        if let match = text.range(of: v4, options: .regularExpression) {
+            return String(text[match])
+        }
+        // IPv6 — loose match; inet_pton in ManualResponse rejects non-IPs.
+        let v6 = #"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b"#
+        if let match = text.range(of: v6, options: .regularExpression) {
+            return String(text[match])
+        }
+        return nil
     }
 }
 

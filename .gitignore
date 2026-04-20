@@ -1,7 +1,9 @@
 # Swift Package Manager
 .build/
 .swiftpm/
-Package.resolved
+# Package.resolved IS committed. Sparkle is pinned to an exact version and
+# runs privileged updates on every install, so we want the resolved hash
+# locked so `swift build` can't pick up a drifted upstream between envs.
 
 # Xcode
 *.xcodeproj/xcuserdata/

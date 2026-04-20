@@ -215,20 +215,23 @@ public actor EventStore {
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
 
-        // Set umask so SQLite WAL/SHM files are world-readable (0o644).
-        // Without this, root's default umask (0o022 or 0o077) makes WAL/SHM
-        // files unreadable by the non-root MacCrab.app dashboard.
-        let oldUmask = umask(0o022)
+        // umask 0o027 ⇒ new SQLite WAL/SHM files get created 0o640 instead
+        // of the world-readable 0o644 that umask 0o022 produced through
+        // v1.3.8. 0o600 would be tighter but breaks the dashboard, which
+        // runs as the user (typically admin-group) and needs read access
+        // to render alerts/events. The directory stays 0o755 so dashboard
+        // can traverse it.
+        let oldUmask = umask(0o027)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
-        umask(oldUmask) // Restore
+        umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        // rw-r--r--: non-root MacCrab.app needs read access to display events
-        chmod(databasePath, 0o644)
-        // Also fix WAL/SHM permissions (may already exist from previous runs)
-        chmod(databasePath + "-wal", 0o644)
-        chmod(databasePath + "-shm", 0o644)
+        // Explicitly tighten any pre-existing files from an old install that
+        // were created under the looser 0o644 default.
+        chmod(databasePath, 0o640)
+        chmod(databasePath + "-wal", 0o640)
+        chmod(databasePath + "-shm", 0o640)
     }
 
     /// Creates an `EventStore` at a custom path (useful for testing).

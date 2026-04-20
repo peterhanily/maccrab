@@ -187,7 +187,7 @@ struct ResponseActionsView: View {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(config) {
             try? data.write(to: URL(fileURLWithPath: configPath))
-            saveStatus = "Saved. Restart daemon to apply."
+            saveStatus = "Saved. Restart detection engine to apply."
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
         }
     }

@@ -239,7 +239,7 @@ struct OverviewDashboard: View {
                         // === System Health ===
                         GroupBox("System Health") {
                             VStack(alignment: .leading, spacing: 6) {
-                                HealthRow(label: "Daemon", status: appState.isConnected, detail: appState.isConnected ? "Active" : "Not connected")
+                                HealthRow(label: "Detection Engine", status: appState.isConnected, detail: appState.isConnected ? "Active" : "Not connected")
                                 HealthRow(label: "Rules", status: appState.rulesLoaded > 0, detail: "\(appState.rulesLoaded) loaded")
                                 HealthRow(label: "Events", status: appState.eventsPerSecond > 0, detail: "\(appState.eventsPerSecond)/sec")
                             }

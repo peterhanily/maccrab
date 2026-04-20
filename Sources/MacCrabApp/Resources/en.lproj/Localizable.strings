@@ -137,7 +137,7 @@
 /* ── Settings ── */
 "settings.general" = "General";
 "settings.notifications" = "Notifications";
-"settings.daemon" = "Daemon";
+"settings.daemon" = "Detection Engine";
 "settings.responseActions" = "Response Actions";
 "settings.about" = "About";
 
@@ -146,8 +146,8 @@
 "settings.keepEventsFor" = "Keep events for";
 "settings.retentionHelp" = "Events, alerts, and baseline data older than this will be automatically pruned.";
 "settings.uiRefresh" = "UI Refresh";
-"settings.pollDaemon" = "Poll daemon every";
-"settings.pollHelp" = "How often the app checks the daemon's database for new events and alerts.";
+"settings.pollDaemon" = "Poll detection engine every";
+"settings.pollHelp" = "How often the app checks the detection engine's database for new events and alerts.";
 "settings.startup" = "Startup";
 "settings.launchAtLogin" = "Launch MacCrab at login";
 
@@ -170,7 +170,7 @@
 "settings.high" = "High";
 "settings.criticalOnly" = "Critical only";
 
-/* ── Settings: Daemon ── */
+/* ── Settings: Detection Engine ── */
 "settings.daemonStatus" = "Status";
 "settings.daemonRunning" = "Running";
 "settings.daemonStopped" = "Stopped";
@@ -188,7 +188,7 @@
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab Active";
-"statusBar.notRunning" = "Daemon Not Running";
+"statusBar.notRunning" = "Detection Engine Not Running";
 "statusBar.eventsPerSecLabel" = "events/sec";
 "statusBar.rulesLoadedLabel" = "rules loaded";
 "statusBar.alertsTodayLabel" = "alerts today";
@@ -250,7 +250,7 @@
 "responseActions.activeSuppressions" = "Active Suppressions";
 "responseActions.suppressionsDesc" = "Alerts matching these patterns are hidden from the dashboard.";
 "responseActions.suppressionsHint" = "Manage via 'Suppress All Like This' button in alert details.";
-"responseActions.saved" = "Saved. Restart daemon to apply.";
+"responseActions.saved" = "Saved. Restart detection engine to apply.";
 "responseActions.whenSeverity" = "when severity \u2265";
 
 /* ── Add Rule Action Sheet ── */
@@ -417,8 +417,8 @@
 
 
 /* ── Overview Dashboard ── */
-"overview.connecting" = "Connecting to MacCrab daemon…";
-"overview.startDaemon" = "Start the daemon: sudo maccrabd";
+"overview.connecting" = "Connecting to MacCrab detection engine…";
+"overview.startDaemon" = "Start the detection engine: sudo maccrabd";
 "overview.reviewAlerts" = "Click to review in Alerts";
 "overview.allClear" = "All clear — no critical alerts";
 "overview.noRecentAlerts" = "No recent alerts";
@@ -428,7 +428,7 @@
 "alerts.multiSelectHint" = "Shift+click to range select, Cmd+click to toggle";
 
 /* ── Status bar / toolbar ── */
-"status.daemonOffline" = "Daemon offline — data may be stale";
+"status.daemonOffline" = "Detection engine offline — data may be stale";
 
 /* ── Welcome Screen ── */
 "welcome.title" = "Welcome to MacCrab";
@@ -465,8 +465,8 @@
 "threatintel.availableFeedsSection" = "Available Feeds (requires API key)";
 "threatintel.freeFeedsSection" = "Free Feeds (no API key needed)";
 "threatintel.customFeedSection" = "Custom Feed Support";
-"threatintel.importNote" = "Import IOCs from CSV, JSON, or STIX 2.1 bundles via the Import tab. Custom IOCs are merged with feed data and persist across daemon restarts.";
-"threatintel.queryNote" = "Loaded IOC data is stored in the daemon’s memory and threat intel cache. Use maccrabctl to query specific IOCs:";
+"threatintel.importNote" = "Import IOCs from CSV, JSON, or STIX 2.1 bundles via the Import tab. Custom IOCs are merged with feed data and persist across detection engine restarts.";
+"threatintel.queryNote" = "Loaded IOC data is stored in the detection engine’s memory and threat intel cache. Use maccrabctl to query specific IOCs:";
 "threatintel.hashesLabel" = "SHA-256 Hashes:";
 "threatintel.ipsLabel" = "IP Addresses:";
 "threatintel.domainsLabel" = "Domains:";

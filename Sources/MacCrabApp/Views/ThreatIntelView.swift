@@ -206,7 +206,7 @@ struct ThreatIntelView: View {
                 .font(.headline)
                 .padding(.top, 8)
 
-            Text(String(localized: "threatintel.importNote", defaultValue: "Import IOCs from CSV, JSON, or STIX 2.1 bundles via the Import tab. Custom IOCs are merged with feed data and persist across daemon restarts."))
+            Text(String(localized: "threatintel.importNote", defaultValue: "Import IOCs from CSV, JSON, or STIX 2.1 bundles via the Import tab. Custom IOCs are merged with feed data and persist across detection engine restarts."))
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -216,7 +216,7 @@ struct ThreatIntelView: View {
 
     private var browseSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(String(localized: "threatintel.queryNote", defaultValue: "Loaded IOC data is stored in the daemon's memory and threat intel cache. Use maccrabctl to query specific IOCs:"))
+            Text(String(localized: "threatintel.queryNote", defaultValue: "Loaded IOC data is stored in the detection engine's memory and threat intel cache. Use maccrabctl to query specific IOCs:"))
                 .font(.caption)
                 .foregroundColor(.secondary)
 

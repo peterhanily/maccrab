@@ -3,6 +3,75 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.9] — 2026-04-18
+
+Polish bundle: closes three findings from the v1.3.8 post-release audit
+plus two long-standing UX gaps. No new features, no schema changes,
+backwards-compatible DB — ships through the validated Sparkle pipeline.
+
+### Security
+
+- **SQLite WAL/SHM no longer world-readable.** `EventStore`,
+  `AlertStore`, and `CampaignStore` now open their databases under
+  `umask(0o027)` and explicitly `chmod 0o640` the main DB plus its
+  `-wal` / `-shm` sidecars. v1.3.8 and earlier used `umask(0o022)` so
+  the SQLite WAL — which contains recent event and alert inserts
+  before checkpoint — was readable by any local user. `0o640` lets
+  the dashboard (user in `admin` group) keep reading while closing
+  the cross-user exposure. Tightening to `0o600` would have broken
+  the dashboard, which runs as the user while the sysext runs as root.
+- **SPM dependencies pinned to exact versions.** `Package.swift` now
+  uses `.exact("2.9.1")` for Sparkle instead of `from: "2.6.4"`, and
+  `swift-testing` is pinned to a specific revision instead of a
+  branch. `Package.resolved` is now committed. Sparkle runs
+  privileged update installs, so a compromised upstream release
+  could push code to every MacCrab user on auto-update; exact pins
+  mean a version bump is always explicit.
+
+### Added
+
+- **Dashboard response actions now do real work.** Kill Process,
+  Quarantine File, and Block Destination buttons in `AlertDetailView`
+  previously called `osascript display notification` stubs — no
+  actual process was killed, no file was quarantined, no PF rule
+  was written. New `Sources/MacCrabCore/Prevention/ManualResponse.swift`
+  provides three typed-throw helpers the dashboard invokes:
+  - **Kill Process**: `kill(SIGTERM)` by PID with `pkill -f` fallback;
+    distinguishes `EPERM` (root-owned — prompts user toward
+    `sudo kill`), `ESRCH` (already exited), and launch failure.
+  - **Quarantine File**: moves the offending binary to
+    `~/Library/Application Support/MacCrab/quarantine/<iso-ts>_<name>`,
+    stamps `com.apple.quarantine` xattr, `chmod 000` the copy so
+    accidental re-execution is blocked, writes a JSON sidecar with
+    rule id/title/alert id for forensics.
+  - **Block Destination**: extracts IPv4/IPv6 from the alert
+    description, validates via `inet_pton`, writes to a per-user
+    persistent block list, calls
+    `osascript do shell script "pfctl ..." with administrator privileges`
+    so the user authorizes once and the block takes effect in the
+    kernel immediately. Uses a dedicated `com.maccrab.dashboard`
+    anchor to not collide with the sysext's automated
+    `com.maccrab` blocks.
+  All three surface descriptive error messages (permissionDenied,
+  notFound, cancelled, invalidInput) as the `actionFeedback` toast
+  so the user knows whether the action succeeded, why it didn't,
+  and what to do next.
+
+### Changed
+
+- **"Daemon" renamed to "Detection Engine" in the UI.** Post-1.3.0
+  the detection runtime moved from a LaunchDaemon to an Endpoint
+  Security system extension, but the dashboard still called it
+  "Daemon" in the Settings tab, Overview health row, status-bar
+  not-running label, and a few help strings in Threat Intel,
+  Integrations, and Response Actions. Updated `defaultValue:` in
+  every `String(localized:)` call plus the base English
+  `Localizable.strings` file. Non-English locales keep their
+  existing translation until re-localized.
+- **README version badge bumped to 1.3.8** (was stuck at 1.3.4 through
+  the v1.3.5 → v1.3.8 release run) plus a line pointing at the
+  Sparkle-signed release channel.
+
 ## [1.3.8] — 2026-04-20
 
 Quality-of-life release following field testing of v1.3.5–v1.3.7. Seven

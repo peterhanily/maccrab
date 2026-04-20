@@ -235,16 +235,17 @@ public actor AlertStore {
         )
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
-        let oldUmask = umask(0o022)
+        // See EventStore.init for why 0o027/0o640 (not 0o077/0o600): sysext
+        // writes as root, dashboard reads as admin-group user.
+        let oldUmask = umask(0o027)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        // rw-r--r--: non-root MacCrab.app needs read access
-        chmod(databasePath, 0o644)
-        chmod(databasePath + "-wal", 0o644)
-        chmod(databasePath + "-shm", 0o644)
+        chmod(databasePath, 0o640)
+        chmod(databasePath + "-wal", 0o640)
+        chmod(databasePath + "-shm", 0o640)
     }
 
     /// Creates an `AlertStore` at a custom path (useful for testing).

@@ -238,7 +238,7 @@ struct MainView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.yellow)
                             .accessibilityHidden(true)
-                        Text(String(localized: "status.daemonOffline", defaultValue: "Daemon offline \u{2014} data may be stale"))
+                        Text(String(localized: "status.daemonOffline", defaultValue: "Detection engine offline \u{2014} data may be stale"))
                             .font(.subheadline)
                             .foregroundColor(.primary)
                         Spacer()

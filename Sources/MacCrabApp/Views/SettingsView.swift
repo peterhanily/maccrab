@@ -93,7 +93,7 @@ struct SettingsView: View {
                 .tabItem { Label(String(localized: "settings.notifications", defaultValue: "Notifications"), systemImage: "bell") }
 
             daemonTab
-                .tabItem { Label(String(localized: "settings.daemon", defaultValue: "Daemon"), systemImage: "server.rack") }
+                .tabItem { Label(String(localized: "settings.daemon", defaultValue: "Detection Engine"), systemImage: "server.rack") }
 
             ResponseActionsView()
                 .tabItem { Label(String(localized: "settings.responseActions", defaultValue: "Response Actions"), systemImage: "bolt.shield") }
@@ -221,7 +221,7 @@ struct SettingsView: View {
                 GroupBox(String(localized: "settings.uiRefresh", defaultValue: "UI Refresh")) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text(String(localized: "settings.pollDaemon", defaultValue: "Poll daemon every"))
+                            Text(String(localized: "settings.pollDaemon", defaultValue: "Poll detection engine every"))
                             Stepper(
                                 "\(pollIntervalSeconds) seconds",
                                 value: $pollIntervalSeconds,
@@ -229,7 +229,7 @@ struct SettingsView: View {
                                 step: 1
                             )
                         }
-                        Text(String(localized: "settings.pollHelp", defaultValue: "How often the app checks the daemon's database for new events and alerts."))
+                        Text(String(localized: "settings.pollHelp", defaultValue: "How often the app checks the detection engine's database for new events and alerts."))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -444,7 +444,7 @@ struct SettingsView: View {
                 GroupBox(String(localized: "settings.daemonStatus", defaultValue: "Status")) {
                     VStack(spacing: 12) {
                         HStack {
-                            Label(String(localized: "settings.daemon", defaultValue: "Daemon"), systemImage: "server.rack")
+                            Label(String(localized: "settings.daemon", defaultValue: "Detection Engine"), systemImage: "server.rack")
                             Spacer()
                             HStack(spacing: 6) {
                                 Circle()
@@ -581,7 +581,7 @@ struct SettingsView: View {
                                     .foregroundColor(.orange)
                             }
 
-                            Text(String(localized: "settings.llmRestart", defaultValue: "Restart the daemon (SIGHUP) to apply changes."))
+                            Text(String(localized: "settings.llmRestart", defaultValue: "Restart the detection engine (SIGHUP) to apply changes."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }

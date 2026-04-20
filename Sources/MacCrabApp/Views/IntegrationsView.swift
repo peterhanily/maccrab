@@ -147,7 +147,7 @@ struct IntegrationsView: View {
                                 .foregroundColor(.secondary)
                         }
 
-                        Text(String(localized: "integrations.fleetHelp", defaultValue: "Fleet telemetry shares threat intel across multiple Macs. Set MACCRAB_FLEET_URL and optionally MACCRAB_FLEET_KEY before starting the daemon."))
+                        Text(String(localized: "integrations.fleetHelp", defaultValue: "Fleet telemetry shares threat intel across multiple Macs. Set MACCRAB_FLEET_URL and optionally MACCRAB_FLEET_KEY before starting the detection engine."))
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }

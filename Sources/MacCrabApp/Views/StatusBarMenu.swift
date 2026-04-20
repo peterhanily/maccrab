@@ -15,7 +15,7 @@ struct StatusBarMenu: View {
                 .accessibilityHidden(true)
             Text(appState.isConnected
                 ? String(localized: "statusBar.active", defaultValue: "MacCrab Active")
-                : String(localized: "statusBar.notRunning", defaultValue: "Daemon Not Running"))
+                : String(localized: "statusBar.notRunning", defaultValue: "Detection Engine Not Running"))
                 .font(.headline)
         }
 
