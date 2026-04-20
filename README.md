@@ -5,6 +5,7 @@
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-588%20passing-brightgreen)]()
 [![Version](https://img.shields.io/badge/version-1.3.9-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
 [![Rules](https://img.shields.io/badge/detection%20rules-380-orange)]()
