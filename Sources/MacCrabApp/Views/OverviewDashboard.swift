@@ -86,13 +86,19 @@ struct OverviewDashboard: View {
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 4) {
                                 if criticalCount > 0 {
-                                    // Pluralization is handled by the .stringsdict for
-                                    // this key; the defaultValue here is the English
-                                    // fallback for the singular-1 case plus an explicit
-                                    // `count` substitution.
+                                    // Apple's ^[...](inflect: true) markdown only renders
+                                    // correctly when backed by a matching .xcstrings or
+                                    // .stringsdict entry with grammatical-agreement rules.
+                                    // Without one, String(localized:defaultValue:) renders
+                                    // the markdown literally. Until we ship that entry,
+                                    // fall back to plain English pluralisation — the
+                                    // localization keys still exist so a translator can
+                                    // override per-locale.
+                                    let noun = criticalCount == 1 ? "critical alert" : "critical alerts"
+                                    let verb = criticalCount == 1 ? "needs" : "need"
                                     Text(String(
                                         localized: "overview.critical.count",
-                                        defaultValue: "^[\(criticalCount) critical alert](inflect: true) needs investigation"
+                                        defaultValue: "\(criticalCount) \(noun) \(verb) investigation"
                                     ))
                                     .font(.system(.body, weight: .semibold))
                                     .foregroundColor(.white)
@@ -100,9 +106,10 @@ struct OverviewDashboard: View {
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.8))
                                 } else if highCount > 0 {
+                                    let noun = highCount == 1 ? "high-severity alert" : "high-severity alerts"
                                     Text(String(
                                         localized: "overview.high.count",
-                                        defaultValue: "^[\(highCount) high-severity alert](inflect: true) to review"
+                                        defaultValue: "\(highCount) \(noun) to review"
                                     ))
                                     .font(.system(.body, weight: .semibold))
                                     .foregroundColor(.white)

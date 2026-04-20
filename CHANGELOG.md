@@ -3,6 +3,26 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.7] — 2026-04-20
+
+Cosmetic hotfix for v1.3.6's Overview banner — users saw the literal
+string `^[1 high-severity alert](inflect: true) to review` instead of
+a rendered English pluralization.
+
+### Fixed
+
+- **Overview alert-count banner no longer renders the Apple inflection
+  markdown verbatim.** The `^[...](inflect: true)` syntax only resolves
+  correctly when backed by a matching `.xcstrings` / `.stringsdict`
+  entry with grammatical-agreement rules for the target locale. With
+  just an in-source `String(localized:defaultValue:)` default, the
+  Foundation localization layer falls through without processing the
+  markdown, and the raw text lands in the UI. Replaced with plain
+  English singular/plural branching. The localization keys
+  (`overview.critical.count`, `overview.high.count`) are unchanged so
+  existing translations keep working; only the English default value
+  was wrong.
+
 ## [1.3.6] — 2026-04-20
 
 Critical hotfix: v1.3.5 shipped with a broken binary that aborted on
