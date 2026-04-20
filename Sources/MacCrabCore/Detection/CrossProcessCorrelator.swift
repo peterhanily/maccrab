@@ -111,6 +111,55 @@ public actor CrossProcessCorrelator {
         "/dev/zero",
     ]
 
+    /// File-name suffixes that never form an attack chain. Log files are the
+    /// dominant source of false positives here: a single vendor app with
+    /// multiple worker processes (GoogleUpdater, Microsoft AutoUpdate, Slack,
+    /// VSCode) can emit hundreds of `write → close_modified → write` events
+    /// against one `.log` file inside its own app-support directory over a
+    /// short window — the correlator then reports it as "13 processes, 140
+    /// events" convergence. Attacks don't propagate through log writes; drop
+    /// the path at ingress.
+    private static let ignoredPathSuffixes: [String] = [
+        ".log",
+        ".log.gz",
+        ".crash",
+        ".ips",
+    ]
+
+    /// Path substrings that mark a location as vendor-internal or
+    /// system-cache. These paths see multi-process writes constantly and
+    /// are never a useful correlation signal. Substring (not prefix) match
+    /// so these catch both `/Users/<u>/Library/...` and
+    /// `/Library/Application Support/...` without needing per-user variants.
+    private static let ignoredPathSubstrings: [String] = [
+        // Cache / log / preference dirs on user home
+        "/Library/Caches/",
+        "/Library/Logs/",
+        "/Library/Preferences/",
+        "/Library/HTTPStorages/",
+        "/Library/Cookies/",
+        "/Library/WebKit/",
+        "/Library/Saved Application State/",
+        "/Library/Metadata/CoreSpotlight/",
+        // Well-known vendors that fan out across many worker processes into
+        // their own Application Support state dirs.
+        "/Library/Application Support/Google/",
+        "/Library/Application Support/Microsoft/",
+        "/Library/Application Support/CrashReporter/",
+        "/Library/Application Support/MobileSync/",
+        "/Library/Application Support/Code/",            // VSCode
+        "/Library/Application Support/Slack/",
+        "/Library/Application Support/Spotify/",
+        "/Library/Application Support/Dropbox/",
+        "/Library/Application Support/iCloud/",
+        // Dev tooling fan-outs
+        "/.git/",
+        "/node_modules/",
+        "/.pnpm/",
+        "/.cargo/",
+        "/.rustup/",
+    ]
+
     /// Network destinations that are never interesting.
     private static let ignoredNetworkPrefixes: [String] = [
         "127.",            // loopback
@@ -569,6 +618,12 @@ public actor CrossProcessCorrelator {
         if Self.ignoredPaths.contains(path) { return true }
         for prefix in Self.ignoredPathPrefixes {
             if path.hasPrefix(prefix) { return true }
+        }
+        for suffix in Self.ignoredPathSuffixes {
+            if path.hasSuffix(suffix) { return true }
+        }
+        for sub in Self.ignoredPathSubstrings {
+            if path.contains(sub) { return true }
         }
         return false
     }

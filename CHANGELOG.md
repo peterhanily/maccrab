@@ -3,6 +3,43 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.10] — 2026-04-20
+
+Noise-reduction hotfix for a v1.3.9 false positive. Field testing
+turned up "13 processes, 140 events, 106s" cross-process chain alerts
+fired by `GoogleUpdater` repeatedly writing to its own
+`~/Library/Application Support/Google/GoogleUpdater/updater.log` from
+multiple worker PIDs. Every event in the chain was a write or
+close_modified against a log file inside a single vendor's own
+state directory — indistinguishable from attack convergence to the
+correlator, but semantically nothing more than a noisy logger.
+
+### Fixed
+
+- **CrossProcessCorrelator ignores `.log`/`.crash`/`.ips` files.** Log
+  files don't carry payloads; an attack doesn't propagate through a
+  log write. Adding these as ignored path suffixes at the correlator's
+  ingress gate stops the 100-plus-event chains that legitimate vendor
+  loggers were producing. New `ignoredPathSuffixes` set in
+  `CrossProcessCorrelator.swift`.
+- **CrossProcessCorrelator ignores noisy vendor app-support + cache
+  paths.** Added a substring-match list covering
+  `Library/Application Support/Google/`, `/Microsoft/`,
+  `/CrashReporter/`, `/Code/` (VSCode), `/Slack/`, `/Spotify/`,
+  `/Dropbox/`, `/iCloud/`, `/MobileSync/`; plus user-home
+  `/Library/Caches/`, `/Library/Logs/`, `/Library/Preferences/`,
+  `/Library/HTTPStorages/`, `/Library/WebKit/`,
+  `/Library/Saved Application State/`, `/Library/Cookies/`, and
+  `/Library/Metadata/CoreSpotlight/`. Also dev-tooling fan-outs
+  `/.git/`, `/node_modules/`, `/.pnpm/`, `/.cargo/`, `/.rustup/`. New
+  `ignoredPathSubstrings` set — substring rather than prefix so
+  `/Users/<u>/Library/...` matches without per-user variants.
+- **Four regression tests in `CrossProcessCorrelatorTests`** lock the
+  behaviour: the exact GoogleUpdater 13-process scenario, a generic
+  `.log` suffix, a sweep across Caches/Preferences/WebKit, and a
+  positive control that `/tmp/payload.bin` write→execute from
+  different PIDs *still* fires. 592 tests in 131 suites.
+
 ## [1.3.9] — 2026-04-18
 
 Polish bundle: closes three findings from the v1.3.8 post-release audit

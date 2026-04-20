@@ -531,6 +531,91 @@ struct CrossProcessCorrelatorTests {
         let countAfter = await correlator.trackedFileCount
         #expect(countAfter == 0, "Stale event should be purged, but \(countAfter) files remain")
     }
+
+    // MARK: - Noise-reduction regressions (v1.3.10)
+
+    @Test("GoogleUpdater writing to its own .log does not form a chain")
+    func googleUpdaterLogDoesNotChain() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let logPath = "/Users/phanily/Library/Application Support/Google/GoogleUpdater/updater.log"
+
+        // Thirteen worker processes hammer the same log file — exactly the
+        // field scenario that produced the 140-event chain alert.
+        var chain: CrossProcessCorrelator.CorrelationChain?
+        for i in 0..<13 {
+            chain = await correlator.recordFileEvent(
+                path: logPath,
+                action: "write",
+                pid: Int32(10000 + i),
+                processName: "GoogleUpdater",
+                processPath: "/Library/Application Support/Google/GoogleUpdater/Current/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+                timestamp: now.addingTimeInterval(Double(i))
+            )
+        }
+        #expect(chain == nil, "Vendor app-support /Google/ paths must not form correlation chains")
+    }
+
+    @Test("Generic .log suffix writes across processes do not form a chain")
+    func logSuffixDoesNotChain() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+
+        await correlator.recordFileEvent(
+            path: "/tmp/my-app.log", action: "write",
+            pid: 500, processName: "proc-a", processPath: "/usr/local/bin/proc-a",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: "/tmp/my-app.log", action: "write",
+            pid: 501, processName: "proc-b", processPath: "/usr/local/bin/proc-b",
+            timestamp: now.addingTimeInterval(1)
+        )
+        #expect(chain == nil, "Log-file writes must never correlate — logs don't carry payloads")
+    }
+
+    @Test("Cache / Preferences / WebKit dirs do not form chains")
+    func systemCacheDirsDoNotChain() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+
+        for (i, path) in [
+            "/Users/u/Library/Caches/com.apple.Spotlight/foo.db",
+            "/Users/u/Library/Preferences/com.example.app.plist",
+            "/Users/u/Library/WebKit/com.apple.Safari/WebsiteData/x",
+        ].enumerated() {
+            await correlator.recordFileEvent(
+                path: path, action: "write",
+                pid: Int32(700 + i), processName: "p1", processPath: "/bin/p1",
+                timestamp: now
+            )
+            let chain = await correlator.recordFileEvent(
+                path: path, action: "write",
+                pid: Int32(800 + i), processName: "p2", processPath: "/bin/p2",
+                timestamp: now.addingTimeInterval(1)
+            )
+            #expect(chain == nil, "Noisy user-library subdir \(path) should be ignored")
+        }
+    }
+
+    @Test("Real /tmp payload write→execute chain still fires (no regression)")
+    func realPayloadChainStillFires() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let payload = "/tmp/payload.bin"
+
+        await correlator.recordFileEvent(
+            path: payload, action: "write",
+            pid: 900, processName: "curl", processPath: "/usr/bin/curl",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: payload, action: "execute",
+            pid: 901, processName: "bash", processPath: "/bin/bash",
+            timestamp: now.addingTimeInterval(2)
+        )
+        #expect(chain != nil, "Real /tmp write→execute chain should still fire")
+    }
 }
 
 // MARK: - Database Encryption Tests
