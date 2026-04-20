@@ -25,6 +25,15 @@ struct CampaignView: View {
     @State private var expandedCampaignId: String? = nil
     @State private var showDismissed = false
 
+    // Multi-select state. When `selectMode` is true, each active campaign
+    // card surfaces a checkbox; tapping the card body toggles membership
+    // instead of expanding. "Dismiss N Selected" becomes active in the
+    // toolbar.
+    @State private var selectMode = false
+    @State private var selectedIDs: Set<String> = []
+
+    private var allActiveIDs: Set<String> { Set(campaigns.map(\.id)) }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -33,23 +42,65 @@ struct CampaignView: View {
                     Text(String(localized: "campaigns.title", defaultValue: "Campaigns & Incidents"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
-                    if !dismissedCampaigns.isEmpty {
-                        Button {
-                            showDismissed.toggle()
-                        } label: {
-                            Label(
-                                showDismissed
-                                    ? String(localized: "campaigns.hideDismissed", defaultValue: "Hide Dismissed")
-                                    : "\(dismissedCampaigns.count) \(String(localized: "campaigns.dismissed", defaultValue: "dismissed"))",
-                                systemImage: showDismissed ? "eye.slash" : "eye"
-                            )
-                            .font(.caption)
+                    if selectMode {
+                        Button(String(localized: "campaigns.selectAll", defaultValue: "Select All")) {
+                            selectedIDs = allActiveIDs
                         }
+                        .disabled(campaigns.isEmpty || selectedIDs == allActiveIDs)
                         .controlSize(.small)
+
+                        Button(String(localized: "campaigns.dismissSelected", defaultValue: "Dismiss \(selectedIDs.count) Selected")) {
+                            let ids = selectedIDs
+                            Task {
+                                await appState.suppressAlerts(ids)
+                                await MainActor.run {
+                                    selectedIDs.removeAll()
+                                    selectMode = false
+                                }
+                            }
+                        }
+                        .keyboardShortcut(.delete, modifiers: [])
+                        .disabled(selectedIDs.isEmpty)
+                        .controlSize(.small)
+                        .help(String(localized: "campaigns.dismissSelected.help", defaultValue: "Dismiss all selected campaigns"))
+
+                        Button(String(localized: "campaigns.cancelSelect", defaultValue: "Cancel")) {
+                            selectMode = false
+                            selectedIDs.removeAll()
+                        }
+                        .keyboardShortcut(.escape, modifiers: [])
+                        .controlSize(.small)
+                    } else {
+                        if !campaigns.isEmpty {
+                            Button {
+                                selectMode = true
+                            } label: {
+                                Label(
+                                    String(localized: "campaigns.select", defaultValue: "Select"),
+                                    systemImage: "checkmark.circle"
+                                ).font(.caption)
+                            }
+                            .controlSize(.small)
+                        }
+
+                        if !dismissedCampaigns.isEmpty {
+                            Button {
+                                showDismissed.toggle()
+                            } label: {
+                                Label(
+                                    showDismissed
+                                        ? String(localized: "campaigns.hideDismissed", defaultValue: "Hide Dismissed")
+                                        : "\(dismissedCampaigns.count) \(String(localized: "campaigns.dismissed", defaultValue: "dismissed"))",
+                                    systemImage: showDismissed ? "eye.slash" : "eye"
+                                )
+                                .font(.caption)
+                            }
+                            .controlSize(.small)
+                        }
+                        Text("\(campaigns.count) \(String(localized: "campaigns.active", defaultValue: "active"))")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
                     }
-                    Text("\(campaigns.count) \(String(localized: "campaigns.active", defaultValue: "active"))")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
                 }
                 .padding(.horizontal)
                 .padding(.top)
@@ -79,19 +130,41 @@ struct CampaignView: View {
                 } else {
                     VStack(spacing: 12) {
                         ForEach(campaigns, id: \.id) { campaign in
-                            CampaignCard(
-                                campaign: campaign,
-                                isExpanded: expandedCampaignId == campaign.id,
-                                relatedAlerts: relatedAlerts(for: campaign),
-                                onToggle: {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        expandedCampaignId = expandedCampaignId == campaign.id ? nil : campaign.id
+                            HStack(alignment: .top, spacing: 8) {
+                                if selectMode {
+                                    Button {
+                                        toggleSelection(campaign.id)
+                                    } label: {
+                                        Image(systemName: selectedIDs.contains(campaign.id)
+                                            ? "checkmark.circle.fill"
+                                            : "circle")
+                                            .font(.title3)
+                                            .foregroundColor(selectedIDs.contains(campaign.id) ? .accentColor : .secondary)
+                                            .accessibilityLabel(selectedIDs.contains(campaign.id)
+                                                ? "Selected"
+                                                : "Not selected")
                                     }
-                                },
-                                onDismiss: {
-                                    Task { await appState.suppressAlert(campaign.id) }
+                                    .buttonStyle(.plain)
+                                    .padding(.top, 14)
                                 }
-                            )
+                                CampaignCard(
+                                    campaign: campaign,
+                                    isExpanded: !selectMode && expandedCampaignId == campaign.id,
+                                    relatedAlerts: relatedAlerts(for: campaign),
+                                    onToggle: {
+                                        if selectMode {
+                                            toggleSelection(campaign.id)
+                                        } else {
+                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                expandedCampaignId = expandedCampaignId == campaign.id ? nil : campaign.id
+                                            }
+                                        }
+                                    },
+                                    onDismiss: selectMode ? nil : {
+                                        Task { await appState.suppressAlert(campaign.id) }
+                                    }
+                                )
+                            }
                         }
 
                         if showDismissed {
@@ -126,6 +199,14 @@ struct CampaignView: View {
             }
         }
         .navigationTitle("Campaigns")
+    }
+
+    private func toggleSelection(_ id: String) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
     }
 
     /// Find alerts that occurred around the same time as a campaign and share tactics.

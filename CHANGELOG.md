@@ -3,6 +3,89 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.11] — 2026-04-21
+
+Major noise-reduction release driven by field data from a real workstation:
+one user reported 1,144 cross-process alerts and a flood of ~32 wifi-attack /
+22 invisible-unicode / 14 EDR-remote-session alerts over 24 hours, all
+false positives. Root cause turned out to be a **Sigma compiler bug** that
+collapsed `selection_A or selection_B` into a flat `any_of` across every
+predicate, so any command with `-s` / `scan` / `connect` / `live-response`
+in its argv fired rules it had no business firing. Plus two UX bugs and a
+bulk-action gap.
+
+### Fixed
+
+- **Sigma compiler preserves intra-selection AND semantics** under OR.
+  `_needs_condition_tree` in `Compiler/compile_rules.py` now forces the
+  hierarchical-tree compilation path when any clause of a pure `or`
+  condition references a selection with more than one field/value pair.
+  Previously those rules compiled to a flat `"condition": "any_of"` list
+  which matched on ANY single predicate — so:
+  - `wifi_attack_tool` at **critical** matched every commandline
+    containing `-s` or `scan` (spctl, Chrome Helper, GoogleUpdater).
+  - `edr_remote_session_active` at **high** matched every commandline
+    containing `connect` (xpcproxy, every `ssh` invocation).
+  - `gatekeeper_override` at **high** matched every spctl invocation
+    regardless of `--add` / `--master-disable` flag context.
+  After the fix the compiled JSON emits a proper nested
+  `condition_tree: or → group[all_of]` structure that the runtime
+  already knew how to evaluate. All 380 rules recompiled; 3 noisy
+  rules now fire only in their intended narrow contexts.
+- **Sidebar Alerts badge no longer counts campaigns twice.**
+  `AppState.swift` had five separate `dashboardAlerts.filter { … }`
+  recomputes of `totalAlerts` and `recentAlerts`, none of which
+  excluded campaign-prefixed ruleIds. Campaigns ship as alerts
+  with `ruleId: maccrab.campaign.*` and have their own sidebar
+  badge. All five call sites consolidated into a single
+  `refreshAlertBadges()` helper that also filters out the
+  campaign prefix. Net: Alerts badge is now alert-only;
+  Campaigns badge unchanged.
+- **CrossProcessCorrelator file chains get the same homogeneity
+  gates network chains had.** `evaluateFileChain` now also skips
+  chains where `allEventsShareExecutable`, `allEventsShareAppBundle`,
+  `allEventsShareToolDirectory`, or `allEventsAreTrustedHelpers`
+  is true, plus a new `allEventsShareProcessName` check. This is
+  the belt-and-braces defense underneath v1.3.10's path filter —
+  even if a new vendor-dir path slips past the substring list, a
+  chain where every event comes from the same process identity is
+  worker fan-out, not attacker convergence.
+
+### Changed
+
+- **`invisible_unicode_in_source` rule marked `status: deprecated`.**
+  Rule claimed to detect zero-width characters in source writes, but
+  its YAML selectors only checked filename extension — there was no
+  `FileContent|matches` regex. Every JSON/YAML/py/md write by a
+  non-Apple-signed process was firing it at medium. Re-enable when
+  the compiler supports content-based regex matching.
+- **Compiler honours Sigma `status: deprecated`.** Deprecated rules
+  still compile (so the rule browser and suppression state keep
+  working for existing alerts) but ship with `enabled: false` so
+  the RuleEngine's hot-path loop skips them.
+
+### Added
+
+- **Bulk-dismiss for campaigns.** `CampaignView` gains a Select /
+  Cancel toggle; in select mode each active campaign card shows
+  a checkbox. A "Dismiss N Selected" toolbar action pipes to a
+  new `AppState.suppressAlerts(Set<String>)` batch method — one
+  DB loop, one badge refresh, no flicker on 20-item dismisses.
+  Delete-key dismisses selected, Escape cancels.
+- **UPGRADE.md documents manual DMG upgrade semantics.** Clarifies
+  that drag-n-drop replace triggers `OSSystemExtensionRequest`
+  `.replace` automatically on next launch; recommends Sparkle /
+  Homebrew for cleaner coordinated handover.
+
+### Rule browser
+
+- Top 3 rules by flat-`any_of` hit count pre-fix, by actual process
+  (24h on one machine): `wifi_attack_tool` → spctl (8), GoogleUpdater
+  (6), Chrome Helper (4); `edr_remote_session_active` → xpcproxy (8),
+  GoogleUpdater (6); `gatekeeper_override` → spctl (8), GoogleUpdater
+  (6). All drop to zero hits on the new compiler output because the
+  intra-selection AND is restored.
+
 ## [1.3.10] — 2026-04-20
 
 Noise-reduction hotfix for a v1.3.9 false positive. Field testing

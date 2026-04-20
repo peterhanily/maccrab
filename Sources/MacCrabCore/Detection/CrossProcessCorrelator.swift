@@ -382,6 +382,23 @@ public actor CrossProcessCorrelator {
         let actions = Set(windowEvents.map(\.action))
         guard actions.count >= 2 else { return nil }
 
+        // Same homogeneity gates that evaluateNetworkChain uses: if every
+        // event in the chain comes from the same executable / app bundle /
+        // tool-version dir, it's a single vendor's worker fan-out — not
+        // cross-process attacker convergence. Catches the belt-and-braces
+        // case where v1.3.10's path filter misses a vendor dir (for
+        // example a new GoogleUpdater sub-path we haven't enumerated yet).
+        if allEventsShareExecutable(windowEvents) { return nil }
+        if allEventsShareAppBundle(windowEvents) { return nil }
+        if allEventsShareToolDirectory(windowEvents) { return nil }
+        if allEventsAreTrustedHelpers(windowEvents) { return nil }
+        // And a processName-based check: if every event shares the same
+        // processName, it's the same binary running multiple times even if
+        // its executable path looks different (e.g. GoogleUpdater forked
+        // with different argv[0] presentations). Log-style fan-out never
+        // crosses process identities.
+        if allEventsShareProcessName(windowEvents) { return nil }
+
         let severity = computeFileSeverity(events: windowEvents, actions: actions)
         let chain = buildChain(
             events: windowEvents,
@@ -492,6 +509,16 @@ public actor CrossProcessCorrelator {
     private func allEventsShareExecutable(_ events: [ChainEvent]) -> Bool {
         guard let first = events.first else { return false }
         return events.allSatisfy { $0.processPath == first.processPath }
+    }
+
+    /// True when every event's processName matches. Same binary running as
+    /// multiple workers emits identical processName even when processPath
+    /// can differ (e.g. GoogleUpdater exec'd as argv[0]=`GoogleUpdater` vs.
+    /// argv[0]=`/Library/.../GoogleUpdater.app/.../GoogleUpdater` look the
+    /// same to ps but compare unequal on processPath when one is a shim).
+    private func allEventsShareProcessName(_ events: [ChainEvent]) -> Bool {
+        guard let first = events.first, !first.processName.isEmpty else { return false }
+        return events.allSatisfy { $0.processName == first.processName }
     }
 
     /// True when every event's process lives under the same tool-version

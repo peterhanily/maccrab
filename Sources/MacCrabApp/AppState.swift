@@ -258,8 +258,7 @@ final class AppState: ObservableObject {
                 if overlay.contains(vm.id) { vm.suppressed = true }
                 return vm
             }
-            recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
-            totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+            refreshAlertBadges()
             // Sync cursor so the next incremental poll doesn't re-fetch these alerts
             // and insert them as unsuppressed duplicates.
             if let mostRecent = dashboardAlerts.first?.timestamp {
@@ -344,8 +343,7 @@ final class AppState: ObservableObject {
         if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
             dashboardAlerts[idx].suppressed = false
         }
-        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
-        totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+        refreshAlertBadges()
         // Best-effort DB write
         do {
             let store = try alertStore()
@@ -364,12 +362,31 @@ final class AppState: ObservableObject {
         if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
             dashboardAlerts[idx].suppressed = true
         }
-        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
-        totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+        refreshAlertBadges()
         // Best-effort DB write (fails silently on read-only DB)
         do {
             let store = try alertStore()
             try await store.suppress(alertId: alertId)
+        } catch {}
+    }
+
+    /// Bulk version of `suppressAlert`. Single authoritative-set update,
+    /// single `refreshAlertBadges()`, and a serialised DB loop. The batched
+    /// form exists so campaign / alert multi-select UIs don't produce N
+    /// badge flickers when dismissing 20 items.
+    func suppressAlerts(_ alertIds: Set<String>) async {
+        guard !alertIds.isEmpty else { return }
+        suppressedIDs.formUnion(alertIds)
+        saveSuppressedIDs()
+        for i in dashboardAlerts.indices where alertIds.contains(dashboardAlerts[i].id) {
+            dashboardAlerts[i].suppressed = true
+        }
+        refreshAlertBadges()
+        do {
+            let store = try alertStore()
+            for id in alertIds {
+                try? await store.suppress(alertId: id)
+            }
         } catch {}
     }
 
@@ -394,8 +411,7 @@ final class AppState: ObservableObject {
             }
         }
         saveSuppressedIDs()
-        recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
-        totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+        refreshAlertBadges()
     }
 
     /// Remove a suppression pattern.
@@ -407,6 +423,30 @@ final class AppState: ObservableObject {
     /// Check if an alert matches a suppression pattern.
     func isPatternSuppressed(_ alert: AlertViewModel) -> Bool {
         suppressionPatterns.contains { $0.ruleTitle == alert.ruleTitle && $0.processName == alert.processName }
+    }
+
+    /// Sidebar-count and "recent" list share a filter: unsuppressed, not in
+    /// the overlay, not pattern-suppressed, and NOT a campaign alert.
+    /// Campaigns ship as alerts with `ruleId` prefixed `maccrab.campaign.`
+    /// and have their own sidebar badge — counting them in both totals was
+    /// the v1.3.10 sidebar double-count bug.
+    private func visibleAlertsForBadges() -> [AlertViewModel] {
+        dashboardAlerts.filter {
+            !$0.suppressed
+            && !suppressedIDs.contains($0.id)
+            && !isPatternSuppressed($0)
+            && !$0.ruleId.hasPrefix("maccrab.campaign.")
+        }
+    }
+
+    /// Refresh `recentAlerts` (top 5 for Overview) and `totalAlerts` (sidebar
+    /// badge). Keep this as the single source of truth for those derived
+    /// fields so adding a new filter term (like the campaign-exclusion
+    /// above) only requires editing one place.
+    private func refreshAlertBadges() {
+        let visible = visibleAlertsForBadges()
+        recentAlerts = Array(visible.prefix(5))
+        totalAlerts = visible.count
     }
 
     private func saveSuppressPatterns() {
@@ -468,8 +508,7 @@ final class AppState: ObservableObject {
                 dashboardAlerts.insert(contentsOf: newViewModels, at: 0)
                 // Cap at 500
                 if dashboardAlerts.count > 500 { dashboardAlerts = Array(dashboardAlerts.prefix(500)) }
-                recentAlerts = Array(dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.prefix(5))
-                totalAlerts = dashboardAlerts.filter { !$0.suppressed && !suppressedIDs.contains($0.id) && !isPatternSuppressed($0) }.count
+                refreshAlertBadges()
                 lastAlertTimestamp = newViewModels.first?.timestamp ?? lastAlertTimestamp
 
                 // Trigger crab speech bubble for critical/high alerts

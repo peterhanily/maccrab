@@ -316,7 +316,7 @@ def parse_detection_block(detection: dict):
 
     # For complex rules, also produce a hierarchical condition tree.
     condition_tree = None
-    if _needs_condition_tree(ast):
+    if _needs_condition_tree(ast, sections):
         tree_predicates = []
         condition_tree = _ast_to_condition_tree(ast, sections, tree_predicates)
         # Use the tree's predicates instead — they have correct indices.
@@ -936,19 +936,31 @@ def _ast_to_condition_tree(node, sections: dict, predicates: list[dict]) -> dict
     return {"type": "and", "operands": []}
 
 
-def _needs_condition_tree(ast_node) -> bool:
+def _needs_condition_tree(ast_node, sections=None) -> bool:
     """
     Determine if an AST is complex enough to require a condition tree.
 
-    Simple cases (single ref, pure AND of refs/NOTs, pure OR of refs)
-    are handled fine by the flat condition format. We only emit trees for
-    rules that mix AND/OR/NOT in ways the flat format can't represent.
+    Simple cases (single ref, pure AND of refs/NOTs, pure OR of refs whose
+    referenced sections each produce exactly one predicate) are handled
+    fine by the flat condition format. We emit trees for rules that mix
+    AND/OR/NOT in ways the flat format can't represent.
+
+    **v1.3.11 fix**: A pure `sel_A or sel_B` previously returned False
+    here and was compiled as a flat `any_of`. That broke every rule whose
+    selections contained multiple field matches meant to AND together —
+    e.g. EDR rule with `selection_defender: Image|endswith: /mdatp` AND
+    `CommandLine|contains: live-response`. Flat `any_of` meant any process
+    whose commandline just contained "live-response" fired — or worse,
+    `CommandLine contains "connect"` matched every xpcproxy and every
+    "scan" / "-s" commandline triggered the Wi-Fi attack rule. If any ref
+    resolves to a multi-predicate section, force the tree path so the
+    intra-selection AND survives compilation.
     """
     if isinstance(ast_node, (_ASTRef, _ASTQuantifier)):
         return False
 
     if isinstance(ast_node, _ASTNot):
-        return _needs_condition_tree(ast_node.child)
+        return _needs_condition_tree(ast_node.child, sections)
 
     if isinstance(ast_node, _ASTBinOp):
         if ast_node.op == "and":
@@ -963,7 +975,10 @@ def _needs_condition_tree(ast_node) -> bool:
             return False
 
         if ast_node.op == "or":
-            # OR of simple refs is fine flat
+            # OR of simple refs USED to be fine flat; now we also check
+            # whether any referenced section has multiple predicates (i.e.
+            # multiple field/value pairs in the selection map). If so we
+            # need a tree to preserve intra-selection AND semantics.
             clauses = _collect_or_clauses(ast_node)
             for c in clauses:
                 if isinstance(c, _ASTBinOp) and c.op == "and":
@@ -972,6 +987,12 @@ def _needs_condition_tree(ast_node) -> bool:
                 if isinstance(c, _ASTNot):
                     # NOT inside OR needs care
                     return True
+                if sections is not None and isinstance(c, _ASTRef):
+                    names = _resolve_section_names(c.name, sections)
+                    for name in names:
+                        preds = _section_predicates(name, sections, negate=False)
+                        if len(preds) > 1:
+                            return True
             return False
 
     return False
@@ -1076,6 +1097,14 @@ def compile_rule(rule_data: dict, source_file: str):
     if falsepositives is None:
         falsepositives = []
 
+    # Sigma `status` → runtime `enabled` flag. `deprecated` rules still
+    # compile (so their id/title show up in the rule browser and existing
+    # suppressions tied to the id keep working), but they ship disabled so
+    # the engine skips them in the hot path. This lets us park rules whose
+    # detection logic is known-broken without having to delete the file.
+    status = (rule_data.get("status") or "experimental").strip().lower()
+    enabled = status != "deprecated"
+
     # Validate severity level.
     valid_levels = {"informational", "low", "medium", "high", "critical"}
     if level not in valid_levels:
@@ -1106,7 +1135,7 @@ def compile_rule(rule_data: dict, source_file: str):
         "predicates": predicates,
         "condition": condition_type,
         "falsepositives": falsepositives,
-        "enabled": True,
+        "enabled": enabled,
     }
 
     if condition_tree is not None:

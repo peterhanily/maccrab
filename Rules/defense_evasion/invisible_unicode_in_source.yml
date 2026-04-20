@@ -1,6 +1,16 @@
 title: Invisible Unicode Characters in Source Code File
 id: d1a2b3c4-0371-4000-a000-000000000371
-status: experimental
+# v1.3.11: disabled. The detection claims to match on zero-width / Unicode
+# tag characters inside file writes, but the selectors only check the
+# filename extension — there is no FileContent regex in the rule. Result:
+# every .md/.txt/.py/.js/.ts/.json/.yaml/.yml write by a non-Apple-signed
+# process fires this rule at medium, which in field testing produced 22
+# hits over 24h on one workstation (GoogleUpdater config writes, logd's
+# log rotation, logioptionsplus_agent, every developer touching source).
+# Rebuild this when the compiler supports `FileContent|matches` regex
+# against the actual Unicode code-point ranges promised in the
+# description. Until then: inactive.
+status: deprecated
 description: >
     Detects file writes to source code containing zero-width characters (U+200B-200D,
     U+FEFF, U+2060-2064) or Unicode tag characters (U+E0000-E007F). These can be

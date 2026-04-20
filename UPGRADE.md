@@ -67,6 +67,30 @@ For fleet deployments with UAMDM, a `.mobileconfig` with a
 `SystemExtensionPolicy` payload can pre-authorize the extension. A signed
 profile is planned for a future release; see the roadmap for status.
 
+### Manual DMG upgrade path (v1.3 → newer v1.3.x)
+
+If you installed via DMG and want to upgrade manually (no Homebrew, no
+Sparkle), the drag-n-drop path works:
+
+1. Mount the new DMG.
+2. Drag `MacCrab.app` onto `/Applications`. macOS will ask if you want
+   to replace the existing copy — click Replace.
+3. Launch the replaced app. `OSSystemExtensionRequest` fires on first
+   launch; because our team ID and bundle ID haven't changed, `sysextd`
+   treats this as an upgrade request and the
+   `SystemExtensionManager.actionForReplacingExtension` delegate returns
+   `.replace`. The new sysext version is installed and activated without
+   a new approval prompt in System Settings.
+4. Quit and relaunch MacCrab.app to let the new sysext take over event
+   collection. (The old sysext stays active until the new activation
+   completes, so there's no detection gap — but a single relaunch
+   cleanly hands over.)
+
+**Recommended over manual drag:** use *Check for Updates…* from the
+status-bar menu (Sparkle), or `brew upgrade --cask maccrab`. Both
+coordinate quit + replace + relaunch so there's zero visible downtime
+and zero chance of the old sysext lingering alongside the new one.
+
 ### What does NOT change
 
 - **Your data.** Events, alerts, rules, and suppressions live at the same
