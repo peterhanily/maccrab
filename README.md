@@ -2,8 +2,9 @@
 
 **Real-time threat detection for macOS -- no cloud, no SIEM, no telemetry.**
 
+[![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-597%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-600%20passing-brightgreen)]()
 [![Version](https://img.shields.io/badge/version-1.4.2-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -11,9 +12,18 @@
 [![Rules](https://img.shields.io/badge/detection%20rules-380-orange)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
+> [!WARNING]
+> **Alpha software under active development.** MacCrab ships in public
+> alpha and is iterating rapidly on detection quality, UX, and the
+> release pipeline. Expect false positives, occasional rule changes,
+> and frequent updates. Run it on a Mac you're comfortable debugging
+> on. Issue reports and field data are very welcome — they're driving
+> most of the current release cadence. See
+> [CHANGELOG.md](CHANGELOG.md) for what's shipped recently.
+
 MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, 380 Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS.
 
-**Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine.
+**Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine **and is OK running alpha software.**
 
 **Releases:** Signed, notarized, auto-updating builds ship via Sparkle through [maccrab.com/appcast.xml](https://maccrab.com/appcast.xml). See [CHANGELOG.md](CHANGELOG.md) for the release history.
 
