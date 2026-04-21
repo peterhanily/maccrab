@@ -66,8 +66,15 @@ PUB_DATE=$(LC_TIME=en_US.UTF-8 date -u '+%a, %d %b %Y %H:%M:%S +0000')
 DMG_NAME=$(basename "$DMG")
 DOWNLOAD_URL="${DOWNLOAD_BASE}/v${VERSION}/${DMG_NAME}"
 
-# Release notes: prefer an explicit markdown file, otherwise cut the matching
-# section from CHANGELOG.md based on the `## [X.Y.Z]` header pattern.
+# Release notes: prefer explicit --release-notes-md; otherwise the
+# convention is a polished `RELEASE_NOTES/v{VERSION}.md`; as a last
+# resort, cut the matching section out of CHANGELOG.md. The CHANGELOG
+# fallback is information-dense (good for history, noisy in a Sparkle
+# update sheet) so always prefer the RELEASE_NOTES file when it exists.
+if [[ -z "$RELEASE_NOTES_MD" && -f "RELEASE_NOTES/v${VERSION}.md" ]]; then
+    RELEASE_NOTES_MD="RELEASE_NOTES/v${VERSION}.md"
+fi
+
 if [[ -z "$RELEASE_NOTES_MD" ]]; then
     if [[ -f "CHANGELOG.md" ]]; then
         NOTES=$(awk -v v="$VERSION" '

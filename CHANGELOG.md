@@ -3,6 +3,37 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.12] — 2026-04-21
+
+Hotfix: suppressions reset after upgrade.
+
+### Fixed
+
+- **Dashboard UI state no longer lives in `dataDir`.** `saveSuppressedIDs`,
+  `loadSuppressedIDs`, `saveSuppressPatterns`, `loadSuppressPatterns`,
+  and the LLM-config-detected read in `AppState.swift` all went through
+  `dataDir`, which resolves to either `~/Library/Application Support/MacCrab/`
+  (user home, dashboard-writable) or `/Library/Application Support/MacCrab/`
+  (system, root-only, sysext-writable) depending on which `events.db` was
+  most recently modified. After each sysext upgrade the system DB's
+  modification time jumps, `dataDir` flips to the system path, and every
+  `try? json.write(...)` from the non-root dashboard silently fails.
+  Next app launch reads from the flipped-to directory, finds no
+  suppressions file, and wipes the in-memory set. All previously dismissed
+  alerts reappear on every upgrade. Anchored UI state to a new
+  `uiStateDir` that is always the user-home MacCrab subdir; added a
+  legacy-path fallback in the read path so existing users migrate
+  automatically on first load.
+
+### Added
+
+- **`RELEASE_NOTES/v{VERSION}.md` convention.** Polished user-facing
+  release notes now live in a dedicated directory and are the default
+  source for Sparkle update sheets and GitHub release descriptions.
+  The CHANGELOG remains the authoritative developer history;
+  `scripts/generate-appcast-entry.sh` prefers the polished file over
+  the CHANGELOG extract when it exists.
+
 ## [1.3.11] — 2026-04-21
 
 Major noise-reduction release driven by field data from a real workstation:

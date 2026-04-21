@@ -216,8 +216,10 @@ final class AppState: ObservableObject {
         var detectedLLMProvider = ProcessInfo.processInfo.environment["MACCRAB_LLM_PROVIDER"] ?? ""
         var llmConfigured = !detectedLLMProvider.isEmpty
         if !llmConfigured {
-            let llmConfigPath = dataDir + "/llm_config.json"
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: llmConfigPath)),
+            // AIAnalysisView/SettingsView write llm_config.json to user-home;
+            // read from the same place, not dataDir (which may flip to the
+            // system dir after a sysext upgrade — see uiStateDir comment).
+            if let data = readUIState("llm_config.json"),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let enabled = json["enabled"] as? Bool, enabled,
                let provider = json["provider"] as? String {
@@ -449,16 +451,64 @@ final class AppState: ObservableObject {
         totalAlerts = visible.count
     }
 
+    // MARK: - UI-state storage
+    //
+    // v1.3.12 bug fix: dashboard state (suppression IDs, suppression
+    // patterns) used to live inside `dataDir`, which resolves to either
+    // the user-home MacCrab dir or the system-wide one depending on
+    // which `events.db` was modified most recently. After every
+    // upgrade the sysext writes fresh events to the system DB, flipping
+    // `dataDir` to `/Library/Application Support/MacCrab/` — a
+    // directory the non-root dashboard can't write to. Result:
+    // `try? json.write(...)` silently fails, the next launch's
+    // `loadSuppressedIDs()` reads from the new empty system location,
+    // and every user suppression disappears.
+    //
+    // Fix: anchor UI-state writes to the stable user-home path. Dashboard
+    // state belongs to the user, not to the detection engine.
+    //
+    // Migration: when loading, fall back to the old dataDir copy if the
+    // user-home copy doesn't exist. First successful save under the new
+    // path makes the fallback unnecessary going forward.
+
+    private var uiStateDir: String {
+        let home = NSHomeDirectory()
+        let dir = "\(home)/Library/Application Support/MacCrab"
+        try? FileManager.default.createDirectory(
+            atPath: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return dir
+    }
+
+    /// Read a UI-state JSON blob, preferring `uiStateDir` with a
+    /// fallback to the legacy `dataDir` location so pre-v1.3.12 users
+    /// don't lose their suppressions on upgrade.
+    private func readUIState(_ filename: String) -> Data? {
+        let newPath = "\(uiStateDir)/\(filename)"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: newPath)) {
+            return data
+        }
+        let oldPath = "\(dataDir)/\(filename)"
+        return try? Data(contentsOf: URL(fileURLWithPath: oldPath))
+    }
+
+    /// Write a UI-state JSON blob under `uiStateDir`.
+    private func writeUIState(_ filename: String, data: Data) {
+        let path = "\(uiStateDir)/\(filename)"
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+
     private func saveSuppressPatterns() {
         let data = suppressionPatterns.map { ["ruleTitle": $0.ruleTitle, "processName": $0.processName] }
         if let json = try? JSONSerialization.data(withJSONObject: data) {
-            try? json.write(to: URL(fileURLWithPath: dataDir + "/ui_suppressions.json"))
+            writeUIState("ui_suppressions.json", data: json)
         }
     }
 
     func loadSuppressPatterns() {
-        let path = dataDir + "/ui_suppressions.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+        guard let data = readUIState("ui_suppressions.json"),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else { return }
         suppressionPatterns = arr.compactMap { dict in
             guard let r = dict["ruleTitle"], let p = dict["processName"] else { return nil }
@@ -470,14 +520,13 @@ final class AppState: ObservableObject {
     private func saveSuppressedIDs() {
         let arr = Array(suppressedIDs)
         if let json = try? JSONSerialization.data(withJSONObject: arr) {
-            try? json.write(to: URL(fileURLWithPath: dataDir + "/ui_suppressed_ids.json"))
+            writeUIState("ui_suppressed_ids.json", data: json)
         }
     }
 
     /// Load previously persisted `suppressedIDs` on startup.
     func loadSuppressedIDs() {
-        let path = dataDir + "/ui_suppressed_ids.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+        guard let data = readUIState("ui_suppressed_ids.json"),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else { return }
         suppressedIDs = Set(arr)
     }
