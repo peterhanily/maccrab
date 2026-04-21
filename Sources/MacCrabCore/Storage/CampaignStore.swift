@@ -176,6 +176,8 @@ public actor CampaignStore {
             Self.exec(handle, "PRAGMA journal_mode = WAL")
             Self.exec(handle, "PRAGMA synchronous = NORMAL")
         }
+        // v1.4.4 — see EventStore.swift for the busy_timeout rationale.
+        Self.exec(handle, "PRAGMA busy_timeout = 5000")
         Self.exec(handle, "PRAGMA foreign_keys = ON")
 
         let schemaSQLs = [

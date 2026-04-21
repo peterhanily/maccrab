@@ -3,6 +3,28 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.4] — 2026-04-21
+
+Same-day hotfix for v1.4.3 — a user on v1.4.3 immediately saw the new
+storage-error banner fire on a single transient `SQLITE_BUSY` during
+WAL checkpoint, which is too noisy. Two changes close the gap.
+
+### Fixed
+
+- **`PRAGMA busy_timeout = 5000`** added in `EventStore.openDatabase`,
+  `AlertStore.openDatabase`, `CampaignStore.openDatabase`. Default was
+  0 (no retry), so any transient lock contention — e.g., a background
+  WAL autocheckpoint briefly holding the write lock while an event
+  insert queued — returned `SQLITE_BUSY` immediately. With 5s the
+  insert waits for the checkpoint to complete and proceeds cleanly.
+  Standard SQLite multi-writer best practice.
+- **Storage-error banner threshold tuned.** New
+  `AppState.hasConcerningStorageError(snap)` replaces the v1.4.3
+  `hasRecentStorageError`. Requires ≥5 total write failures AND the
+  most recent within 120s (was: any failure within 600s). Keeps the
+  banner a signal for real persistent issues — disk full,
+  permissions, corruption — without firing on single transients.
+
 ## [1.4.3] — 2026-04-21
 
 Wave A of the 1.4.x quality pass — "fail loud, not silent". Five

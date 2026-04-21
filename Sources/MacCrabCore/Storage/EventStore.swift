@@ -120,6 +120,13 @@ public actor EventStore {
             Self.exec(handle, "PRAGMA cache_size = -64000")  // 64MB cache (negative = KB)
             Self.exec(handle, "PRAGMA mmap_size = 268435456")  // 256MB memory-mapped I/O
         }
+        // v1.4.4: `busy_timeout = 5000` tells SQLite to retry a busy-lock
+        // for up to 5 seconds instead of failing immediately with
+        // SQLITE_BUSY. Default is 0 (no retry). Fixes the class of
+        // transient "database is locked" errors v1.4.3's fail-loud
+        // banner surfaced — WAL autocheckpoint briefly holds the write
+        // lock, and without a timeout the next insert fails.
+        Self.exec(handle, "PRAGMA busy_timeout = 5000")
         Self.exec(handle, "PRAGMA foreign_keys = ON")
 
         // Create schema

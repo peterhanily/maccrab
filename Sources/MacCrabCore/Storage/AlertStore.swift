@@ -157,10 +157,12 @@ public actor AlertStore {
         if !isReadOnly {
             Self.exec(handle, "PRAGMA journal_mode = WAL")
             Self.exec(handle, "PRAGMA synchronous = NORMAL")
-            Self.exec(handle, "PRAGMA wal_autocheckpoint = 10000")  // Checkpoint every 10K pages (~40MB) instead of default 1K
-            Self.exec(handle, "PRAGMA cache_size = -64000")  // 64MB cache (negative = KB)
-            Self.exec(handle, "PRAGMA mmap_size = 268435456")  // 256MB memory-mapped I/O
+            Self.exec(handle, "PRAGMA wal_autocheckpoint = 10000")
+            Self.exec(handle, "PRAGMA cache_size = -64000")
+            Self.exec(handle, "PRAGMA mmap_size = 268435456")
         }
+        // v1.4.4 — see EventStore.swift for the busy_timeout rationale.
+        Self.exec(handle, "PRAGMA busy_timeout = 5000")
         Self.exec(handle, "PRAGMA foreign_keys = ON")
 
         // Create schema

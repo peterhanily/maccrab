@@ -162,7 +162,7 @@ struct OverviewDashboard: View {
                     // recent error text so the user can act without
                     // digging through `sudo log show`.
                     if let snap = appState.storageErrors,
-                       snap.lastErrorAt.map({ Date().timeIntervalSince($0) < 600 }) == true {
+                       appState.hasConcerningStorageError(snap) {
                         DetectionHealthBanner(
                             severity: .critical,
                             title: String(

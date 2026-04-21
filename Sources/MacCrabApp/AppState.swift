@@ -88,19 +88,25 @@ final class AppState: ObservableObject {
     /// change instead of sweeping every UI surface.
     var isProtectionDegraded: Bool {
         if isConnected && rulesLoaded == 0 { return true }
-        if let snap = storageErrors, hasRecentStorageError(snap) { return true }
+        if let snap = storageErrors, hasConcerningStorageError(snap) { return true }
         if let hb = heartbeat, hb.isStale { return true }
         if ruleTamper != nil { return true }
         return false
     }
 
-    /// True if the snapshot shows a storage error in the last 10 min.
-    /// Using a recency window (rather than absolute count) avoids
-    /// a stale one-off failure from a week ago keeping the degraded
-    /// banner up forever.
-    private func hasRecentStorageError(_ s: StorageErrorSnapshot) -> Bool {
+    /// True if storage errors are accumulating — not just a single
+    /// transient failure. v1.4.3 was too sensitive: one event insert
+    /// returning SQLITE_BUSY (a routine consequence of WAL
+    /// checkpoint contention, now fixed by busy_timeout=5000 in
+    /// v1.4.4) fired the red banner. Require both: the most recent
+    /// error within 2 minutes AND ≥ `storageErrorBannerThreshold`
+    /// total failures. Below the threshold, single transients are
+    /// logged but don't nag the user.
+    private static let storageErrorBannerThreshold = 5
+    func hasConcerningStorageError(_ s: StorageErrorSnapshot) -> Bool {
         guard let at = s.lastErrorAt else { return false }
-        return Date().timeIntervalSince(at) < 600
+        guard Date().timeIntervalSince(at) < 120 else { return false }
+        return (s.alertInsertErrors + s.eventInsertErrors) >= Self.storageErrorBannerThreshold
     }
 
     /// Read the storage-errors snapshot file that the sysext writes.
