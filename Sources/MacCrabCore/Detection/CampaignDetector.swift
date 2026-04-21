@@ -566,8 +566,17 @@ public actor CampaignDetector {
     private func checkLateralMovement() -> Campaign? {
         // Use the incremental user-ID index — O(1), not O(n).
         guard userIdCounts.count >= 2 else { return nil }
+
+        // Require at least one actual lateral-movement alert. Previously any
+        // two user contexts (root daemon + interactive user) would fire this,
+        // which produced a constant false "Possible Lateral Movement" on every
+        // developer workstation. A real lateral-movement campaign has at
+        // minimum one ssh / vnc / ard / remote-exec rule hit.
+        let lateralAlerts = recentAlerts.filter { $0.tactics.contains("lateral_movement") }
+        guard !lateralAlerts.isEmpty else { return nil }
+
         let userIds = Set(userIdCounts.keys)
-        let description = "Alerts from \(userIds.count) user contexts (\(userIds.sorted().joined(separator: ", "))) within \(Int(campaignWindow))s — possible privilege escalation or lateral movement"
+        let description = "Lateral-movement alert observed with activity across \(userIds.count) user contexts (\(userIds.sorted().joined(separator: ", "))) within \(Int(campaignWindow))s"
         return Campaign(
             id: makeCampaignId(),
             type: .lateralMovement,

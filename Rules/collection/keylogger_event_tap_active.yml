@@ -30,4 +30,4 @@ detection:
 falsepositives:
     - Legitimate accessibility applications (screen readers, input method editors)
     - Karabiner-Elements keyboard customization tool
-level: critical
+level: high

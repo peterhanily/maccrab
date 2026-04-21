@@ -44,4 +44,4 @@ falsepositives:
     - Developer scripts retrieving signing certificates for Xcode builds
     - CI/CD systems accessing code signing credentials
     - Enterprise IT tools rotating or auditing stored credentials
-level: critical
+level: high

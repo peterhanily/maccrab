@@ -43,4 +43,4 @@ falsepositives:
     - Remote admin tooling run manually by an authorized operator
     - Automation over SSH that legitimately rotates or reads credentials
     - MDM / fleet-management agents collecting credential inventory
-level: critical
+level: high

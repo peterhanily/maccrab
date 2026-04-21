@@ -1,6 +1,6 @@
 title: Trojan Source Bidirectional Override in Source Code
 id: d1a2b3c4-0370-4000-a000-000000000370
-status: experimental
+status: deprecated
 description: >
     Detects source code files containing Unicode bidirectional override characters
     (U+202A-202E, U+2066-2069) which can be used in Trojan Source attacks to make

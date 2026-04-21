@@ -29,4 +29,4 @@ detection:
     condition: selection_download and selection_pipe_exec
 falsepositives:
     - Legitimate installation scripts (Homebrew, rustup, nvm)
-level: critical
+level: high

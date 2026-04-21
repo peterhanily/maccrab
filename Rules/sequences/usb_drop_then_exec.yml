@@ -24,6 +24,7 @@ tags:
 type: sequence
 window: 300s
 ordered: true
+correlation: file.path
 
 steps:
     - id: usb_drop

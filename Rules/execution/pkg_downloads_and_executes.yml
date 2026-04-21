@@ -45,4 +45,4 @@ detection:
     condition: selection_parent and (selection_download or selection_execute)
 falsepositives:
     - Some legitimate installers download components during install
-level: critical
+level: high

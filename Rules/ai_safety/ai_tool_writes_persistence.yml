@@ -23,4 +23,4 @@ detection:
     condition: selection_la or selection_ld or selection_cron
 falsepositives:
     - Legitimate service installation at user's explicit request
-level: critical
+level: high

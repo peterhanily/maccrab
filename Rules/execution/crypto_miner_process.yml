@@ -48,4 +48,4 @@ detection:
 falsepositives:
     - Legitimate cryptocurrency mining by the system owner
     - Security research and testing
-level: critical
+level: high

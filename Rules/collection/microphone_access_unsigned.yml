@@ -25,4 +25,4 @@ detection:
 falsepositives:
     - Locally compiled audio recording or conferencing tools
     - Developer testing of audio applications
-level: critical
+level: high

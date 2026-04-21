@@ -41,4 +41,4 @@ detection:
 falsepositives:
     - Directory service administration tools
     - Backup software reading system databases
-level: critical
+level: high

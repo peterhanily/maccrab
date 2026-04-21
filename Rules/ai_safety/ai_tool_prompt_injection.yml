@@ -29,4 +29,4 @@ detection:
 falsepositives:
     - Security testing and red teaming
     - Prompt injection research
-level: critical
+level: high

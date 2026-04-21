@@ -5,12 +5,60 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [1.4.5] — 2026-04-21
 
-Wave B of the 1.4.x quality pass. Five noise sources observed on a
-real MacBook Pro developer workstation running v1.4.4 get shut down
-at their source.
+Waves B and C of the 1.4.x quality pass, shipped together. Wave B
+addresses noise sources observed on a real MacBook Pro developer
+workstation running v1.4.4. Wave C is a noise-severity rebalance
+and a set of correctness fixes across the rule pack, sequence
+engine, and UI-state persistence.
+
+### Changed
+
+- **Severity recalibration sweep.** 16 single-event rules moved
+  from `level: critical` to `level: high` because their current
+  selectors produce too many false positives on a developer
+  workstation for a pager-level signal. Still actionable at HIGH,
+  still aggregatable into a campaign. Rules affected:
+  `memory_dump_credential_tools`, `ai_tool_downloads_script`,
+  `crypto_miner_process`, `wifi_attack_tool`, `keychain_cli_extract`,
+  `git_credential_helper_abuse`, `sensitive_file_read_untrusted`,
+  `microphone_access_unsigned`, `pkg_downloads_and_executes`,
+  `ai_tool_prompt_injection`, `rosetta_binary_from_downloads`,
+  `endpoint_security_slot_exhaustion`, `shadow_hash_access`,
+  `ssh_launched_security_dump`, `ai_tool_writes_persistence`,
+  `keylogger_event_tap_active`. Total critical-level rules drops
+  from 81 → 65.
+- **`trojan_source_bidi_code.yml` deprecated.** The rule fires on
+  any source-file write (`.py`, `.js`, …) without actually
+  inspecting content for Unicode bidi overrides — no `FileContent`
+  field reference. Status flipped to `deprecated`; compiler marks
+  the rule `enabled: false` so it keeps its id/suppressions but
+  the engine skips it. File kept for future reimplementation once
+  the collector exposes content.
+- **Four sequence rules now declare correlation explicitly.**
+  `cron_install_then_exec`, `download_then_cryptominer`,
+  `ransomware_kill_chain` get `correlation: process.lineage`.
+  `usb_drop_then_exec` gets `correlation: file.path`. Rule-level
+  correlation for `process.lineage` is loose (accepts all,
+  precision comes from step-level `processRelation`); the
+  declaration documents intent and locks the contract so future
+  rule-engine tightening applies cleanly.
 
 ### Fixed
 
+- **`CampaignDetector.checkLateralMovement` requires a real
+  lateral-movement alert.** Previous trigger was ≥2 user contexts
+  in the campaign window, which fires on every dev workstation
+  (root daemon alert + user process alert = 2 user contexts). Now
+  requires at least one contributing alert tagged with
+  `lateral_movement` tactic *and* ≥2 user contexts. Real SSH /
+  VNC / ARD launches across users still fire; idle dual-context
+  noise stops.
+- **`AppState.writeUIState` uses temp + rename.** The UI state
+  writer (suppressions, suppressed IDs) previously wrote in place
+  — a crash between open and close left a half-written JSON file
+  that silently wiped the user's suppressions on next read. Now
+  writes to `<filename>.tmp` and renames into place, matching the
+  pattern DaemonTimers already uses for `heartbeat.json`.
 - **`PowerAnomalyDetector.knownLegitimate` expanded.** Added
   `useractivityd`, `appleh13camerad`, `applecamerad`, `Signal`,
   `nsurlsessiond`, `AssetCacheLocatorService`, `AssetCache`,

@@ -24,6 +24,7 @@ tags:
 type: sequence
 window: 600s
 ordered: true
+correlation: process.lineage
 
 steps:
     - id: initial_exec

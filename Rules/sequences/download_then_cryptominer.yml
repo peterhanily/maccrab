@@ -21,6 +21,7 @@ tags:
 type: sequence
 window: 300s
 ordered: true
+correlation: process.lineage
 
 steps:
     - id: download

@@ -37,4 +37,4 @@ falsepositives:
     - MDM agents reading user account configuration
     - Legitimate directory service management tools
     - Account provisioning scripts during user onboarding
-level: critical
+level: high

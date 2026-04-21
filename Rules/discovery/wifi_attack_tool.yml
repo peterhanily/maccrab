@@ -60,4 +60,4 @@ detection:
 falsepositives:
     - Network security auditing (authorized penetration testing)
     - Wi-Fi troubleshooting by IT staff
-level: critical
+level: high

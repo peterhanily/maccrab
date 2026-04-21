@@ -35,4 +35,4 @@ detection:
 falsepositives:
     - Endpoint security products initializing their ES clients
     - Security research tools
-level: critical
+level: high

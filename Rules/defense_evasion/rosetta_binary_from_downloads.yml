@@ -33,4 +33,4 @@ detection:
     condition: selection_arch and selection_path and not filter_signed
 falsepositives:
     - Legitimate x86 installers downloaded for migration
-level: critical
+level: high

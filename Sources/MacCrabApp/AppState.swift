@@ -729,13 +729,25 @@ final class AppState: ObservableObject {
         return nil
     }
 
-    /// Write a UI-state JSON blob under `uiStateDir`.
+    /// Write a UI-state JSON blob under `uiStateDir` via temp + rename so a
+    /// crash between calls cannot leave a half-written file that the next
+    /// readback would fail to decode (silently wiping user suppressions).
     private func writeUIState(_ filename: String, data: Data) {
         let path = "\(uiStateDir)/\(filename)"
+        let tmp = path + ".tmp"
         do {
-            try data.write(to: URL(fileURLWithPath: path))
+            try data.write(to: URL(fileURLWithPath: tmp))
+            // moveItem fails if the destination exists — remove first on the
+            // second+ write. Not atomic with respect to a crash between
+            // remove and rename, but the temp file remains and the next
+            // write recovers cleanly.
+            if FileManager.default.fileExists(atPath: path) {
+                try FileManager.default.removeItem(atPath: path)
+            }
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
             Self.uiStateLogger.info("Wrote \(filename, privacy: .public) (\(data.count) bytes) to \(path, privacy: .public)")
         } catch {
+            try? FileManager.default.removeItem(atPath: tmp)
             Self.uiStateLogger.error("Failed to write \(filename, privacy: .public) to \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }

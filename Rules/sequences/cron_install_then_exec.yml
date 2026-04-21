@@ -21,6 +21,7 @@ tags:
 type: sequence
 window: 120s
 ordered: true
+correlation: process.lineage
 
 steps:
     - id: cron_write
