@@ -122,9 +122,27 @@ public actor CrossProcessCorrelator {
     private static let ignoredPathSuffixes: [String] = [
         ".log",
         ".log.gz",
+        ".log.bz2",
         ".crash",
         ".ips",
     ]
+
+    /// Numeric-suffix rotated logs never form an attack chain. newsyslog's
+    /// rotation emits `setmode → setowner → close_modified → unlink` across
+    /// `airportd` / `bzip2` / `newsyslog` on paths like `wifi.log.0`,
+    /// `system.log.1`, and the cross-process correlator converged on the
+    /// tuple. Strip trailing `.gz`/`.bz2`, then if the file is `<name>.log.N`
+    /// where N is all digits, treat it as rotated.
+    private static func hasRotatedLogSuffix(_ path: String) -> Bool {
+        var stem = path
+        for ext in [".gz", ".bz2"] where stem.hasSuffix(ext) {
+            stem.removeLast(ext.count)
+        }
+        guard let lastDot = stem.lastIndex(of: ".") else { return false }
+        let tail = stem[stem.index(after: lastDot)...]
+        guard !tail.isEmpty, tail.allSatisfy({ $0.isNumber }) else { return false }
+        return stem[..<lastDot].hasSuffix(".log")
+    }
 
     /// Path substrings that mark a location as vendor-internal or
     /// system-cache. These paths see multi-process writes constantly and
@@ -208,6 +226,11 @@ public actor CrossProcessCorrelator {
         "/opt/homebrew/Cellar/",
         "/usr/local/Homebrew/",                     // legacy Intel brew
         "/usr/local/Cellar/",
+        // System log rotation. newsyslog spawns airportd, bzip2, and touches
+        // files here as a matter of course — the three-process chain across
+        // /private/var/log/wifi.log.0 etc. is not attacker convergence.
+        "/private/var/log/",
+        "/var/log/",
     ]
 
     /// Network destinations that are never interesting.
@@ -778,6 +801,7 @@ public actor CrossProcessCorrelator {
         for sub in Self.ignoredPathSubstrings {
             if path.contains(sub) { return true }
         }
+        if Self.hasRotatedLogSuffix(path) { return true }
         return false
     }
 

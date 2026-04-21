@@ -3,6 +3,42 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.6] — 2026-04-22
+
+Same-day FP hotfix after v1.4.5 landed. Six false positives
+observed on a real MacBook Pro — all six closed. No new
+detection added; each change removes one specific FP class.
+
+### Fixed
+
+- **`credential_theft_exfil.yml` no longer fires on Apple system
+  daemons.** Added step-level `filter_apple` (SignerType=apple)
+  and `filter_system_path` to the `cred_read` step. Previously
+  `networkserviceproxy` (Apple-signed, `/usr/libexec/`) was
+  firing Critical on legitimate cred-path reads followed by the
+  daemon's normal network activity.
+- **`CrossProcessCorrelator` ignores rotated system logs.**
+  New `hasRotatedLogSuffix` helper recognises `*.log.N`,
+  `*.log.N.gz`, `*.log.N.bz2`. `/private/var/log/` and
+  `/var/log/` added to `ignoredPathSubstrings`. `.log.bz2`
+  added alongside `.log.gz`. Fixes the 3-process chain on
+  `newsyslog` rotating `wifi.log.0`.
+- **Apple VID 0x5AC USB events suppressed entirely for
+  non-mass-storage.** Built-in keyboard, trackpad, camera,
+  touchbar, T2 churn on every sleep/wake — filtered upstream
+  of the rate limiter. Mass storage still surfaces regardless
+  of vendor.
+- **`csrutil_status_check.yml` adds `filter_terminal` step.**
+  Previously filtered only `ParentImage|startswith /System/`;
+  shell-parent csrutil from Terminal now suppressed.
+- **`system_enumeration_burst.yml` adds `filter_terminal`
+  step.** Covers shell-launched `whoami` / `uname` / `sw_vers`
+  / `ifconfig` / `launchctl` from Terminal, which the
+  `SignerType apple AND /System/ parent` filter missed.
+- **`process_listing_by_unsigned.yml` filter_terminal includes
+  shell basenames.** Added bash / zsh / sh / fish / dash
+  alongside the existing Terminal.app bundle list.
+
 ## [1.4.5] — 2026-04-21
 
 Waves B and C of the 1.4.x quality pass, shipped together. Wave B

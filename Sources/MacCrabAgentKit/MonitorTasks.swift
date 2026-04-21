@@ -163,6 +163,11 @@ enum MonitorTasks {
                 if usbEvent.isMassStorage {
                     severity = .high
                 } else {
+                    // Apple VID 0x5ac = built-in keyboard, trackpad, camera,
+                    // touchbar, T2 chip, FaceTime HD. These churn on every
+                    // sleep/wake and are never exfil signal — suppress
+                    // entirely rather than surfacing the first event per day.
+                    if usbEvent.vendorId == 0x5ac { continue }
                     severity = .informational
                     // Only rate-limit non-mass-storage. Mass-storage
                     // connect/disconnect always surfaces — every event

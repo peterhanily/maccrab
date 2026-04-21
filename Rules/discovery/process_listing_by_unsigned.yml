@@ -23,6 +23,11 @@ detection:
             - 'adHoc'
     filter_terminal:
         ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
             - '/Terminal'
             - '/iTerm2'
             - '/Alacritty'
