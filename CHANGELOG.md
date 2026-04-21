@@ -3,6 +3,67 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] — 2026-04-21
+
+Wave A of the 1.4.x quality pass — "fail loud, not silent". Five
+protection-guarantee failure modes where MacCrab looked fine while
+not actually protecting the user get made visible: zero-rules-loaded,
+sysext crashed/hung, storage writes failing, sysext silently replaced
+by a no-op, rules tampered post-install.
+
+### Added
+
+- **`DetectionHealthBanner`** (`Sources/MacCrabApp/Views/OverviewDashboard.swift`)
+  — reusable critical/warning banner shared by four new protection-health
+  states. Keeps the Overview from accumulating bespoke one-off banners
+  when new health signals land.
+- **`AppState.isProtectionDegraded`** aggregates health signals. The
+  statusbar crab flips between `🦀` (healthy) and `⚠️🦀` (degraded)
+  via a 5s-cadence timer in AppDelegate.
+- **Heartbeat timer in sysext** (`DaemonTimers.swift`). Writes
+  `/Library/Application Support/MacCrab/heartbeat.json` every 30s
+  via a temp+rename pattern so readers never catch a half-written
+  file. Payload: written_at, uptime, events/alerts counters.
+- **`refreshHeartbeat`, `refreshStorageHealth`, `refreshRuleTamper`**
+  in `AppState.refresh()`. Three sysext-written JSON snapshots
+  polled every 10s.
+- **Watchdog callback** wired from MacCrabApp.onAppear →
+  `AppState.sysextWatchdogActivate`. When heartbeat has been stale
+  ≥120s and we haven't retried in the last 5min, AppState calls
+  `sysextManager.activate()` to respawn via OSSystemExtensionRequest.
+  Idempotent; cooldowned.
+- **Rule-manifest SHA-256 verification** in `RuleBundleInstaller`.
+  `build-release.sh` now generates `manifest.json` listing SHA-256
+  of every compiled rule. `verifyManifest(at:)` runs on both the
+  bundled and installed trees on every launch; mismatch → refuse to
+  sync (bundled tampered) or auto-resync (installed tampered) plus
+  a `rule_tamper.json` snapshot the dashboard polls.
+- **Fail-loud banners** surface all four signals on Overview:
+  zero-rules, stale heartbeat, storage errors, rule tamper. Each
+  with actionable body text and an appropriate SF Symbol icon.
+
+### Changed
+
+- **`StorageErrorTracker.writeSnapshot()`** persists every storage
+  failure to `/Library/Application Support/MacCrab/storage_errors.json`.
+  Before v1.4.3 these only hit os_log, invisible to anyone not
+  running `sudo log show`.
+- **`DaemonTimers.Handles`** gains `heartbeatTimer: DispatchSourceTimer`.
+  Seven periodic timers total now (was six).
+
+### Developer notes
+
+- `scripts/build-release.sh` post-`compile_rules` step emits
+  `compiled_rules/manifest.json` with SHA-256 hashes. Every release
+  DMG from now forward will ship a manifest; pre-v1.4.3 bundles
+  without one are accepted by `verifyManifest` to preserve upgrade
+  paths.
+- Three new snapshot files to be aware of under
+  `/Library/Application Support/MacCrab/`: `heartbeat.json`,
+  `storage_errors.json`, `rule_tamper.json`. All sysext-written, all
+  user-readable. Safe to delete on support calls — they're
+  regenerated on the next tick.
+
 ## [1.4.2] — 2026-04-21
 
 Fixes the update-channel gap that prevented v1.3.11-v1.4.1 rule

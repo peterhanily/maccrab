@@ -21,6 +21,166 @@ final class AppState: ObservableObject {
     @Published var rulesLoaded: Int = 0
     @Published var totalAlerts: Int = 0
 
+    // MARK: Health signals (v1.4.3 "fail loud" surfaces)
+
+    /// Snapshot of sysext-side storage errors, written by
+    /// `StorageErrorTracker.writeSnapshot()` to
+    /// `/Library/Application Support/MacCrab/storage_errors.json` and
+    /// polled by `refreshStorageHealth()`. Nil when no errors have
+    /// been recorded yet.
+    struct StorageErrorSnapshot {
+        var alertInsertErrors: Int
+        var eventInsertErrors: Int
+        var lastErrorMessage: String
+        var lastErrorKind: String      // "alert_insert" | "event_insert"
+        var lastErrorAt: Date?
+    }
+    @Published var storageErrors: StorageErrorSnapshot?
+
+    /// Snapshot of sysext heartbeat. Sysext writes this every 30s via
+    /// the heartbeatTimer. Dashboard considers it "stale" (detection
+    /// silent) if age exceeds `heartbeatStaleThreshold`.
+    struct HeartbeatSnapshot {
+        var writtenAt: Date
+        var uptimeSeconds: Int
+        var eventsProcessed: UInt64
+        var alertsEmitted: UInt64
+
+        /// Ages past this are considered stale → detection engine is
+        /// either hung, crashed, or replaced by a silent no-op. 120s
+        /// is ~4× the 30s write cadence: tolerates one missed tick and
+        /// common IO hiccups without false-positive banner.
+        static let staleThreshold: TimeInterval = 120
+        var isStale: Bool { Date().timeIntervalSince(writtenAt) > Self.staleThreshold }
+    }
+    @Published var heartbeat: HeartbeatSnapshot?
+
+    /// Rule-tampering state. Written by `RuleBundleInstaller` when the
+    /// installed compiled_rules directory's SHA-256 hashes don't
+    /// match the bundled manifest.json — either because an attacker
+    /// modified the installed tree post-sync, OR because the shipped
+    /// .app bundle itself was tampered with.
+    struct RuleTamperSnapshot {
+        var bundledTampered: Bool
+        var installedTampered: Bool
+        var mismatchedFileCount: Int
+        var detectedAt: Date
+    }
+    @Published var ruleTamper: RuleTamperSnapshot?
+
+    /// Callback MacCrabApp wires up so AppState's poll loop can
+    /// trigger a sysext reactivation when the heartbeat goes stale.
+    /// Returns true if the activation request was submitted. Without
+    /// this, a crashed or deadlocked sysext required the user to
+    /// notice the banner and relaunch manually. Watchdog respects a
+    /// cooldown (`sysextWatchdogRetryAfter`) so we don't pound
+    /// sysextd with activation requests on a persistently-failing
+    /// install.
+    var sysextWatchdogActivate: (() -> Void)?
+    private var lastSysextWatchdogAt: Date?
+    private let sysextWatchdogCooldown: TimeInterval = 300  // 5 min
+
+    /// True when detection is in a degraded state — zero rules loaded,
+    /// heartbeat stale, storage-write errors accumulating, or rule
+    /// tampering detected. The statusbar icon swaps to a warning
+    /// variant and the Overview shows a `DetectionHealthBanner`.
+    /// Aggregate in one place so new health signals are a one-line
+    /// change instead of sweeping every UI surface.
+    var isProtectionDegraded: Bool {
+        if isConnected && rulesLoaded == 0 { return true }
+        if let snap = storageErrors, hasRecentStorageError(snap) { return true }
+        if let hb = heartbeat, hb.isStale { return true }
+        if ruleTamper != nil { return true }
+        return false
+    }
+
+    /// True if the snapshot shows a storage error in the last 10 min.
+    /// Using a recency window (rather than absolute count) avoids
+    /// a stale one-off failure from a week ago keeping the degraded
+    /// banner up forever.
+    private func hasRecentStorageError(_ s: StorageErrorSnapshot) -> Bool {
+        guard let at = s.lastErrorAt else { return false }
+        return Date().timeIntervalSince(at) < 600
+    }
+
+    /// Read the storage-errors snapshot file that the sysext writes.
+    /// Called from `refresh()`; low cost (tiny file, no parsing on the
+    /// hot path). Silent if file is absent — no errors yet recorded.
+    func refreshStorageHealth() {
+        let path = "/Library/Application Support/MacCrab/storage_errors.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        let alertErrs = json["alert_insert_errors"] as? Int ?? 0
+        let eventErrs = json["event_insert_errors"] as? Int ?? 0
+        let msg = json["last_error_message"] as? String ?? ""
+        let kind = json["last_error_kind"] as? String ?? ""
+        let at = (json["last_error_at_unix"] as? TimeInterval).flatMap {
+            $0 > 0 ? Date(timeIntervalSince1970: $0) : nil
+        }
+        storageErrors = StorageErrorSnapshot(
+            alertInsertErrors: alertErrs,
+            eventInsertErrors: eventErrs,
+            lastErrorMessage: msg,
+            lastErrorKind: kind,
+            lastErrorAt: at
+        )
+    }
+
+    /// Read the rule-tamper snapshot that RuleBundleInstaller writes
+    /// when verifyManifest finds a SHA-256 mismatch. Absent file →
+    /// healthy (no tamper); any present file is a live tamper
+    /// indicator the Overview banner surfaces.
+    func refreshRuleTamper() {
+        let path = "/Library/Application Support/MacCrab/rule_tamper.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // No file → no tamper detected. Clear any stale state.
+            if ruleTamper != nil { ruleTamper = nil }
+            return
+        }
+        ruleTamper = RuleTamperSnapshot(
+            bundledTampered: json["bundled_tampered"] as? Bool ?? false,
+            installedTampered: json["installed_tampered"] as? Bool ?? false,
+            mismatchedFileCount: json["mismatched_file_count"] as? Int ?? 0,
+            detectedAt: Date(timeIntervalSince1970: json["detected_at_unix"] as? TimeInterval ?? 0)
+        )
+    }
+
+    /// Read the heartbeat snapshot the sysext writes every 30s. An
+    /// absent file (first run) or a stale timestamp (>120s) both
+    /// indicate the detection engine is silent — the dashboard
+    /// surfaces a banner and the statusbar icon flips.
+    func refreshHeartbeat() {
+        let path = "/Library/Application Support/MacCrab/heartbeat.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let writtenAtUnix = json["written_at_unix"] as? TimeInterval else {
+            // No file yet — cold start, mark as stale so the user sees
+            // the banner until the first write arrives. Without this
+            // the banner would never appear for a hung-from-start
+            // sysext because `heartbeat` stays nil.
+            if heartbeat == nil && isConnected {
+                heartbeat = HeartbeatSnapshot(
+                    writtenAt: .distantPast,
+                    uptimeSeconds: 0,
+                    eventsProcessed: 0,
+                    alertsEmitted: 0
+                )
+            }
+            return
+        }
+        heartbeat = HeartbeatSnapshot(
+            writtenAt: Date(timeIntervalSince1970: writtenAtUnix),
+            uptimeSeconds: json["uptime_seconds"] as? Int ?? 0,
+            eventsProcessed: (json["events_processed"] as? UInt64)
+                ?? UInt64(json["events_processed"] as? Int ?? 0),
+            alertsEmitted: (json["alerts_emitted"] as? UInt64)
+                ?? UInt64(json["alerts_emitted"] as? Int ?? 0)
+        )
+    }
+
     /// Full Disk Access state.
     ///
     /// macOS treats `com.maccrab.app` (this process) and `com.maccrab.agent`
@@ -262,6 +422,13 @@ final class AppState: ObservableObject {
         await loadAlertsIncremental()
         await loadEventsIncremental()
         await updateStats()
+        // v1.4.3 fail-loud: refresh storage-error and heartbeat state
+        // from sysext-written snapshot files so the Overview banners
+        // and statusbar icon react within one poll cycle.
+        refreshStorageHealth()
+        refreshHeartbeat()
+        refreshRuleTamper()
+        maybeKickWatchdog()
 
         // Rules rarely change — only load once
         if !rulesLoaded_cached {
@@ -269,6 +436,25 @@ final class AppState: ObservableObject {
             await loadTCCEvents()
             rulesLoaded_cached = true
         }
+    }
+
+    /// If the heartbeat has been stale for long enough AND we haven't
+    /// tried to reactivate the sysext within the cooldown window,
+    /// invoke the watchdog callback. Doesn't replace the user-facing
+    /// banner — both fire. The goal is to self-heal transient sysext
+    /// crashes without user intervention; if reactivation doesn't
+    /// restore the heartbeat, the banner stays up and the user takes
+    /// over.
+    private func maybeKickWatchdog() {
+        guard let hb = heartbeat, hb.isStale else { return }
+        guard let callback = sysextWatchdogActivate else { return }
+        if let last = lastSysextWatchdogAt,
+           Date().timeIntervalSince(last) < sysextWatchdogCooldown {
+            return
+        }
+        lastSysextWatchdogAt = Date()
+        Self.uiStateLogger.notice("Sysext heartbeat stale — kicking watchdog reactivation")
+        callback()
     }
 
     func loadAlerts(limit: Int = 500) async {

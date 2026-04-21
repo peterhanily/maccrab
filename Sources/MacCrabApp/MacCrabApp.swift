@@ -48,6 +48,15 @@ struct MacCrabApp: App {
                     // repeated launches — the request returns
                     // immediately with .completed.
                     sysextManager.activate()
+                    // v1.4.3 watchdog: AppState polls the sysext
+                    // heartbeat; when it's stale, this callback gets
+                    // invoked so we can respawn the sysext without
+                    // user intervention. Idempotent — sysextManager
+                    // internally dedups a redundant activation when
+                    // the ext is already running.
+                    appState.sysextWatchdogActivate = { [weak sysextManager] in
+                        sysextManager?.activate()
+                    }
                     // Reconcile the launch-at-login preference with the
                     // actual SMAppService state. First run registers;
                     // subsequent runs are no-ops unless the user changed
@@ -126,6 +135,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var dismissTimer: Timer?
     private var lastPopoverAlertId: String?
+    /// Polls AppState's health signals and flips the statusbar icon
+    /// between the healthy crab 🦀 and a warning variant ⚠️🦀 when
+    /// detection is degraded (zero rules loaded, stale heartbeat, or
+    /// storage errors accumulating). Introduced in v1.4.3 so users
+    /// who glance at the menubar immediately know protection is off.
+    private var statusBarHealthTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -139,6 +154,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Register callback for critical alert popups
         appState.onCriticalAlert = { [weak self] alert in
             self?.showAlertPopover(alert: alert)
+        }
+        // Start the statusbar health poller. Uses a 5s cadence so the
+        // icon updates quickly after the first refresh() but doesn't
+        // fight the 10s AppState poll. Fires immediately on setup so a
+        // degraded cold-start state is visible without waiting.
+        statusBarHealthTimer?.invalidate()
+        statusBarHealthTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.updateStatusBarIcon()
+        }
+        updateStatusBarIcon()
+    }
+
+    /// Flip the statusbar title to the healthy crab or the warning
+    /// variant based on AppState's current health signals. Source of
+    /// truth for "is protection degraded" is `isProtectionDegraded`
+    /// on AppState — see that property for the exact conditions.
+    @MainActor private func updateStatusBarIcon() {
+        guard let button = statusItem?.button else { return }
+        let degraded = appState?.isProtectionDegraded ?? false
+        let newTitle = degraded ? "⚠️🦀" : "🦀"
+        if button.title != newTitle {
+            button.title = newTitle
         }
     }
 

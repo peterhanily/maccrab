@@ -13,6 +13,7 @@ enum DaemonTimers {
         let pruneTimer: DispatchSourceTimer
         let maintenanceTimer: DispatchSourceTimer
         let feedbackTimer: DispatchSourceTimer
+        let heartbeatTimer: DispatchSourceTimer
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
@@ -264,13 +265,51 @@ enum DaemonTimers {
         }
         feedbackTimer.resume()
 
+        // v1.4.3 fail-loud: write a heartbeat snapshot every 30s so
+        // the dashboard can detect a silently-replaced or hung sysext.
+        // If an attacker drops in a no-op sysext binary, the dashboard
+        // still sees the old heartbeat file aging past the threshold
+        // and raises a DetectionHealthBanner. The snapshot includes
+        // event/alert counters + uptime so the dashboard can also
+        // show rich debugging info on the ES Health page.
+        let heartbeatTimer = DispatchSource.makeTimerSource(queue: .global())
+        heartbeatTimer.schedule(deadline: .now() + 5, repeating: 30)
+        heartbeatTimer.setEventHandler {
+            let payload: [String: Any] = [
+                "written_at_unix": Date().timeIntervalSince1970,
+                "uptime_seconds": Int(Date().timeIntervalSince(startTime)),
+                "events_processed": eventCount(),
+                "alerts_emitted": alertCount(),
+                "schema_version": 1,
+            ]
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: payload,
+                options: [.prettyPrinted, .sortedKeys]
+            ) else { return }
+            let path = "/Library/Application Support/MacCrab/heartbeat.json"
+            // Write via temp + rename so the dashboard never catches a
+            // half-written file. Silent on failure — the next 30s tick
+            // will try again.
+            let tmp = path + ".tmp"
+            do {
+                try data.write(to: URL(fileURLWithPath: tmp))
+                try FileManager.default.moveItem(atPath: tmp, toPath: path)
+            } catch {
+                // File may already exist; retry as overwrite.
+                try? FileManager.default.removeItem(atPath: path)
+                try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+            }
+        }
+        heartbeatTimer.resume()
+
         return Handles(
             forensicTimer: forensicTimer,
             hourlyTimer: hourlyTimer,
             statsTimer: statsTimer,
             pruneTimer: pruneTimer,
             maintenanceTimer: maintenanceTimer,
-            feedbackTimer: feedbackTimer
+            feedbackTimer: feedbackTimer,
+            heartbeatTimer: heartbeatTimer
         )
     }
 }

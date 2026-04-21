@@ -82,6 +82,102 @@ struct OverviewDashboard: View {
                         .padding(.horizontal)
                     }
 
+                    // v1.4.3 fail-loud: zero-rules-loaded banner. Silent
+                    // detection-is-disabled is the worst protection-failure
+                    // mode — the app looks fine but is evaluating zero
+                    // rules. Show a red banner in Overview whenever we've
+                    // gotten connected but rulesLoaded is still zero.
+                    if appState.isConnected && appState.rulesLoaded == 0 {
+                        DetectionHealthBanner(
+                            severity: .critical,
+                            title: String(localized: "health.zeroRules.title", defaultValue: "No detection rules loaded"),
+                            message: String(localized: "health.zeroRules.body", defaultValue: "The detection engine is running but has zero rules to evaluate. You are not being protected. Try reinstalling MacCrab via `brew reinstall --cask maccrab`, or check the detection engine's rule directory at /Library/Application Support/MacCrab/compiled_rules/."),
+                            icon: "exclamationmark.octagon.fill"
+                        )
+                        .padding(.horizontal)
+                    }
+
+                    // v1.4.3 fail-loud: rule tamper. SHA-256 mismatch
+                    // between bundled manifest.json and installed
+                    // compiled_rules/. Either someone modified
+                    // /Library/Application Support/MacCrab/compiled_rules/
+                    // after sync (bundled_tampered=false,
+                    // installed_tampered=true) — we auto-resynced to
+                    // the bundled copy — OR the shipped .app bundle
+                    // itself is tampered, in which case we refused
+                    // to propagate.
+                    if let tamper = appState.ruleTamper {
+                        DetectionHealthBanner(
+                            severity: .critical,
+                            title: tamper.bundledTampered
+                                ? String(localized: "health.ruleTamper.bundledTitle", defaultValue: "Bundled detection rules have been tampered with")
+                                : String(localized: "health.ruleTamper.installedTitle", defaultValue: "Detection rules on disk were modified"),
+                            message: tamper.bundledTampered
+                                ? String(
+                                    localized: "health.ruleTamper.bundledBody",
+                                    defaultValue: "\(tamper.mismatchedFileCount) rule file(s) inside MacCrab.app do not match the signed manifest. This should not happen on a legitimately installed copy. Re-download MacCrab from maccrab.com or reinstall via `brew reinstall --cask maccrab`."
+                                )
+                                : String(
+                                    localized: "health.ruleTamper.installedBody",
+                                    defaultValue: "\(tamper.mismatchedFileCount) rule file(s) in /Library/Application Support/MacCrab/compiled_rules/ differ from the expected SHA-256. MacCrab re-synced from the bundled copy; if this keeps happening, something on this machine is modifying the rules directory."
+                                ),
+                            icon: "shield.slash.fill"
+                        )
+                        .padding(.horizontal)
+                    }
+
+                    // v1.4.3 fail-loud: heartbeat stale → detection
+                    // engine is either crashed, hung, or silently
+                    // replaced. Shows banner as soon as the last
+                    // written_at timestamp is older than 120s (4× the
+                    // 30s write cadence — tolerates one missed tick).
+                    if let hb = appState.heartbeat, hb.isStale {
+                        let ageSeconds = Int(Date().timeIntervalSince(hb.writtenAt))
+                        let ageText: String = {
+                            if hb.writtenAt == .distantPast {
+                                return String(localized: "health.heartbeat.never", defaultValue: "never")
+                            }
+                            if ageSeconds < 3600 { return "\(ageSeconds / 60)m ago" }
+                            return "\(ageSeconds / 3600)h ago"
+                        }()
+                        DetectionHealthBanner(
+                            severity: .critical,
+                            title: String(
+                                localized: "health.heartbeat.title",
+                                defaultValue: "Detection engine appears silent"
+                            ),
+                            message: String(
+                                localized: "health.heartbeat.body",
+                                defaultValue: "The detection engine's last heartbeat was \(ageText). It may have crashed, hung, or been disabled. Try relaunching MacCrab; if it persists, run `systemextensionsctl list` to check the extension state, then `pkill -HUP com.maccrab.agent` to force a reload."
+                            ),
+                            icon: "heart.slash.fill"
+                        )
+                        .padding(.horizontal)
+                    }
+
+                    // v1.4.3 fail-loud: accumulated storage failures.
+                    // When inserts are failing (disk full / DB locked /
+                    // permissions) alerts and events silently never land
+                    // in the DB. Show a warning banner with the most
+                    // recent error text so the user can act without
+                    // digging through `sudo log show`.
+                    if let snap = appState.storageErrors,
+                       snap.lastErrorAt.map({ Date().timeIntervalSince($0) < 600 }) == true {
+                        DetectionHealthBanner(
+                            severity: .critical,
+                            title: String(
+                                localized: "health.storage.title",
+                                defaultValue: "Detection data is not being saved"
+                            ),
+                            message: String(
+                                localized: "health.storage.body",
+                                defaultValue: "\(snap.alertInsertErrors) alert and \(snap.eventInsertErrors) event writes have failed. Last error: \(snap.lastErrorMessage). Check available disk space, DB permissions under /Library/Application Support/MacCrab/, and that no third-party backup tool is holding the DB open."
+                            ),
+                            icon: "internaldrive.fill"
+                        )
+                        .padding(.horizontal)
+                    }
+
                     // === Call to Action Banner (clickable → navigates to Alerts) ===
                     Button { selectedSection = .alerts } label: {
                         HStack(spacing: 12) {
@@ -337,6 +433,58 @@ struct SeverityCount: View {
 /// drop. This is the product's worst silent-failure mode ("enabled but
 /// half-dark") — surfacing it loudly is intentional.
 ///
+/// v1.4.3 fail-loud banner shared by several protection-health states:
+/// zero rules loaded, stale detection-engine heartbeat, accumulated
+/// storage-write failures. Each condition builds one of these with a
+/// clear title + actionable body + appropriate severity color. Kept
+/// generic so the Overview doesn't end up with six lookalike bespoke
+/// banners when new health signals land.
+enum DetectionHealthBannerSeverity {
+    case critical   // user is actively unprotected — red treatment
+    case warning    // protection degraded but partly working — amber
+
+    var tint: Color {
+        switch self {
+        case .critical: return .red
+        case .warning:  return .orange
+        }
+    }
+}
+
+struct DetectionHealthBanner: View {
+    let severity: DetectionHealthBannerSeverity
+    let title: String
+    let message: String     // renamed from `body` to avoid clobbering SwiftUI's View.body
+    let icon: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(severity.tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(.headline, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(severity.tint.opacity(0.1))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(severity.tint.opacity(0.4), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// macOS treats `com.maccrab.app` and `com.maccrab.agent` as separate TCC
 /// principals. Each must be granted FDA independently. The banner tells the
 /// user which one is missing so they don't dig through System Settings.

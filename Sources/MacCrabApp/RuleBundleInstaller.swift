@@ -27,18 +27,37 @@
 // user-home copy the detection engine falls back to.
 
 import Foundation
+import CryptoKit
 import os.log
 
 enum RuleBundleInstaller {
 
     private static let logger = Logger(subsystem: "com.maccrab.app", category: "rule-bundle")
     private static let markerFile = ".bundle_version"
+    private static let manifestFile = "manifest.json"
+
+    /// Result of verifying a compiled-rules directory against its
+    /// manifest.json. Used to gate sync (don't replace installed
+    /// rules if the *bundled* copy itself is tampered) and to surface
+    /// "installed rules tampered after sync" as a visible banner.
+    enum ManifestVerification {
+        case missing                    // no manifest.json — older pre-v1.4.3 bundle, accept
+        case valid                      // every file's SHA-256 matches
+        case mismatch([String])         // list of paths whose hash differs
+        case malformed(String)          // parse error / missing keys
+    }
 
     /// Sync compiled rules from the app bundle to the best writable
     /// rules directory on disk. Called once on app launch, before
     /// `AppState` opens the detection engine DB. Fails silently if the
     /// bundle doesn't ship rules (dev builds, non-release `.app`s) —
     /// no functional regression for developers running `swift run`.
+    ///
+    /// v1.4.3: verifies the bundled manifest.json before sync. If the
+    /// bundled rules directory itself has been tampered with, refuses
+    /// to overwrite the installed tree and logs a critical warning.
+    /// Also verifies the installed tree after sync and writes a
+    /// tamper-state file the dashboard polls to raise a banner.
     static func syncIfNeeded() {
         guard let bundledDir = locateBundledRules() else {
             logger.debug("No bundled rules found — dev build or Sparkle stub; skipping sync")
@@ -51,10 +70,37 @@ enum RuleBundleInstaller {
             return
         }
 
+        // Verify the BUNDLED copy first. If the app bundle is tampered
+        // — someone replaced compiled_rules inside /Applications after
+        // installation — we must not propagate that tampered set to
+        // /Library. Skip sync, log critical, let detection continue
+        // with whatever's already installed.
+        let bundledCheck = verifyManifest(at: bundledDir)
+        if case .mismatch(let paths) = bundledCheck {
+            logger.critical("Bundled rules tamper detected: \(paths.count, privacy: .public) file(s) differ from manifest. Refusing to propagate. First: \(paths.first ?? "", privacy: .public)")
+            writeTamperState(bundled: true, installed: false, mismatchedCount: paths.count)
+            return
+        }
+        if case .malformed(let msg) = bundledCheck {
+            logger.error("Bundled manifest malformed: \(msg, privacy: .public); skipping sync")
+            return
+        }
+
         let installedDir = bestInstalledDir()
         let installedVersion = readVersion(at: installedDir) ?? ""
 
         if bundledVersion == installedVersion {
+            // Same version — still verify the installed tree. Tamper
+            // AFTER sync is a separate class of attack.
+            let installedCheck = verifyManifest(at: installedDir)
+            if case .mismatch(let paths) = installedCheck {
+                logger.critical("Installed rules tamper detected (\(paths.count, privacy: .public) files differ from manifest). Re-syncing from bundle.")
+                writeTamperState(bundled: false, installed: true, mismatchedCount: paths.count)
+                _ = copyRules(from: bundledDir, to: installedDir)
+                sighupDetectionEngine()
+                return
+            }
+            clearTamperState()
             logger.debug("Rules already at \(bundledVersion, privacy: .public); no sync needed")
             return
         }
@@ -64,10 +110,76 @@ enum RuleBundleInstaller {
         let ok = copyRules(from: bundledDir, to: installedDir)
         if ok {
             logger.notice("Rules synced to \(installedDir, privacy: .public); SIGHUPing detection engine")
+            clearTamperState()
             sighupDetectionEngine()
         } else {
             logger.error("Rule sync failed; detection engine continues with whatever rules were previously installed")
         }
+    }
+
+    /// Verify every file under `dir` against its `manifest.json`.
+    /// Returns `.missing` for pre-v1.4.3 bundles that shipped without
+    /// a manifest (accept them), `.valid` on clean match, `.mismatch`
+    /// with the list of differing files, or `.malformed` for parse
+    /// errors.
+    static func verifyManifest(at dir: String) -> ManifestVerification {
+        let manifestPath = "\(dir)/\(manifestFile)"
+        guard FileManager.default.fileExists(atPath: manifestPath) else {
+            return .missing
+        }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .malformed("cannot read/parse manifest.json")
+        }
+        guard let hashes = json["hashes"] as? [String: String] else {
+            return .malformed("missing 'hashes' key")
+        }
+
+        var mismatched: [String] = []
+        for (relPath, expectedHash) in hashes {
+            let fullPath = "\(dir)/\(relPath)"
+            guard let actual = sha256Hex(ofFile: fullPath) else {
+                mismatched.append(relPath)
+                continue
+            }
+            if actual != expectedHash {
+                mismatched.append(relPath)
+            }
+        }
+        return mismatched.isEmpty ? .valid : .mismatch(mismatched)
+    }
+
+    /// Record tamper state to a JSON snapshot the dashboard polls.
+    /// When tamper is cleared we remove the file so absent == healthy.
+    private static let tamperStatePath = "/Library/Application Support/MacCrab/rule_tamper.json"
+
+    private static func writeTamperState(bundled: Bool, installed: Bool, mismatchedCount: Int) {
+        let payload: [String: Any] = [
+            "bundled_tampered": bundled,
+            "installed_tampered": installed,
+            "mismatched_file_count": mismatchedCount,
+            "detected_at_unix": Date().timeIntervalSince1970,
+        ]
+        if let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? data.write(to: URL(fileURLWithPath: tamperStatePath))
+        }
+    }
+
+    private static func clearTamperState() {
+        try? FileManager.default.removeItem(atPath: tamperStatePath)
+    }
+
+    /// SHA-256 hex for the file at `path`. Nil if the file can't be
+    /// read — verifyManifest treats that as a mismatch.
+    private static func sha256Hex(ofFile path: String) -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return nil
+        }
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Bundle rules path: Contents/Resources/compiled_rules/. Returns
