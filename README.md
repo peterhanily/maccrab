@@ -3,8 +3,8 @@
 **Real-time threat detection for macOS -- no cloud, no SIEM, no telemetry.**
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-592%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-1.3.12-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Tests](https://img.shields.io/badge/tests-597%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-1.4.0-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()

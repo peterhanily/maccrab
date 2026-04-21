@@ -283,10 +283,20 @@ public actor CampaignDetector {
     }
 
     private func checkKillChain() -> Campaign? {
-        // Use the incremental tactic index — O(T) where T = unique tactic count,
-        // not O(n·t). `recentAlerts` is already trimmed to the campaign window
-        // by `purgeStaleAlerts()`, so no redundant filtering is needed.
-        let allTactics = Set(normalizedTacticCounts.keys)
+        // v1.4: only count tactics contributed by medium+ severity alerts.
+        // Low-severity discovery rules (ps, lsof, dscl, ioreg, …) produce
+        // tactics ~every minute on a developer workstation; letting those
+        // count for kill-chain detection meant every user who ran three
+        // admin commands within 10 min got flagged as "Multi-Stage Attack".
+        // Re-derive from `recentAlerts` with a severity filter — cost is
+        // O(n) in window size which is bounded by purgeStaleAlerts, so
+        // still cheap compared to the campaign-emission path.
+        let allTactics = Set(
+            recentAlerts
+                .filter { $0.severity >= .medium }
+                .flatMap { $0.tactics }
+                .map(normalizeTactic)
+        )
         guard allTactics.count >= 2 else { return nil }
 
         // Check specific 2-tactic combos first

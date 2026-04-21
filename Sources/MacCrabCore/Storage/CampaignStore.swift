@@ -9,6 +9,7 @@
 import Foundation
 import Darwin
 import SQLite3
+import os.log
 
 // MARK: - Errors
 
@@ -134,7 +135,26 @@ public actor CampaignStore {
 
     // MARK: - Init
 
+    /// Throw `CampaignStoreError.databaseOpenFailed` if `path` exists and is a
+    /// symbolic link. A missing file is always OK — SQLite will create it.
+    /// Matches the guard EventStore and AlertStore already apply: without this,
+    /// a privileged attacker can swap the DB for a symlink pointing at an
+    /// arbitrary root-owned file and redirect writes.
+    private static func rejectIfSymlink(_ path: String) throws {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
+            return
+        }
+        if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            throw CampaignStoreError.databaseOpenFailed("refusing to open: \(path) is a symlink")
+        }
+    }
+
     private static func openDatabase(at path: String) throws -> (OpaquePointer, Bool, OpaquePointer?) {
+        try rejectIfSymlink(path)
+        try rejectIfSymlink(path + "-wal")
+        try rejectIfSymlink(path + "-shm")
+        try rejectIfSymlink(path + "-journal")
+
         var db: OpaquePointer?
         var isReadOnly = false
         var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
@@ -153,10 +173,10 @@ public actor CampaignStore {
         }
 
         if !isReadOnly {
-            sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
-            sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
+            Self.exec(handle, "PRAGMA journal_mode = WAL")
+            Self.exec(handle, "PRAGMA synchronous = NORMAL")
         }
-        sqlite3_exec(handle, "PRAGMA foreign_keys = ON", nil, nil, nil)
+        Self.exec(handle, "PRAGMA foreign_keys = ON")
 
         let schemaSQLs = [
             """
@@ -179,7 +199,7 @@ public actor CampaignStore {
             "CREATE INDEX IF NOT EXISTS idx_campaigns_sup_det ON campaigns(suppressed, detected_at)",
         ]
         for sql in schemaSQLs {
-            sqlite3_exec(handle, sql, nil, nil, nil)
+            Self.exec(handle, sql)
         }
 
         if !isReadOnly {
@@ -199,6 +219,17 @@ public actor CampaignStore {
         }
 
         return (handle, isReadOnly, insertStmt)
+    }
+
+    /// Execute SQL on a raw handle and surface the error via os.log on
+    /// failure. See the EventStore.exec comment for the rationale.
+    private static func exec(_ db: OpaquePointer, _ sql: String) {
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            Logger(subsystem: "com.maccrab.storage", category: "campaign-store")
+                .error("sqlite3_exec failed (rc=\(rc, privacy: .public)): \(sql, privacy: .public) — \(msg, privacy: .public)")
+        }
     }
 
     /// Open a CampaignStore at the default MacCrab data directory.

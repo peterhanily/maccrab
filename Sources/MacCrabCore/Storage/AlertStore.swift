@@ -8,6 +8,7 @@
 import Foundation
 import Darwin
 import SQLite3
+import os.log
 
 // MARK: - AlertStoreError
 
@@ -210,8 +211,15 @@ public actor AlertStore {
     }
 
     /// Execute a SQL statement on a raw handle (used during init before actor is live).
+    /// Execute SQL on a raw handle and surface the error via os.log on
+    /// failure. See the EventStore.exec comment for the rationale.
     private static func exec(_ db: OpaquePointer, _ sql: String) {
-        sqlite3_exec(db, sql, nil, nil, nil)
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            Logger(subsystem: "com.maccrab.storage", category: "alert-store")
+                .error("sqlite3_exec failed (rc=\(rc, privacy: .public)): \(sql, privacy: .public) — \(msg, privacy: .public)")
+        }
     }
 
     /// Creates an `AlertStore` backed by a SQLite database at the default location.

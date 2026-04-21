@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MacCrab MDM deployment profile — UNSIGNED TEMPLATE.
+
+     This profile pre-authorizes MacCrab's System Extension, grants Full
+     Disk Access to both the MacCrab app bundle and the sysext, and
+     registers MacCrab.app as a Login Item so it relaunches after reboot.
+
+     Deployment workflow:
+
+       1. Customize the five REPLACE-ME fields below (PayloadUUID x5,
+          PayloadOrganization, PayloadDescription).
+       2. Sign the file with your Apple Enterprise / Developer ID profile-
+          signing certificate via:
+            /usr/bin/security cms -S -N "Developer ID Installer: ..." \
+              -i MacCrab.mobileconfig.template \
+              -o MacCrab.mobileconfig
+       3. Deploy via Jamf, Kandji, Mosyle, Intune, etc. as a
+          "Configuration Profile".
+       4. Users on managed Macs won't see the System Settings approval
+          prompt anymore — the profile authorizes it.
+
+     Team ID: 79S425CW99 (Peter Hanily).
+     Extension bundle ID: com.maccrab.agent
+     Host app bundle ID: com.maccrab.app
+
+     DO NOT commit the signed output to git — only this template.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+                      "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>com.maccrab.deploy.REPLACE-ME-UUID</string>
+    <key>PayloadUUID</key>
+    <string>REPLACE-ME-PARENT-UUID</string>
+    <key>PayloadDisplayName</key>
+    <string>MacCrab Endpoint Security</string>
+    <key>PayloadDescription</key>
+    <string>Pre-authorizes MacCrab's Endpoint Security system extension and grants Full Disk Access. REPLACE-ME: customize organization / contact info before signing.</string>
+    <key>PayloadOrganization</key>
+    <string>REPLACE-ME-ORG-NAME</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+
+    <key>PayloadContent</key>
+    <array>
+
+        <!-- SystemExtensions payload: pre-authorize our sysext so users
+             don't see the System Settings approval prompt. Apple-required
+             keys: AllowedSystemExtensions (bundle IDs) and
+             AllowUserOverrides (whether user can disable). -->
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.system-extension-policy</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.maccrab.deploy.sysext</string>
+            <key>PayloadUUID</key>
+            <string>REPLACE-ME-SYSEXT-UUID</string>
+            <key>PayloadDisplayName</key>
+            <string>MacCrab — Allow System Extension</string>
+            <key>AllowUserOverrides</key>
+            <false/>
+            <key>AllowedSystemExtensions</key>
+            <dict>
+                <key>79S425CW99</key>
+                <array>
+                    <string>com.maccrab.agent</string>
+                </array>
+            </dict>
+            <key>AllowedSystemExtensionTypes</key>
+            <dict>
+                <key>79S425CW99</key>
+                <array>
+                    <string>EndpointSecurityExtension</string>
+                </array>
+            </dict>
+        </dict>
+
+        <!-- Full Disk Access (TCC) for both the app and the sysext.
+             MacCrab.app reads the DB; the sysext reads TCC.db, mail
+             indexes, etc. Both need FDA; granting only one produces
+             silent detection gaps that are confusing to debug. -->
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.TCC.configuration-profile-policy</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.maccrab.deploy.tcc</string>
+            <key>PayloadUUID</key>
+            <string>REPLACE-ME-TCC-UUID</string>
+            <key>PayloadDisplayName</key>
+            <string>MacCrab — Grant Full Disk Access</string>
+            <key>Services</key>
+            <dict>
+                <key>SystemPolicyAllFiles</key>
+                <array>
+                    <dict>
+                        <key>Identifier</key>
+                        <string>com.maccrab.app</string>
+                        <key>IdentifierType</key>
+                        <string>bundleID</string>
+                        <key>CodeRequirement</key>
+                        <string>identifier "com.maccrab.app" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "79S425CW99"</string>
+                        <key>Authorization</key>
+                        <string>Allow</string>
+                    </dict>
+                    <dict>
+                        <key>Identifier</key>
+                        <string>com.maccrab.agent</string>
+                        <key>IdentifierType</key>
+                        <string>bundleID</string>
+                        <key>CodeRequirement</key>
+                        <string>identifier "com.maccrab.agent" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "79S425CW99"</string>
+                        <key>Authorization</key>
+                        <string>Allow</string>
+                    </dict>
+                </array>
+            </dict>
+        </dict>
+
+        <!-- Launch at login: register MacCrab.app as a managed login
+             item so protection resumes automatically after reboot. Users
+             can still disable this from System Settings → Login Items,
+             which is the intended behavior for fleet deployments where
+             the employee owns the machine. -->
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.servicemanagement</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>com.maccrab.deploy.launchatlogin</string>
+            <key>PayloadUUID</key>
+            <string>REPLACE-ME-LOGIN-UUID</string>
+            <key>PayloadDisplayName</key>
+            <string>MacCrab — Launch at Login</string>
+            <key>Rules</key>
+            <array>
+                <dict>
+                    <key>RuleType</key>
+                    <string>BundleIdentifier</string>
+                    <key>RuleValue</key>
+                    <string>com.maccrab.app</string>
+                </dict>
+            </array>
+        </dict>
+
+    </array>
+</dict>
+</plist>

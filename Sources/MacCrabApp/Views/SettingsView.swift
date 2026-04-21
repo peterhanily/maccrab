@@ -28,6 +28,8 @@ struct SettingsView: View {
     @AppStorage("autoKill") private var autoKill = false
     @AppStorage("autoBlock") private var autoBlock = false
     @AppStorage("maxDatabaseSizeMB") private var maxDatabaseSizeMB: Int = 500
+    @AppStorage("retentionWindowDays") private var retentionWindowDays: Int = 30
+    @State private var retentionConfirmShown: Bool = false
 
     // LLM settings (provider selection + URLs persist to UserDefaults; API
     // keys live in the Keychain via SecretsStore — see `llmAPIKey` below).
@@ -511,6 +513,52 @@ struct SettingsView: View {
                             }
                         } label: {
                             Label(String(localized: "settings.checkForUpdates", defaultValue: "Check for Updates"), systemImage: "arrow.down.circle")
+                        }
+                    }
+                    .padding(8)
+                }
+
+                GroupBox(String(localized: "settings.retention", defaultValue: "Retention")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(String(localized: "settings.retention.help", defaultValue: "Delete alerts older than the chosen threshold. Event records are pruned separately by the detection engine's retention config."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack(spacing: 8) {
+                            Picker(String(localized: "settings.retention.window", defaultValue: "Clear alerts older than"), selection: $retentionWindowDays) {
+                                Text(String(localized: "settings.retention.7d", defaultValue: "7 days")).tag(7)
+                                Text(String(localized: "settings.retention.30d", defaultValue: "30 days")).tag(30)
+                                Text(String(localized: "settings.retention.90d", defaultValue: "90 days")).tag(90)
+                                Text(String(localized: "settings.retention.365d", defaultValue: "1 year")).tag(365)
+                            }
+                            .labelsHidden()
+                            .frame(width: 140)
+
+                            Button(role: .destructive) {
+                                retentionConfirmShown = true
+                            } label: {
+                                Label(String(localized: "settings.retention.clear", defaultValue: "Clear Now"), systemImage: "trash")
+                            }
+                            .confirmationDialog(
+                                String(localized: "settings.retention.confirmTitle", defaultValue: "Delete alerts older than \(retentionWindowDays) days?"),
+                                isPresented: $retentionConfirmShown,
+                                titleVisibility: .visible
+                            ) {
+                                Button(String(localized: "settings.retention.confirm", defaultValue: "Delete"), role: .destructive) {
+                                    Task { await appState.pruneAlerts(olderThanDays: retentionWindowDays) }
+                                }
+                            } message: {
+                                Text(String(
+                                    localized: "settings.retention.confirmBody",
+                                    defaultValue: "This removes alert rows from the local database. Events are not affected. Cannot be undone."
+                                ))
+                            }
+
+                            if let result = appState.lastPruneResult {
+                                Text(result)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                     .padding(8)

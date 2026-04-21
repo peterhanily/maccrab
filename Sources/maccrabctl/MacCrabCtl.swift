@@ -81,8 +81,16 @@ struct MacCrabCtl {
             if args.count >= 3 && args[2] == "create" {
                 let category = args.count >= 4 ? args[3] : "process_creation"
                 createRuleTemplate(category: category)
+            } else if args.count >= 4 && (args[2] == "enable" || args[2] == "disable") {
+                // Persist the enable/disable state on disk so the change
+                // survives SIGHUP rule reload and sysext restarts. The
+                // RuleEngine respects this on load.
+                setRuleEnabled(ruleId: args[3], enabled: args[2] == "enable")
             } else {
-                print("Usage: maccrabctl rule create [category]")
+                print("Usage:")
+                print("  maccrabctl rule create [category]   # Scaffold a new rule YAML")
+                print("  maccrabctl rule enable <id>         # Re-enable a rule that was disabled")
+                print("  maccrabctl rule disable <id>        # Disable a noisy rule without deleting the YAML")
                 print("  Categories: process_creation, file_event, network_connection, tcc_event")
             }
         case "suppress":

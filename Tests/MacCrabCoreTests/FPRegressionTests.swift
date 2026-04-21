@@ -47,6 +47,35 @@ private func fsEventsFileWrite(path: String, action: FileAction = .write) -> Eve
     )
 }
 
+/// Build a process-creation event driven by an executable name (e.g. `ps`,
+/// `lsof`) with a specific ancestor chain. Used for Gate 5 (interactive
+/// admin CLI) regression tests.
+func interactiveAdminExec(
+    basename: String,
+    ancestors: [ProcessAncestor]
+) -> Event {
+    let exe = "/usr/bin/\(basename)"
+    let proc = ProcessInfo(
+        pid: Int32.random(in: 1000...60000),
+        ppid: ancestors.first?.pid ?? 1, rpid: 1,
+        name: basename, executable: exe,
+        commandLine: exe, args: [exe],
+        workingDirectory: "/tmp",
+        userId: 501, userName: "testuser", groupId: 20,
+        startTime: Date(),
+        codeSignature: nil,
+        ancestors: ancestors,
+        architecture: "arm64",
+        isPlatformBinary: true
+    )
+    return Event(
+        eventCategory: .process,
+        eventType: .start,
+        eventAction: "exec",
+        process: proc
+    )
+}
+
 /// Build a file event with full process attribution — the shape ES-mode
 /// produces. Drives the positive counter-tests: same file path, but now
 /// we know who wrote it, so the rules should fire if the content pattern
@@ -499,5 +528,107 @@ struct MacCrabSelfTests {
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
         #expect(matches.count == 1,
                 "Events on non-MacCrab paths/processes must be unaffected by the self-allowlist")
+    }
+}
+
+// MARK: - Interactive admin CLI gate (v1.4)
+
+/// Gate 5 suppresses non-critical matches on admin CLI tools whose
+/// ancestor chain includes a desktop terminal emulator. These tests lock
+/// the behaviour so a future refactor can't accidentally start alerting
+/// every time a developer runs `ps` at a Terminal prompt.
+@Suite("FP regression: interactive admin CLI gate")
+struct InteractiveAdminGateTests {
+
+    private func terminalAncestor(_ path: String = "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal") -> ProcessAncestor {
+        ProcessAncestor(pid: 800, executable: path, name: (path as NSString).lastPathComponent)
+    }
+
+    @Test("ps launched from Terminal via zsh suppresses non-critical matches")
+    func psFromTerminalSuppressed() async throws {
+        var matches = [
+            RuleMatch(ruleId: "d1a2b3c4-0123", ruleName: "Process Listing by Unsigned Process",
+                      severity: .low, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = interactiveAdminExec(
+            basename: "ps",
+            ancestors: [
+                ProcessAncestor(pid: 900, executable: "/bin/zsh", name: "zsh"),
+                terminalAncestor(),
+            ]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "ps launched from Terminal should not fire recon alerts")
+    }
+
+    @Test("lsof via tmux under iTerm is still treated as interactive")
+    func lsofViaTmuxSuppressed() async throws {
+        var matches = [
+            RuleMatch(ruleId: "d1a2b3c4-0252", ruleName: "lsof network enumeration",
+                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = interactiveAdminExec(
+            basename: "lsof",
+            ancestors: [
+                ProcessAncestor(pid: 950, executable: "/bin/zsh", name: "zsh"),
+                ProcessAncestor(pid: 940, executable: "/opt/homebrew/bin/tmux", name: "tmux"),
+                terminalAncestor("/Applications/iTerm.app/Contents/MacOS/iTerm2"),
+            ]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "lsof reached via tmux multiplexer under iTerm must still be treated as interactive")
+    }
+
+    @Test("ps from launchd (no terminal ancestor) still fires")
+    func psFromLaunchdStillFires() async throws {
+        var matches = [
+            RuleMatch(ruleId: "d1a2b3c4-0123", ruleName: "Process Listing by Unsigned Process",
+                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = interactiveAdminExec(
+            basename: "ps",
+            ancestors: [ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd")]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "ps spawned by launchd is suspicious and must still alert")
+    }
+
+    @Test("CRITICAL-severity admin CLI match survives interactive gate")
+    func criticalAdminStillFires() async throws {
+        var matches = [
+            RuleMatch(ruleId: "critical.admin-misuse", ruleName: "Admin Misuse",
+                      severity: .critical, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = interactiveAdminExec(
+            basename: "csrutil",
+            ancestors: [
+                ProcessAncestor(pid: 900, executable: "/bin/zsh", name: "zsh"),
+                terminalAncestor(),
+            ]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "Critical-severity rules on admin CLI must still fire even from a terminal")
+    }
+
+    @Test("Non-admin-CLI processes are unaffected by Gate 5")
+    func unrelatedProcessUnaffected() async throws {
+        var matches = [
+            RuleMatch(ruleId: "test.unrelated", ruleName: "Some Rule",
+                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = interactiveAdminExec(
+            basename: "curl",
+            ancestors: [
+                ProcessAncestor(pid: 900, executable: "/bin/zsh", name: "zsh"),
+                terminalAncestor(),
+            ]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "Gate 5 only applies to a whitelisted set of admin CLI basenames — curl is not one")
     }
 }

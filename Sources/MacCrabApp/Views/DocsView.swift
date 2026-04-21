@@ -14,6 +14,7 @@ struct DocsView: View {
         case rules = "Creating Rules"
         case actions = "Response Actions"
         case cli = "CLI Reference"
+        case shortcuts = "Keyboard Shortcuts"
         case tuning = "Tuning & Allowlists"
 
         var id: String { rawValue }
@@ -26,6 +27,7 @@ struct DocsView: View {
             case .rules:        return "plus.rectangle"
             case .actions:      return "bolt.shield"
             case .cli:          return "terminal"
+            case .shortcuts:    return "keyboard"
             case .tuning:       return "slider.horizontal.3"
             }
         }
@@ -61,7 +63,52 @@ struct DocsView: View {
         case .rules:        rulesContent
         case .actions:      actionsContent
         case .cli:          cliContent
+        case .shortcuts:    shortcutsContent
         case .tuning:       tuningContent
+        }
+    }
+
+    private var shortcutsContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            DocTitle("Keyboard Shortcuts")
+            DocBody("The dashboard and status-bar menu accept these shortcuts. Menubar shortcuts fire only while the menu is open.")
+
+            DocSubtitle("Status-bar menu")
+            keyRow("⌘D", "Open Dashboard")
+            keyRow("⌘R", "Reload Rules")
+            keyRow("⌘F", "Refresh data")
+            keyRow("⌘,", "Settings")
+            keyRow("⌘Q", "Quit MacCrab")
+
+            DocSubtitle("Alerts tab")
+            keyRow("⌘A", "Select all visible alerts")
+            keyRow("⌘Z", "Undo last suppress")
+            keyRow("⌘E", "Export alerts (JSON / CSV / SIEM formats)")
+            keyRow("⌘R", "Refresh")
+
+            DocSubtitle("Campaigns tab")
+            keyRow("Delete", "Dismiss selected campaigns (in Select mode)")
+            keyRow("Escape", "Cancel selection mode")
+
+            DocSubtitle("Events tab")
+            keyRow("Space", "Pause / resume live stream")
+            keyRow("⌘R", "Refresh")
+
+            DocSubtitle("Alert detail")
+            keyRow("Return", "Submit text field (e.g. AI hunt query)")
+        }
+    }
+
+    private func keyRow(_ shortcut: String, _ description: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(shortcut)
+                .font(.system(.body, design: .monospaced))
+                .padding(.vertical, 2).padding(.horizontal, 6)
+                .background(Color.secondary.opacity(0.15))
+                .cornerRadius(4)
+                .frame(minWidth: 80, alignment: .leading)
+            Text(description).foregroundColor(.primary)
+            Spacer()
         }
     }
 

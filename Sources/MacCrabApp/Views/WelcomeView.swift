@@ -7,6 +7,7 @@ import SwiftUI
 
 struct WelcomeView: View {
     @Binding var isPresented: Bool
+    @ObservedObject var sysextManager: SystemExtensionManager
     @State private var selectedLanguage: String = Locale.current.language.languageCode?.identifier ?? "en"
     @State private var currentStep = 0
 
@@ -77,8 +78,21 @@ struct WelcomeView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                 } else {
-                    Button("Get Started") {
+                    // Step 3: one-click Enable Protection. Kicking off the
+                    // sysext activation request here means the user only
+                    // needs to make one decision (approve in System
+                    // Settings) instead of two (dismiss wizard → click
+                    // Enable Protection on Overview → approve). When the
+                    // sysext is already active we fall back to the
+                    // original Get Started behavior.
+                    Button(sysextManager.state == .activated
+                        ? String(localized: "welcome.getStarted", defaultValue: "Get Started")
+                        : String(localized: "welcome.enableProtection", defaultValue: "Enable Protection")
+                    ) {
                         applyLanguage()
+                        if sysextManager.state != .activated {
+                            sysextManager.activate()
+                        }
                         isPresented = false
                     }
                     .buttonStyle(.borderedProminent)

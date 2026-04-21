@@ -42,4 +42,6 @@ falsepositives:
     - Legitimate debugging tools and profilers
     - Security research and reversing tools
     - Crash reporting agents checking process state
-level: medium
+level: low
+# v1.4: lowered from medium. ptrace checks are common in legitimate debuggers
+# and crash-handling runtimes; escalate on corroborating exfil/persistence.

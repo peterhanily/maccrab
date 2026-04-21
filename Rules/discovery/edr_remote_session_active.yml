@@ -66,4 +66,6 @@ detection:
 falsepositives:
     - Legitimate incident response by your security team
     - Scheduled EDR scans and health checks
-level: high
+level: medium
+# v1.4: lowered from high. EDR/RMM session activity is an informational signal
+# (your MSSP connecting), not an attack. Critical is reserved for surprising EDRs.

@@ -195,3 +195,4 @@ tmp/
 # Signed rule bundle build artifacts (produced by scripts/publish-rules.sh)
 # -----------------------------------------------------------------------------
 dist/
+.claude/scheduled_tasks.lock

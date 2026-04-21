@@ -36,4 +36,6 @@ falsepositives:
     - System administration scripts
     - MDM enrollment and compliance checks
     - Directory service troubleshooting
-level: medium
+level: low
+# v1.4: lowered from medium. `dscl . list /Users` is every admin's daily query.
+# Base rule stays at low; pair with campaign detection to escalate on lineage.

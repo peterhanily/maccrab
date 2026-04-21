@@ -74,6 +74,20 @@ public enum NoiseFilter {
         if isMacCrabSelf(event: event) {
             matches.removeAll { $0.severity != .critical }
         }
+
+        // Gate 5: interactive admin CLI from a terminal parent. ps, top,
+        // defaults, dscl, id, lsof, etc. are what every developer and
+        // sysadmin runs constantly. Sigma rules flag them as "recon" at
+        // Medium severity because in an attack chain those commands
+        // really ARE enumeration — but fired in isolation from Terminal →
+        // zsh → ps, they're nobody's evidence of intrusion. Suppress
+        // non-critical matches when (a) the event process is a known
+        // admin CLI and (b) any ancestor is a desktop terminal emulator.
+        // Critical still fires so a genuine post-exploitation pattern
+        // (unsigned parent, dropped-to-disk binary) isn't hidden.
+        if isInteractiveAdminCommand(event: event) {
+            matches.removeAll { $0.severity != .critical }
+        }
     }
 
     /// True when an event's subject is a MacCrab process, a MacCrab file,
@@ -119,6 +133,76 @@ public enum NoiseFilter {
         }
         return false
     }
+
+    /// True when the event process is one of the admin-CLI basenames (ps,
+    /// lsof, defaults, csrutil, …) AND at least one ancestor is a desktop
+    /// terminal emulator (Terminal, iTerm, Warp, Alacritty, tmux, …). This
+    /// is the "human at a shell prompt" heuristic — by far the biggest
+    /// source of discovery-rule noise on developer workstations. Ancestry
+    /// walk handles tmux / screen / zsh chains (terminal → tmux → zsh → ps).
+    public static func isInteractiveAdminCommand(event: Event) -> Bool {
+        let basename = (event.process.executable as NSString).lastPathComponent.lowercased()
+        let imageBasename = event.process.name.lowercased()
+        guard interactiveAdminBasenames.contains(basename)
+            || interactiveAdminBasenames.contains(imageBasename) else {
+            return false
+        }
+        for ancestor in event.process.ancestors {
+            if isInteractiveTerminalAncestor(ancestor.executable) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True when the path is a desktop terminal emulator bundle. Covers
+    /// Apple Terminal, third-party terminals, multiplexers (tmux/screen)
+    /// that commonly sit between a terminal and an interactive shell.
+    public static func isInteractiveTerminalAncestor(_ path: String) -> Bool {
+        for prefix in terminalEmulatorPrefixes where path.hasPrefix(prefix) {
+            return true
+        }
+        let base = (path as NSString).lastPathComponent
+        return terminalMultiplexerBasenames.contains(base)
+    }
+
+    /// Admin-CLI basenames that commonly fire discovery rules when run
+    /// interactively. Intentionally narrow — only well-known system tools
+    /// a developer/admin runs at a prompt. Adding anything here with a
+    /// more generic name (like "sh" or "python") would hide real signal.
+    public static let interactiveAdminBasenames: Set<String> = [
+        "ps", "top", "lsof", "netstat", "ifconfig", "ipconfig", "networksetup",
+        "scutil", "arp", "route", "tcpdump",
+        "defaults", "dscl", "id", "dsmemberutil", "groups", "who", "w", "whoami",
+        "uname", "hostname", "sw_vers", "system_profiler", "ioreg",
+        "csrutil", "spctl", "profiles", "kextstat", "launchctl",
+        "sysctl", "diskutil", "mount", "df", "mdutil",
+    ]
+
+    /// Desktop-terminal-emulator bundle prefixes. If an ancestor's
+    /// executable path starts with one of these, the descendant process
+    /// was launched from a terminal window.
+    public static let terminalEmulatorPrefixes: [String] = [
+        "/System/Applications/Utilities/Terminal.app/",
+        "/Applications/Utilities/Terminal.app/",
+        "/Applications/iTerm.app/",
+        "/Applications/iTerm2.app/",
+        "/Applications/Alacritty.app/",
+        "/Applications/Warp.app/",
+        "/Applications/WarpPreview.app/",
+        "/Applications/kitty.app/",
+        "/Applications/WezTerm.app/",
+        "/Applications/Hyper.app/",
+        "/Applications/Tabby.app/",
+        "/Applications/Ghostty.app/",
+    ]
+
+    /// Multiplexer/helper basenames that sit between a terminal and a
+    /// shell. When we see one of these as an ancestor, keep walking — the
+    /// terminal proper is usually one or two levels above.
+    public static let terminalMultiplexerBasenames: Set<String> = [
+        "tmux", "screen", "byobu", "zellij",
+    ]
 
     /// Known browser / Electron app-bundle prefixes whose helper processes
     /// do a lot of activity individual Sigma rules flag in isolation.

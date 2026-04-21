@@ -2,6 +2,24 @@ import Testing
 import Foundation
 @testable import MacCrabCore
 
+// Run a `body` between `start()` and `stop()` while guaranteeing `stop()`
+// runs even if `body` throws. v1.4 stability fix: before this helper, all
+// CollectorTests called `await monitor.stop()` *after* `try await
+// Task.sleep(...)`, so a cancelled sleep (slow CI, parallel test
+// contention) left the monitor running and polluted later test state.
+// Each test now routes through `withStartedMonitor` and the stop is in
+// the guaranteed-cleanup path.
+private func withStartedMonitor(
+    start: () async -> Void,
+    stop: () async -> Void,
+    body: @escaping @Sendable () async throws -> Void
+) async throws {
+    await start()
+    let bodyResult = await Task { try await body() }.result
+    await stop()
+    _ = try bodyResult.get()
+}
+
 // MARK: - EDR Monitor
 
 @Suite("EDR Monitor")
@@ -18,10 +36,9 @@ struct EDRMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = EDRMonitor(pollInterval: 60)
-        await monitor.start()
-        // Brief pause to let the scan task spin up
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -35,9 +52,9 @@ struct ClipboardMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = ClipboardMonitor()
-        await monitor.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -48,9 +65,9 @@ struct USBMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = USBMonitor()
-        await monitor.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -61,9 +78,9 @@ struct MCPMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = MCPMonitor()
-        await monitor.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -74,9 +91,9 @@ struct NetworkCollectorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let collector = NetworkCollector()
-        await collector.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await collector.stop()
+        try await withStartedMonitor(start: { await collector.start() }, stop: { await collector.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -87,9 +104,9 @@ struct SystemPolicyMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = SystemPolicyMonitor()
-        await monitor.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -100,9 +117,9 @@ struct TEMPESTMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = TEMPESTMonitor()
-        await monitor.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -113,9 +130,9 @@ struct EventTapMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = EventTapMonitor()
-        await monitor.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -126,9 +143,9 @@ struct FSEventsCollectorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let collector = FSEventsCollector()
-        await collector.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await collector.stop()
+        try await withStartedMonitor(start: { await collector.start() }, stop: { await collector.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 
@@ -139,8 +156,8 @@ struct TCCMonitorTests {
     @Test("Start and stop without crash")
     func lifecycle() async throws {
         let monitor = TCCMonitor()
-        await monitor.start()
-        try await Task.sleep(for: .milliseconds(100))
-        await monitor.stop()
+        try await withStartedMonitor(start: { await monitor.start() }, stop: { await monitor.stop() }) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }

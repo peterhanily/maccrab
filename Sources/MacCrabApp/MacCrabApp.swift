@@ -48,7 +48,7 @@ struct MacCrabApp: App {
                     }
                 }
                 .sheet(isPresented: $showWelcome) {
-                    WelcomeView(isPresented: $showWelcome)
+                    WelcomeView(isPresented: $showWelcome, sysextManager: sysextManager)
                 }
         }
         .commands {

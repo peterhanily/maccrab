@@ -7,6 +7,7 @@
 import Foundation
 import Combine
 import MacCrabCore
+import os.log
 
 // MARK: - AppState
 
@@ -108,9 +109,12 @@ final class AppState: ObservableObject {
     /// Resolve the MacCrab data directory.
     /// Prefers the system dir (root daemon) when its DB exists and is newer
     /// than the user dir DB, which may contain stale data from a previous
-    /// non-root run.
+    /// non-root run. v1.4: use *readable* checks (not just `fileExists`),
+    /// log the chosen path so operators can diagnose, and do not fall
+    /// through to an unreadable path silently.
     private let dataDir: String = {
         let fm = FileManager.default
+        let logger = Logger(subsystem: "com.maccrab.app", category: "data-dir")
         let userDir = fm.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -120,22 +124,41 @@ final class AppState: ObservableObject {
 
         let userDB = userDir + "/events.db"
         let systemDB = systemDir + "/events.db"
-        let userExists = fm.fileExists(atPath: userDB)
+        let userReadable = fm.isReadableFile(atPath: userDB)
         let systemReadable = fm.isReadableFile(atPath: systemDB)
 
-        // If both exist, prefer whichever was modified more recently.
-        if userExists && systemReadable {
+        // If both are readable, prefer whichever was modified more recently.
+        if userReadable && systemReadable {
             let userMod = (try? fm.attributesOfItem(atPath: userDB))?[.modificationDate] as? Date
             let sysMod = (try? fm.attributesOfItem(atPath: systemDB))?[.modificationDate] as? Date
             if let s = sysMod, let u = userMod, s >= u {
+                logger.info("dataDir=system (system DB newer than user DB)")
                 return systemDir
             }
+            logger.info("dataDir=user (user DB newer than system DB)")
             return userDir
         }
-        if systemReadable { return systemDir }
-        if userExists { return userDir }
-        // Neither exists yet — default to system dir so we pick it up when
-        // the root daemon creates it.
+        if systemReadable {
+            logger.info("dataDir=system (only system DB readable)")
+            return systemDir
+        }
+        if userReadable {
+            logger.info("dataDir=user (only user DB readable)")
+            return userDir
+        }
+        // Neither is readable. That's either a first-run (no DB yet) or a
+        // filesystem-level problem (both DBs exist but permissions deny
+        // us — e.g. system DB is root-600 and we're non-root). The former
+        // is normal, the latter is an install/upgrade bug. Warn and
+        // return systemDir as the "expected" location so the sysext's DB
+        // gets picked up as soon as it's first readable.
+        let systemExists = fm.fileExists(atPath: systemDB)
+        let userExists = fm.fileExists(atPath: userDB)
+        if systemExists || userExists {
+            logger.warning("dataDir fallback to system: system-exists=\(systemExists, privacy: .public) user-exists=\(userExists, privacy: .public) but neither is readable — possible permissions issue")
+        } else {
+            logger.info("dataDir=system (first-run: no DB at either location yet)")
+        }
         return systemDir
     }()
 
@@ -536,6 +559,29 @@ final class AppState: ObservableObject {
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         task.arguments = ["-HUP", "maccrabd"]
         try? task.run()
+    }
+
+    /// Human-readable result of the last `pruneAlerts` call — shown next to
+    /// the "Clear Now" button so users see confirmation without a modal.
+    @Published var lastPruneResult: String?
+
+    /// Delete alerts older than `olderThanDays`. Wraps `AlertStore.prune`,
+    /// refreshes the dashboard afterwards, and records a user-facing
+    /// summary string. Failures are caught and surfaced via the same
+    /// `lastPruneResult` field so the UI has exactly one feedback surface.
+    func pruneAlerts(olderThanDays days: Int) async {
+        guard days > 0 else { return }
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        do {
+            let store = try alertStore()
+            let deleted = try await store.prune(olderThan: cutoff)
+            await refresh()
+            lastPruneResult = deleted == 0
+                ? "No alerts older than \(days) days"
+                : "Deleted \(deleted) alerts older than \(days) days"
+        } catch {
+            lastPruneResult = "Prune failed: \(error.localizedDescription)"
+        }
     }
 
     // MARK: Incremental Loading

@@ -34,4 +34,6 @@ detection:
 falsepositives:
     - Unsigned developer tools or scripts that check process status
     - Custom monitoring agents
-level: medium
+level: low
+# v1.4: lowered from medium. Unsigned `ps`/`top` is most commonly Homebrew-
+# linked development tools. Kill-chain rules upgrade severity when warranted.

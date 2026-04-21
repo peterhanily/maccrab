@@ -8,6 +8,7 @@
 import Foundation
 import Darwin
 import SQLite3
+import os.log
 
 // MARK: - EventStoreError
 
@@ -189,8 +190,20 @@ public actor EventStore {
     }
 
     /// Execute a SQL statement on a raw handle (used during init before actor is live).
+    /// Execute SQL on a raw handle and surface the error to os.log when it
+    /// fails. PRAGMAs used to be silently ignored; a failed `journal_mode =
+    /// WAL` (corrupt DB, disk-full, read-only filesystem) would leave the
+    /// store in a quieter fallback mode with no visible signal. `.public`
+    /// interpolation keeps the diagnostic useful under `sudo log show`
+    /// (values here are SQL strings and SQLite return codes, never user
+    /// secrets).
     private static func exec(_ db: OpaquePointer, _ sql: String) {
-        sqlite3_exec(db, sql, nil, nil, nil)
+        let rc = sqlite3_exec(db, sql, nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                .error("sqlite3_exec failed (rc=\(rc, privacy: .public)): \(sql, privacy: .public) — \(msg, privacy: .public)")
+        }
     }
 
     /// Creates an `EventStore` backed by a SQLite database at the default location.

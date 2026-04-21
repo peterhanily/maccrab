@@ -38,4 +38,6 @@ detection:
 falsepositives:
     - Hardware diagnostic tools
     - System information utilities
-level: medium
+level: low
+# v1.4: lowered from medium. ioreg is used by Apple Hardware Info and every
+# diagnostic tool. Treat as discovery signal only; escalate via campaign context.

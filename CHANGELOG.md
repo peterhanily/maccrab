@@ -3,6 +3,118 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-04-21
+
+Broad quality-of-life release. Noise-reduction pass, stability fixes,
+new UX surfaces, enterprise MDM profile template, and a reproducible
+release-hygiene checklist. v1.3.12 is rolled in rather than shipped
+independently — its suppression-persistence fix is the first item
+below.
+
+### Fixed
+
+- **Dashboard UI state survives app upgrades.** Suppression IDs and
+  rule/process suppression patterns are now anchored to a stable
+  user-home directory (`uiStateDir`) instead of the volatile
+  `dataDir` that flips between user and system paths after every
+  sysext write. Previously every upgrade silently discarded
+  suppressions because the non-root dashboard couldn't write to the
+  root-owned system dir. Legacy state is read from the old location
+  on first launch and migrated automatically.
+- **CampaignStore now rejects symlink DB paths.** Matching the guard
+  EventStore and AlertStore already had; closes a privilege-
+  escalation path where a swapped DB symlink could redirect
+  root-owned writes.
+- **Sysext crash-write failures are logged, not swallowed.** 14
+  `try?` call sites in `MonitorTasks.swift` now route failures
+  through `StorageErrorTracker.shared.recordAlertError` so a crash
+  mid-alert leaves a forensic trail in Unified Log.
+- **PRAGMA failures are logged across EventStore / AlertStore /
+  CampaignStore.** A failed `journal_mode = WAL` used to silently
+  drop the store to rollback-journal mode; operators now see the
+  return code + error message under `sudo log show`.
+- **dataDir fail-loud when both DBs are unreadable.** New `isReadableFile`
+  checks replace `fileExists` so dataDir doesn't return a path the
+  dashboard can't actually read. Logs a warning when permissions
+  problems are evident (system DB exists but non-root app can't read).
+- **Flaky `CollectorTests` lifecycle race.** 10 monitor lifecycle
+  tests routed through a new `withStartedMonitor` helper that
+  guarantees `stop()` runs even if the body throws. Previously a
+  cancelled `Task.sleep` left the monitor running and polluted
+  later test state — the "1 issue" flake reported on first runs.
+
+### Added
+
+- **NoiseFilter Gate 5: interactive admin CLI.** Drops non-critical
+  matches on a curated set of admin binaries (ps, lsof, defaults,
+  dscl, csrutil, system_profiler, spctl, profiles, etc.) when any
+  process ancestor is a desktop terminal emulator (Terminal, iTerm,
+  Warp, Alacritty, kitty, WezTerm, Hyper, Tabby, Ghostty) or a
+  multiplexer (tmux, screen, byobu, zellij). 5 new regression tests
+  in `InteractiveAdminGateTests`.
+- **Alert retention control.** Settings → Detection Engine →
+  Retention exposes `AlertStore.prune(olderThan:)` as a one-click
+  "Clear alerts older than N days" (7 / 30 / 90 / 365).
+- **Copy as Markdown.** `AlertDetailView` gains a Copy-as-Markdown
+  button alongside Copy Details. Formats severity as bold, wraps
+  identifiers in code spans, links MITRE technique IDs to
+  attack.mitre.org, and uses ATX-style headings for paste into
+  tickets / Slack / incident docs.
+- **Keyboard Shortcuts reference.** New section in DocsView
+  enumerates every in-app keyboard shortcut.
+- **One-click sysext activation in WelcomeView.** Step 3's button
+  now reads "Enable Protection" (instead of "Get Started") when the
+  sysext isn't activated yet, and kicks off
+  `OSSystemExtensionRequest` directly instead of sending the user
+  to the Overview tab to find the button themselves.
+- **`maccrabctl rule enable|disable <id>`.** CLI subcommand to
+  toggle a compiled rule's `enabled` flag without rebuilding or
+  deleting the YAML. Writes the JSON and prompts SIGHUP.
+- **MacCrab.mobileconfig template for MDM deployment** (`deploy/`).
+  Pre-authorizes the sysext, grants FDA to both app + sysext,
+  registers MacCrab as a managed login item. Full deployment
+  walkthrough in `deploy/README.md`.
+- **`RELEASE_CHECKLIST.md` + `scripts/prerelease-check.sh`.** The
+  release pipeline now runs the checklist as step 0: version sync
+  across project.yml / plists / README / CHANGELOG, RELEASE_NOTES/
+  file presence + non-trivial content, rule compile success,
+  localization coverage per locale, SPM pin discipline. Release.sh
+  refuses to sign if any hard check fails.
+
+### Changed
+
+- **Cross-process correlator suppresses more vendor paths.** Added
+  Adobe / Creative Cloud / JetBrains / Zoom / 1Password / Firefox /
+  Notion / Obsidian / iCloud Drive (Mobile Documents) / Time Machine
+  volumes / Homebrew temp / dev-tool fan-outs (`.npm`, `.yarn`,
+  `.gradle`, `.m2`, `.venv`, `__pycache__`) to `ignoredPathSubstrings`.
+- **evaluateFileChain now applies the same homogeneity gates
+  evaluateNetworkChain had.** Chains where every event shares the
+  same executable path, app bundle, tool-version directory, trusted
+  helper lineage, or process name are dropped at evaluation time.
+  Belt-and-braces over v1.3.10's path filter.
+- **Kill-chain detection ignores Low-severity tactics.** Previously
+  `Multi-Stage Attack` fired when `recentAlerts` spanned three
+  distinct MITRE tactics — easily triggered by three Low-severity
+  discovery rules. Now only medium+ severity alerts contribute to
+  the tactic set.
+- **Discovery-rule severity recalibration.** 6 discovery rules
+  dropped from Medium / High to Low: `bluetooth_scanning_tool`,
+  `dscl_user_enumeration`, `ioreg_hardware_enum`, `lsof_network_enum`,
+  `process_listing_by_unsigned`, `debugger_evasion_check`.
+  `edr_remote_session_active` dropped from High to Medium.
+- **Compiler honours `status: deprecated`.** Rules marked deprecated
+  still compile (so rule browser + existing suppressions keep
+  working) but ship `enabled: false` so the engine skips them.
+- **"Daemon" → "Detection Engine"** in three remaining UI strings
+  missed in the v1.3.9 rename sweep: Settings Response Actions
+  save toast, status-bar fallback label, Integrations fleet-help
+  copy.
+- **`.mcp.json` now carries an explicit comment** explaining the
+  dev-vs-release path split so end users understand the file is
+  pointed at a local build and need to edit it when registering
+  the Homebrew-installed binary.
+
 ## [1.3.12] — 2026-04-21
 
 Hotfix: suppressions reset after upgrade.

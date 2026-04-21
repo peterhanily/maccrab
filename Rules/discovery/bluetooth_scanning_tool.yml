@@ -51,4 +51,7 @@ detection:
 falsepositives:
     - Bluetooth development and testing
     - Home automation tools (HomeKit, IoT)
-level: high
+level: low
+# v1.4: lowered from high. Matching on `python + import bleak` is reconnaissance-
+# intent, not attack evidence. Bluetooth scanning tools raise a rank only when
+# corroborated by follow-on exploitation activity in the same kill chain.

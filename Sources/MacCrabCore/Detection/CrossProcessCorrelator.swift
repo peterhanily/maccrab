@@ -141,8 +141,12 @@ public actor CrossProcessCorrelator {
         "/Library/WebKit/",
         "/Library/Saved Application State/",
         "/Library/Metadata/CoreSpotlight/",
+        "/Library/Mobile Documents/",               // iCloud Drive sync
+        "/Library/ColorSync/",
+        "/Library/Fonts/",                          // font cache rebuilds
         // Well-known vendors that fan out across many worker processes into
-        // their own Application Support state dirs.
+        // their own Application Support state dirs. Each entry here blocked
+        // a real FP class reported by users — add conservatively.
         "/Library/Application Support/Google/",
         "/Library/Application Support/Microsoft/",
         "/Library/Application Support/CrashReporter/",
@@ -152,12 +156,44 @@ public actor CrossProcessCorrelator {
         "/Library/Application Support/Spotify/",
         "/Library/Application Support/Dropbox/",
         "/Library/Application Support/iCloud/",
+        "/Library/Application Support/Adobe/",
+        "/Library/Application Support/Creative Cloud/",
+        "/Library/Application Support/JetBrains/",
+        "/Library/Application Support/zoom.us/",
+        "/Library/Application Support/1Password/",
+        "/Library/Application Support/Firefox/",
+        "/Library/Application Support/com.apple.sharedfilelist/",
+        "/Library/Application Support/com.apple.spotlight/",
+        "/Library/Application Support/com.apple.TCC/",   // TCC daemon state
+        "/Library/Application Support/Backblaze/",
+        "/Library/Application Support/DoctorClink/",
+        "/Library/Application Support/Notion/",
+        "/Library/Application Support/Obsidian/",
+        // ~/.config fan-outs
+        "/.config/JetBrains/",
+        "/.mozilla/firefox/",
+        "/.cache/",
         // Dev tooling fan-outs
         "/.git/",
         "/node_modules/",
         "/.pnpm/",
+        "/.npm/",
+        "/.yarn/",
         "/.cargo/",
         "/.rustup/",
+        "/.gradle/",
+        "/.m2/",
+        "/.venv/",
+        "/__pycache__/",
+        // OS backup / snapshot volumes
+        "/Volumes/MobileBackups/",
+        "/Volumes/Backups of ",
+        "/.DocumentRevisions-V100/",
+        "/.MobileBackups/",
+        "/.TemporaryItems/",
+        // Homebrew scratch
+        "/private/tmp/homebrew-",
+        "/opt/homebrew/var/",
     ]
 
     /// Network destinations that are never interesting.

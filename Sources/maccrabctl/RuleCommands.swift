@@ -89,6 +89,54 @@ extension MacCrabCtl {
         print("  python3 Compiler/compile_rules.py --input-dir \(inputDir) --output-dir \(outputDir)")
     }
 
+    /// Flip a rule's `enabled` flag on disk inside its compiled JSON. The
+    /// detection engine reads the flag on load — a SIGHUP or sysext
+    /// restart after running this picks up the change. Lets a user park
+    /// a noisy rule without deleting the source YAML or recompiling.
+    ///
+    /// Writes to compiled_rules/<file>.json directly; falls back to
+    /// scanning the dir for a matching rule id when no filename is given.
+    static func setRuleEnabled(ruleId: String, enabled: Bool) {
+        let compiledDir = maccrabDataDir() + "/compiled_rules"
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: compiledDir) else {
+            print("Cannot read \(compiledDir) — is the detection engine installed?")
+            return
+        }
+
+        for file in files where file.hasSuffix(".json") {
+            let path = compiledDir + "/" + file
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = json["id"] as? String,
+                  id == ruleId else {
+                continue
+            }
+
+            json["enabled"] = enabled
+            guard let rewritten = try? JSONSerialization.data(
+                withJSONObject: json,
+                options: [.prettyPrinted, .sortedKeys]
+            ) else {
+                print("Failed to serialize updated rule JSON")
+                return
+            }
+
+            do {
+                try rewritten.write(to: URL(fileURLWithPath: path))
+                print("\(enabled ? "Enabled" : "Disabled") rule \(ruleId) (\(file))")
+                print("Send SIGHUP to the detection engine or restart MacCrab.app for the change to take effect:")
+                print("  pkill -HUP com.maccrab.agent   # release sysext")
+                print("  pkill -HUP maccrabd            # dev fallback")
+            } catch {
+                print("Failed to write \(path): \(error.localizedDescription)")
+            }
+            return
+        }
+
+        print("Rule \(ruleId) not found under \(compiledDir)")
+        print("Use `maccrabctl rules list` to find the rule id.")
+    }
+
     static func createRuleTemplate(category: String) {
         let id = UUID().uuidString.lowercased()
         let date = {

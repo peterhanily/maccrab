@@ -31,4 +31,5 @@ detection:
 falsepositives:
     - Monitoring and troubleshooting scripts
     - Network management utilities
-level: medium
+level: low
+# v1.4: lowered from medium. lsof is standard admin/dev troubleshooting.
