@@ -3,6 +3,40 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-04-21
+
+Hotfix: Sparkle update sheets rendered v1.4.0's Markdown release notes as
+raw text. Sparkle's `<description>` field is HTML, not Markdown. Also
+adds diagnostic logging to suppression save/load paths so a user report
+that survived the v1.3.12/v1.4.0 fix has a trail to follow.
+
+### Fixed
+
+- **Sparkle update sheet renders release notes as HTML.**
+  `scripts/generate-appcast-entry.sh` now runs `RELEASE_NOTES/vX.Y.Z.md`
+  through a pure-Python Markdown→HTML converter (`scripts/_md_to_html.py`)
+  before embedding the result in the appcast's CDATA `<description>`.
+  GitHub releases keep rendering the same file as Markdown.
+  Converter handles headings, paragraphs, bulleted lists, **bold**,
+  *italic*, `code`, [links](#), and horizontal rules — the subset we
+  use. Extend the script if new constructs appear.
+
+### Added
+
+- **Suppression persistence diagnostics.** `saveSuppressedIDs`,
+  `loadSuppressedIDs`, `saveSuppressPatterns`, `loadSuppressPatterns`,
+  `readUIState`, `writeUIState`, and `suppressAlert` now emit
+  `os_log` info/notice/error records under subsystem
+  `com.maccrab.app` category `ui-state`. Showing path chosen, bytes
+  written/read, and counts loaded on every save/load. Users reporting
+  "suppressions come back after update" can run
+  `sudo log show --subsystem com.maccrab.app --predicate
+  'category == "ui-state"' --last 1h` to produce a diagnostic trail.
+- **One-shot on-load migration.** `loadSuppressedIDs` now rewrites
+  the state to `uiStateDir` immediately if it found the file only at
+  the legacy `dataDir` location. Next launch hits the stable path on
+  the first try.
+
 ## [1.4.0] — 2026-04-21
 
 Broad quality-of-life release. Noise-reduction pass, stability fixes,

@@ -384,6 +384,7 @@ final class AppState: ObservableObject {
         // suppressedIDs survives any DB reload, so tab-switching can never undo a suppression.
         suppressedIDs.insert(alertId)
         saveSuppressedIDs()
+        Self.uiStateLogger.info("suppressAlert \(alertId, privacy: .public) — total suppressed=\(self.suppressedIDs.count, privacy: .public)")
         if let idx = dashboardAlerts.firstIndex(where: { $0.id == alertId }) {
             dashboardAlerts[idx].suppressed = true
         }
@@ -494,14 +495,27 @@ final class AppState: ObservableObject {
     // user-home copy doesn't exist. First successful save under the new
     // path makes the fallback unnecessary going forward.
 
+    // v1.4.1 diagnostic logging: users reported suppressions still
+    // resetting after the v1.3.12/v1.4.0 fix was supposed to anchor them
+    // to user-home. These logger calls make save/load paths visible under
+    // `sudo log show --subsystem com.maccrab.app --predicate
+    // 'category == "ui-state"' --last 1h` so a future repro leaves a
+    // trail. Values are file paths and counts, never user secrets, so
+    // `.public` is safe.
+    private static let uiStateLogger = Logger(subsystem: "com.maccrab.app", category: "ui-state")
+
     private var uiStateDir: String {
         let home = NSHomeDirectory()
         let dir = "\(home)/Library/Application Support/MacCrab"
-        try? FileManager.default.createDirectory(
-            atPath: dir,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        do {
+            try FileManager.default.createDirectory(
+                atPath: dir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            Self.uiStateLogger.error("Failed to create uiStateDir \(dir, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
         return dir
     }
 
@@ -511,16 +525,27 @@ final class AppState: ObservableObject {
     private func readUIState(_ filename: String) -> Data? {
         let newPath = "\(uiStateDir)/\(filename)"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: newPath)) {
+            Self.uiStateLogger.info("Read \(filename, privacy: .public) from uiStateDir (\(data.count) bytes)")
             return data
         }
         let oldPath = "\(dataDir)/\(filename)"
-        return try? Data(contentsOf: URL(fileURLWithPath: oldPath))
+        if oldPath != newPath, let data = try? Data(contentsOf: URL(fileURLWithPath: oldPath)) {
+            Self.uiStateLogger.notice("Read \(filename, privacy: .public) from legacy dataDir fallback \(self.dataDir, privacy: .public) (\(data.count) bytes)")
+            return data
+        }
+        Self.uiStateLogger.info("No \(filename, privacy: .public) found at uiStateDir or dataDir — using defaults")
+        return nil
     }
 
     /// Write a UI-state JSON blob under `uiStateDir`.
     private func writeUIState(_ filename: String, data: Data) {
         let path = "\(uiStateDir)/\(filename)"
-        try? data.write(to: URL(fileURLWithPath: path))
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+            Self.uiStateLogger.info("Wrote \(filename, privacy: .public) (\(data.count) bytes) to \(path, privacy: .public)")
+        } catch {
+            Self.uiStateLogger.error("Failed to write \(filename, privacy: .public) to \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func saveSuppressPatterns() {
@@ -537,6 +562,7 @@ final class AppState: ObservableObject {
             guard let r = dict["ruleTitle"], let p = dict["processName"] else { return nil }
             return (r, p)
         }
+        Self.uiStateLogger.info("Loaded \(self.suppressionPatterns.count, privacy: .public) suppression pattern(s)")
     }
 
     /// Persist the current `suppressedIDs` set to disk so suppressions survive app restarts.
@@ -547,11 +573,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Load previously persisted `suppressedIDs` on startup.
+    /// Load previously persisted `suppressedIDs` on startup. Also migrates
+    /// the state forward: if we found the file only at the legacy
+    /// `dataDir` location (not at `uiStateDir`), rewrite it immediately so
+    /// future launches hit the stable path on the first try.
     func loadSuppressedIDs() {
         guard let data = readUIState("ui_suppressed_ids.json"),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else { return }
         suppressedIDs = Set(arr)
+        Self.uiStateLogger.info("Loaded \(self.suppressedIDs.count, privacy: .public) suppressed alert id(s)")
+
+        // Migration: if the file only exists at legacy dataDir, rewrite
+        // it at uiStateDir so the stable location is authoritative.
+        let newPath = "\(uiStateDir)/ui_suppressed_ids.json"
+        if !FileManager.default.fileExists(atPath: newPath) {
+            saveSuppressedIDs()
+        }
     }
 
     func reloadDaemonRules() {

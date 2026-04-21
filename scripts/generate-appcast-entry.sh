@@ -25,6 +25,7 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DMG=""
 VERSION=""
 SPARKLE_BIN="${HOME}/Tools/Sparkle-2.6.4/bin"
@@ -94,8 +95,26 @@ else
     NOTES=$(cat "$RELEASE_NOTES_MD")
 fi
 
-# Emit a single Sparkle <item>. Notes are embedded as CDATA so Markdown-y
-# characters (&, <, >) survive without escaping.
+# Sparkle renders <description> as HTML, not Markdown. Shipping raw
+# Markdown produced the v1.4.0 update sheet showing **bold** as
+# literal text and every line collapsed onto one paragraph. Convert
+# Markdown → HTML via scripts/_md_to_html.py so RELEASE_NOTES/vX.Y.Z.md
+# stays as the single authoritative source (GitHub release still
+# renders it as Markdown; Sparkle now sees HTML).
+NOTES_TMP=$(mktemp -t maccrab-appcast-notes.XXXXXX.md)
+trap 'rm -f "$NOTES_TMP"' EXIT
+printf '%s' "$NOTES" > "$NOTES_TMP"
+NOTES_HTML=$(python3 "$SCRIPT_DIR/_md_to_html.py" "$NOTES_TMP" 2>/dev/null || true)
+rm -f "$NOTES_TMP"
+if [[ -z "$NOTES_HTML" ]]; then
+    # Converter failed — fall back to the raw Markdown so the sheet
+    # at least shows content. Better than nothing; still fixable by
+    # a follow-up appcast republish.
+    NOTES_HTML="$NOTES"
+fi
+
+# Emit a single Sparkle <item>. HTML notes are embedded as CDATA so
+# tags pass through unescaped.
 cat <<XML
 <item>
   <title>MacCrab ${VERSION}</title>
@@ -105,7 +124,7 @@ cat <<XML
   <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
   <pubDate>${PUB_DATE}</pubDate>
   <description><![CDATA[
-${NOTES}
+${NOTES_HTML}
 ]]></description>
   <enclosure
     url="${DOWNLOAD_URL}"
