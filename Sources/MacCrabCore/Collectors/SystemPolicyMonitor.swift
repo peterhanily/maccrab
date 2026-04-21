@@ -224,24 +224,51 @@ public actor SystemPolicyMonitor {
             }
         }
 
-        // CryptoTokenKit extensions
+        // CryptoTokenKit extensions. v1.4.5 tightening: most non-Apple
+        // CTK extensions on a real Mac are YubiKey, 1Password, OneSpan,
+        // PIV smartcard tokens, and other legitimate auth hardware.
+        // HIGH severity for all of them made every user see a "credential
+        // access attempt" alert on normal YubiKey insert. Skip known
+        // signed auth providers entirely; lower the rest to
+        // informational (the sysext still records the enumeration, the
+        // operator just doesn't get a red alert in the dashboard).
         let ctkOutput = runCommand("/usr/bin/pluginkit", args: ["-m", "-p", "com.apple.ctk-tokens"])
         let ctkLines = ctkOutput.split(separator: "\n")
         for line in ctkLines {
             let lineStr = String(line)
-            if !lineStr.contains("com.apple.") && !knownPlugins.contains(lineStr) {
-                knownPlugins.insert(lineStr)
-                emit(SystemPolicyEvent(
-                    type: .cryptoTokenExtension,
-                    description: "Non-Apple CryptoTokenKit extension: \(lineStr)",
-                    path: nil,
-                    severity: .high,
-                    mitreTactic: "attack.credential_access",
-                    mitreTechnique: "attack.t1556"
-                ))
+            guard !lineStr.contains("com.apple."),
+                  !Self.trustedCTKProviders.contains(where: { lineStr.contains($0) }),
+                  !knownPlugins.contains(lineStr) else {
+                continue
             }
+            knownPlugins.insert(lineStr)
+            emit(SystemPolicyEvent(
+                type: .cryptoTokenExtension,
+                description: "Non-Apple CryptoTokenKit extension: \(lineStr)",
+                path: nil,
+                severity: .informational,
+                mitreTactic: "attack.credential_access",
+                mitreTechnique: "attack.t1556"
+            ))
         }
     }
+
+    /// Known-legitimate CTK providers. Installing one of these is not a
+    /// credential-access attack — it's a user plugging in a YubiKey or
+    /// installing 1Password. Substring match against the plugin bundle
+    /// ID from `pluginkit -m`.
+    private static let trustedCTKProviders: [String] = [
+        "com.yubico.",                  // YubiKey
+        "com.agilebits.",               // 1Password 7 / 8
+        "com.1password.",               // 1Password browser integration
+        "com.onespan.",                 // OneSpan / VASCO
+        "com.thalesgroup.",             // Thales / SafeNet
+        "com.entrust.",                 // Entrust smartcards
+        "com.gemalto.",                 // Gemalto PIV
+        "net.opensc-project.",          // OpenSC
+        "com.cryptosmart.",
+        "at.mtrust.",                   // mTrust
+    ]
 
     // MARK: - XProtect Version
 

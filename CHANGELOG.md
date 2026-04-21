@@ -3,6 +3,44 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.5] — 2026-04-21
+
+Wave B of the 1.4.x quality pass. Five noise sources observed on a
+real MacBook Pro developer workstation running v1.4.4 get shut down
+at their source.
+
+### Fixed
+
+- **`PowerAnomalyDetector.knownLegitimate` expanded.** Added
+  `useractivityd`, `appleh13camerad`, `applecamerad`, `Signal`,
+  `nsurlsessiond`, `AssetCacheLocatorService`, `AssetCache`,
+  `mobileassetd`, `assetsubscriptiond`, `SEPAuthSession`,
+  `SmartCardServices`, plus meeting apps `Google Meet`, `Zoom`,
+  `Cisco Webex`. Every entry validated against observed field FPs.
+- **`SystemPolicyMonitor` CryptoTokenKit alerts no longer fire
+  HIGH on legitimate auth hardware.** New `trustedCTKProviders`
+  substring list covers Yubico, 1Password, OneSpan, Thales,
+  Entrust, Gemalto, OpenSC, mTrust. Unknown CTK extensions drop
+  from HIGH to `.informational`.
+- **USB alert rate limiting** via new `USBRateLimiter` actor in
+  `MacCrabAgentKit`. Tracks `(vid:pid:direction)` tuples and
+  suppresses duplicates within 24h per session. Mass-storage
+  bypasses the limiter. Eliminates the per-hub-replug spam.
+- **`BehaviorScorer.addRuleMatch` skips contributions from trusted
+  browser helpers.** `NoiseFilter.isTrustedBrowserHelper(path:)`
+  check at the scoring source. Fixes the "Google Chrome Helper
+  accumulated suspicious behavior score of 10.8" HIGH alert
+  driven by false `sigma_rule_match_critical` contributions.
+- **NoiseFilter Gate 5 recognizes shell-binary ancestors as
+  interactive.** New `shellAncestorBasenames` set (bash/zsh/sh/
+  fish/dash/ksh/tcsh/csh) added to `isInteractiveTerminalAncestor`.
+  Covers cases where the ES ancestor chain doesn't reach
+  Terminal.app but the immediate parent is a shell.
+- **`ssh_agent_access_suspicious.yml` adds `filter_terminal`.**
+  Excludes parents of `/bash`, `/zsh`, `/sh`, `/fish`, `/dash`
+  so dev work (Paramiko, Ansible, Fabric, `git clone` via ssh)
+  stops firing HIGH alerts.
+
 ## [1.4.4] — 2026-04-21
 
 Same-day hotfix for v1.4.3 — a user on v1.4.3 immediately saw the new

@@ -64,6 +64,28 @@ public actor PowerAnomalyDetector {
         // Dev tools commonly left running under a sleep assertion
         "Docker Desktop", "com.docker.hyperkit", "OrbStack",
         "Xcode", "Simulator", "com.apple.dt.Xcode",
+        // v1.4.5 additions — observed in field data. Each one produced
+        // Medium alerts that are 100% legitimate:
+        //   useractivityd       — BTLE advertisement wake lock (Handoff,
+        //                          AirDrop, continuity features)
+        //   appleh13camerad     — Apple camera driver real-time latency
+        //                          constraint during video capture
+        //   Signal              — "Video Wake Lock" during a call
+        //   applecamerad        — same family as appleh13camerad,
+        //                          generic macOS camera daemon
+        //   nsurlsessiond       — background URL session holds during
+        //                          iCloud / APN sync
+        //   AssetCacheLocatorService, AssetCache
+        //   mobileassetd, assetsubscriptiond — Apple asset downloads
+        "useractivityd", "appleh13camerad", "applecamerad",
+        "Signal",
+        "nsurlsessiond",
+        "AssetCacheLocatorService", "AssetCache",
+        "mobileassetd", "assetsubscriptiond",
+        // Additional meeting apps that weren't in the original list
+        "Google Meet", "Zoom", "Cisco Webex",
+        // Smartcard / security token flows hold assertions during auth
+        "SEPAuthSession", "SmartCardServices",
     ]
 
     /// Thermal level threshold above which we flag an anomaly.

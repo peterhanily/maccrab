@@ -29,8 +29,21 @@ detection:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: (selection or selection_process) and not filter_system
+    # v1.4.5: exclude ancestry paths where an interactive shell ran
+    # the command (dev using paramiko, ansible, fabric, pip-install-
+    # from-git, npm-install-from-git, etc). Attackers don't chain
+    # SSH-agent hijack through Terminal + zsh; they do it from a
+    # dropped binary or a script running under launchd.
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+    condition: (selection or selection_process) and not filter_system and not filter_terminal
 falsepositives:
     - SSH-based deployment scripts
     - Git over SSH operations
+    - Interactive `ssh`, `git`, `ansible`, paramiko, etc. from a terminal session
 level: high

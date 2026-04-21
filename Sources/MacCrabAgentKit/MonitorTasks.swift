@@ -148,18 +148,29 @@ enum MonitorTasks {
             }
         }
 
-        // USB device monitoring task
+        // USB device monitoring task. v1.4.5: per-device rate limiting.
+        // Before, every hub replug produced an informational alert. A
+        // user with a dock, YubiKey, and a USB-C hub hit 10+ USB alerts
+        // every time they reconnected. Track (vid, pid) tuples in-
+        // process and skip non-mass-storage events we've already
+        // surfaced in the last 24 hours. Mass-storage events always
+        // fire — those are exfil-class and the user needs to see every
+        // one. Rate limit cache is in-memory only; resets on restart.
+        let usbRateLimiter = USBRateLimiter()
         await supervisor.start("usb") {
             for await usbEvent in state.usbMonitor.events {
-                // Hubs and non-storage HID are benign — the vast majority
-                // of a user's USB chatter is keyboards, mice, hubs, audio
-                // devices. Only mass-storage events are worth drawing
-                // attention to; everything else is Informational.
                 let severity: Severity
                 if usbEvent.isMassStorage {
                     severity = .high
                 } else {
                     severity = .informational
+                    // Only rate-limit non-mass-storage. Mass-storage
+                    // connect/disconnect always surfaces — every event
+                    // matters.
+                    let key = "\(usbEvent.vendorId):\(usbEvent.productId):\(usbEvent.isConnected ? "c" : "d")"
+                    if await usbRateLimiter.shouldSuppress(key: key) {
+                        continue
+                    }
                 }
                 let alert = Alert(
                     ruleId: "maccrab.usb.\(usbEvent.isConnected ? "connected" : "disconnected")",

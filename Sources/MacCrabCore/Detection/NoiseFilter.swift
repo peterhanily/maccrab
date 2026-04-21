@@ -158,13 +158,33 @@ public enum NoiseFilter {
     /// True when the path is a desktop terminal emulator bundle. Covers
     /// Apple Terminal, third-party terminals, multiplexers (tmux/screen)
     /// that commonly sit between a terminal and an interactive shell.
+    ///
+    /// v1.4.5: also treat a shell binary (bash, zsh, sh, fish, etc.) as
+    /// a terminal-equivalent ancestor. Field data showed Gate 5 failing
+    /// to fire on `ps` invoked from `zsh` when the ES ancestor chain
+    /// only contained the shell — the user's Terminal window was too
+    /// far up the tree. Shells as direct parents of admin CLI tools
+    /// are overwhelmingly a human at a prompt; the FN risk (attacker
+    /// launches shell → launches ps) is low because the attacker's
+    /// shell would itself be a child of a dropper, and Gate 5 only
+    /// fires on the admin-CLI basenames list anyway.
     public static func isInteractiveTerminalAncestor(_ path: String) -> Bool {
         for prefix in terminalEmulatorPrefixes where path.hasPrefix(prefix) {
             return true
         }
         let base = (path as NSString).lastPathComponent
-        return terminalMultiplexerBasenames.contains(base)
+        if terminalMultiplexerBasenames.contains(base) { return true }
+        if shellAncestorBasenames.contains(base) { return true }
+        return false
     }
+
+    /// Shells that, when seen as an ancestor of an admin-CLI basename,
+    /// indicate the command was run in an interactive shell session.
+    /// Intentionally scoped to basenames (not paths) so we match both
+    /// /bin/zsh and /opt/homebrew/bin/zsh.
+    public static let shellAncestorBasenames: Set<String> = [
+        "bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh", "csh",
+    ]
 
     /// Admin-CLI basenames that commonly fire discovery rules when run
     /// interactively. Intentionally narrow — only well-known system tools

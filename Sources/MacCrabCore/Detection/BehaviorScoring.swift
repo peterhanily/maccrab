@@ -344,6 +344,20 @@ public actor BehaviorScoring {
     }
 
     /// Add score for a Sigma rule match (escalates behavioral score based on rule severity).
+    ///
+    /// v1.4.5: skip contributions from processes inside trusted
+    /// browser / Electron bundles. Field data showed Chrome Helper
+    /// accumulating behavioral score 10+ from three back-to-back
+    /// `sigma_rule_match_critical` hits that were themselves false
+    /// positives on the pre-v1.3.11 compiler bug — a Behavioral
+    /// Score Threshold alert on Google Chrome Helper. NoiseFilter
+    /// Gate 3 already drops non-critical matches on trusted
+    /// browsers, and critical-level matches almost never apply
+    /// to browser helpers legitimately (real credential theft from
+    /// Chrome goes through a dropper, not Chrome itself). Drop the
+    /// contribution at the score-accumulation source so the user
+    /// never sees "Google Chrome Helper accumulated suspicious
+    /// behavior score of 10.8" from these rule FPs.
     @discardableResult
     public func addRuleMatch(
         severity: Severity,
@@ -351,6 +365,9 @@ public actor BehaviorScoring {
         forProcess pid: Int32,
         path: String
     ) -> ScoringResult? {
+        if NoiseFilter.isTrustedBrowserHelper(path: path) {
+            return nil
+        }
         let indicatorName: String
         switch severity {
         case .low:           indicatorName = "sigma_rule_match_low"
