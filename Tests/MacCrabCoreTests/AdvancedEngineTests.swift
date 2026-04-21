@@ -598,6 +598,79 @@ struct CrossProcessCorrelatorTests {
         }
     }
 
+    @Test("brew-install shell utility chain does not form a chain")
+    func shellUtilityChainDoesNotFire() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        // Exact field-data scenario: brew install spawns bash, ruby, curl,
+        // git, dirname, readlink, env, zsh all touching a shared tmp path.
+        // 1200+ chain events hit the correlator during the v1.4.1 user's
+        // `brew reinstall --cask maccrab`. None of them are attacks.
+        let sharedPath = "/opt/homebrew/Cellar/maccrab/1.4.2/.brew/install-script.sh"
+        let utilities: [(String, String)] = [
+            ("bash",     "/bin/bash"),
+            ("ruby",     "/opt/homebrew/Cellar/ruby/3.4.1/bin/ruby"),
+            ("curl",     "/usr/bin/curl"),
+            ("git",      "/opt/homebrew/bin/git"),
+            ("dirname",  "/usr/bin/dirname"),
+            ("readlink", "/usr/bin/readlink"),
+            ("env",      "/usr/bin/env"),
+            ("cat",      "/bin/cat"),
+            ("zsh",      "/bin/zsh"),
+            ("locale",   "/usr/bin/locale"),
+        ]
+        var chain: CrossProcessCorrelator.CorrelationChain?
+        for (i, (name, path)) in utilities.enumerated() {
+            chain = await correlator.recordFileEvent(
+                path: sharedPath, action: i % 2 == 0 ? "write" : "close_modified",
+                pid: Int32(20_000 + i), processName: name, processPath: path,
+                timestamp: now.addingTimeInterval(Double(i))
+            )
+        }
+        #expect(chain == nil,
+                "A chain dominated by shell utilities (bash/ruby/curl/git/…) is script activity, not an attack")
+    }
+
+    @Test("Chain with a dropped-to-disk binary still fires (shell-utility gate doesn't over-match)")
+    func droppedBinaryChainStillFires() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let payload = "/tmp/attacker-payload"
+        // curl (shell helper) writes the file, then a suspicious
+        // never-seen-before binary executes it. Only 50% shell-utility —
+        // below the 80% threshold, so the chain should fire.
+        await correlator.recordFileEvent(
+            path: payload, action: "write",
+            pid: 8000, processName: "curl", processPath: "/usr/bin/curl",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: payload, action: "execute",
+            pid: 8001, processName: "evil", processPath: "/private/tmp/evil",
+            timestamp: now.addingTimeInterval(2)
+        )
+        #expect(chain != nil,
+                "A curl→evil-binary chain is below the 80% shell threshold and must still fire")
+    }
+
+    @Test("/dev/ttys terminal I/O is not correlated")
+    func terminalDeviceNotCorrelated() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        await correlator.recordFileEvent(
+            path: "/dev/ttys000", action: "write",
+            pid: 9000, processName: "sudo", processPath: "/usr/bin/sudo",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: "/dev/ttys000", action: "write",
+            pid: 9001, processName: "zsh", processPath: "/bin/zsh",
+            timestamp: now.addingTimeInterval(1)
+        )
+        #expect(chain == nil,
+                "sudo+zsh writing to the user's own terminal is not cross-process attacker convergence")
+    }
+
     @Test("Real /tmp payload write→execute chain still fires (no regression)")
     func realPayloadChainStillFires() async {
         let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)

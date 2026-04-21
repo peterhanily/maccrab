@@ -282,21 +282,43 @@ public actor CampaignDetector {
         return tactic
     }
 
+    /// True when `processPath` is an Apple-signed system daemon under
+    /// `/usr/libexec/` or `/System/Library/`. These processes (xpcproxy,
+    /// mobileassetd, usernoted, rtcreportingd, nsurlsessiond, …)
+    /// legitimately span MITRE tactics as part of macOS bookkeeping —
+    /// `defense_evasion` from code-signing helpers, `initial_access` from
+    /// XPC connection setup, etc. Counting them toward kill-chain tactic
+    /// thresholds produced 15+ coordinated_attack campaigns on the
+    /// v1.4.1 user's workstation in 24h, none of which were real.
+    static func isAppleSystemDaemon(processPath: String?) -> Bool {
+        guard let path = processPath else { return false }
+        return path.hasPrefix("/usr/libexec/")
+            || path.hasPrefix("/System/Library/")
+            || path.hasPrefix("/System/Applications/Utilities/")
+    }
+
     private func checkKillChain() -> Campaign? {
         // v1.4: only count tactics contributed by medium+ severity alerts.
         // Low-severity discovery rules (ps, lsof, dscl, ioreg, …) produce
         // tactics ~every minute on a developer workstation; letting those
         // count for kill-chain detection meant every user who ran three
         // admin commands within 10 min got flagged as "Multi-Stage Attack".
-        // Re-derive from `recentAlerts` with a severity filter — cost is
-        // O(n) in window size which is bounded by purgeStaleAlerts, so
-        // still cheap compared to the campaign-emission path.
-        let allTactics = Set(
-            recentAlerts
-                .filter { $0.severity >= .medium }
-                .flatMap { $0.tactics }
-                .map(normalizeTactic)
-        )
+        //
+        // v1.4.2 tightening: also skip tactics contributed by USB hot-
+        // plug alerts and Crypto-Token-Kit XPC alerts. Plugging in a
+        // YubiKey near an open terminal shouldn't be a kill chain —
+        // that exact scenario drove user's CAMP-8842E942 ("5 tactics,
+        // 14 alerts") in field data. And exclude alerts whose subject
+        // process sits under /usr/libexec/ or /System/Library/ (Apple
+        // system daemons legitimately span tactics as part of OS
+        // bookkeeping).
+        let tacticContributingAlerts = recentAlerts.filter {
+            $0.severity >= .medium
+            && !$0.ruleId.hasPrefix("maccrab.usb.")
+            && !$0.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
+            && !Self.isAppleSystemDaemon(processPath: $0.processPath)
+        }
+        let allTactics = Set(tacticContributingAlerts.flatMap(\.tactics).map(normalizeTactic))
         guard allTactics.count >= 2 else { return nil }
 
         // Check specific 2-tactic combos first
@@ -451,6 +473,14 @@ public actor CampaignDetector {
     // MARK: - Coordinated Attack Detection
 
     private func checkCoordinatedAttack(latestAlert: AlertSummary) -> Campaign? {
+        // v1.4.2: Apple system daemons (xpcproxy, mobileassetd, usernoted,
+        // rtcreportingd, nsurlsessiond, …) span tactics by design as part of
+        // macOS bookkeeping. Don't emit a coordinated-attack campaign for
+        // them — 15+ FPs in user's 24h field window.
+        if Self.isAppleSystemDaemon(processPath: latestAlert.processPath) {
+            return nil
+        }
+
         let cutoff = Date().addingTimeInterval(-campaignWindow)
         let windowAlerts = recentAlerts.filter { $0.timestamp > cutoff }
 

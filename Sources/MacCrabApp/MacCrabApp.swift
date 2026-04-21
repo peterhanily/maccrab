@@ -7,6 +7,17 @@ import Sparkle
 
 @main
 struct MacCrabApp: App {
+    // v1.4.2: sync rules from the app bundle to the installed
+    // rules-dir before AppState is constructed — AppState opens the
+    // detection engine DB and loads rules on init, so getting fresh
+    // rule JSON in place before that point is a no-op for everything
+    // else. Runs at most once per process; syncIfNeeded compares the
+    // bundled vs. installed `.bundle_version` markers and skips when
+    // they match.
+    init() {
+        RuleBundleInstaller.syncIfNeeded()
+    }
+
     @StateObject private var appState = AppState()
     @StateObject private var sysextManager = SystemExtensionManager()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate

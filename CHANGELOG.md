@@ -3,6 +3,66 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] — 2026-04-21
+
+Fixes the update-channel gap that prevented v1.3.11-v1.4.1 rule
+improvements from reaching Sparkle-updated users. Ships five
+noise-reduction gates validated against v1.4.1 field data.
+
+### Fixed
+
+- **Compiled rules now ship inside `MacCrab.app/Contents/Resources/
+  compiled_rules/`.** New `RuleBundleInstaller.syncIfNeeded()` runs
+  at app launch (before `AppState` init). It compares the bundled
+  `.bundle_version` marker against
+  `/Library/Application Support/MacCrab/compiled_rules/.bundle_version`;
+  when bundled is newer it removes the installed tree, copies the
+  bundled one in place, and `pkill -HUP`'s the detection engine so
+  the new rule JSON takes effect without relaunching. Fixes the
+  root cause of v1.4.1 field data showing pre-v1.3.11 rule bugs —
+  the Homebrew cask's postflight, which used to be the only copy
+  path, doesn't run on Sparkle updates.
+- **`CrossProcessCorrelator` new shell-utility gate.** Chains where
+  ≥80% of participants are small shell helpers (bash / ruby / curl /
+  git / dirname / readlink / env / locale / cat / 30 others) AND
+  ≥4 distinct utilities AND no `execute` action are dropped at
+  evaluation time. A `brew reinstall` fired 3,000+ chain events
+  in 30 seconds in v1.4.1 field data; this gate drops them. A
+  real curl→bash download-and-run attack has only 2 utilities +
+  execute action so it still fires.
+- **`CrossProcessCorrelator.ignoredPathSubstrings` expanded.**
+  Added `/dev/tty`, `/dev/pts/`, `/dev/ttys` (the "sudo+zsh
+  touched /dev/ttys000" 62-hit FP is a shell writing your
+  password prompt to your terminal). Also `/private/tmp/homebrew-`,
+  `/private/tmp/brew-`, `/private/tmp/d20`, `/opt/homebrew/var/`,
+  `/opt/homebrew/Cellar/`, `/usr/local/Homebrew/`,
+  `/usr/local/Cellar/`.
+- **`CampaignDetector.checkKillChain` excludes USB and
+  crypto-token-kit alerts from tactic contribution.** Plugging in
+  a YubiKey produced "5 tactics, 14 alerts Multi-Stage Attack"
+  campaigns in field data. `maccrab.usb.*` and
+  `maccrab.deep.crypto_token_extension` no longer count.
+- **`CampaignDetector.checkCoordinatedAttack` skips Apple system
+  daemons.** Processes under `/usr/libexec/`, `/System/Library/`,
+  `/System/Applications/Utilities/` don't emit coordinated-attack
+  campaigns even when they span multiple tactics. User's 24h
+  field window had 15+ bogus campaigns — all xpcproxy,
+  mobileassetd, usernoted, rtcreportingd, nsurlsessiond.
+- **`credential_theft_exfil` sequence rule lowered from critical
+  to high.** Critical bypasses NoiseFilter Gate 3 (trusted-
+  browser-helper suppression), so every Chrome Helper reading its
+  own Cookies DB and uploading to Google fired at critical. At
+  high, Gate 3 drops the match on browsers — a non-browser doing
+  credential-read→upload still fires at high. 22 critical FPs
+  eliminated in field data.
+
+### Added
+
+- **Three new CrossProcessCorrelator regression tests** lock the
+  new behaviour: brew-install shell-utility chain suppressed,
+  curl→evil-binary chain still fires, `/dev/ttys000` terminal
+  I/O not correlated.
+
 ## [1.4.1] — 2026-04-21
 
 Hotfix: Sparkle update sheets rendered v1.4.0's Markdown release notes as

@@ -191,9 +191,23 @@ public actor CrossProcessCorrelator {
         "/.DocumentRevisions-V100/",
         "/.MobileBackups/",
         "/.TemporaryItems/",
-        // Homebrew scratch
+        // Terminal device files. A sudo + zsh chain "touching /dev/ttys000"
+        // is the shell writing your password prompt to your terminal — the
+        // user's 62-hit repeat FP in v1.4.1. Also /dev/pts on other platforms.
+        "/dev/tty",
+        "/dev/pts/",
+        "/dev/ttys",
+        // Homebrew scratch + cellar. `brew install` fires 3,000+ chain
+        // events from bash/ruby/curl/git/dirname/readlink touching
+        // /opt/homebrew/var/ and /private/tmp/brew-*/. The shell-utility
+        // gate handles the process side; these handle the path side.
         "/private/tmp/homebrew-",
+        "/private/tmp/brew-",
+        "/private/tmp/d20",                         // mktemp default used by brew + many installer scripts
         "/opt/homebrew/var/",
+        "/opt/homebrew/Cellar/",
+        "/usr/local/Homebrew/",                     // legacy Intel brew
+        "/usr/local/Cellar/",
     ]
 
     /// Network destinations that are never interesting.
@@ -434,6 +448,13 @@ public actor CrossProcessCorrelator {
         // with different argv[0] presentations). Log-style fan-out never
         // crosses process identities.
         if allEventsShareProcessName(windowEvents) { return nil }
+        // Shell-utility chain (v1.4.2): `brew install` fires ~3,000 chain
+        // events in 30s from bash + ruby + curl + git + dirname +
+        // readlink + env + locale touching shared tmp dirs. Attackers
+        // don't chain through coreutils. If >=80% of chain participants
+        // are small shell helpers, drop — this is a script, not a
+        // campaign.
+        if chainDominatedByShellUtilities(windowEvents) { return nil }
 
         let severity = computeFileSeverity(events: windowEvents, actions: actions)
         let chain = buildChain(
@@ -556,6 +577,75 @@ public actor CrossProcessCorrelator {
         guard let first = events.first, !first.processName.isEmpty else { return false }
         return events.allSatisfy { $0.processName == first.processName }
     }
+
+    /// True when a chain is dominated by a *variety* of shell helpers
+    /// AND doesn't include an `execute` action. That shape — many
+    /// distinct shell utilities, all touching a shared path, no
+    /// execution — is a build/install script (brew, configure, make
+    /// install) not an attack chain. Drops the 3,000+ FP storm the
+    /// v1.4.1 user saw during `brew reinstall`.
+    ///
+    /// Deliberately NARROW: a classic curl→bash two-process attack
+    /// (curl writes payload, bash executes it) has only 2 shell
+    /// utilities AND includes an `execute` action, so it escapes this
+    /// gate and still fires. The detection latency cost of requiring
+    /// ≥4 distinct utilities is zero for real attacks — they don't
+    /// involve 4 different shell helpers touching the same file.
+    private func chainDominatedByShellUtilities(_ events: [ChainEvent]) -> Bool {
+        // Execute is the attack signal. If anything in the chain
+        // executed the shared file, keep the chain — this is exactly
+        // what "download + run" malware looks like.
+        let actions = Set(events.map(\.action))
+        if actions.contains("execute") { return false }
+
+        // Require both coverage (≥80% of events are shell helpers) AND
+        // variety (≥4 distinct utilities). Variety distinguishes a
+        // build script from a 2-process attack that happens to use two
+        // shell tools.
+        var shellHits = 0
+        var distinctShellNames: Set<String> = []
+        for e in events {
+            let name = (e.processPath as NSString).lastPathComponent.lowercased()
+            if Self.shellUtilityBasenames.contains(name) {
+                shellHits += 1
+                distinctShellNames.insert(name)
+            }
+        }
+        let coverage = Double(shellHits) / Double(events.count)
+        return coverage >= 0.8 && distinctShellNames.count >= 4
+    }
+
+    /// Small shell helpers that legitimately chain through shared paths.
+    /// Intentionally conservative — anything listed here must be a tool
+    /// an attacker wouldn't use as a payload. Full shells (bash/zsh/sh)
+    /// are here because they're script interpreters, not persistence
+    /// mechanisms — an attack uses them AS a shell to run another
+    /// dropped binary, and the binary would fall outside this list and
+    /// keep the percentage below threshold.
+    private static let shellUtilityBasenames: Set<String> = [
+        // Shells + interpreters
+        "bash", "sh", "zsh", "ksh", "dash", "fish",
+        "ruby", "perl", "python", "python3", "node", "npm", "yarn", "pnpm",
+        // Core text / file tools
+        "cat", "cp", "mv", "rm", "ln", "mkdir", "rmdir", "touch",
+        "dirname", "basename", "readlink", "realpath", "pwd",
+        "echo", "printf", "true", "false", "test", "env", "exec",
+        "grep", "egrep", "fgrep", "sed", "awk", "cut", "tr", "tee",
+        "sort", "uniq", "head", "tail", "wc", "od", "xxd",
+        "find", "xargs", "locate", "which", "type",
+        "file", "stat", "chmod", "chown", "chgrp",
+        "locale", "date", "id", "tty", "hostname", "uname",
+        // Archive / hash
+        "tar", "gzip", "gunzip", "zip", "unzip",
+        "md5", "md5sum", "shasum", "openssl",
+        // Network / HTTP helpers used by install scripts
+        "curl", "wget", "nc", "ping", "host", "dig", "nslookup",
+        // Dev-tool wrappers brew/pip/npm invoke constantly
+        "git", "svn", "make", "cmake", "pkg-config",
+        "brew", "pip", "pip3", "gem", "bundle", "cargo", "rustc", "go",
+        // Misc JSON / templating
+        "jq", "yq", "xmllint",
+    ]
 
     /// True when every event's process lives under the same tool-version
     /// directory — i.e. the parent directory of the executable matches, or
