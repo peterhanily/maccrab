@@ -6,6 +6,7 @@
 
 import Foundation
 import Combine
+import SQLite3
 import MacCrabCore
 import os.log
 
@@ -201,11 +202,10 @@ final class AppState: ObservableObject {
     /// The app itself can read TCC.db — means Settings → Privacy & Security
     /// → Full Disk Access has MacCrab.app allowed.
     @Published var appHasFDA: Bool = true
-    /// The sysext can read TCC-protected paths — means FDA is granted to
-    /// "MacCrab Endpoint Security Extension". We can't probe this directly
-    /// from the app (separate process), so we infer from the presence of a
-    /// healthy events.db with recent writes: if the sysext is writing TCC
-    /// events to disk, it has FDA. Otherwise we assume it doesn't.
+    /// The sysext has FDA for "MacCrab Endpoint Security Extension". When
+    /// the app has FDA we read the sysext's row directly from TCC.db
+    /// (authoritative). Without app FDA we fall back to a WAL-mtime
+    /// heuristic (imprecise, but it's all we have without DB read access).
     @Published var sysextHasFDA: Bool = true
     @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
@@ -379,20 +379,21 @@ final class AppState: ObservableObject {
         let tccPath = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db"
         appHasFDA = fm.isReadableFile(atPath: tccPath)
 
-        // FDA probe for the SYSEXT principal — we can't call an API from
-        // here that directly tells us the sysext's TCC state, but we can
-        // infer it: if events.db WAL has been written to recently, the
-        // sysext is flowing ES events, which requires it to have FDA for
-        // protected paths. If the WAL hasn't been touched in the last 5
-        // minutes, assume it's missing FDA (or the sysext is wedged).
-        let walPath = dbPath + "-wal"
-        if let attrs = try? fm.attributesOfItem(atPath: walPath),
-           let mtime = attrs[.modificationDate] as? Date {
-            sysextHasFDA = Date().timeIntervalSince(mtime) < 300
+        // FDA probe for the SYSEXT principal.
+        // When the app has FDA we can open TCC.db and read the sysext's
+        // own auth row — authoritative and instant. Without app FDA we
+        // fall back to inferring from WAL mtime (imperfect: tests whether
+        // the sysext is active, not specifically whether it has FDA).
+        if appHasFDA {
+            sysextHasFDA = Self.querySysextFDA(tccPath: tccPath)
         } else {
-            // No WAL yet → sysext hasn't written anything → assume missing FDA
-            // until proven otherwise.
-            sysextHasFDA = !isConnected ? false : sysextHasFDA
+            let walPath = dbPath + "-wal"
+            if let attrs = try? fm.attributesOfItem(atPath: walPath),
+               let mtime = attrs[.modificationDate] as? Date {
+                sysextHasFDA = Date().timeIntervalSince(mtime) < 300
+            } else {
+                sysextHasFDA = !isConnected ? false : sysextHasFDA
+            }
         }
         fullDiskAccessGranted = appHasFDA && sysextHasFDA
 
@@ -665,6 +666,25 @@ final class AppState: ObservableObject {
         let visible = visibleAlertsForBadges()
         recentAlerts = Array(visible.prefix(5))
         totalAlerts = visible.count
+    }
+
+    /// Query TCC.db for the sysext's Full Disk Access authorization.
+    /// Only useful when the app already has FDA (otherwise TCC.db is
+    /// unreadable and sqlite3_open returns SQLITE_CANTOPEN).
+    /// auth_value = 2 (kTCCAuthorizationAuthorizationStatusAuthorized)
+    /// means the entry is explicitly allowed; anything else is not.
+    private static func querySysextFDA(tccPath: String) -> Bool {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(tccPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_close(db) }
+        let sql = "SELECT auth_value FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND client='com.maccrab.agent'"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if sqlite3_column_int(stmt, 0) == 2 { return true }
+        }
+        return false
     }
 
     // MARK: - UI-state storage

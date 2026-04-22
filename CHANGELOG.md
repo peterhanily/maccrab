@@ -3,6 +3,33 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] — 2026-04-22
+
+Dashboard UX fixes: reliable Full Disk Access detection and drag-to-install DMG.
+
+### Fixed
+
+- **Full Disk Access banner now clears immediately after both grants.**
+  The sysext FDA check was using a WAL file mtime heuristic that tested
+  whether the sysext was actively writing to disk, not whether it actually
+  had FDA. When the app gains FDA it now queries `TCC.db` directly for the
+  sysext's `auth_value` row — authoritative and instant. The banner updates
+  within one 10-second poll cycle after each grant.
+
+- **FDA banner redesigned as a two-row checklist.**
+  Instead of switching between three paragraphs of text, the banner now
+  shows "MacCrab ○/✓" and "MacCrab Endpoint Security Extension ○/✓" so
+  users can see at a glance which grant is still pending after completing
+  one of the two steps. The "Reveal MacCrab in Finder" button is now
+  conditional — only shown when the app itself needs FDA (dragging from
+  Finder is useful for the app; for the sysext entry, the list already
+  contains it automatically).
+
+- **DMG now shows the classic drag-to-Applications install window.**
+  The release DMG was missing an `/Applications` symlink in the staging
+  directory, so Finder opened it as a plain folder. Added the symlink so
+  users see the standard side-by-side drag install UI.
+
 ## [1.5.1] — 2026-04-22
 
 False positive fixes in 6 detection rules. No new detections, no Swift
