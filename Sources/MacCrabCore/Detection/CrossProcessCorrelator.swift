@@ -704,9 +704,11 @@ public actor CrossProcessCorrelator {
     }
 
     /// True when every event's process is an Apple system daemon — path
-    /// starts with /System/, /usr/, /sbin/, or /bin/. Multiple Apple
+    /// in /System/, /usr/libexec/, /usr/sbin/, or /sbin/. Multiple Apple
     /// daemons (mDNSResponder, nsurlsessiond, trustd) contacting the same
-    /// CDN IP is normal system operation, not convergence.
+    /// CDN IP is normal system operation, not convergence. Deliberately
+    /// excludes /usr/bin/ and /bin/ so that user-level tools (curl,
+    /// python3, bash) still trigger convergence alerts.
     private func allEventsAreAppleSystemProcesses(_ events: [ChainEvent]) -> Bool {
         guard !events.isEmpty else { return false }
         return events.allSatisfy { event in
@@ -714,9 +716,7 @@ public actor CrossProcessCorrelator {
             return path.hasPrefix("/System/") ||
                    path.hasPrefix("/usr/libexec/") ||
                    path.hasPrefix("/usr/sbin/") ||
-                   path.hasPrefix("/usr/bin/") ||
-                   path.hasPrefix("/sbin/") ||
-                   path.hasPrefix("/bin/")
+                   path.hasPrefix("/sbin/")
         }
     }
 
