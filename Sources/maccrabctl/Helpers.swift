@@ -152,7 +152,7 @@ extension MacCrabCtl {
 
     static func printVersion() {
         // LOCALIZE: "MacCrab Detection Engine v1.3.4"
-        print("MacCrab Detection Engine v1.5.0")
+        print("MacCrab Detection Engine v1.5.1")
         // LOCALIZE: "License: Apache 2.0 (code), DRL 1.1 (rules)"
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
         print("https://github.com/maccrab-detection/maccrab")

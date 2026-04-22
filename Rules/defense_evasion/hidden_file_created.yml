@@ -32,7 +32,12 @@ detection:
             - '/.zsh_history'
             - '/.bash_history'
             - '/Library/'
-    condition: selection and not filter_apple and not filter_common
+    filter_known_apps:
+        Image|contains:
+            - 'logioptionsplus'
+            - 'LogiMgr'
+            - 'logi_'
+    condition: selection and not filter_apple and not filter_common and not filter_known_apps
 falsepositives:
     - Development tools creating dotfiles
     - Application configuration files

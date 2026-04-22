@@ -46,7 +46,13 @@ detection:
             - '/WarpTerminal'
             - '/tmux'
             - '/screen'
-    condition: selection and not filter_apple and not filter_platform and not filter_terminal
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+    filter_apple_child:
+        SignerType: 'apple'
+    condition: selection and not filter_apple and not filter_platform and not filter_terminal and not filter_apple_child
 falsepositives:
     - System administration scripts
     - Monitoring tools

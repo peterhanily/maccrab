@@ -8,7 +8,6 @@ references:
     - https://attack.mitre.org/techniques/T1518/001/
 tags:
     - attack.discovery
-    - attack.defense_evasion
     - attack.t1518.001
 logsource:
     category: process_creation

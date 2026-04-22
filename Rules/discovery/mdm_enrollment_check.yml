@@ -32,7 +32,23 @@ detection:
             - 'jamf'
             - 'Mosyle'
             - 'Kandji'
-    condition: selection and not filter_system and not filter_mdm
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+    condition: selection and not filter_system and not filter_mdm and not filter_terminal
 falsepositives:
     - IT administrators checking enrollment status
     - Compliance verification scripts

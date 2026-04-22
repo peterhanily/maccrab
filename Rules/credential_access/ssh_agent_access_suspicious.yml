@@ -41,7 +41,7 @@ detection:
             - '/sh'
             - '/fish'
             - '/dash'
-    condition: (selection or selection_process) and not filter_system and not filter_terminal
+    condition: (selection and selection_process) and not filter_system and not filter_terminal
 falsepositives:
     - SSH-based deployment scripts
     - Git over SSH operations
