@@ -28,8 +28,10 @@ needs a human pass.
 
 - [ ] `README.md` tests badge matches actual test count (`swift test` row
       count). Off-by-a-few is fine; off by 30+ is stale.
-- [ ] `README.md` rules badge matches `find Rules -name "*.yml" | wc -l`.
-- [ ] Same two stats in `maccrab-site/index.html` stats tiles.
+- [ ] `README.md` does not introduce a hardcoded rule count — the
+      count fluctuates release-to-release; descriptive language only.
+- [ ] Site landing page rule/test stats match the current repo. Run
+      `find Rules -name "*.yml" | wc -l` and compare.
 
 ## Localization coverage
 

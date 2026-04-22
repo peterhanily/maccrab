@@ -9,7 +9,6 @@
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
-[![Rules](https://img.shields.io/badge/detection%20rules-380-orange)]()
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-F05138)]()
 
 > [!WARNING]
@@ -21,7 +20,7 @@
 > most of the current release cadence. See
 > [CHANGELOG.md](CHANGELOG.md) for what's shipped recently.
 
-MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, 380 Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS.
+MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS.
 
 **Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine **and is OK running alpha software.**
 
@@ -85,7 +84,7 @@ Once running, MacCrab gives you:
 | Capability | MacCrab | Santa | osquery | Commercial EDR |
 |------------|:-------:|:-----:|:-------:|:--------------:|
 | Real-time kernel events (90+ ES types) | Yes | Exec only | Scheduled | Yes |
-| Sigma-compatible rules | **380** | No | No | Varies |
+| Sigma-compatible rules | **Yes** | No | No | Varies |
 | Temporal sequence detection | **Yes** | No | No | Some |
 | Behavioral scoring | **Yes** | No | No | Yes |
 | AI coding tool guardrails | **Yes** | No | No | No |
@@ -144,8 +143,8 @@ Read the full [Security Policy](SECURITY.md).
  |   Event Sources    |     |    Enrichment       |     |     Detection        |
  |                    |     |                     |     |                      |
  | ES Framework  ----------> Process Lineage DAG  |     | Single-Event Rules   |
- | Unified Log   ----------> Code Signing Cache   |     |   (353 Sigma YAML)   |
- | TCC Monitor   ----------> Quarantine Origin    +---->| Sequence Rules (27)  |
+ | Unified Log   ----------> Code Signing Cache   |     |     (Sigma YAML)     |
+ | TCC Monitor   ----------> Quarantine Origin    +---->| Sequence Rules       |
  | Network Coll. ----------> Threat Intel Feeds   |     | Baseline Anomaly     |
  | DNS Collector ----------> Cert Transparency    |     | Statistical Anomaly  |
  | Event Tap     ----------> YARA Scanner         |     | Behavioral Scoring   |
@@ -224,9 +223,9 @@ MacCrab evaluates events through a 5-tier detection hierarchy:
 
 | Tier | Description |
 |------|-------------|
-| **1. Rules** | 353 Sigma-compatible YAML rules compiled to JSON. Category-indexed for O(1) dispatch; rules exceeding 50 ms are logged for profiling. |
-| **2. Anomaly** | Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights). |
-| **3. Sequences** | 27 temporal multi-step rules with process lineage correlation, 10K partial match cap, LRU regex cache. |
+| **1. Rules** | Sigma-compatible YAML rules compiled to JSON. Category-indexed for O(1) dispatch; rules exceeding 50 ms are logged for profiling. |
+| **2. Anomaly** | Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring with weighted indicators and feedback-adjusted weights. |
+| **3. Sequences** | Temporal multi-step rules with process lineage correlation, 10K partial match cap, LRU regex cache. |
 | **4. Campaigns** | Kill chain, alert storm, AI compromise, coordinated attack, and lateral movement detection with incremental O(1) indexes. |
 | **5. Cross-process** | Correlation across the full process lineage graph with trusted-helper and unresolved-destination sentinels. |
 
@@ -414,31 +413,17 @@ Rules can trigger configurable response actions ranging from passive to active:
 
 ## Rule Coverage by MITRE ATT&CK Tactic
 
-<details>
-<summary><strong>Full rule breakdown (380 rules across 17 tactics)</strong></summary>
-
-| Tactic | Directory | Single-Event | Sequences | Total |
-|--------|-----------|:------------:|:---------:|:-----:|
-| Defense Evasion | `defense_evasion/` | 62 | -- | 62 |
-| Credential Access | `credential_access/` | 35 | -- | 35 |
-| Persistence | `persistence/` | 34 | -- | 34 |
-| Supply Chain | `supply_chain/` | 31 | -- | 31 |
-| Execution | `execution/` | 31 | -- | 31 |
-| Discovery | `discovery/` | 24 | -- | 24 |
-| Privilege Escalation | `privilege_escalation/` | 21 | -- | 21 |
-| AI Safety | `ai_safety/` | 19 | -- | 19 |
-| Command and Control | `command_and_control/` | 17 | -- | 17 |
-| Lateral Movement | `lateral_movement/` | 16 | -- | 16 |
-| Collection | `collection/` | 15 | -- | 15 |
-| Exfiltration | `exfiltration/` | 12 | -- | 12 |
-| Initial Access | `initial_access/` | 11 | -- | 11 |
-| TCC Abuse | `tcc/` | 9 | -- | 9 |
-| Container | `container/` | 8 | -- | 8 |
-| Impact | `impact/` | 8 | -- | 8 |
-| Temporal Sequences | `sequences/` | -- | 27 | 27 |
-| **Total** | | **353** | **27** | **380** |
-
-</details>
+Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. Run
+`find Rules -name "*.yml" | wc -l` for the current total, or `ls
+Rules/` for the tactic directories. Coverage spans every MITRE
+ATT&CK tactic relevant to macOS — Defense Evasion, Credential
+Access, Persistence, Supply Chain, Execution, Discovery,
+Privilege Escalation, AI Safety, Command and Control, Lateral
+Movement, Collection, Exfiltration, Initial Access, TCC Abuse,
+Container, Impact — plus temporal multi-step detections under
+`Rules/sequences/`. Counts fluctuate release-to-release as rules
+get added, tightened, or deprecated; the repository tree is the
+source of truth.
 
 ---
 
@@ -982,24 +967,24 @@ maccrab/
 │       └── ViewModels/
 │           └── ViewModels.swift
 │
-├── Rules/                               # 380 Sigma-compatible detection rules
-│   ├── defense_evasion/    (62)
-│   ├── credential_access/  (35)
-│   ├── persistence/        (34)
-│   ├── supply_chain/       (31)
-│   ├── execution/          (31)
-│   ├── discovery/          (24)
-│   ├── privilege_escalation/ (21)
-│   ├── ai_safety/          (19)
-│   ├── command_and_control/ (17)
-│   ├── lateral_movement/   (16)
-│   ├── collection/         (15)
-│   ├── exfiltration/       (12)
-│   ├── initial_access/     (11)
-│   ├── tcc/                (9)
-│   ├── container/          (8)
-│   ├── impact/             (8)
-│   └── sequences/          (27)
+├── Rules/                               # Sigma-compatible detection rules
+│   ├── defense_evasion/
+│   ├── credential_access/
+│   ├── persistence/
+│   ├── supply_chain/
+│   ├── execution/
+│   ├── discovery/
+│   ├── privilege_escalation/
+│   ├── ai_safety/
+│   ├── command_and_control/
+│   ├── lateral_movement/
+│   ├── collection/
+│   ├── exfiltration/
+│   ├── initial_access/
+│   ├── tcc/
+│   ├── container/
+│   ├── impact/
+│   └── sequences/
 │
 ├── Compiler/
 │   └── compile_rules.py                 # Sigma YAML to JSON compiler
