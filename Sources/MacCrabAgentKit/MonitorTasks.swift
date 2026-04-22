@@ -168,6 +168,14 @@ enum MonitorTasks {
                     // sleep/wake and are never exfil signal — suppress
                     // entirely rather than surfacing the first event per day.
                     if usbEvent.vendorId == 0x5ac { continue }
+                    // USB device class 0x09 = hub. Third-party USB-C docks,
+                    // 4-port splitters, monitor-integrated hubs (Realtek,
+                    // VIA, Intel) churn connect/disconnect on every replug
+                    // or USB-C mode renegotiation. A malicious USB hub is
+                    // not a plausible attack vector on macOS (can't exfil
+                    // data, can't execute code, can't grant permissions).
+                    // Skip entirely for informational.
+                    if usbEvent.deviceClass == 9 { continue }
                     severity = .informational
                     // Only rate-limit non-mass-storage. Mass-storage
                     // connect/disconnect always surfaces — every event

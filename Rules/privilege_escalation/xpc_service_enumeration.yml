@@ -30,7 +30,23 @@ detection:
             - 'NSXPCConnection'
     filter_apple:
         SignerType: 'apple'
-    condition: (selection_launchctl or selection_xpc_enum) and not filter_apple
+    filter_platform:
+        PlatformBinary: 'true'
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+    condition: (selection_launchctl or selection_xpc_enum) and not filter_apple and not filter_platform and not filter_terminal
 falsepositives:
     - System administrators auditing services
     - Monitoring tools inspecting launchd state

@@ -36,7 +36,23 @@ detection:
             - '/usr/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and selection_sensitive and not filter_system and not filter_apple_signed
+    filter_platform:
+        PlatformBinary: 'true'
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+    condition: selection and selection_sensitive and not filter_system and not filter_apple_signed and not filter_platform and not filter_terminal
 falsepositives:
     - System administration and configuration scripts
     - Preference management tools

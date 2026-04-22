@@ -3,6 +3,45 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.8] — 2026-04-22
+
+Discovery-rule filter-gap fix, USB hub noise, CTK error-line
+parsing.
+
+### Added
+
+- **`PlatformBinary` Sigma field** mapped to
+  `process.is_platform_binary` in `Compiler/compile_rules.py`.
+  Directly reads the ES-framework-provided platform bit without
+  depending on the code-signing enrichment path (which returns
+  nil for short-lived Apple CLI tools and silently breaks
+  `SignerType: 'apple'` filters).
+
+### Fixed
+
+- **Discovery rules firing on Apple CLI tools from shell
+  parents.** `filter_platform: PlatformBinary: 'true'` added
+  to `system_enumeration_burst`, `xpc_service_enumeration`,
+  `csrutil_status_check`, `process_listing_by_unsigned`, and
+  `defaults_read_sensitive`. The existing `filter_apple:
+  SignerType: 'apple'` silently failed when code-sign
+  enrichment returned nil, allowing launchctl / system_profiler
+  / defaults / ps / csrutil to fire when run from a Terminal
+  shell.
+
+- **USB device class `0x09` (hub) suppressed for
+  informational.** Third-party USB hubs (Realtek, VIA, Intel
+  chipsets) are not a credible exfil vector and churned on
+  every replug and USB-C mode change. Mass-storage still
+  surfaces regardless of vendor.
+
+- **`SystemPolicyMonitor` skips pluginkit error lines.**
+  `match: Connection invalid` and similar pluginkit status
+  output was being parsed as CTK plugin bundle IDs and
+  surfacing as informational alerts. New filter on
+  `Connection invalid`, `Operation not permitted`, `No such`,
+  `error`.
+
 ## [1.4.7] — 2026-04-22
 
 Alert detail now surfaces the triggering event, and two more

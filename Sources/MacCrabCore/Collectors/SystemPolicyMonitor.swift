@@ -236,6 +236,18 @@ public actor SystemPolicyMonitor {
         let ctkLines = ctkOutput.split(separator: "\n")
         for line in ctkLines {
             let lineStr = String(line)
+            // pluginkit can emit status/error lines to the match column on
+            // machines with smartcard daemons in transitional states ("match:
+            // Connection invalid", "match: Operation not permitted"). These
+            // aren't plugin bundle IDs and shouldn't surface as CTK alerts.
+            // Real plugin entries are reverse-DNS bundle IDs that contain a
+            // dot and no whitespace in the matching segment.
+            if lineStr.contains("Connection invalid") ||
+               lineStr.contains("Operation not permitted") ||
+               lineStr.contains("No such") ||
+               lineStr.lowercased().contains("error") {
+                continue
+            }
             guard !lineStr.contains("com.apple."),
                   !Self.trustedCTKProviders.contains(where: { lineStr.contains($0) }),
                   !knownPlugins.contains(lineStr) else {

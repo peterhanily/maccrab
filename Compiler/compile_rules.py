@@ -87,6 +87,12 @@ SIGMA_FIELD_MAP = {
     "SourceIp": "network.source.ip",
     "SourcePort": "network.source.port",
     "CodeSigningFlags": "process.code_signature.flags",
+    # ES-framework-provided platform bit. More reliable than SignerType
+    # for filtering Apple binaries because it comes from the kernel event
+    # directly and doesn't depend on post-hoc code-signing enrichment
+    # (which can be nil for short-lived processes like launchctl/
+    # system_profiler). Compare against string "true"/"false".
+    "PlatformBinary": "process.is_platform_binary",
 }
 
 
