@@ -196,3 +196,14 @@ tmp/
 # -----------------------------------------------------------------------------
 dist/
 .claude/scheduled_tasks.lock
+
+# -----------------------------------------------------------------------------
+# Outdated / internal docs (kept locally, not part of public repo)
+# -----------------------------------------------------------------------------
+# Superseded by RELEASE_NOTES/ directory (per-version files)
+RELEASE_NOTES.md
+# Internal release and contribution checklists (process docs, not user-facing)
+RELEASE_CHECKLIST.md
+CONTRIBUTING_CHECKLIST.md
+# Research notes (referenced during development, not part of public docs)
+PREVENTION_RESEARCH.md
