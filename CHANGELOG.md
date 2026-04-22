@@ -3,6 +3,22 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] — 2026-04-23
+
+Fix sysext FDA detection: query both user and system TCC.db; widen WAL fallback to 30 min.
+
+### Fixed
+
+- `sysextHasFDA` detection now checks `/Library/Application Support/com.apple.TCC/TCC.db`
+  (system-level) in addition to the user-level TCC.db — macOS stores the
+  Endpoint Security extension FDA grant in the system DB on some builds.
+  A `LIKE 'com.maccrab.agent%'` clause handles any `.systemextension` suffix
+  variant seen across OS versions. Either database matching clears the banner.
+- WAL mtime fallback window extended from 5 minutes to 30 minutes for the
+  case where neither TCC.db is readable (app hasn't been granted FDA yet).
+  A quiet system with no recent events no longer incorrectly shows the
+  sysext as needing FDA.
+
 ## [1.5.2] — 2026-04-22
 
 Dashboard UX fixes: reliable Full Disk Access detection and drag-to-install DMG.

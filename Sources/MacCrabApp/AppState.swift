@@ -202,10 +202,10 @@ final class AppState: ObservableObject {
     /// The app itself can read TCC.db — means Settings → Privacy & Security
     /// → Full Disk Access has MacCrab.app allowed.
     @Published var appHasFDA: Bool = true
-    /// The sysext has FDA for "MacCrab Endpoint Security Extension". When
-    /// the app has FDA we read the sysext's row directly from TCC.db
-    /// (authoritative). Without app FDA we fall back to a WAL-mtime
-    /// heuristic (imprecise, but it's all we have without DB read access).
+    /// The sysext has FDA for "MacCrab Endpoint Security Extension". Checked
+    /// by querying both the user TCC.db and the system TCC.db (macOS stores
+    /// the grant in different places across OS versions). Falls back to a
+    /// 30-minute WAL mtime window when neither database is readable.
     @Published var sysextHasFDA: Bool = true
     @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
@@ -380,17 +380,27 @@ final class AppState: ObservableObject {
         appHasFDA = fm.isReadableFile(atPath: tccPath)
 
         // FDA probe for the SYSEXT principal.
-        // When the app has FDA we can open TCC.db and read the sysext's
-        // own auth row — authoritative and instant. Without app FDA we
-        // fall back to inferring from WAL mtime (imperfect: tests whether
-        // the sysext is active, not specifically whether it has FDA).
-        if appHasFDA {
-            sysextHasFDA = Self.querySysextFDA(tccPath: tccPath)
+        // System Settings writes the grant into the user TCC.db for some
+        // macOS builds and into the system-level TCC.db for others (the
+        // sysext runs as root so macOS may use the system DB). Try both;
+        // the system DB open silently fails if we lack permission, which
+        // is fine. When neither DB is queryable we fall back to WAL mtime
+        // with a 30-minute window — a quiet system shouldn't lose its
+        // sysext-FDA indicator just because no events arrived recently.
+        let systemTCCPath = "/Library/Application Support/com.apple.TCC/TCC.db"
+        let foundInTCC = Self.querySysextFDA(userTCC: appHasFDA ? tccPath : nil,
+                                              systemTCC: systemTCCPath)
+        if foundInTCC {
+            sysextHasFDA = true
+        } else if appHasFDA {
+            // User TCC.db was readable; entry absent → sysext genuinely needs FDA.
+            sysextHasFDA = false
         } else {
+            // No TCC.db was readable; use WAL as a loose proxy.
             let walPath = dbPath + "-wal"
             if let attrs = try? fm.attributesOfItem(atPath: walPath),
                let mtime = attrs[.modificationDate] as? Date {
-                sysextHasFDA = Date().timeIntervalSince(mtime) < 300
+                sysextHasFDA = Date().timeIntervalSince(mtime) < 1800 // 30 min
             } else {
                 sysextHasFDA = !isConnected ? false : sysextHasFDA
             }
@@ -668,16 +678,23 @@ final class AppState: ObservableObject {
         totalAlerts = visible.count
     }
 
-    /// Query TCC.db for the sysext's Full Disk Access authorization.
-    /// Only useful when the app already has FDA (otherwise TCC.db is
-    /// unreadable and sqlite3_open returns SQLITE_CANTOPEN).
-    /// auth_value = 2 (kTCCAuthorizationAuthorizationStatusAuthorized)
-    /// means the entry is explicitly allowed; anything else is not.
-    private static func querySysextFDA(tccPath: String) -> Bool {
+    /// Check the user TCC.db and/or system TCC.db for the sysext's FDA row.
+    /// `userTCC` is nil when the app itself doesn't have FDA (file unreadable).
+    /// The system TCC.db open silently fails without root — that's expected.
+    private static func querySysextFDA(userTCC: String?, systemTCC: String) -> Bool {
+        if let path = userTCC, querySysextFDAInDB(path) { return true }
+        if querySysextFDAInDB(systemTCC) { return true }
+        return false
+    }
+
+    /// Open one TCC.db and look for an authorized sysext FDA entry.
+    /// Uses LIKE so a `.systemextension` suffix on the client value
+    /// (seen on some macOS builds) doesn't cause a miss.
+    private static func querySysextFDAInDB(_ tccPath: String) -> Bool {
         var db: OpaquePointer?
         guard sqlite3_open_v2(tccPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else { return false }
         defer { sqlite3_close(db) }
-        let sql = "SELECT auth_value FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND client='com.maccrab.agent'"
+        let sql = "SELECT auth_value FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND (client='com.maccrab.agent' OR client LIKE 'com.maccrab.agent%')"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
         defer { sqlite3_finalize(stmt) }
