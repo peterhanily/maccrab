@@ -3,6 +3,32 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] — 2026-04-22
+
+False positive fixes in 6 detection rules. No new detections, no Swift
+source changes, no schema changes. 628 tests pass.
+
+### Fixed
+
+- `ssh_agent_access_suspicious`: condition changed from OR to AND — now
+  fires only when python3/curl/wget/node specifically open `SSH_AUTH_SOCK`,
+  not on any file access by those processes. Was the source of spurious HIGH
+  alerts and cascading campaign noise on developer machines.
+- `csrutil_status_check`: removed `attack.defense_evasion` tag. A single
+  csrutil execution was contributing two MITRE tactics, triggering a
+  "Coordinated Attack from single process" campaign on its own.
+- `mdm_enrollment_check`: added `filter_terminal` so `profiles status` run
+  interactively from any shell no longer fires.
+- `hidden_file_created`: added image-path filter for Logitech Options+
+  (`logioptionsplus_agent`, `LogiMgr`) which legitimately writes dotfiles
+  in the user home directory.
+- `process_listing_by_unsigned`: expanded terminal filter to include Cursor,
+  VS Code, node, and ruby as known benign parents.
+- `system_enumeration_burst`: same terminal filter expansion plus new
+  `filter_apple_child: SignerType: apple` to suppress Apple-signed system
+  tools (e.g. `system_profiler`, `scutil`) launched by non-terminal parents
+  such as software installers.
+
 ## [1.5.0] — 2026-04-22
 
 Major detection expansion: 37 new rules (417 total), 3 new sequence rules
