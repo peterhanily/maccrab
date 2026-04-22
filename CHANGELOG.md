@@ -3,6 +3,23 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.9] — 2026-04-22
+
+Same-day hotfix for a CampaignDetector FP surfaced after 1.4.8.
+
+### Fixed
+
+- **`CampaignDetector.checkCoordinatedAttack` skips trusted
+  browser helpers.** Google Chrome Helper was triggering a
+  HIGH "Coordinated Attack from single process" campaign
+  spanning `credential_access` + `exfiltration` tactics during
+  normal Chrome sync (reading its own Cookies / Login Data
+  DBs and uploading to Google). Individual rule matches were
+  already suppressed by NoiseFilter Gate 3, but the campaign
+  path counted tactics one tier up. Added early-return for
+  `NoiseFilter.isTrustedBrowserHelper(path:)` parallel to the
+  existing `isAppleSystemDaemon` skip.
+
 ## [1.4.8] — 2026-04-22
 
 Discovery-rule filter-gap fix, USB hub noise, CTK error-line

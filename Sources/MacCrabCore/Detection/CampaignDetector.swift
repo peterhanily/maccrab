@@ -480,6 +480,19 @@ public actor CampaignDetector {
         if Self.isAppleSystemDaemon(processPath: latestAlert.processPath) {
             return nil
         }
+        // v1.4.9: trusted browser helpers (Google Chrome Helper, Safari
+        // Web Content, Firefox Content, Edge Helper, Arc Helper, Electron
+        // app helpers) legitimately span credential_access + exfiltration
+        // tactics during normal sync to Google / Microsoft / Mozilla
+        // clouds — reading their own Cookies / Login Data DBs and
+        // uploading to the vendor backend. NoiseFilter Gate 3 suppresses
+        // the individual rule matches; this mirrors that suppression at
+        // the campaign layer so aggregated tactic-counting doesn't
+        // resurrect the same FP class one tier up.
+        if let path = latestAlert.processPath,
+           NoiseFilter.isTrustedBrowserHelper(path: path) {
+            return nil
+        }
 
         let cutoff = Date().addingTimeInterval(-campaignWindow)
         let windowAlerts = recentAlerts.filter { $0.timestamp > cutoff }
