@@ -114,6 +114,14 @@ struct AlertDashboard: View {
                     .frame(minWidth: 150, idealWidth: 200, maxWidth: 300)
                     .accessibilityLabel("Search alerts")
 
+                if !filteredAlerts.isEmpty {
+                    Button(String(localized: "alerts.selectAll", defaultValue: "Select All")) {
+                        selectedAlerts = Set(filteredAlerts)
+                    }
+                    .controlSize(.small)
+                    .disabled(filteredAlerts.allSatisfy { selectedAlerts.contains($0) })
+                }
+
                 Menu {
                     Button("JSON") { exportAlerts(format: .json) }
                     Button("CSV") { exportAlerts(format: .csv) }

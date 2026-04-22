@@ -4,14 +4,17 @@
 // to AI agents. Communicates via JSON-RPC 2.0 over stdio.
 //
 // Tools exposed:
-//   get_alerts      — Query recent alerts with severity/time filtering
-//   get_events      — Query recent events with category filtering
-//   get_campaigns   — List detected attack campaigns
-//   get_status      — Daemon status, rule count, event stats
-//   hunt            — Natural language threat hunting (SQL generation)
+//   get_alerts         — Query recent alerts with severity/time filtering
+//   get_events         — Query recent events with category filtering
+//   get_campaigns      — List detected attack campaigns
+//   get_status         — Daemon status, rule count, event stats
+//   hunt               — Natural language threat hunting (SQL generation)
 //   get_security_score — System security posture score with factors
-//   get_edr_tools   — List detected EDR/RMM/insider threat tools
-//   suppress_alert  — Suppress an alert by ID
+//   suppress_alert     — Suppress an alert by ID
+//   get_alert_detail   — Full alert detail: description, LLM investigation, D3FEND, ancestry
+//   suppress_campaign  — Suppress a campaign and all its contributing alerts
+//   get_ai_alerts      — AI Guard alert stream (credential fence, boundary, injection, MCP)
+//   scan_text          — Prompt injection scan via Forensicate.ai (self-protection for AI agents)
 //
 // Usage:
 //   Register in Claude Code settings:
@@ -225,6 +228,50 @@ let tools: [[String: Any]] = [
             "required": ["alert_id"],
         ] as [String: Any],
     ],
+    [
+        "name": "get_alert_detail",
+        "description": "Get full detail for a single alert by ID: complete description (no truncation), LLM investigation verdict and suggested actions, MITRE D3FEND mitigations, parent process ancestry, and remediation hints. Use after get_alerts to deep-dive a specific alert.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "alert_id": ["type": "string", "description": "The alert ID to look up (from get_alerts)"],
+            ],
+            "required": ["alert_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "suppress_campaign",
+        "description": "Suppress a campaign alert and all of its contributing alerts in one operation. Use the campaign ID from get_campaigns. Audit-logged.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "campaign_id": ["type": "string", "description": "The campaign alert ID to suppress (from get_campaigns)"],
+            ],
+            "required": ["campaign_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_ai_alerts",
+        "description": "Get AI Guard specific alerts: credential fence violations, project boundary crossings, prompt injection detections, and MCP tool poisoning attempts. Useful for an AI coding tool to check whether MacCrab has flagged its own recent activity.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "limit": ["type": "integer", "description": "Max alerts to return (default 20, max 100)", "default": 20],
+                "hours": ["type": "number", "description": "Only alerts from the last N hours (default: 24)", "default": 24],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "scan_text",
+        "description": "Scan text for prompt injection attacks using MacCrab's built-in Forensicate.ai scanner (87+ rules). An AI agent can call this before processing untrusted input — e.g. file contents, web pages, user-supplied prompts — to check for jailbreaks, DAN personas, encoded payloads, and multi-vector attacks. Returns verdict, confidence score, and matched rule names.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "text": ["type": "string", "description": "Text to scan for prompt injection (max 10000 characters)"],
+            ],
+            "required": ["text"],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Tool Handlers
@@ -247,6 +294,14 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleGetSecurityScore()
     case "suppress_alert":
         return await handleSuppressAlert(args)
+    case "get_alert_detail":
+        return await handleGetAlertDetail(args)
+    case "suppress_campaign":
+        return await handleSuppressCampaign(args)
+    case "get_ai_alerts":
+        return await handleGetAIAlerts(args)
+    case "scan_text":
+        return await handleScanText(args)
     default:
         return ["content": [["type": "text", "text": "Unknown tool: \(name)"]]]
     }
@@ -309,7 +364,7 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
             if !event.process.commandLine.isEmpty { lines.append("  Cmd: \(event.process.commandLine.prefix(200))") }
             if let file = event.file { lines.append("  File: \(file.path)") }
             if let net = event.network {
-                lines.append("  Network: \(net.destinationIp ?? "?"):\(net.destinationPort)")
+                lines.append("  Network: \(net.destinationIp):\(net.destinationPort)")
             }
         }
 
@@ -461,6 +516,182 @@ func handleSuppressAlert(_ args: [String: Any]) async -> Any {
     } catch {
         return ["content": [["type": "text", "text": "Error suppressing alert: \(error.localizedDescription)"]]]
     }
+}
+
+func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
+    guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
+        return ["content": [["type": "text", "text": "Error: 'alert_id' parameter is required"]]]
+    }
+    guard alertId.count <= 64 else {
+        return ["content": [["type": "text", "text": "Error: invalid alert_id format"]]]
+    }
+
+    do {
+        let store = try AlertStore(directory: dataDir)
+        guard let alert = try await store.alert(id: alertId) else {
+            return ["content": [["type": "text", "text": "Alert \(alertId) not found."]]]
+        }
+
+        var lines: [String] = []
+        lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)")
+        lines.append("ID:     \(alert.id)")
+        lines.append("Time:   \(ISO8601DateFormatter().string(from: alert.timestamp))")
+        lines.append("Status: \(alert.suppressed ? "Suppressed" : "Active")")
+        if let proc = alert.processName { lines.append("Process: \(proc)") }
+        if let path = alert.processPath  { lines.append("Path:    \(path)") }
+        if let tactics = alert.mitreTactics    { lines.append("Tactics:    \(tactics)") }
+        if let techs   = alert.mitreTechniques { lines.append("Techniques: \(techs)") }
+        if let d3 = alert.d3fendTechniques, !d3.isEmpty {
+            lines.append("D3FEND Mitigations: \(d3.joined(separator: ", "))")
+        }
+        if let hint = alert.remediationHint { lines.append("Remediation: \(hint)") }
+        if let cid = alert.campaignId { lines.append("Campaign ID: \(cid)") }
+
+        if let desc = alert.description {
+            lines.append("")
+            lines.append("Description:")
+            lines.append(desc)
+        }
+
+        if let inv = alert.llmInvestigation {
+            lines.append("")
+            lines.append("AI Investigation:")
+            lines.append("  Verdict:    \(inv.verdict.rawValue)")
+            lines.append("  Confidence: \(Int(inv.confidence * 100))%")
+            lines.append("  Summary:    \(inv.summary)")
+            if !inv.suggestedActions.isEmpty {
+                lines.append("  Suggested Actions:")
+                for action in inv.suggestedActions.prefix(5) {
+                    let risk = action.requiresConfirmation ? " [requires confirmation]" : ""
+                    lines.append("    • \(action.title)\(risk): \(action.rationale)")
+                }
+            }
+            if !inv.confidencePenalties.isEmpty {
+                lines.append("  Uncertainty: \(inv.confidencePenalties.joined(separator: "; "))")
+            }
+        }
+
+        lines.append("")
+        lines.append("Use get_events with search='\(alert.eventId)' to see the triggering event and full process ancestry.")
+
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    } catch {
+        return ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]]]
+    }
+}
+
+func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
+    guard let campaignId = args["campaign_id"] as? String, !campaignId.isEmpty else {
+        return ["content": [["type": "text", "text": "Error: 'campaign_id' parameter is required"]]]
+    }
+    guard campaignId.count <= 64 else {
+        return ["content": [["type": "text", "text": "Error: invalid campaign_id format"]]]
+    }
+
+    auditLog("suppress_campaign", details: "campaign_id=\(campaignId) ppid=\(getppid())")
+
+    do {
+        let store = try AlertStore(directory: dataDir)
+
+        // Suppress the campaign alert itself.
+        try await store.suppress(alertId: campaignId)
+
+        // Suppress all contributing alerts (those whose campaignId references this campaign).
+        let all = try await store.alerts(since: Date.distantPast, limit: 10_000)
+        let contributing = all.filter { $0.campaignId == campaignId && !$0.suppressed }
+        for alert in contributing {
+            try? await store.suppress(alertId: alert.id)
+        }
+
+        let extra = contributing.isEmpty ? "" : " Also suppressed \(contributing.count) contributing alert(s)."
+        return ["content": [["type": "text", "text": "Campaign \(campaignId) suppressed.\(extra)"]]]
+    } catch {
+        return ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]]]
+    }
+}
+
+func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
+    let limit = min(args["limit"] as? Int ?? 20, 100)
+    let hours = args["hours"] as? Double ?? 24
+
+    do {
+        let store = try AlertStore(directory: dataDir)
+        let since = Date().addingTimeInterval(-hours * 3600)
+        let all = try await store.alerts(since: since, limit: 10_000)
+
+        let aiKeywords = ["ai_tool", "ai-tool", "ai_guard", "credential_fence",
+                          "boundary", "injection", "mcp_server", "prompt"]
+        let aiTitleKeywords = ["AI", "Credential Fence", "Boundary", "Injection", "MCP", "Prompt"]
+
+        let aiAlerts = all.filter { alert in
+            let ruleId = alert.ruleId.lowercased()
+            let title  = alert.ruleTitle
+            return aiKeywords.contains(where: { ruleId.contains($0) })
+                || aiTitleKeywords.contains(where: { title.contains($0) })
+        }.prefix(limit)
+
+        if aiAlerts.isEmpty {
+            return ["content": [["type": "text", "text": "No AI safety alerts in the last \(Int(hours))h. AI tools are operating within safe boundaries."]]]
+        }
+
+        var lines: [String] = ["\(aiAlerts.count) AI safety alert(s) — last \(Int(hours))h:"]
+        for alert in aiAlerts {
+            lines.append("")
+            lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)")
+            lines.append("  Time:    \(ISO8601DateFormatter().string(from: alert.timestamp))")
+            lines.append("  ID:      \(alert.id)")
+            if let proc = alert.processName { lines.append("  Process: \(proc)") }
+            if let desc = alert.description { lines.append("  Detail:  \(desc)") }
+        }
+
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    } catch {
+        return ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]]]
+    }
+}
+
+func handleScanText(_ args: [String: Any]) async -> Any {
+    guard let text = args["text"] as? String, !text.isEmpty else {
+        return ["content": [["type": "text", "text": "Error: 'text' parameter is required"]]]
+    }
+    guard text.count <= 10_000 else {
+        return ["content": [["type": "text", "text": "Error: text too long (max 10000 characters)"]]]
+    }
+
+    let scanner = PromptInjectionScanner()
+    guard await scanner.isAvailable else {
+        return ["content": [["type": "text", "text": "Prompt injection scanner not available. Install forensicate to enable this tool:\n  pip install forensicate-ai"]]]
+    }
+
+    guard let result = await scanner.scan(text) else {
+        return ["content": [["type": "text", "text": "Scan returned no result (possible timeout or parse error)."]]]
+    }
+
+    var lines: [String] = ["Prompt Injection Scan"]
+    lines.append("═══════════════════════════════════")
+    lines.append("Safe:       \(!result.isPositive)")
+    lines.append("Confidence: \(result.confidence)%")
+
+    if result.isPositive {
+        lines.append("⚠️  INJECTION DETECTED")
+        if !result.reasons.isEmpty {
+            lines.append("Reasons:")
+            for r in result.reasons { lines.append("  - \(r)") }
+        }
+        if !result.matchedRules.isEmpty {
+            lines.append("Matched Rules:")
+            for rule in result.matchedRules.prefix(10) {
+                lines.append("  [\(rule.severity.uppercased())] \(rule.ruleName)")
+            }
+        }
+        if !result.compoundThreats.isEmpty {
+            lines.append("Compound Threats: \(result.compoundThreats.joined(separator: ", "))")
+        }
+    } else {
+        lines.append("✓ No injection patterns detected")
+    }
+
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 
 // MARK: - Main Loop (stdio JSON-RPC)
