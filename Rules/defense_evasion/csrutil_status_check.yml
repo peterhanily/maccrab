@@ -33,7 +33,12 @@ detection:
             - '/WarpTerminal'
             - '/tmux'
             - '/screen'
-    condition: selection and not filter_apple and not filter_platform and not filter_terminal
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_apple and not filter_platform and not filter_terminal and not filter_apple_parent
 falsepositives:
     - System administration
     - Security audit tools

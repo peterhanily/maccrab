@@ -15,7 +15,7 @@ this now — if it's showing, click *Open Settings* and grant access.
 
 Other possibilities: the System Extension isn't activated (check *Overview
 → Protection active*), no rules are compiled (`maccrabctl rules list | wc
--l` should be ~380), or you're inside the 60-second startup warm-up
+-l` should be ~417), or you're inside the 60-second startup warm-up
 window that suppresses non-critical alerts.
 
 Full diagnostic walkthrough in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
@@ -79,7 +79,7 @@ The *Suppress All Like This* button on an alert's detail panel adds a
 ### Does it work offline / in air-gapped environments?
 
 **Yes.** MacCrab's core detection pipeline needs zero network access. All
-380 rules are compiled at install time. Behavioral scoring, sequence
+417 rules are compiled at install time. Behavioral scoring, sequence
 correlation, campaign detection, and the SQLite store are fully local.
 
 Features that need network:
@@ -209,6 +209,76 @@ rm -f ~/Library/Preferences/com.maccrab.app.plist     # app preferences
 The uninstall does *not* delete your data by default — the data paths are
 left intact so you can reinstall without losing alert history. Remove them
 manually if you want a clean slate.
+
+---
+
+### What is the MacCrab MCP server and how do I use it?
+
+MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/)
+server (`maccrab-mcp`) that exposes 11 security tools to AI coding tools
+like Claude Code. Once wired up, your AI sessions can query alerts, hunt
+threats, and scan untrusted input — without leaving the editor.
+
+**Setup:** copy `.mcp.json` from the repo root into your project, update the
+`command` path to point at your built `maccrab-mcp` binary, then build with
+`swift build --target maccrab-mcp`.
+
+Key tools: `get_alerts`, `get_campaigns`, `hunt`, `get_security_score`,
+`get_alert_detail`, `suppress_campaign`, `get_ai_alerts`, and `scan_text`.
+
+Pre-built slash commands in `.claude/commands/` give you `/security-check`,
+`/threat-hunt <query>`, and `/alerts` as one-liners.
+
+---
+
+### What does `scan_text` do and when should I use it?
+
+`scan_text` is the MacCrab MCP tool for **prompt injection detection**. It
+runs the same forensicate.ai analysis that AI Guard uses internally and
+returns a verdict (`safe`, `prompt_injection`, `jailbreak_attempt`, etc.)
+along with a confidence score and matched rule names.
+
+Use it **before acting on content from external sources** — files cloned from
+the internet, output from third-party APIs, user-supplied prompts, or anything
+else that an attacker might craft to hijack your AI tool's behavior.
+
+```
+scan_text: { text: "<paste suspicious content here>" }
+# Returns: { "safe": false, "verdict": "prompt_injection",
+#            "confidence": 0.92, "matchedRules": ["jailbreak_attempt"] }
+```
+
+The check is synchronous and local. Input is capped at 10,000 characters. If
+`forensicate` CLI is not installed the tool returns `{ "available": false }`.
+
+---
+
+### What does AI Guard actually monitor — and what triggers an alert?
+
+AI Guard tracks 8 AI coding tools (Claude Code, Codex, Cursor, Copilot,
+Aider, Windsurf, Continue, OpenClaw) and their entire child process trees.
+
+Alerts fire on:
+
+- **Credential fence** (CRITICAL): any child process opens a file matching one
+  of 28 sensitive path patterns — SSH keys, `.env` files, AWS credentials,
+  keychains, browser credential stores, kubeconfig, `.npmrc`, `.pypirc`, etc.
+- **Project boundary** (HIGH): a child process writes a file outside the
+  directory the AI tool was launched in.
+- **Shell spawning** (MEDIUM): a shell is forked from an AI tool — normal in
+  development but logged for audit.
+- **Package install** (HIGH): `npm install`, `pip install`, `brew install`, or
+  `cargo add` runs from an AI child process.
+- **Privilege escalation** (CRITICAL): `sudo` or a setuid binary is invoked
+  from the AI tool tree.
+- **Prompt injection** (HIGH): forensicate.ai scanner fires on content being
+  read by the tool.
+- **Persistence** (CRITICAL): a LaunchAgent plist, cron entry, or login item
+  is written by an AI child process.
+
+The **AI Guard tab** in the dashboard shows a live per-tool breakdown of
+credential / injection / boundary / other alert counts, sorted by worst
+severity, so you can see at a glance which tool is the noisiest.
 
 ---
 

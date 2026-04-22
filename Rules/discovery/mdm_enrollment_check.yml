@@ -48,7 +48,9 @@ detection:
             - '/screen'
             - '/Cursor'
             - '/Code'
-    condition: selection and not filter_system and not filter_mdm and not filter_terminal
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_system and not filter_mdm and not filter_terminal and not filter_apple_parent
 falsepositives:
     - IT administrators checking enrollment status
     - Compliance verification scripts

@@ -168,6 +168,12 @@ enum MonitorTasks {
                     // sleep/wake and are never exfil signal — suppress
                     // entirely rather than surfacing the first event per day.
                     if usbEvent.vendorId == 0x5ac { continue }
+                    // Yubico VID 0x1050 = YubiKey security tokens. Frequent
+                    // connect/disconnect is expected with 2FA workflows and
+                    // YubiKeys cannot exfil data or execute code — skip.
+                    if usbEvent.vendorId == 0x1050 { continue }
+                    // Nitrokey VID 0x20a0 and SoloKeys VID 0x0483 — same rationale.
+                    if usbEvent.vendorId == 0x20a0 || usbEvent.vendorId == 0x0483 { continue }
                     // USB device class 0x09 = hub. Third-party USB-C docks,
                     // 4-port splitters, monitor-integrated hubs (Realtek,
                     // VIA, Intel) churn connect/disconnect on every replug

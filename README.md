@@ -190,6 +190,42 @@ maccrabctl extensions --suspicious      # Browser extension scan
 
 ---
 
+## MCP Server
+
+MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) server (`maccrab-mcp`) that lets AI coding tools query your security data directly from the editor.
+
+**Setup** — copy `.mcp.json` from the repo root to your project, or add the entry manually:
+
+```json
+{
+  "mcpServers": {
+    "maccrab": { "command": "/path/to/.build/debug/maccrab-mcp" }
+  }
+}
+```
+
+Build the MCP binary with `swift build --target maccrab-mcp`.
+
+**Available tools (11):**
+
+| Tool | Purpose |
+|------|---------|
+| `get_alerts` | Query alerts with severity, time, and suppression filters |
+| `get_events` | Search events by category, keyword, or time window |
+| `get_campaigns` | List detected attack campaigns with contributing alerts |
+| `get_status` | Daemon status, rule count, uptime, database size |
+| `hunt` | Natural-language threat hunting across all stored events |
+| `get_security_score` | Security posture score (0–100) with per-factor breakdown |
+| `suppress_alert` | Suppress a false-positive alert by ID |
+| `get_alert_detail` | Full detail for one alert: LLM investigation, d3fend techniques, remediation hint |
+| `suppress_campaign` | Suppress a campaign and all its contributing alerts at once |
+| `get_ai_alerts` | All AI Guard alerts for the last 24 h (credential, boundary, injection) |
+| `scan_text` | Check untrusted text for prompt injection before your AI tool acts on it |
+
+**Slash commands** (`.claude/commands/`): `/security-check`, `/threat-hunt <query>`, `/alerts`.
+
+---
+
 ## Uninstall
 
 ### Homebrew
@@ -300,9 +336,10 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 | **AI process tracker** | Identifies and tracks AI tool processes and their child process trees |
 | **Credential fence** | Alerts when AI tool children access any of 28 sensitive path patterns (SSH keys, `.env` files, AWS credentials, keychains, browser credential stores, kubeconfig, and more) |
 | **Project boundary enforcement** | Detects when AI tools read or write files outside the current project directory |
-| **Prompt injection scanner** | Scans for injection patterns in files read by AI tools |
+| **Prompt injection scanner** | Scans for injection patterns in files read by AI tools using forensicate.ai analysis |
+| **Activity by tool** | Dashboard AI Guard tab shows a live per-tool alert breakdown (credential / injection / boundary / other) sorted by severity |
 
-19 dedicated AI safety detection rules in `Rules/ai_safety/`.
+22 dedicated AI safety detection rules in `Rules/ai_safety/`. Use the `scan_text` MCP tool to proactively check untrusted input before your AI tool acts on it.
 
 </details>
 

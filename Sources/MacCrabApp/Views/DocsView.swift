@@ -13,6 +13,8 @@ struct DocsView: View {
         case alerts = "When a Detection Fires"
         case rules = "Creating Rules"
         case actions = "Response Actions"
+        case aiGuard = "AI Guard"
+        case mcpServer = "MCP Server"
         case cli = "CLI Reference"
         case shortcuts = "Keyboard Shortcuts"
         case tuning = "Tuning & Allowlists"
@@ -26,6 +28,8 @@ struct DocsView: View {
             case .alerts:       return "exclamationmark.triangle"
             case .rules:        return "plus.rectangle"
             case .actions:      return "bolt.shield"
+            case .aiGuard:      return "cpu.fill"
+            case .mcpServer:    return "network"
             case .cli:          return "terminal"
             case .shortcuts:    return "keyboard"
             case .tuning:       return "slider.horizontal.3"
@@ -62,6 +66,8 @@ struct DocsView: View {
         case .alerts:       alertsContent
         case .rules:        rulesContent
         case .actions:      actionsContent
+        case .aiGuard:      aiGuardContent
+        case .mcpServer:    mcpServerContent
         case .cli:          cliContent
         case .shortcuts:    shortcutsContent
         case .tuning:       tuningContent
@@ -120,7 +126,7 @@ struct DocsView: View {
             DocBody("""
             MacCrab is a local-first macOS security monitoring tool. It watches what \
             happens on your Mac in real time — process executions, file changes, network \
-            connections, and permission grants — and evaluates 304 detection rules against \
+            connections, and permission grants — and evaluates 417 detection rules against \
             every event to find threats.
             """)
 
@@ -183,8 +189,8 @@ struct DocsView: View {
 
             DocSubtitle("Detection Layers (3)")
             DocBullets([
-                "Single-Event Rules (195): Sigma-compatible rules that match individual events — \"if process X does Y, alert\"",
-                "Sequence Rules (20): Temporal-causal rules that detect multi-step attack chains — \"if A happens, then B within 60 seconds, alert\"",
+                "Single-Event Rules (379): Sigma-compatible rules that match individual events — \"if process X does Y, alert\"",
+                "Sequence Rules (38): Temporal-causal rules that detect multi-step attack chains — \"if A happens, then B within 60 seconds, alert\"",
                 "Baseline Anomaly: learns normal process-spawning patterns over 7 days, then alerts on novel parent→child relationships",
             ])
 
@@ -207,26 +213,30 @@ struct DocsView: View {
     private var detectionsContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             DocTitle("What It Detects")
-            DocBody("304 detection rules across 12 MITRE ATT&CK tactics:")
+            DocBody("417 detection rules across 16 MITRE ATT&CK tactics — plus 38 temporal sequence rules:")
 
             DocTable(headers: ["Tactic", "Examples", "Rules"], rows: [
-                ["Initial Access", "Exploit payloads, phishing downloads, supply chain attacks", "15"],
-                ["Execution", "Reverse shells, osascript abuse, Python/Ruby one-liners", "25"],
-                ["Persistence", "LaunchAgents, login items, cron jobs, shell profile mods", "30"],
-                ["Privilege Escalation", "sudo abuse, SUID binaries, TCC bypasses", "12"],
-                ["Defense Evasion", "Log deletion, Gatekeeper bypass, code injection", "20"],
-                ["Credential Access", "Keychain dumps, password manager DB access, credential harvesting", "15"],
-                ["Discovery", "System enumeration, network scanning, process listing", "12"],
-                ["Lateral Movement", "SSH tunneling, VNC, remote desktop", "8"],
-                ["Collection", "Screen recording, microphone access, keylogging", "10"],
-                ["Command & Control", "Reverse shells, DNS tunneling, Tor, ngrok, C2 callbacks", "18"],
-                ["Exfiltration", "Large file uploads, DNS exfil, archive staging", "8"],
-                ["Supply Chain", "VS Code extension attacks, npm/pip package compromise", "15"],
+                ["Execution", "Reverse shells, osascript abuse, Python/Ruby one-liners", "46"],
+                ["Persistence", "LaunchAgents, login items, cron jobs, shell profile mods", "46"],
+                ["Defense Evasion", "Log deletion, Gatekeeper bypass, code injection", "43"],
+                ["Credential Access", "Keychain dumps, password manager DB access, credential harvesting", "33"],
+                ["Discovery", "System enumeration, network scanning, process listing", "31"],
+                ["Command & Control", "Reverse shells, DNS tunneling, Tor, ngrok, C2 callbacks", "30"],
+                ["AI Safety", "Credential fence, boundary escapes, prompt injection, MCP drift", "22"],
+                ["Privilege Escalation", "sudo abuse, SUID binaries, TCC bypasses", "20"],
+                ["Supply Chain", "VS Code extension attacks, npm/pip package compromise", "18"],
+                ["Collection", "Screen recording, microphone access, keylogging", "17"],
+                ["Initial Access", "Exploit payloads, phishing downloads, supply chain attacks", "16"],
+                ["Lateral Movement", "SSH tunneling, VNC, remote desktop", "15"],
+                ["Exfiltration", "Large file uploads, DNS exfil, archive staging", "12"],
+                ["TCC Abuse", "Privacy permission grants, accessibility hijacking", "11"],
+                ["Impact", "Data destruction, ransomware indicators, disk wipe", "8"],
+                ["Container", "Docker daemon abuse, container escapes", "6"],
             ])
 
             DocSubtitle("Sequence Detection (Multi-Step Attacks)")
             DocBody("""
-            20 temporal sequence rules detect attack chains that unfold over time. \
+            38 temporal sequence rules detect attack chains that unfold over time. \
             Examples:
             """)
             DocBullets([
@@ -402,6 +412,138 @@ struct DocsView: View {
             MACCRAB_FILE_PATH        # File path (for file events)
             MACCRAB_DEST_IP          # Destination IP (for network events)
             MACCRAB_DEST_PORT        # Destination port (for network events)
+            """)
+        }
+    }
+
+    // MARK: - AI Guard
+
+    private var aiGuardContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            DocTitle("AI Guard")
+            DocBody("""
+            AI Guard monitors AI coding tool processes in real time. When Claude Code, \
+            Cursor, or any other tracked tool touches sensitive resources or steps \
+            outside expected boundaries, MacCrab fires a CRITICAL or HIGH alert before \
+            the action completes.
+            """)
+
+            DocSubtitle("Supported AI Tools (8)")
+            DocBullets([
+                "Claude Code (claude, claude-code)",
+                "Codex (codex)",
+                "Cursor (cursor)",
+                "GitHub Copilot (copilot)",
+                "Aider (aider)",
+                "Windsurf (windsurf)",
+                "Continue.dev (continue)",
+                "OpenClaw (openclaw)",
+            ])
+
+            DocSubtitle("What AI Guard Monitors")
+            DocTable(headers: ["Component", "What it Catches"], rows: [
+                ["Credential Fence", "Reads of SSH keys, .env files, AWS credentials, keychains, kubeconfig, browser credential stores (28 path patterns)"],
+                ["Project Boundary", "File writes outside the directory the AI tool was opened in"],
+                ["Shell Spawning", "Every shell process spawned by an AI tool or its children"],
+                ["Package Installs", "npm, pip, cargo, brew invocations from AI tool context"],
+                ["Privilege Escalation", "sudo, su, setuid binaries called from an AI child process"],
+                ["Network Activity", "Outbound connections from AI tool child processes"],
+                ["Prompt Injection", "Forensicate.ai scan of text read by AI tools from external sources"],
+                ["Persistence Attempts", "LaunchAgents, cron, login items written by AI tool children"],
+            ])
+
+            DocSubtitle("Activity by Tool")
+            DocBody("""
+            The AI Guard tab in the dashboard shows a live breakdown of which tool \
+            generated each alert category — credential hits, injection events, boundary \
+            escapes, and other alerts — sorted by total alert count. A color-coded \
+            severity dot shows the worst severity seen for that tool.
+            """)
+
+            DocSubtitle("Protected Credential Paths (sample)")
+            DocCode("""
+            ~/.ssh/id_*            ~/.aws/credentials      ~/.aws/config
+            ~/.env                 .env                    *.pem / *.key
+            ~/Library/Keychains/   ~/.gnupg/               ~/.kube/config
+            ~/.npmrc               ~/.pypirc               ~/.docker/config.json
+            ~/Library/Application Support/*/Login Data      (browser passwords)
+            """)
+
+            DocSubtitle("Scan Untrusted Input with MCP")
+            DocBody("""
+            Use the `scan_text` MCP tool to check untrusted content before processing \
+            it in an AI coding session. It runs the same forensicate.ai prompt-injection \
+            analysis that AI Guard uses internally and returns a verdict with matched \
+            patterns and a confidence score.
+            """)
+            DocCode("""
+            # Via Claude Code (configured in .mcp.json at repo root)
+            scan_text: { text: "<paste suspicious content here>" }
+
+            # Returns: { "safe": false, "verdict": "prompt_injection",
+            #            "confidence": 0.92, "matchedRules": ["jailbreak_attempt"] }
+            """)
+        }
+    }
+
+    // MARK: - MCP Server
+
+    private var mcpServerContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            DocTitle("MCP Server")
+            DocBody("""
+            MacCrab ships a built-in MCP (Model Context Protocol) server that exposes \
+            security data to AI agents. Configure it once in .mcp.json and your AI \
+            coding tools can query alerts, hunt threats, and scan for prompt injection \
+            without leaving the editor.
+            """)
+
+            DocSubtitle("Setup")
+            DocCode("""
+            # .mcp.json at your project root (already present in this repo)
+            {
+              "mcpServers": {
+                "maccrab": {
+                  "command": "/path/to/.build/debug/maccrab-mcp"
+                }
+              }
+            }
+
+            # Build the MCP binary
+            swift build --target maccrab-mcp
+            """)
+
+            DocSubtitle("Available Tools (11)")
+            DocTable(headers: ["Tool", "Purpose"], rows: [
+                ["get_alerts", "Query alerts with severity, time, and suppression filters"],
+                ["get_events", "Search events by category, keyword, or time window"],
+                ["get_campaigns", "List detected attack campaigns with contributing alerts"],
+                ["get_status", "Daemon status, rule count, uptime, database size"],
+                ["hunt", "Natural-language threat hunting across all events"],
+                ["get_security_score", "Security posture score (0–100) with per-factor breakdown"],
+                ["suppress_alert", "Suppress a false-positive alert by ID"],
+                ["get_alert_detail", "Full detail for one alert including LLM investigation, d3fend techniques, remediation hint"],
+                ["suppress_campaign", "Suppress an entire campaign and all its contributing alerts"],
+                ["get_ai_alerts", "All AI Guard alerts for the last 24h (credential, boundary, injection)"],
+                ["scan_text", "Check untrusted text for prompt injection before processing it"],
+            ])
+
+            DocSubtitle("Slash Commands")
+            DocBody("Three slash commands are pre-configured in .claude/commands/ for common security workflows:")
+            DocCode("""
+            /security-check      # Full security posture report (score + campaigns + recent alerts)
+            /threat-hunt <query> # Natural language hunt — \"show SSH processes last hour\"
+            /alerts              # Review and triage recent alerts
+            """)
+
+            DocSubtitle("Example: Scan Before Processing")
+            DocCode("""
+            # Before acting on content from an external file or user input:
+            scan_text: { text: "<content to check>" }
+            # If verdict is not \"safe\", inspect the matchedRules before proceeding.
+
+            # Full threat hunt from within a Claude Code session:
+            hunt: { query: \"unsigned processes that made outbound connections\" }
             """)
         }
     }

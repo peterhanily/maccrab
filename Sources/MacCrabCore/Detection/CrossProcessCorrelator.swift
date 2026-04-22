@@ -248,6 +248,8 @@ public actor CrossProcessCorrelator {
     /// example) — not attacker convergence. These ranges mirror the AI
     /// network sandbox allowlist so the two stay in sync.
     private static let trustedCloudPrefixes: [String] = [
+        // Apple (ASN 714 — 17.0.0.0/8 is Apple's own registered IP space)
+        "17.",
         // Anthropic (Fastly)
         "160.79.",
         // OpenAI / Cloudflare-fronted services
@@ -538,6 +540,11 @@ public actor CrossProcessCorrelator {
         // single biggest source of Chrome-Helper `network-convergence` noise
         // on workstations where the user runs the Google suite end-to-end.
         if allEventsAreTrustedHelpers(windowEvents) { return nil }
+        // Skip when every contacting process is an Apple system daemon
+        // (e.g. mDNSResponder, nsurlsessiond, trustd all hitting an Apple
+        // CDN IP). These belong to /System/ or /usr/ paths and are never
+        // attack convergence regardless of what IP they share.
+        if allEventsAreAppleSystemProcesses(windowEvents) { return nil }
 
         let severity = computeNetworkSeverity(events: windowEvents)
         let chain = buildChain(
@@ -693,6 +700,23 @@ public actor CrossProcessCorrelator {
         guard !events.isEmpty else { return false }
         return events.allSatisfy {
             NoiseFilter.isTrustedBrowserHelper(path: $0.processPath)
+        }
+    }
+
+    /// True when every event's process is an Apple system daemon — path
+    /// starts with /System/, /usr/, /sbin/, or /bin/. Multiple Apple
+    /// daemons (mDNSResponder, nsurlsessiond, trustd) contacting the same
+    /// CDN IP is normal system operation, not convergence.
+    private func allEventsAreAppleSystemProcesses(_ events: [ChainEvent]) -> Bool {
+        guard !events.isEmpty else { return false }
+        return events.allSatisfy { event in
+            let path = event.processPath
+            return path.hasPrefix("/System/") ||
+                   path.hasPrefix("/usr/libexec/") ||
+                   path.hasPrefix("/usr/sbin/") ||
+                   path.hasPrefix("/usr/bin/") ||
+                   path.hasPrefix("/sbin/") ||
+                   path.hasPrefix("/bin/")
         }
     }
 
