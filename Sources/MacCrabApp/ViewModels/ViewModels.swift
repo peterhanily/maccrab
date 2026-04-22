@@ -88,6 +88,14 @@ struct AlertViewModel: Identifiable, Hashable {
     let description: String
     let mitreTechniques: String
     var suppressed: Bool
+    /// ID of the Event that triggered this alert. The detail view
+    /// uses it to fetch the full event record (command line, parent,
+    /// signer, file path, network destination, ancestor chain) so
+    /// the user sees what actually fired, not just the rule title.
+    /// Empty for alerts generated outside the rule engine (USB,
+    /// clipboard, tamper) where no backing Event exists. Defaults
+    /// empty so mock/preview constructors don't need updating.
+    var eventId: String = ""
     /// Phase 4 agentic investigation output. Nil until an LLM has
     /// triaged this alert. Default nil so existing memberwise init
     /// callers (mocks, previews, tests) don't need to pass it.

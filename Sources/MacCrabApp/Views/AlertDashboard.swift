@@ -221,7 +221,7 @@ struct AlertDashboard: View {
                     // Detail panel — shown when exactly one alert selected
                     if let alert = detailAlert {
                         Divider()
-                        AlertDetailView(alert: alert, onSuppress: {
+                        AlertDetailView(alert: alert, appState: appState, onSuppress: {
                             presentSuppressToast(names: [alert.ruleTitle], ids: [alert.id])
                             Task { await appState.suppressAlert(alert.id) }
                         }, onUnsuppress: {
@@ -435,6 +435,7 @@ struct AlertDashboard: View {
 
 struct AlertDetailView: View {
     let alert: AlertViewModel
+    var appState: AppState? = nil
     let onSuppress: () -> Void
     var onUnsuppress: (() -> Void)? = nil
     var onSuppressPattern: (() -> Void)? = nil
@@ -443,6 +444,7 @@ struct AlertDetailView: View {
     @State private var showQuarantineConfirm = false
     @State private var showBlockConfirm = false
     @State private var actionFeedback: String?
+    @State private var triggerEvent: Event?
 
     var body: some View {
         ScrollView {
@@ -499,6 +501,46 @@ struct AlertDetailView: View {
                             DetailRow(label: String(localized: "alertDetail.directory", defaultValue: "Directory"), value: (alert.processPath as NSString).deletingLastPathComponent)
                         }
                     }.padding(4)
+                }
+
+                // Triggering event — fetched from the event store using
+                // alert.eventId. Shows the fields that actually matter for
+                // triage: what the process ran (command line), who launched
+                // it (parent chain), what file/network endpoint it touched,
+                // and how it was signed.
+                if let event = triggerEvent {
+                    GroupBox("Triggering Event") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            DetailRow(label: "Action", value: "\(event.eventCategory.rawValue) / \(event.eventAction)")
+                            if !event.process.commandLine.isEmpty {
+                                DetailRow(label: "Command Line", value: event.process.commandLine)
+                            }
+                            DetailRow(label: "PID", value: "\(event.process.pid)")
+                            if let sig = event.process.codeSignature {
+                                DetailRow(label: "Signer", value: sig.signerType.rawValue + (sig.teamId.map { " (team \($0))" } ?? ""))
+                            }
+                            if let parent = event.process.ancestors.first {
+                                DetailRow(label: "Parent", value: "\(parent.name) — \(parent.executable)")
+                            }
+                            if event.process.ancestors.count > 1 {
+                                let chain = event.process.ancestors.prefix(5).reversed().map(\.name).joined(separator: " → ")
+                                DetailRow(label: "Ancestry", value: chain + " → " + event.process.name)
+                            }
+                            if let file = event.file {
+                                DetailRow(label: "File", value: file.path)
+                                if let src = file.sourcePath { DetailRow(label: "Source Path", value: src) }
+                            }
+                            if let net = event.network {
+                                let hostOrIp = net.destinationHostname ?? net.destinationIp
+                                let shown = hostOrIp.isEmpty ? "unresolved" : hostOrIp
+                                DetailRow(label: "Destination", value: "\(shown):\(net.destinationPort) (\(net.transport))")
+                            }
+                            if let tcc = event.tcc {
+                                DetailRow(label: "TCC Service", value: tcc.service)
+                                DetailRow(label: "TCC Allowed", value: tcc.allowed ? "yes" : "no")
+                            }
+                        }.padding(4)
+                    }
                 }
 
                 // MITRE ATT&CK
@@ -747,7 +789,20 @@ struct AlertDetailView: View {
 
                 Spacer()
             }.padding()
-        }.background(Color(nsColor: .controlBackgroundColor))
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+        .task(id: alert.id) {
+            // Fetch the underlying event for the detail GroupBox. Runs
+            // on every selection change (task(id:) re-runs when id
+            // changes) so switching alerts reloads the correct event.
+            // Skip for alerts without an eventId (USB / clipboard /
+            // tamper — they have no backing Event).
+            guard !alert.eventId.isEmpty, let state = appState else {
+                triggerEvent = nil
+                return
+            }
+            triggerEvent = await state.fetchEvent(id: alert.eventId)
+        }
     }
 
     /// Check if the alert's rule has a configured response action in actions.json.

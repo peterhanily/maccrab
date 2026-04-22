@@ -3,6 +3,37 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.7] — 2026-04-22
+
+Alert detail now surfaces the triggering event, and two more
+v1.4.6-field-test FPs close.
+
+### Added
+
+- **Triggering Event panel in AlertDetailView.** The detail
+  view now fetches the originating `Event` by id (via new
+  `AppState.fetchEvent(id:)`) and renders command line, PID,
+  signer + team id, parent process, ancestor chain, file path,
+  destination endpoint, and TCC service fields. `AlertViewModel`
+  gained an `eventId` field. Tamper / USB / clipboard alerts
+  with no backing Event omit the section.
+
+### Fixed
+
+- **`SelfDefense` no longer flags attrib changes on non-critical
+  paths.** sysextd stamps xattrs on the sysext executable every
+  install + activation cycle, triggering "MacCrab Tamper
+  Detection: Config Modified" at HIGH on the daemon's own
+  binary. Only the LaunchDaemon plist and compiled-rules
+  directory still escalate on attrib.
+- **`plist_written_to_library.yml` filters browser helpers and
+  Developer-ID-signed processes.** `filter_apple_signed`
+  broadened to `apple | appStore | devId`. New
+  `filter_browser_helper` covers Chrome / Chromium / Firefox /
+  Safari / Edge / Arc / Brave / Opera / Vivaldi bundles.
+  Fixes the Google-Chrome-from-`/var/folders/` → `~/Library/
+  Google/Chrome/.../*.plist` FP.
+
 ## [1.4.6] — 2026-04-22
 
 Same-day FP hotfix after v1.4.5 landed. Six false positives

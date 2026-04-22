@@ -28,8 +28,22 @@ detection:
             - '/usr/libexec/'
             - '/usr/sbin/'
     filter_apple_signed:
-        SignerType: 'apple'
-    condition: selection_target and selection_source and not filter_system and not filter_apple_signed
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    filter_browser_helper:
+        Image|contains:
+            - '/Google Chrome.app/'
+            - '/Chromium.app/'
+            - '/Firefox.app/'
+            - '/Safari.app/'
+            - '/Microsoft Edge.app/'
+            - '/Arc.app/'
+            - '/Brave Browser.app/'
+            - '/Opera.app/'
+            - '/Vivaldi.app/'
+    condition: selection_target and selection_source and not filter_system and not filter_apple_signed and not filter_browser_helper
 falsepositives:
     - Installer packages writing configuration plists
     - Legitimate software first-run configuration

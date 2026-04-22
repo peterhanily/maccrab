@@ -350,8 +350,14 @@ public actor SelfDefense {
                     }
                     message = "\(desc) was modified: \(path)"
                 } else if data.contains(.attrib) {
-                    // Skip attrib changes on the DB — WAL checkpoints and chmod are normal
-                    if path.contains("events.db") && !critical { return }
+                    // Attrib changes on non-critical paths are routine: sysextd
+                    // stamps xattrs during activation, codesign staples the
+                    // binary, Homebrew upgrades touch mtime, Time Machine
+                    // tags nodes for exclusion. None of that is tampering.
+                    // Only attribs on critical paths (LaunchDaemon plist,
+                    // compiled rules) escalate; for everything else (binary,
+                    // events.db, config files) silently ignore.
+                    if !critical { return }
                     message = "\(desc) had attributes changed: \(path)"
                 }
 

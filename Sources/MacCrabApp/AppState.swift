@@ -892,8 +892,24 @@ final class AppState: ObservableObject {
             description: a.description ?? "",
             mitreTechniques: a.mitreTechniques ?? "",
             suppressed: a.suppressed,
+            eventId: a.eventId,
             llmInvestigation: a.llmInvestigation
         )
+    }
+
+    /// Fetch the originating Event for an alert so the detail view can
+    /// render command line, parent, signer, file path, network endpoint,
+    /// and ancestors. Returns nil for alerts without a backing Event
+    /// (USB, clipboard, tamper) or when the event has already been
+    /// pruned from the DB.
+    func fetchEvent(id: String) async -> Event? {
+        guard let uuid = UUID(uuidString: id) else { return nil }
+        do {
+            let store = try eventStore()
+            return try await store.event(id: uuid)
+        } catch {
+            return nil
+        }
     }
 
     private func eventToViewModel(_ e: Event) -> EventViewModel {
