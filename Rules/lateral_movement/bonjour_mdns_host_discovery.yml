@@ -1,0 +1,52 @@
+title: Bonjour/mDNS Host Discovery by Unexpected Process
+id: a1b2c3d4-1014-4000-b000-000000001014
+status: experimental
+description: >
+    Detects use of dns-sd (Bonjour command-line) or avahi-browse for mDNS/Zeroconf
+    host and service discovery. While dns-sd is a legitimate Apple utility, it is
+    rarely invoked from the command line during normal use. Adversaries pivot through
+    macOS networks by leveraging Bonjour to discover internal services (AFP, SMB,
+    SSH, HTTP) without generating traditional network scan traffic. This technique
+    avoids port-scanning signatures while still enumerating the local segment.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1046/
+    - https://attack.mitre.org/techniques/T1135/
+tags:
+    - attack.discovery
+    - attack.t1046
+    - attack.lateral_movement
+    - attack.t1135
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_dnsd:
+        Image|endswith: '/dns-sd'
+        CommandLine|contains:
+            - '-B'
+            - '-L'
+            - '-Z'
+            - '-G'
+            - '-browse'
+            - '_ssh._tcp'
+            - '_afpovertcp._tcp'
+            - '_smb._tcp'
+            - '_http._tcp'
+            - '_https._tcp'
+    selection_avahi:
+        Image|endswith: '/avahi-browse'
+    filter_apple:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/Library/Apple/'
+    filter_system:
+        SignerType: 'apple'
+    condition: (selection_dnsd or selection_avahi) and not filter_apple and not filter_system
+falsepositives:
+    - Network administrators using dns-sd for legitimate service discovery debugging
+    - Development tools that probe for local services during setup
+    - Xcode and developer SDKs that use Bonjour for simulator discovery
+level: medium

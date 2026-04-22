@@ -1,0 +1,51 @@
+title: macOS System Service Stopped via launchctl bootout
+id: f0e1d2c3-a011-4000-e000-00000000a011
+status: experimental
+description: |
+  Detects use of `launchctl bootout` or `launchctl remove` to terminate
+  built-in macOS system services. Adversaries stop system daemons to
+  disable endpoint defenses (XProtect, MRT, Gatekeeper), inhibit logging
+  (aslmanager, syslogd, oslogd), or prevent system recovery (cfprefsd,
+  com.apple.backupd). This technique is distinct from the
+  security_tool_disabled rule, which targets security-specific features,
+  and covers broader service disruption.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1489/
+tags:
+    - attack.impact
+    - attack.t1489
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_launchctl:
+        Image|endswith: '/launchctl'
+    selection_action:
+        CommandLine|contains:
+            - 'bootout'
+            - 'remove'
+    selection_target:
+        CommandLine|contains:
+            - 'com.apple.XProtect'
+            - 'com.apple.MRT'
+            - 'com.apple.security'
+            - 'com.apple.oslog'
+            - 'com.apple.syslogd'
+            - 'com.apple.aslmanager'
+            - 'com.apple.backupd'
+            - 'com.apple.cfprefsd'
+            - 'com.apple.watchdogd'
+            - 'com.apple.tccd'
+            - 'com.apple.trustd'
+            - 'com.apple.endpointsecurity'
+            - 'com.apple.mds'
+    filter_recovery_env:
+        CommandLine|contains: 'system/com.apple.recovery'
+    condition: selection_launchctl and selection_action and selection_target
+        and not filter_recovery_env
+falsepositives:
+    - System administrators explicitly stopping services for maintenance
+    - macOS OS upgrade scripts that restart core daemons as part of installation
+level: critical

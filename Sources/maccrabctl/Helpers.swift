@@ -111,6 +111,8 @@ extension MacCrabCtl {
           tree-score [N]          Top-N suspicious processes (behavioral + Markov scoring)
           mcp list [--suspicious] List MCP server configs across all AI tools
           extensions [--suspicious]  Scan browser extensions for dangerous permissions
+          vulns [--hours H] [--severity S]  Vulnerability alerts from the CVE scanner
+          privacy [--hours H]  Privacy anomaly alerts (bulk egress, trackers, domain spikes)
           security            Full security posture breakdown with recommendations
 
         Other:
@@ -136,6 +138,10 @@ extension MacCrabCtl {
           maccrabctl tree-score 20
           maccrabctl mcp list
           maccrabctl extensions --suspicious
+          maccrabctl vulns
+          maccrabctl vulns --hours 24 --severity critical
+          maccrabctl privacy
+          maccrabctl privacy --hours 24
           maccrabctl security
           maccrabctl allow add --rule rule.noisy --path /usr/local/bin/vendor --ttl 7d --reason "vendor rollout"
           maccrabctl allow list --expired
@@ -146,7 +152,7 @@ extension MacCrabCtl {
 
     static func printVersion() {
         // LOCALIZE: "MacCrab Detection Engine v1.3.4"
-        print("MacCrab Detection Engine v1.3.4")
+        print("MacCrab Detection Engine v1.5.0")
         // LOCALIZE: "License: Apache 2.0 (code), DRL 1.1 (rules)"
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
         print("https://github.com/maccrab-detection/maccrab")

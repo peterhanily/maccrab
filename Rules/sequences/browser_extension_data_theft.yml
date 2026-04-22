@@ -1,0 +1,72 @@
+title: Malicious Browser Extension Reads Cookies Then Exfiltrates
+id: e1f2a3b4-0034-4000-b000-000000000034
+status: experimental
+description: >
+    Detects a malicious browser extension data-theft sequence: a browser
+    process reads the user's cookie or password database (common extension
+    permission abuse), followed by a network connection to an external
+    server not associated with the browser's normal operations. Extensions
+    with `cookies` or `browsingData` permissions can read all authenticated
+    sessions for any site.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1539/
+    - https://attack.mitre.org/techniques/T1185/
+tags:
+    - attack.collection
+    - attack.credential_access
+    - attack.t1539
+    - attack.t1185
+
+type: sequence
+window: 30s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: cookie_read
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|endswith:
+                  - 'Cookies'
+                  - 'Cookies.binarycookies'
+                  - 'Login Data'
+                  - 'cookies.sqlite'
+                  - 'places.sqlite'
+              Image|contains:
+                  - 'Google Chrome'
+                  - 'Brave Browser'
+                  - 'Microsoft Edge'
+                  - 'Firefox'
+                  - 'Arc'
+          condition: selection
+
+    - id: suspicious_exfil
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          filter_known_good:
+              DestinationHostname|endswith:
+                  - '.google.com'
+                  - '.googleapis.com'
+                  - '.gstatic.com'
+                  - '.mozilla.org'
+                  - '.mozilla.com'
+                  - '.microsoft.com'
+                  - '.brave.com'
+          condition: selection and not filter_known_good
+      process: cookie_read.same_process
+
+trigger: all
+falsepositives:
+    - Browser sync features reading local databases before uploading to legitimate
+      sync services (filtered by known-good destination list above)
+    - Password manager extensions reading browser storage before syncing to their own backend
+level: critical

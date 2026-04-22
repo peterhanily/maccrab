@@ -1,0 +1,43 @@
+title: Wi-Fi Preference File Modified by Non-System Process
+id: d1a2b3c4-0504-4000-a000-000000000504
+status: experimental
+description: >
+    Detects writes to the macOS Wi-Fi/AirPort preference file
+    (com.apple.airport.preferences.plist) by a process that is not a
+    known system configuration daemon. This file stores the list of
+    preferred wireless networks including 802.1X enterprise credentials.
+    Modification by an untrusted process could add a rogue preferred
+    network to redirect wireless traffic or extract stored credentials.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1565.001/
+    - https://support.apple.com/en-us/HT202613
+tags:
+    - attack.wireless
+    - attack.defense_evasion
+    - attack.t1565.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - 'SystemConfiguration/com.apple.airport.preferences'
+            - 'SystemConfiguration/com.apple.wifi.known-networks'
+            - 'SystemConfiguration/NetworkInterfaces.plist'
+        FileAction: 'write'
+    filter_trusted_writers:
+        Image|endswith:
+            - '/configd'
+            - '/airportd'
+            - '/SystemUIServer'
+            - '/jamf'
+            - '/kandji'
+            - '/scutil'
+        PlatformBinary: 'true'
+    condition: selection and not filter_trusted_writers
+falsepositives:
+    - System administrators using configuration management tools (Munki, Mosyle)
+      that directly write preference files without going through scutil
+level: medium

@@ -1,0 +1,52 @@
+title: Docker Remote API Accessed via Plaintext TCP
+id: d1a2b3c4-0432-4000-a000-000000000432
+status: experimental
+description: >
+    Detects processes connecting to the Docker daemon's unauthenticated TCP
+    API (port 2375) or the TLS API (port 2376) via curl, wget, or the
+    docker CLI with a -H flag. An exposed Docker TCP API gives full
+    root-equivalent host access. Attackers pivot through misconfigured
+    Docker hosts in lateral movement and target publicly exposed daemons
+    for initial access.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1609/
+    - https://attack.mitre.org/techniques/T1021/
+tags:
+    - attack.lateral_movement
+    - attack.execution
+    - attack.t1609
+    - attack.t1021
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_curl:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+        CommandLine|contains:
+            - ':2375'
+            - ':2376'
+    selection_docker_host:
+        Image|endswith: '/docker'
+        CommandLine|contains:
+            - '-H tcp://'
+            - '--host tcp://'
+    selection_docker_host_env:
+        Image|endswith: '/docker'
+        CommandLine|contains:
+            - 'DOCKER_HOST=tcp://'
+    filter_localhost:
+        CommandLine|contains:
+            - 'localhost:2375'
+            - 'localhost:2376'
+            - '127.0.0.1:2375'
+            - '127.0.0.1:2376'
+    condition: (selection_curl or selection_docker_host or selection_docker_host_env)
+        and not filter_localhost
+falsepositives:
+    - Legitimate remote Docker management by authorized administrators
+    - CI/CD agents connecting to remote Docker build daemons
+level: high

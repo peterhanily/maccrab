@@ -713,7 +713,6 @@ enum EventLoop {
 
                 // LLM baseline anomaly analysis (non-blocking)
                 if let llm = state.llmService {
-                    let matchCopy = baselineMatch
                     let parentName = enrichedEvent.process.ancestors.first?.name ?? "unknown"
                     let parentPath = enrichedEvent.process.ancestors.first?.executable ?? "unknown"
                     let childName = enrichedEvent.process.name
@@ -983,29 +982,47 @@ enum EventLoop {
                             }
 
                             Task {
-                                // Investigation summary
-                                if let enhancement = await llm.query(
-                                    systemPrompt: LLMPrompts.investigationSystem,
-                                    userPrompt: LLMPrompts.investigationUser(
-                                        campaignType: campaignType, title: campaignTitle,
+                                // Investigation summary — use extended thinking for
+                                // HIGH/CRITICAL campaigns with 3+ tactics. Falls back
+                                // to regular query on non-Opus backends automatically.
+                                let useDeepAnalysis = (campaignSeverity == .critical || campaignSeverity == .high)
+                                    && campaignTactics.count >= 3
+                                let investigationText: String?
+                                if useDeepAnalysis {
+                                    investigationText = await llm.deepAnalyzeCampaign(
+                                        campaignType: campaignType,
+                                        title: campaignTitle,
                                         severity: campaignSeverity.rawValue,
                                         tactics: campaignTactics,
-                                        alerts: alertSummaries
-                                    ),
-                                    maxTokens: 1024, temperature: 0.3
-                                ) {
+                                        alerts: alertSummaries,
+                                        thinkingBudgetTokens: 8000
+                                    )
+                                } else {
+                                    investigationText = await llm.query(
+                                        systemPrompt: LLMPrompts.investigationSystem,
+                                        userPrompt: LLMPrompts.investigationUser(
+                                            campaignType: campaignType, title: campaignTitle,
+                                            severity: campaignSeverity.rawValue,
+                                            tactics: campaignTactics,
+                                            alerts: alertSummaries
+                                        ),
+                                        maxTokens: 1024, temperature: 0.3
+                                    )?.response
+                                }
+                                if let text = investigationText {
+                                    let label = useDeepAnalysis ? "Deep Analysis" : "Investigation Summary"
                                     let summaryAlert = Alert(
                                         ruleId: "maccrab.llm.investigation-summary",
-                                        ruleTitle: "Investigation Summary: \(campaignTitle)",
+                                        ruleTitle: "\(label): \(campaignTitle)",
                                         severity: .informational,
                                         eventId: campaignId,
                                         processPath: nil, processName: nil,
-                                        description: enhancement.response,
+                                        description: text,
                                         mitreTactics: nil, mitreTechniques: nil,
                                         suppressed: false
                                     )
                                     do { try await state.alertStore.insert(alert: summaryAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                    print("[LLM] Investigation summary generated for: \(campaignTitle)")
+                                    print("[LLM] \(label) generated for: \(campaignTitle)")
                                 }
 
                                 // Active defense recommendation (high/critical only)

@@ -1,0 +1,57 @@
+title: Data Posted to Public Paste or File Sharing Service
+id: e1f2a3b4-7010-4000-c000-000000007010
+status: experimental
+description: >
+    Detects curl or wget posting data to public paste or file-sharing services
+    (Pastebin, Hastebin, Ghostbin, ix.io, transfer.sh, file.io, termbin). Adversaries
+    use these services as anonymous exfiltration channels and dead-drop resolvers
+    because traffic blends with normal browsing, accounts are not required, and
+    content is ephemerally hosted. stdin piping (-d @-) indicates automated use.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1567/
+    - https://attack.mitre.org/techniques/T1102.001/
+tags:
+    - attack.exfiltration
+    - attack.t1567
+    - attack.command_and_control
+    - attack.t1102.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+    selection_sites:
+        CommandLine|contains:
+            - 'pastebin.com'
+            - 'hastebin.com'
+            - 'ghostbin.com'
+            - ' ix.io'
+            - 'transfer.sh'
+            - 'file.io'
+            - 'termbin.com'
+            - 'pastecode.io'
+            - '0x0.st'
+            - 'paste.ee'
+    selection_post:
+        CommandLine|contains:
+            - ' -X POST'
+            - ' -d '
+            - ' --data'
+            - ' -F '
+            - ' --form'
+            - ' -T '
+            - ' --upload-file'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection_tool and selection_sites and selection_post and not filter_system
+falsepositives:
+    - Developer scripts sharing code snippets or configuration examples
+    - CI/CD pipelines publishing test artifacts
+level: medium

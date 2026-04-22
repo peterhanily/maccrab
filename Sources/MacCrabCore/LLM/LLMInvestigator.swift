@@ -221,6 +221,41 @@ extension LLMService {
         Self.investigatorLogger.warning("Investigation failed to parse after retry")
         return nil
     }
+
+    /// Deep campaign investigation using extended thinking (if supported by the
+    /// backend). Falls back to a standard `query()` call on non-Opus backends
+    /// so callers always receive a result or nil with no special-casing.
+    ///
+    /// Use instead of the regular `query()` path when:
+    /// - The campaign has HIGH or CRITICAL severity
+    /// - The kill chain spans ≥ 3 tactics
+    /// - An AI-generated narrative is needed before a human analyst is available
+    ///
+    /// The thinking budget is passed to the backend; for non-Opus Claude or
+    /// non-Claude backends it is silently ignored. The returned string is the
+    /// final narrative answer only — internal reasoning blocks are discarded.
+    public func deepAnalyzeCampaign(
+        campaignType: String,
+        title: String,
+        severity: String,
+        tactics: [String],
+        alerts: [(title: String, process: String?, severity: String)],
+        thinkingBudgetTokens: Int = 8000
+    ) async -> String? {
+        let enhancement = await self.queryWithExtendedThinking(
+            systemPrompt: LLMPrompts.investigationSystem,
+            userPrompt: LLMPrompts.investigationUser(
+                campaignType: campaignType,
+                title: title,
+                severity: severity,
+                tactics: tactics,
+                alerts: alerts
+            ),
+            thinkingBudgetTokens: thinkingBudgetTokens,
+            maxOutputTokens: 4096
+        )
+        return enhancement?.response
+    }
 }
 
 // MARK: - Parser
@@ -286,6 +321,7 @@ public enum LLMInvestigator {
             modelVersion: i.modelVersion, generatedAt: i.generatedAt
         )
     }
+
     private static func withModelVersion(_ i: LLMInvestigation, _ v: String) -> LLMInvestigation {
         LLMInvestigation(
             alertId: i.alertId, confidence: i.confidence, verdict: i.verdict,

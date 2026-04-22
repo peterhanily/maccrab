@@ -1,0 +1,49 @@
+title: Docker Image Layer Tampering via Export and Archive Manipulation
+id: d1a2b3c4-0434-4000-a000-000000000434
+status: experimental
+description: >
+    Detects patterns consistent with Docker image layer tampering: docker save
+    or docker export followed by tar or gzip operations targeting image layer
+    directories. Attackers tamper with image layers to inject backdoors into
+    container images that appear legitimate, targeting software supply chain
+    integrity. This also catches attempts to exfiltrate container filesystems
+    by archiving exported layers.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1195.002/
+    - https://attack.mitre.org/techniques/T1565.001/
+tags:
+    - attack.supply_chain
+    - attack.t1195.002
+    - attack.defense_evasion
+    - attack.t1565.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_save:
+        Image|endswith: '/docker'
+        CommandLine|contains:
+            - ' save '
+            - ' export '
+    selection_tar_layer:
+        Image|endswith:
+            - '/tar'
+            - '/gzip'
+            - '/gunzip'
+        CommandLine|contains:
+            - 'layer.tar'
+            - '/var/lib/docker'
+            - '.docker/overlay2'
+            - 'manifest.json'
+    filter_docker_desktop:
+        ParentImage|contains:
+            - 'Docker.app'
+            - 'com.docker'
+    condition: (selection_save or selection_tar_layer) and not filter_docker_desktop
+falsepositives:
+    - Legitimate image backup and migration workflows
+    - DevOps pipelines exporting images for scanning
+    - Developers building custom base images
+level: medium

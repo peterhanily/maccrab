@@ -734,7 +734,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(String(localized: "settings.llmClaudeModel", defaultValue: "Model"))
                     .font(.caption).fontWeight(.medium)
-                TextField("claude-sonnet-4-20250514", text: $llmModel)
+                TextField("claude-sonnet-4-6", text: $llmModel)
                     .textFieldStyle(.roundedBorder)
                     .font(.caption)
                     .onChange(of: llmModel) { _ in syncLLMConfig() }
@@ -864,7 +864,7 @@ struct SettingsView: View {
             config["openai_model"] = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
         case "claude":
             config["claude_api_key"] = llmAPIKey
-            config["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-20250514" : llmModel
+            config["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-6" : llmModel
         case "mistral":
             config["mistral_api_key"] = llmAPIKey
             config["mistral_model"] = llmModel.isEmpty ? "mistral-small-latest" : llmModel

@@ -193,10 +193,12 @@ public enum NoiseFilter {
     public static let interactiveAdminBasenames: Set<String> = [
         "ps", "top", "lsof", "netstat", "ifconfig", "ipconfig", "networksetup",
         "scutil", "arp", "route", "tcpdump",
-        "defaults", "dscl", "id", "dsmemberutil", "groups", "who", "w", "whoami",
+        "defaults", "dscl", "dseditgroup", "id", "dsmemberutil", "groups",
+        "who", "w", "whoami",
         "uname", "hostname", "sw_vers", "system_profiler", "ioreg",
         "csrutil", "spctl", "profiles", "kextstat", "launchctl",
         "sysctl", "diskutil", "mount", "df", "mdutil",
+        "smbutil", "nettop", "nfsstat", "ndp", "dig", "host", "nslookup",
     ]
 
     /// Desktop-terminal-emulator bundle prefixes. If an ancestor's

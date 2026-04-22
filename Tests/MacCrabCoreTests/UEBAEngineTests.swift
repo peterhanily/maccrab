@@ -218,4 +218,86 @@ struct UEBAEngineTests {
         await engine.save()
         #expect(await engine.stats().totalObservations == 3)
     }
+
+    // MARK: - Off-hours severity escalation
+
+    @Test("Unusual login hour at 3 AM fires high severity")
+    func offHoursNightSeverity() async {
+        let engine = UEBAEngine(minObservationsForScoring: 20, hourAnomalyThreshold: 0.05)
+        let noonBaseline = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+        for _ in 0..<20 {
+            _ = await engine.observe(event: procEvent(path: "/usr/bin/ls"), now: noonBaseline)
+        }
+        let nightTime = Calendar.current.date(bySettingHour: 3, minute: 0, second: 0, of: Date())!
+        let anomalies = await engine.observe(event: procEvent(path: "/usr/bin/ls"), now: nightTime)
+        let hourAnomaly = anomalies.first { $0.kind == .unusualLoginHour }
+        #expect(hourAnomaly != nil)
+        #expect(hourAnomaly?.severity == .high)
+    }
+
+    @Test("Unusual login hour during core hours fires low severity")
+    func offHoursCoreSeverity() async {
+        // Baseline only at hour 23 — so hour 10 (core hours) is flagged at .low.
+        let engine = UEBAEngine(minObservationsForScoring: 20, hourAnomalyThreshold: 0.05)
+        let lateNightBaseline = Calendar.current.date(bySettingHour: 23, minute: 0, second: 0, of: Date())!
+        for _ in 0..<20 {
+            _ = await engine.observe(event: procEvent(path: "/usr/bin/ls"), now: lateNightBaseline)
+        }
+        let coreHour = Calendar.current.date(bySettingHour: 10, minute: 0, second: 0, of: Date())!
+        let anomalies = await engine.observe(event: procEvent(path: "/usr/bin/ls"), now: coreHour)
+        let hourAnomaly = anomalies.first { $0.kind == .unusualLoginHour }
+        #expect(hourAnomaly != nil)
+        #expect(hourAnomaly?.severity == .low)
+    }
+
+    // MARK: - Weekday/weekend split
+
+    @Test("Weekday and weekend observation counts are tracked separately")
+    func weekdayWeekendSplit() async {
+        let engine = UEBAEngine(minObservationsForScoring: 5)
+        // Use a known Monday (2026-04-20) for weekday observations.
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 4; comps.day = 20; comps.hour = 9
+        let monday = Calendar.current.date(from: comps)!
+        // Use a known Saturday (2026-04-18) for weekend observations.
+        comps.day = 18; comps.hour = 11
+        let saturday = Calendar.current.date(from: comps)!
+
+        for _ in 0..<10 {
+            _ = await engine.observe(event: procEvent(), now: monday)
+        }
+        for _ in 0..<6 {
+            _ = await engine.observe(event: procEvent(), now: saturday)
+        }
+        let profile = await engine.profile(for: "alice")
+        #expect(profile?.weekdayObservations == 10)
+        #expect(profile?.weekendObservations == 6)
+        #expect(profile?.weekdayHourCounts[9] == 10)
+        #expect(profile?.weekendHourCounts[11] == 6)
+    }
+
+    @Test("Old JSON without weekday/weekend fields deserializes gracefully")
+    func backwardCompatibleDecode() throws {
+        let legacyJSON = """
+        [{
+            "userName": "alice",
+            "firstSeen": "2026-01-01T00:00:00Z",
+            "lastObserved": "2026-01-02T00:00:00Z",
+            "loginHourCounts": [0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "sshRemoteIPs": [],
+            "toolUsage": {"/usr/bin/ls": 5},
+            "totalObservations": 5
+        }]
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let profiles = try decoder.decode([UserEntityProfile].self, from: legacyJSON)
+        let p = try #require(profiles.first)
+        #expect(p.userName == "alice")
+        #expect(p.totalObservations == 5)
+        #expect(p.weekdayHourCounts == Array(repeating: 0, count: 24))
+        #expect(p.weekendHourCounts == Array(repeating: 0, count: 24))
+        #expect(p.weekdayObservations == 0)
+        #expect(p.weekendObservations == 0)
+    }
 }

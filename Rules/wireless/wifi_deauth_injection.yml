@@ -1,0 +1,56 @@
+title: Wi-Fi Deauthentication Frame Injection Detected
+id: d1a2b3c4-0506-4000-a000-000000000506
+status: experimental
+description: >
+    Detects tools that inject IEEE 802.11 deauthentication frames to
+    forcibly disconnect clients from a wireless network. Deauth attacks
+    are used to capture WPA handshakes (for offline cracking), force
+    clients onto a rogue AP, or cause persistent denial-of-service on a
+    wireless network. Requires monitor-mode capable Wi-Fi hardware.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1498/
+    - https://www.aircrack-ng.org/doku.php?id=deauthentication
+tags:
+    - attack.wireless
+    - attack.impact
+    - attack.t1498
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_aireplay:
+        Image|endswith:
+            - '/aireplay-ng'
+            - '/mdk3'
+            - '/mdk4'
+        CommandLine|contains:
+            - '-0'
+            - '--deauth'
+            - '--deauthentication'
+    selection_scapy_deauth:
+        Image|endswith:
+            - '/python3'
+            - '/python'
+        CommandLine|contains:
+            - 'Dot11Deauth'
+            - 'sendp'
+            - 'RadioTap'
+    selection_wifite_deauth:
+        Image|endswith:
+            - '/wifite'
+            - '/wifite2'
+        CommandLine|contains:
+            - '--deauth'
+    selection_bettercap:
+        Image|endswith: '/bettercap'
+        CommandLine|contains:
+            - 'wifi.deauth'
+            - 'wifi.recon'
+    condition: selection_aireplay or selection_scapy_deauth
+        or selection_wifite_deauth or selection_bettercap
+falsepositives:
+    - Authorized penetration testers performing wireless security assessments
+    - Network engineers testing AP failover by forcing client reconnects
+level: high

@@ -1,0 +1,62 @@
+title: Cloud Provider CLI Used to Upload Data from Sensitive Paths
+id: e1f2a3b4-7007-4000-c000-000000007007
+status: experimental
+description: >
+    Detects AWS CLI (aws s3), Google Cloud (gsutil), and Azure (az storage) being
+    used to upload or sync data from sensitive user directories. Cloud provider CLIs
+    are rarely invoked from home directory data paths during normal developer workflow;
+    this pattern has been observed in TA505, FIN7, and cloud-targeting ransomware
+    groups using legitimate cloud infrastructure for staging and exfiltration.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1567/002/
+    - https://attack.mitre.org/techniques/T1048/
+    - https://permiso.io/blog/s/unmasking-guivil-new-cloud-threat-actor/
+tags:
+    - attack.exfiltration
+    - attack.t1567.002
+    - attack.t1048
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_aws:
+        Image|endswith: '/aws'
+        CommandLine|contains:
+            - 's3 cp'
+            - 's3 sync'
+            - 's3 mv'
+            - 's3api put-object'
+    selection_gcs:
+        Image|endswith: '/gsutil'
+        CommandLine|contains:
+            - ' cp '
+            - ' rsync '
+            - ' mv '
+    selection_azure:
+        Image|endswith: '/az'
+        CommandLine|contains:
+            - 'storage blob upload'
+            - 'storage file upload'
+    selection_sensitive:
+        CommandLine|contains:
+            - '/Documents/'
+            - '/Desktop/'
+            - '/Downloads/'
+            - '/.ssh/'
+            - '/Keychains/'
+            - '/Library/Mail/'
+            - '/Library/Messages/'
+            - '/.aws/'
+            - '/.config/'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: (selection_aws or selection_gcs or selection_azure) and selection_sensitive and not filter_system
+falsepositives:
+    - Authorized cloud backup and DR workflows
+    - CI/CD pipelines deploying from developer machines
+    - Data engineers syncing datasets to cloud storage
+level: high

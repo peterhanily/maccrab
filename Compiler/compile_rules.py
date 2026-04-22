@@ -1128,6 +1128,47 @@ def compile_rule(rule_data: dict, source_file: str):
         print(f"  WARNING: No predicates generated from {source_file}, skipping", file=sys.stderr)
         return None
 
+    # Lint: process_creation rules in discovery/, execution/, and
+    # privilege_escalation/ that match on GENERIC binary names (shells,
+    # interpreters, generic CLI tools) should include a PlatformBinary or
+    # SignerType:apple filter. These were the #1 FP source in v1.3–v1.4:
+    # the code-signing enrichment returns nil for short-lived Apple binaries,
+    # silently breaking SignerType filters and letting Apple daemons fire rules
+    # written to catch attacker tools.
+    #
+    # Intentionally does NOT flag rules that match on SPECIFIC named third-party
+    # tools (e.g. dscl, profiles, smbutil) — FP for those rules is about who
+    # runs the tool (parent context), not whether the tool is a platform binary.
+    _GENERIC_BINARY_INDICATORS = {
+        "/bash", "/zsh", "/sh", "/fish", "/dash", "/ksh", "/tcsh",
+        "/python", "/python3", "/ruby", "/perl", "/node",
+        "/osascript", "/swift", "/swiftc",
+        "/launchctl",       # generic enough to be fired on by Apple daemons
+        "/defaults",        # fired by system preference plists constantly
+    }
+    if category == "process_creation":
+        tactic_dir = os.path.basename(os.path.dirname(source_file))
+        if tactic_dir in {"discovery", "execution", "privilege_escalation"}:
+            detection_str = str(detection)
+            targets_generic_binary = any(
+                indicator in detection_str for indicator in _GENERIC_BINARY_INDICATORS
+            )
+            if targets_generic_binary:
+                has_platform_filter = (
+                    "PlatformBinary" in detection_str
+                    or ("SignerType" in detection_str and "apple" in detection_str.lower())
+                    or "filter_platform" in detection_str
+                    or "filter_apple" in detection_str
+                )
+                if not has_platform_filter:
+                    print(
+                        f"  HINT  '{title}' ({tactic_dir}/) matches generic binaries but "
+                        f"has no PlatformBinary/SignerType:apple filter — Apple-binary FP "
+                        f"risk (code-sign enrichment may return nil for platform binaries). "
+                        f"({os.path.basename(source_file)})",
+                        file=sys.stderr,
+                    )
+
     result = {
         "id": rule_id,
         "title": title,

@@ -1,0 +1,84 @@
+title: LLM Tool Config Scan Followed by Credential Exfiltration
+id: e1f2a3b4-0037-4000-b000-000000000037
+status: experimental
+description: >
+    Detects the CanisterWorm/NX-style attack chain: an unexpected process
+    first reads AI/LLM tool configuration files (Cursor, Copilot, Ollama,
+    Cody, Continue, LM Studio) to harvest API keys and tokens, then makes
+    an outbound connection to an attacker-controlled host to exfiltrate them.
+    This two-step sequence distinguishes malicious harvesting from tools that
+    legitimately access their own config, since the exfiltration step is
+    required to fire the alert.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1552.001/
+    - https://attack.mitre.org/techniques/T1041/
+    - https://socket.dev/blog/canisterworm-nx-llm-targeting-2025
+tags:
+    - attack.credential_access
+    - attack.t1552.001
+    - attack.exfiltration
+    - attack.t1041
+    - attack.initial_access
+    - attack.t1195.001
+
+type: sequence
+window: 60s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: llm_config_read
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - '/.cursor/'
+                  - '/github-copilot/'
+                  - '/.cody/'
+                  - '/.continue/'
+                  - '/LM Studio/'
+                  - '/.ollama/'
+                  - '/.codeium/'
+                  - '/.tabby/'
+          filter_ai_tools:
+              Image|contains:
+                  - 'Cursor'
+                  - 'copilot'
+                  - 'Cody'
+                  - 'Continue'
+                  - 'LM Studio'
+                  - 'Ollama'
+                  - 'Code'
+                  - 'Claude'
+          filter_apple:
+              SignerType: 'apple'
+          condition: selection and not filter_ai_tools and not filter_apple
+
+    - id: exfil_callout
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          filter_pkg_managers:
+              Image|endswith:
+                  - '/npm'
+                  - '/pip'
+                  - '/pip3'
+                  - '/node'
+                  - '/curl'
+                  - '/wget'
+          condition: selection
+      process: llm_config_read.same_process
+
+trigger: all
+falsepositives:
+    - Security audit tools that enumerate installed AI software and then report
+      to a corporate SIEM (legitimate destinations would be internal)
+    - Developer scripts that read their own config and then authenticate to AI APIs
+level: critical

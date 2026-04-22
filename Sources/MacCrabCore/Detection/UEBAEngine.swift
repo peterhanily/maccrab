@@ -23,10 +23,18 @@ public struct UserEntityProfile: Codable, Sendable, Hashable {
     public var lastObserved: Date
 
     /// Rolling histogram of observed launch hours (local time), one
-    /// bucket per hour of day. 168 buckets keyed `day * 24 + hour`
-    /// would be more precise but adds cross-TZ complexity — 24 buckets
-    /// captures the common "user works 9-5" signal well enough.
+    /// bucket per hour of day. Combined across weekdays and weekends —
+    /// used as the stable public API (tests depend on hourFrequency(_:)).
     public var loginHourCounts: [Int]
+
+    /// Hour-of-day histograms split by weekday (Mon–Fri) and weekend
+    /// (Sat–Sun). Gives sharper anomaly precision: 3 AM on a Saturday
+    /// is less suspicious for a night-owl developer than 3 AM on a
+    /// Tuesday.
+    public var weekdayHourCounts: [Int]
+    public var weekendHourCounts: [Int]
+    public var weekdayObservations: Int
+    public var weekendObservations: Int
 
     /// Set of SSH source IPs this user has logged in from.
     public var sshRemoteIPs: Set<String>
@@ -41,16 +49,64 @@ public struct UserEntityProfile: Codable, Sendable, Hashable {
         self.firstSeen = now
         self.lastObserved = now
         self.loginHourCounts = Array(repeating: 0, count: 24)
+        self.weekdayHourCounts = Array(repeating: 0, count: 24)
+        self.weekendHourCounts = Array(repeating: 0, count: 24)
+        self.weekdayObservations = 0
+        self.weekendObservations = 0
         self.sshRemoteIPs = []
         self.toolUsage = [:]
         self.totalObservations = 0
     }
 
-    /// Ratio of observations at this hour. Used for anomaly detection —
-    /// a hour < 0.02 ratio after ≥ 100 observations is genuinely rare.
+    // MARK: - Codable (backward-compatible)
+
+    private enum CodingKeys: String, CodingKey {
+        case userName, firstSeen, lastObserved, loginHourCounts
+        case weekdayHourCounts, weekendHourCounts
+        case weekdayObservations, weekendObservations
+        case sshRemoteIPs, toolUsage, totalObservations
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        userName              = try c.decode(String.self,   forKey: .userName)
+        firstSeen             = try c.decode(Date.self,     forKey: .firstSeen)
+        lastObserved          = try c.decode(Date.self,     forKey: .lastObserved)
+        loginHourCounts       = try c.decode([Int].self,    forKey: .loginHourCounts)
+        weekdayHourCounts     = try c.decodeIfPresent([Int].self, forKey: .weekdayHourCounts)
+                                    ?? Array(repeating: 0, count: 24)
+        weekendHourCounts     = try c.decodeIfPresent([Int].self, forKey: .weekendHourCounts)
+                                    ?? Array(repeating: 0, count: 24)
+        weekdayObservations   = try c.decodeIfPresent(Int.self, forKey: .weekdayObservations) ?? 0
+        weekendObservations   = try c.decodeIfPresent(Int.self, forKey: .weekendObservations) ?? 0
+        sshRemoteIPs          = try c.decode(Set<String>.self,     forKey: .sshRemoteIPs)
+        toolUsage             = try c.decode([String: Int].self,   forKey: .toolUsage)
+        totalObservations     = try c.decode(Int.self,    forKey: .totalObservations)
+    }
+
+    // MARK: - Frequency helpers
+
+    /// Ratio of combined (weekday + weekend) observations at this hour.
+    /// Stable public API — tests and callers that don't need weekday
+    /// precision use this.
     public func hourFrequency(_ hour: Int) -> Double {
         guard (0..<24).contains(hour), totalObservations > 0 else { return 0 }
         return Double(loginHourCounts[hour]) / Double(totalObservations)
+    }
+
+    /// Ratio of weekday-only (or weekend-only) observations at this
+    /// hour. Returns 0 when the corresponding observation count is too
+    /// small to be meaningful (< 5 obs). Falls back to the combined
+    /// `hourFrequency` when the split bucket is under-sampled.
+    public func hourFrequency(_ hour: Int, isWeekend: Bool) -> Double {
+        guard (0..<24).contains(hour) else { return 0 }
+        let obs = isWeekend ? weekendObservations : weekdayObservations
+        guard obs >= 5 else {
+            // Not enough weekday/weekend data yet — fall back to combined.
+            return hourFrequency(hour)
+        }
+        let counts = isWeekend ? weekendHourCounts : weekdayHourCounts
+        return Double(counts[hour]) / Double(obs)
     }
 
     /// True when the tool has never (or almost never) been seen. Uses a
@@ -174,14 +230,18 @@ public actor UEBAEngine {
         guard !user.isEmpty else { return [] }
 
         var profile = profiles[user] ?? UserEntityProfile(userName: user, now: now)
-        let hour = Calendar.current.component(.hour, from: now)
+        let cal = Calendar.current
+        let hour = cal.component(.hour, from: now)
+        let weekday = cal.component(.weekday, from: now) // 1=Sun, 7=Sat
+        let isWeekend = weekday == 1 || weekday == 7
         let sshIP = event.process.session?.sshRemoteIP
         let toolPath = event.process.executable
 
         // Anomaly assessment happens BEFORE the profile is updated so
         // the observation itself doesn't baseline away its own novelty.
         let anomalies = assess(
-            profile: profile, hour: hour, sshIP: sshIP, toolPath: toolPath
+            profile: profile, hour: hour, isWeekend: isWeekend,
+            sshIP: sshIP, toolPath: toolPath
         )
 
         // Fold the observation in.
@@ -189,6 +249,13 @@ public actor UEBAEngine {
         profile.lastObserved = now
         if (0..<24).contains(hour) {
             profile.loginHourCounts[hour] += 1
+            if isWeekend {
+                profile.weekendHourCounts[hour] += 1
+                profile.weekendObservations += 1
+            } else {
+                profile.weekdayHourCounts[hour] += 1
+                profile.weekdayObservations += 1
+            }
         }
         if let ip = sshIP {
             profile.sshRemoteIPs.insert(ip)
@@ -219,6 +286,7 @@ public actor UEBAEngine {
     private func assess(
         profile: UserEntityProfile,
         hour: Int,
+        isWeekend: Bool,
         sshIP: String?,
         toolPath: String
     ) -> [UEBAAnomaly] {
@@ -229,15 +297,17 @@ public actor UEBAEngine {
 
         var out: [UEBAAnomaly] = []
 
-        // Unusual login hour
+        // Unusual login hour — uses weekday/weekend-split frequency when
+        // the split bucket is adequately sampled, combined otherwise.
         if (0..<24).contains(hour) {
-            let freq = profile.hourFrequency(hour)
+            let freq = profile.hourFrequency(hour, isWeekend: isWeekend)
             if freq < hourAnomalyThreshold {
+                let dayKind = isWeekend ? "weekend" : "weekday"
                 out.append(UEBAAnomaly(
                     kind: .unusualLoginHour,
                     userName: profile.userName,
-                    detail: "Activity at hour \(hour) has \(String(format: "%.2f%%", freq * 100)) baseline frequency",
-                    severity: .medium
+                    detail: "Activity at \(dayKind) hour \(hour):00 has \(String(format: "%.2f%%", freq * 100)) baseline frequency",
+                    severity: offHoursSeverity(hour: hour)
                 ))
             }
         }
@@ -263,5 +333,19 @@ public actor UEBAEngine {
         }
 
         return out
+    }
+
+    /// Maps hour-of-day to anomaly severity for unusual login-hour
+    /// detections. Deep-night and late-night hours are escalated because
+    /// autonomous/automated access at those times is rare on user machines
+    /// and warrants faster triage.
+    private func offHoursSeverity(hour: Int) -> Severity {
+        switch hour {
+        case 0..<5:   return .high    // Deep night (midnight–4 AM)
+        case 5..<7:   return .medium  // Very early morning
+        case 7..<19:  return .low     // Core hours — freq < 2% is already odd
+        case 19..<22: return .medium  // Evening
+        default:      return .high    // Late night (10 PM–midnight)
+        }
     }
 }

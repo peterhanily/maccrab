@@ -1,0 +1,58 @@
+title: System Audit Log or Unified Log Tampered
+id: f0e1d2c3-a012-4000-e000-00000000a012
+status: experimental
+description: |
+  Detects deletion, truncation, or disabling of macOS audit and
+  unified logging systems. Attackers clear audit logs to destroy
+  forensic evidence of their activity. Techniques include deleting
+  /var/audit/ trail files, stopping the audit daemon, disabling
+  the unified log system via `log config`, and truncating syslog.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1070.002/
+tags:
+    - attack.defense_evasion
+    - attack.impact
+    - attack.t1070.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_audit_disable:
+        Image|endswith:
+            - '/audit'
+            - '/auditctl'
+        CommandLine|contains:
+            - '-e 0'
+            - 'disable'
+            - 'halt'
+    selection_audit_delete:
+        Image|endswith: '/rm'
+        CommandLine|contains: '/var/audit/'
+    selection_log_disable:
+        Image|endswith: '/log'
+        CommandLine|contains:
+            - 'config --mode'
+            - 'erase'
+            - 'disable'
+    selection_syslog_truncate:
+        Image|endswith:
+            - '/syslog'
+            - '/asl'
+        CommandLine|contains:
+            - '-C'
+            - '-delete'
+            - 'prune'
+    filter_logrotate:
+        ParentImage|endswith:
+            - '/newsyslog'
+            - '/aslmanager'
+            - '/launchd'
+        PlatformBinary: 'true'
+    condition: (selection_audit_disable or selection_audit_delete or selection_log_disable
+        or selection_syslog_truncate) and not filter_logrotate
+falsepositives:
+    - System administrators rotating logs with custom scripts
+    - Disk-space management scripts pruning old log files (should use newsyslog/aslmanager)
+level: high

@@ -32,9 +32,11 @@ detection:
             - '-P now'
     selection_osascript_shutdown:
         Image|endswith: '/osascript'
+    selection_osascript_action:
         CommandLine|contains:
             - 'shut down'
             - 'restart'
+    selection_osascript_sysevents:
         CommandLine|contains: 'System Events'
     selection_launchctl_shutdown:
         Image|endswith: '/launchctl'
@@ -52,7 +54,9 @@ detection:
             - '/installd'
             - '/system_installd'
         CommandLine|contains: 'reboot'
-    condition: (selection_shutdown or selection_osascript_shutdown or selection_launchctl_shutdown)
+    condition: (selection_shutdown
+        or (selection_osascript_shutdown and selection_osascript_action and selection_osascript_sysevents)
+        or selection_launchctl_shutdown)
         and not filter_loginwindow and not filter_system_daemons
 falsepositives:
     - System administrators scheduling or performing controlled reboots

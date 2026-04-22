@@ -1,0 +1,63 @@
+title: CGEvent Tap Installed Then Persistence Written
+id: e1f2a3b4-0031-4000-b000-000000000031
+status: experimental
+description: >
+    Detects a two-stage keylogger attack: a process installs a CGEvent
+    tap (capturing keystrokes) and subsequently writes a LaunchAgent or
+    LaunchDaemon plist to persist across reboots. This sequence separates
+    interactive keylogger testing (no persistence) from a deliberate long-
+    term credential harvesting implant. The event-tap step is detected by
+    the EventTapMonitor; the persistence write step is a file event.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1056.001/
+    - https://attack.mitre.org/techniques/T1547.011/
+tags:
+    - attack.collection
+    - attack.persistence
+    - attack.t1056.001
+    - attack.t1547.011
+
+type: sequence
+window: 300s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: event_tap
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              SignerType:
+                  - 'unsigned'
+                  - 'adhoc'
+              CommandLine|contains: 'CGEvent'
+          filter_system:
+              Image|startswith:
+                  - '/System/'
+                  - '/Library/Apple/'
+                  - '/usr/libexec/'
+          condition: selection and not filter_system
+
+    - id: persist
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - 'LaunchAgents'
+                  - 'LaunchDaemons'
+              TargetFilename|endswith: '.plist'
+              FileAction: 'write'
+          condition: selection
+      process: event_tap.same_tree
+
+trigger: all
+falsepositives:
+    - Legitimate accessibility tools with event taps that also persist via LaunchAgent
+      (e.g., keystroke expanders, mouse utilities — these are Apple or Developer-ID signed)
+level: critical

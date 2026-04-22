@@ -117,12 +117,55 @@ enum DaemonTimers {
                     }
                 }
 
-                // Vulnerability scan
+                // Vulnerability scan — emit alerts for critical/high CVEs.
+                // Alert ID = "vuln-<cveId>" so INSERT OR REPLACE deduplicates
+                // at the DB level: same CVE updates the existing alert rather
+                // than creating duplicates on every hourly scan.
                 let vulns = await state.vulnScanner.scanInstalledApps()
                 for vuln in vulns {
                     for v in vuln.vulnerabilities where v.severity == "critical" || v.severity == "high" {
                         logger.warning("Vulnerable app: \(vuln.appName) v\(vuln.installedVersion) -- \(v.cveId)")
+                        let sev: Severity = v.severity == "critical" ? .critical : .high
+                        let fixNote = v.fixedInVersion.map { " Fixed in \($0)." } ?? ""
+                        let desc = "\(vuln.appName) \(vuln.installedVersion) contains \(v.cveId) (\(v.severity.uppercased())).\(fixNote) Update immediately."
+                        let vulnAlert = Alert(
+                            id: "vuln-\(v.cveId)",
+                            ruleId: "maccrab.vuln.\(v.cveId)",
+                            ruleTitle: "\(v.cveId) in \(vuln.appName) \(vuln.installedVersion)",
+                            severity: sev,
+                            eventId: "vuln-\(v.cveId)",
+                            processPath: vuln.appPath,
+                            processName: vuln.appName,
+                            description: desc,
+                            mitreTactics: nil,
+                            mitreTechniques: nil,
+                            suppressed: false
+                        )
+                        do { try await state.alertStore.insert(alert: vulnAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     }
+                }
+
+                // Privacy egress anomaly alerts. Alert ID keyed on process +
+                // anomaly kind so each unique (app, kind) pair produces one
+                // alert regardless of scan frequency.
+                let privacyAnomalies = await state.appPrivacyAuditor.checkForAnomalies()
+                for anomaly in privacyAnomalies {
+                    logger.warning("Privacy anomaly [\(anomaly.kind.rawValue)]: \(anomaly.detail)")
+                    let alertId = "privacy-\(anomaly.processName)-\(anomaly.kind.rawValue)"
+                    let privAlert = Alert(
+                        id: alertId,
+                        ruleId: "maccrab.privacy.\(anomaly.kind.rawValue)",
+                        ruleTitle: "Privacy: \(anomaly.kind.rawValue.replacingOccurrences(of: "_", with: " ").capitalized) — \(anomaly.processName)",
+                        severity: .medium,
+                        eventId: alertId,
+                        processPath: anomaly.processPath,
+                        processName: anomaly.processName,
+                        description: anomaly.detail,
+                        mitreTactics: nil,
+                        mitreTechniques: nil,
+                        suppressed: false
+                    )
+                    do { try await state.alertStore.insert(alert: privAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
                 // Purge old privacy audit data

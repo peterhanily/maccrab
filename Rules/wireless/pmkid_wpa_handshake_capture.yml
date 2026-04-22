@@ -1,0 +1,58 @@
+title: WPA Handshake or PMKID Capture Attempt
+id: d1a2b3c4-0507-4000-a000-000000000507
+status: experimental
+description: >
+    Detects tools capturing WPA/WPA2 four-way handshakes or RSN PMKID
+    values from wireless networks. Captured handshakes are exported as
+    .cap/.pcap files and cracked offline with hashcat or aircrack-ng.
+    PMKID capture (hcxdumptool) does not require connected clients,
+    making it a faster and stealthier attack than traditional deauth-
+    and-capture.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://hashcat.net/forum/thread-7717.html
+    - https://attack.mitre.org/techniques/T1040/
+tags:
+    - attack.wireless
+    - attack.credential_access
+    - attack.t1040
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_capture:
+        Image|endswith:
+            - '/airodump-ng'
+            - '/hcxdumptool'
+            - '/hcxtools'
+            - '/hcxpcapngtool'
+    selection_airport_sniff:
+        Image|endswith: '/airport'
+        CommandLine|contains:
+            - 'sniff'
+            - '-z'
+    selection_tshark_wpa:
+        Image|endswith:
+            - '/tshark'
+            - '/tcpdump'
+        CommandLine|contains:
+            - 'eapol'
+            - 'wlan.fc.type'
+            - 'handshake'
+    selection_cap_output:
+        CommandLine|endswith:
+            - '.cap'
+            - '.pcap'
+            - '.hccapx'
+            - '.22000'
+        Image|endswith:
+            - '/airodump-ng'
+            - '/hcxdumptool'
+            - '/hcxpcapngtool'
+    condition: selection_capture or selection_airport_sniff or selection_tshark_wpa
+        or selection_cap_output
+falsepositives:
+    - Authorized wireless security auditors performing network assessment
+    - Network engineers capturing traffic for legitimate troubleshooting
+level: high

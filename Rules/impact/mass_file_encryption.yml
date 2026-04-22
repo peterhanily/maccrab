@@ -1,0 +1,72 @@
+title: Mass File Encryption Pattern Detected
+id: f0e1d2c3-a010-4000-e000-00000000a010
+status: experimental
+description: |
+  Detects the creation of files with extensions characteristic of
+  ransomware encryption output. Unlike the ransomware_note_created rule
+  (which watches for ransom note filenames), this rule targets the
+  encrypted output files themselves — focusing on generic encrypted-file
+  extensions that ransomware families append to every file they process.
+  A single match may be benign; combine with campaign detection for
+  confidence. Known extensions are curated from active ransomware
+  families observed encrypting macOS targets.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1486/
+tags:
+    - attack.impact
+    - attack.t1486
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_encrypted_ext:
+        TargetFilename|endswith:
+            - '.encrypted'
+            - '.locked'
+            - '.crypted'
+            - '.crypt'
+            - '.enc'
+            - '.rans'
+            - '.ransom'
+            - '.pays'
+            - '.WNCRY'
+            - '.wcry'
+            - '.crinf'
+            - '.r5a'
+            - '.XRNT'
+            - '.XTBL'
+            - '.crypt'
+            - '.breaking_bad'
+            - '.fun'
+            - '.theva'
+            - '.darkness'
+            - '.neitrino'
+            - '.7h9r'
+            - '.vault'
+            - '.enigma'
+            - '.777'
+            - '.magic'
+            - '.hacked'
+        FileAction: 'write'
+    filter_legitimate_encryption:
+        Image|endswith:
+            - '/gpg'
+            - '/gpg2'
+            - '/openssl'
+        ParentImage|endswith:
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Warp'
+    filter_dev_context:
+        TargetFilename|startswith:
+            - '/private/tmp/'
+            - '/tmp/'
+    condition: selection_encrypted_ext and not filter_legitimate_encryption
+        and not filter_dev_context
+falsepositives:
+    - GPG/OpenSSL encryption tools writing output files with .enc extension from
+      a terminal session (filtered above, but custom extension names may vary)
+    - Backup tools that use .encrypted as an output extension for encrypted archives
+level: high

@@ -1,0 +1,70 @@
+title: TEMPEST Preparation Chain — SDR Connect then Outbound Data Transfer
+id: e1f2a3b4-0038-4000-b000-000000000038
+status: experimental
+description: >
+    Detects a potential Van Eck phreaking or electromagnetic eavesdropping
+    preparation chain: a known Software-Defined Radio (SDR) tool is launched
+    (RTL-SDR, HackRF, USRP, GNU Radio, Airspy) and subsequently an outbound
+    network connection is made, suggesting captured EM signals are being
+    exfiltrated. This chain distinguishes amateur radio hobbyists (who capture
+    locally) from adversaries who immediately transfer captures to a remote host.
+    References: Deep-TEMPEST (arXiv:2407.09717), NATO SDIP-27.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1125/
+    - https://attack.mitre.org/techniques/T1048/
+    - https://arxiv.org/abs/2407.09717
+tags:
+    - attack.collection
+    - attack.t1125
+    - attack.exfiltration
+    - attack.t1048
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: sdr_launch
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|contains:
+                  - 'rtl_sdr'
+                  - 'rtl_fm'
+                  - 'rtl_power'
+                  - 'hackrf_'
+                  - 'usrp'
+                  - 'gnuradio'
+                  - 'gqrx'
+                  - 'CubicSDR'
+                  - 'SDRAngel'
+                  - 'SDRplay'
+                  - 'airspy'
+                  - 'limesdr'
+          condition: selection
+
+    - id: exfil_transfer
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          filter_update:
+              DestinationPort:
+                  - 80
+                  - 443
+          condition: selection and not filter_update
+      process: sdr_launch.any
+
+trigger: all
+falsepositives:
+    - Amateur radio operators using SDR tools and legitimate remote logging services
+    - SDR-based weather satellite reception with cloud upload of imagery
+    - Security researchers testing TEMPEST countermeasures with authorized remote logging
+level: high

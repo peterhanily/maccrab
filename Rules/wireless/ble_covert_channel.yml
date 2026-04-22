@@ -1,0 +1,57 @@
+title: Bluetooth Low Energy Covert Channel or Exfiltration Tool
+id: d1a2b3c4-0508-4000-a000-000000000508
+status: experimental
+description: >
+    Detects tools that abuse Bluetooth Low Energy (BLE) for covert
+    communication, data exfiltration, or proximity-based command and
+    control. BLE operates on 2.4 GHz and can pass through RF-opaque
+    enclosures; NUIT-style attacks use audio injection via BLE speakers
+    while other tools exfiltrate small chunks of data via BLE
+    advertisement broadcasts.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1011/
+    - https://arxiv.org/abs/2208.09506
+tags:
+    - attack.wireless
+    - attack.exfiltration
+    - attack.t1011
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tools:
+        Image|endswith:
+            - '/btlejack'
+            - '/mirage'
+            - '/gattacker'
+            - '/bettercap'
+        CommandLine|contains:
+            - 'ble'
+            - 'bluetooth'
+            - 'gatt'
+            - 'advertise'
+    selection_python_ble:
+        Image|endswith:
+            - '/python3'
+            - '/python'
+        CommandLine|contains:
+            - 'CoreBluetooth'
+            - 'bleak'
+            - 'pygatt'
+            - 'gattlib'
+            - 'sendData'
+            - 'writeValue'
+            - 'BLE advertise'
+            - 'characteristic'
+    selection_osascript_bt:
+        Image|endswith: '/osascript'
+        CommandLine|contains:
+            - 'Bluetooth'
+            - 'peripheral'
+    condition: selection_tools or selection_python_ble or selection_osascript_bt
+falsepositives:
+    - IoT developers and embedded systems engineers testing BLE peripherals
+    - Smart home automation developers using BLE for legitimate device control
+level: medium

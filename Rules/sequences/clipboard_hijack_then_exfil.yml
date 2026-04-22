@@ -1,0 +1,59 @@
+title: Clipboard Content Captured Then Sent to External Server
+id: e1f2a3b4-0035-4000-b000-000000000035
+status: experimental
+description: >
+    Detects a clipboard-based credential theft sequence: an unsigned
+    process reads clipboard content (monitored by MacCrab's ClipboardMonitor)
+    and within a short window makes a network connection to an external
+    host. Clipboard hijacking is used to steal credentials, cryptocurrency
+    addresses, and sensitive text that users copy-paste. Attackers also
+    replace clipboard content with malicious values (address substitution).
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1115/
+tags:
+    - attack.collection
+    - attack.t1115
+
+type: sequence
+window: 15s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: clipboard_read
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/pbpaste'
+                  - '/osascript'
+              SignerType:
+                  - 'unsigned'
+                  - 'adhoc'
+          selection_osascript:
+              CommandLine|contains:
+                  - 'the clipboard'
+                  - 'get clipboard'
+                  - 'clipboard as'
+              Image|endswith: '/osascript'
+          condition: selection or selection_osascript
+
+    - id: exfil
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          condition: selection
+      process: clipboard_read.same_process
+
+trigger: all
+falsepositives:
+    - Password managers or clipboard utilities that sync clipboard content to their own cloud service
+    - Note-taking apps that auto-save clipboard pastes and sync via their own backend
+level: high

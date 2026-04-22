@@ -1,0 +1,85 @@
+title: Typosquatted Package Install Calls Home and Drops Persistence
+id: e1f2a3b4-0032-4000-b000-000000000032
+status: experimental
+description: >
+    Detects the full typosquatting/supply-chain attack chain: a package
+    manager install spawns a postinstall script, which makes an outbound
+    network connection to an attacker-controlled server, and then writes
+    a persistence mechanism. This multi-step sequence filters out
+    legitimate postinstall behavior (which may contact CDNs for binary
+    downloads) by requiring the additional persistence write within the
+    same time window.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1195.001/
+    - https://jfrog.com/blog/npm-supply-chain-attack-detection/
+tags:
+    - attack.initial_access
+    - attack.persistence
+    - attack.t1195.001
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: pkg_install
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/npm'
+                  - '/npx'
+                  - '/pip'
+                  - '/pip3'
+                  - '/gem'
+                  - '/cargo'
+                  - '/yarn'
+                  - '/pnpm'
+          CommandLine|contains:
+              - 'install'
+              - 'add'
+          condition: selection
+
+    - id: network_callhome
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationIsPrivate: 'false'
+          filter_pkg_managers:
+              Image|endswith:
+                  - '/npm'
+                  - '/pip'
+                  - '/pip3'
+                  - '/node'
+          condition: selection and not filter_pkg_managers
+      process: pkg_install.descendant
+
+    - id: persist
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - 'LaunchAgents'
+                  - 'LaunchDaemons'
+                  - 'crontab'
+                  - '.bash_profile'
+                  - '.zshrc'
+                  - '.zprofile'
+              FileAction: 'write'
+          condition: selection
+      process: pkg_install.descendant
+
+trigger: all
+falsepositives:
+    - First-time installs of frameworks like Puppeteer or Electron that download
+      platform binaries and then write shell configuration during setup
+level: critical

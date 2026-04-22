@@ -1,0 +1,56 @@
+title: Browser Profile or History Bulk Deleted
+id: f0e1d2c3-a014-4000-e000-00000000a014
+status: experimental
+description: |
+  Detects bulk deletion of browser profile directories or history/
+  cookie databases. Attackers wipe browser data to destroy forensic
+  artefacts (browsing history, saved credentials, session cookies)
+  after credential theft. Covers Chrome, Firefox, Safari, Edge, Brave,
+  and Arc profile paths on macOS.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1070.004/
+tags:
+    - attack.impact
+    - attack.defense_evasion
+    - attack.t1070.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_rm_browser:
+        Image|endswith:
+            - '/rm'
+            - '/shred'
+        CommandLine|contains:
+            - 'Google/Chrome'
+            - 'BraveSoftware/Brave-Browser'
+            - 'Firefox/Profiles'
+            - 'Microsoft Edge'
+            - 'Library/Safari/History'
+            - 'Library/Safari/Cookies'
+            - 'com.apple.Safari'
+            - 'Arc/User Data'
+    selection_rm_db:
+        Image|endswith: '/rm'
+        CommandLine|endswith:
+            - 'History'
+            - 'Cookies'
+            - 'Login Data'
+            - 'Web Data'
+            - 'places.sqlite'
+            - 'cookies.sqlite'
+    filter_browser_self_cleanup:
+        ParentImage|contains:
+            - 'Google Chrome'
+            - 'Firefox'
+            - 'Safari'
+            - 'Brave'
+            - 'Microsoft Edge'
+            - 'Arc'
+    condition: (selection_rm_browser or selection_rm_db) and not filter_browser_self_cleanup
+falsepositives:
+    - Privacy-focused users intentionally clearing browser history via scripts
+    - IT provisioning scripts that factory-reset browser state before device handoff
+level: high

@@ -16,8 +16,9 @@ detection:
     selection:
         TargetFilename|contains: '/Library/Application Support/FileProvider/'
     selection_alt:
-        TargetFilename|contains: '.appex'
-        TargetFilename|contains: 'FinderSync'
+        TargetFilename|contains|all:
+            - '.appex'
+            - 'FinderSync'
     filter_signed:
         SignerType:
             - 'apple'

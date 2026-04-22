@@ -35,6 +35,7 @@ public enum APIProvider: String, Sendable {
     case mistral   = "api.mistral.ai"
     case virustotal = "www.virustotal.com"
     case shodan    = "api.shodan.io"
+    case osv       = "api.osv.dev"
     case ollama    = "localhost"   // local — no pinning needed
 
     /// Known SHA-256 SPKI pins for this provider.
@@ -113,6 +114,8 @@ public enum APIProvider: String, Sendable {
                 // Intermediate CA — Google Trust Services WE1
                 "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
             ]
+        case .osv:
+            return []   // Public open API — OS trust store only
         case .ollama:
             return []   // Local only — no pinning needed
         }

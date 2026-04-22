@@ -48,10 +48,11 @@ detection:
             - 'Fiddle.dlopen'
             - 'DL.dlopen'
             - 'require "fiddle"'
-    selection_curl_pipe:
+    selection_curl_pipe_silent:
         CommandLine|contains:
             - 'curl -s'
             - 'curl --silent'
+    selection_curl_pipe_interp:
         CommandLine|contains:
             - '| python'
             - '| ruby'
@@ -61,7 +62,8 @@ detection:
             - '| bash -'
     filter_apple:
         SignerType: 'apple'
-    condition: (selection_jxa or selection_python_reflective or selection_ruby_reflective or selection_curl_pipe) and not filter_apple
+    condition: (selection_jxa or selection_python_reflective or selection_ruby_reflective
+        or (selection_curl_pipe_silent and selection_curl_pipe_interp)) and not filter_apple
 falsepositives:
     - Legitimate JXA automation scripts
     - Python scientific computing using ctypes/cffi

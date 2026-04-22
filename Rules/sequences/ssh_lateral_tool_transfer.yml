@@ -1,0 +1,70 @@
+title: SSH Session Transfers Tool Then Executes It
+id: e1f2a3b4-0030-4000-b000-000000000030
+status: experimental
+description: >
+    Detects lateral movement via SSH where an attacker transfers a binary
+    or script to the target system (via scp/sftp/rsync) and then executes
+    it within the same SSH session. This sequence distinguishes legitimate
+    file transfers (no subsequent exec) from lateral tool staging where
+    the transferred binary becomes the next-stage payload.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1021.004/
+    - https://attack.mitre.org/techniques/T1105/
+tags:
+    - attack.lateral_movement
+    - attack.command_and_control
+    - attack.t1021.004
+    - attack.t1105
+
+type: sequence
+window: 180s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: ssh_session
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith: '/sshd'
+              CommandLine|contains: '-D'
+          condition: selection
+
+    - id: file_transfer
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|endswith:
+                  - '/scp'
+                  - '/sftp'
+                  - '/rsync'
+                  - '/curl'
+                  - '/wget'
+          condition: selection
+      process: ssh_session.descendant
+
+    - id: execute_transferred
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              Image|contains:
+                  - '/tmp/'
+                  - '/var/folders/'
+                  - '/private/tmp/'
+              SignerType: 'unsigned'
+          condition: selection
+      process: file_transfer.descendant
+
+trigger: all
+falsepositives:
+    - DevOps automation tools that deploy binaries via SSH and then run health checks
+    - Ansible/Chef/Puppet execution over SSH where a freshly deployed binary is executed
+level: high

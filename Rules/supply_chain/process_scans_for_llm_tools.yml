@@ -1,11 +1,13 @@
-title: Process Scans for Multiple AI/LLM Tool Configurations
+title: Unexpected Process Reads AI/LLM Tool Configuration
 id: d1a2b3c4-0322-4000-a000-000000000022
 status: experimental
 description: >
-    Detects a process reading configuration files for multiple AI/LLM tools. The
-    CanisterWorm/NX attack (August 2025) was the first supply chain attack to specifically
-    scan for installed LLM tools on developer machines, targeting configurations for
-    Cursor, Copilot, Cody, Continue, LMStudio, and Ollama to steal API keys and tokens.
+    Detects an unexpected process accessing configuration files for AI/LLM tools
+    (Cursor, Copilot, Cody, Continue, LM Studio, Ollama). The CanisterWorm/NX attack
+    (August 2025) was the first supply chain attack to specifically scan for installed
+    LLM tools on developer machines to steal API keys and tokens. Note: the count-based
+    condition (≥3 files) cannot be enforced in the flat predicate engine; this rule
+    fires on single-file access by processes that pass all filters.
 author: MacCrab Community
 date: 2026/03/30
 references:
@@ -45,8 +47,16 @@ detection:
             - 'LM Studio'
             - 'Ollama'
             - 'Code'
-    condition: selection and not filter_apple and not filter_ai_tools | count(TargetFilename) by Image > 2
+            - 'Claude'
+    filter_backup:
+        Image|endswith:
+            - '/rsync'
+            - '/tar'
+            - '/cp'
+            - '/ditto'
+            - '/tmutil'
+    condition: selection and not filter_apple and not filter_ai_tools and not filter_backup
 falsepositives:
     - Backup utilities that traverse home directory configuration files
     - Security audit tools that enumerate installed software
-level: high
+level: medium

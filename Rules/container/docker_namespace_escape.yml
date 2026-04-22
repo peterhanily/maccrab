@@ -1,0 +1,44 @@
+title: Container Namespace Escape via nsenter
+id: d1a2b3c4-0431-4000-a000-000000000431
+status: experimental
+description: >
+    Detects docker exec or run being used to invoke nsenter inside a
+    container — the canonical container escape pattern on privileged or
+    host-PID containers. On macOS the docker CLI runs in host context and
+    is visible to Endpoint Security; the nsenter target is specified as a
+    string in the docker command line even though it runs inside the VM.
+    Attackers with access to a privileged container use this to re-enter
+    the host PID namespace and escape container isolation.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1611/
+    - https://book.hacktricks.xyz/linux-hardening/privilege-escalation/docker-security/docker-breakout-privilege-escalation
+tags:
+    - attack.privilege_escalation
+    - attack.t1611
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_nsenter_exec:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains: 'nsenter'
+    selection_seccomp_bypass:
+        Image|endswith:
+            - '/docker'
+            - '/nerdctl'
+            - '/podman'
+        CommandLine|contains:
+            - '--security-opt apparmor=unconfined'
+            - '--security-opt seccomp=unconfined'
+            - '--security-opt=apparmor=unconfined'
+            - '--security-opt=seccomp=unconfined'
+    condition: selection_nsenter_exec or selection_seccomp_bypass
+falsepositives:
+    - Security researchers testing container isolation
+    - Container orchestration tools performing legitimate operations
+level: high

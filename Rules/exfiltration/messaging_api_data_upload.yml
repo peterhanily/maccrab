@@ -1,0 +1,50 @@
+title: Data Upload to Messaging Platform API
+id: e1f2a3b4-7008-4000-c000-000000007008
+status: experimental
+description: >
+    Detects curl or wget posting file data to Slack, Discord, or Teams webhook
+    or file upload API endpoints. Adversaries have used collaboration platform
+    APIs as exfiltration channels because outbound traffic to these services
+    is often whitelisted and blends with normal corporate communications.
+    File uploads via multipart form POST to these endpoints are a strong indicator.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1567/004/
+    - https://attack.mitre.org/techniques/T1102/
+    - https://www.bleepingcomputer.com/news/security/slack-used-as-command-and-control-in-new-macos-malware/
+tags:
+    - attack.exfiltration
+    - attack.t1567.004
+    - attack.command_and_control
+    - attack.t1102
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tool:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+    selection_api:
+        CommandLine|contains:
+            - 'slack.com/api/files.upload'
+            - 'hooks.slack.com/services/'
+            - 'discord.com/api/webhooks/'
+            - 'discordapp.com/api/webhooks/'
+            - 'graph.microsoft.com/v1.0/drives'
+            - 'graph.microsoft.com/v1.0/sites'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_slack_apps:
+        ParentImage|contains:
+            - '/Slack.app/'
+            - '/Discord.app/'
+            - '/Microsoft Teams'
+    condition: selection_tool and selection_api and not filter_system and not filter_slack_apps
+falsepositives:
+    - Authorized Slack bots and integration scripts that post files to channels
+    - DevOps notification scripts uploading build artifacts or test results
+level: high

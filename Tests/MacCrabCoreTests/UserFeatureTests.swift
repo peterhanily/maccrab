@@ -48,9 +48,80 @@ struct AppPrivacyAuditorTests {
     func purgeWorks() async {
         let auditor = AppPrivacyAuditor()
         await auditor.recordConnection(processName: "old", processPath: "/tmp/old", domain: "x.com", ip: "1.1.1.1", port: 80)
-        await auditor.purge(olderThan: 0) // Purge everything
+        // olderThan: -1 moves the cutoff 1s into the future, guaranteeing
+        // every existing record falls before it regardless of clock resolution.
+        await auditor.purge(olderThan: -1)
         let profiles = await auditor.audit()
         #expect(profiles.isEmpty)
+    }
+
+    @Test("Known tracking domain flagged in concerns")
+    func trackingDomainFlagged() async {
+        let auditor = AppPrivacyAuditor()
+        await auditor.recordConnection(processName: "app", processPath: "/tmp/app",
+            domain: "sub.amplitude.com", ip: "1.2.3.4", port: 443)
+        let profiles = await auditor.audit()
+        let concern = profiles.first?.concerns.first(where: { $0.contains("tracking") })
+        #expect(concern != nil)
+    }
+
+    @Test("Bulk egress anomaly detected above 50 MB threshold")
+    func bulkEgressDetected() async {
+        let auditor = AppPrivacyAuditor()
+        let mb55 = 55 * 1_048_576
+        await auditor.recordConnection(processName: "leaky", processPath: "/tmp/leaky",
+            domain: "somewhere.com", ip: "10.0.0.1", port: 443, bytesOut: mb55)
+        let anomalies = await auditor.checkForAnomalies()
+        let bulk = anomalies.first { $0.kind == .bulkEgress }
+        #expect(bulk != nil)
+        #expect(bulk?.processName == "leaky")
+    }
+
+    @Test("Single-domain spike anomaly detected above 10 MB to unknown domain")
+    func singleDomainSpikeDetected() async {
+        let auditor = AppPrivacyAuditor()
+        let mb11 = 11 * 1_048_576
+        await auditor.recordConnection(processName: "uploader", processPath: "/tmp/uploader",
+            domain: "unknown-exfil.net", ip: "192.168.1.100", port: 443, bytesOut: mb11)
+        let anomalies = await auditor.checkForAnomalies()
+        let spike = anomalies.first { $0.kind == .singleDomainSpike }
+        #expect(spike != nil)
+        #expect(spike?.detail.contains("unknown-exfil.net") == true)
+    }
+
+    @Test("High-frequency tracker contact anomaly fires above 50 hits")
+    func trackerContactDetected() async {
+        let auditor = AppPrivacyAuditor()
+        for _ in 0..<60 {
+            await auditor.recordConnection(processName: "chatty", processPath: "/tmp/chatty",
+                domain: "in.hotjar.com", ip: "1.2.3.4", port: 443)
+        }
+        let anomalies = await auditor.checkForAnomalies()
+        let tracking = anomalies.first { $0.kind == .trackingContact }
+        #expect(tracking != nil)
+    }
+
+    @Test("System processes are excluded from anomaly checks")
+    func systemProcessesExcluded() async {
+        let auditor = AppPrivacyAuditor()
+        let mb60 = 60 * 1_048_576
+        await auditor.recordConnection(processName: "cfnetd", processPath: "/System/Library/cfnetd",
+            domain: "example.com", ip: "1.1.1.1", port: 443, bytesOut: mb60)
+        let anomalies = await auditor.checkForAnomalies()
+        #expect(anomalies.isEmpty)
+    }
+
+    @Test("DomainContact tracks bytes per domain")
+    func domainBytesTracked() async {
+        let auditor = AppPrivacyAuditor()
+        await auditor.recordConnection(processName: "app", processPath: "/tmp/app2",
+            domain: "cdn.example.com", ip: "5.5.5.5", port: 443, bytesOut: 1024)
+        await auditor.recordConnection(processName: "app", processPath: "/tmp/app2",
+            domain: "cdn.example.com", ip: "5.5.5.5", port: 443, bytesOut: 2048)
+        let profiles = await auditor.audit()
+        let contact = profiles.first?.domains.first(where: { $0.domain == "cdn.example.com" })
+        #expect(contact?.bytesOut == 3072)
+        #expect(contact?.connectionCount == 2)
     }
 }
 

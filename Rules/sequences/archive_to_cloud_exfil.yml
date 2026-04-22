@@ -1,0 +1,89 @@
+title: Sensitive File Archive Followed by Cloud Upload
+id: e1f2a3b4-0036-4000-b000-000000000036
+status: experimental
+description: >
+    Detects the two-stage bulk exfiltration pattern: a process archives or
+    compresses sensitive user directories (Documents, Desktop, .ssh, Keychains),
+    followed by an upload via rclone, AWS CLI, gsutil, Azure CLI, or curl to
+    an external destination. The staging + transfer combination significantly
+    reduces false positives vs. detecting either step alone, as many legitimate
+    processes create archives without transferring them externally.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1560.001/
+    - https://attack.mitre.org/techniques/T1567.002/
+    - https://thedfirreport.com/2021/03/29/sodinokibi-aka-revil-ransomware/
+tags:
+    - attack.collection
+    - attack.t1560.001
+    - attack.exfiltration
+    - attack.t1567.002
+
+type: sequence
+window: 300s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: archive_sensitive
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_tool:
+              Image|endswith:
+                  - '/tar'
+                  - '/zip'
+                  - '/gzip'
+                  - '/7z'
+                  - '/rar'
+          selection_sensitive:
+              CommandLine|contains:
+                  - '/Documents'
+                  - '/Desktop'
+                  - '/.ssh'
+                  - '/Keychains'
+                  - '/Library/Mail'
+                  - '/Library/Messages'
+                  - '/.aws'
+                  - '/.config'
+          condition: selection_tool and selection_sensitive
+
+    - id: cloud_upload
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_rclone:
+              Image|endswith: '/rclone'
+              CommandLine|contains:
+                  - 'copy'
+                  - 'sync'
+                  - 'move'
+          selection_aws:
+              Image|endswith: '/aws'
+              CommandLine|contains:
+                  - 's3 cp'
+                  - 's3 sync'
+                  - 's3 mv'
+          selection_gcs:
+              Image|endswith: '/gsutil'
+              CommandLine|contains:
+                  - ' cp '
+                  - ' rsync '
+          selection_curl_upload:
+              Image|endswith: '/curl'
+              CommandLine|contains:
+                  - ' -T '
+                  - ' --upload-file'
+                  - ' -F '
+          condition: selection_rclone or selection_aws or selection_gcs or selection_curl_upload
+      process: archive_sensitive.any
+
+trigger: all
+falsepositives:
+    - Authorized backup scripts that archive home directories and upload to cloud storage
+    - Developer workflows that package projects and push to artifact storage
+    - IT-managed backup solutions (Time Machine alternatives, Backblaze B2 agents)
+level: critical

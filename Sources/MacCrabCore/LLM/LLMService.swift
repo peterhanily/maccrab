@@ -129,6 +129,74 @@ public actor LLMService {
         )
     }
 
+    /// Send a prompt using extended thinking when the backend supports it.
+    /// Applies the same circuit breaker, rate limiting, and sanitization as
+    /// `query()`, but calls `backend.completeWithExtendedThinking()` instead
+    /// of `backend.complete()`. On backends that don't support extended
+    /// thinking, this falls back to a regular `complete()` call — callers
+    /// always receive a response or nil.
+    ///
+    /// Use for tasks that benefit from deep multi-step reasoning:
+    /// - Full kill-chain campaign attribution
+    /// - Novel malware family classification
+    /// - Complex threat hunting queries
+    ///
+    /// Extended thinking calls take significantly longer (30–90s); the
+    /// timeout on the HTTP request is 120s. Do not use for latency-sensitive
+    /// paths.
+    public func queryWithExtendedThinking(
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudgetTokens: Int = 8000,
+        maxOutputTokens: Int = 4096
+    ) async -> LLMEnhancement? {
+        if consecutiveFailures >= maxConsecutiveFailures {
+            if Date() < circuitOpenUntil { return nil }
+            consecutiveFailures = 0
+        }
+        let finalSystem = shouldSanitize ? LLMSanitizer.sanitize(systemPrompt) : systemPrompt
+        let finalUser = shouldSanitize ? LLMSanitizer.sanitize(userPrompt) : userPrompt
+
+        let elapsed = Date().timeIntervalSince(lastCallTime)
+        if elapsed < minInterval {
+            try? await Task.sleep(nanoseconds: UInt64((minInterval - elapsed) * 1_000_000_000))
+        }
+
+        let start = Date()
+        lastCallTime = Date()
+        totalCalls += 1
+
+        let providerName = await backend.providerName
+
+        guard let response = await backend.completeWithExtendedThinking(
+            systemPrompt: finalSystem,
+            userPrompt: finalUser,
+            thinkingBudgetTokens: thinkingBudgetTokens,
+            maxOutputTokens: maxOutputTokens
+        ) else {
+            consecutiveFailures += 1
+            if consecutiveFailures >= maxConsecutiveFailures {
+                circuitOpenUntil = Date().addingTimeInterval(circuitResetInterval)
+                logger.warning("LLM circuit breaker opened (extended thinking) after \(self.consecutiveFailures) failures")
+            }
+            return nil
+        }
+
+        consecutiveFailures = 0
+        guard response.count <= maxResponseSize else {
+            logger.warning("LLM extended-thinking response too large, discarding")
+            return nil
+        }
+        let latency = Date().timeIntervalSince(start)
+        logger.info("LLM extended-thinking query completed in \(String(format: "%.2f", latency))s (\(providerName))")
+
+        return LLMEnhancement(
+            provider: providerName,
+            prompt: finalUser, response: response,
+            latency: latency, cached: false
+        )
+    }
+
     /// Statistics for monitoring.
     public func stats() async -> (totalCalls: Int, cacheHits: Int, cacheEntries: Int, provider: String) {
         let cs = await cache.stats()

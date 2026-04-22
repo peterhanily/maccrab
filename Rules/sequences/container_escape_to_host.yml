@@ -1,0 +1,61 @@
+title: Container Process Writes to Host Filesystem Then Persists
+id: e1f2a3b4-0033-4000-b000-000000000033
+status: experimental
+description: >
+    Detects a container escape sequence where a Docker container process
+    writes to host filesystem paths outside the container root (via a
+    misbound mount or privilege escalation), and a file matching the write
+    is subsequently executed or loaded as persistence on the host. This
+    covers both host path bind-mount abuse and privileged container
+    escapes that write to /etc, /tmp, or the host's LaunchAgents directory.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1611/
+    - https://attack.mitre.org/techniques/T1547/
+tags:
+    - attack.privilege_escalation
+    - attack.persistence
+    - attack.t1611
+    - attack.t1547
+
+type: sequence
+window: 300s
+correlation: process.lineage
+ordered: false
+
+steps:
+    - id: container_context
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              ParentImage|endswith:
+                  - '/com.docker.hyperkit'
+                  - '/docker'
+                  - '/containerd'
+                  - '/dockerd'
+          condition: selection
+
+    - id: host_write
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|startswith:
+                  - '/Library/LaunchAgents/'
+                  - '/Library/LaunchDaemons/'
+                  - '/etc/'
+                  - '/usr/local/bin/'
+              FileAction: 'write'
+              SignerType: 'unsigned'
+          condition: selection
+      process: container_context.descendant
+
+trigger: all
+falsepositives:
+    - Docker Desktop writing to host paths as part of legitimate VM integration
+    - Developer tools that use Docker to cross-compile and place output binaries in /usr/local/bin
+level: high

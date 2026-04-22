@@ -1,0 +1,43 @@
+title: ICMP Tunneling Tool Execution
+id: e1f2a3b4-7009-4000-c000-000000007009
+status: experimental
+description: >
+    Detects execution of known ICMP tunneling utilities (ptunnel, ptunnel-ng,
+    icmptunnel, icmpsh) used to encapsulate TCP/data inside ICMP echo packets.
+    ICMP tunneling bypasses network egress controls that only filter TCP/UDP,
+    providing a covert exfiltration and C2 channel. Legitimate ICMP tunnel
+    use on macOS endpoints is extremely rare.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1048/002/
+    - https://attack.mitre.org/techniques/T1572/
+    - https://github.com/nicowillis/ptunnel
+tags:
+    - attack.exfiltration
+    - attack.t1048.002
+    - attack.command_and_control
+    - attack.t1572
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_binary:
+        Image|endswith:
+            - '/ptunnel'
+            - '/ptunnel-ng'
+            - '/icmptunnel'
+            - '/icmpsh'
+            - '/icmptx'
+    selection_args:
+        CommandLine|contains:
+            - '-icmp'
+            - '--icmp'
+            - 'icmp_type'
+    filter_system:
+        SignerType: 'apple'
+    condition: (selection_binary or selection_args) and not filter_system
+falsepositives:
+    - Network testing in authorized penetration testing engagements
+    - Security research environments
+level: high

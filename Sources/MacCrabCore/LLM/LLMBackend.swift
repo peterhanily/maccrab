@@ -22,3 +22,33 @@ public protocol LLMBackend: Actor {
         temperature: Double
     ) async -> String?
 }
+
+// MARK: - Optional extended thinking
+
+extension LLMBackend {
+    /// Send a prompt requesting extended thinking (deep multi-step reasoning).
+    /// The default implementation falls back to a regular `complete()` call so
+    /// all existing backends work unchanged. Claude backends override this with
+    /// the API's `thinking` parameter, which causes the model to emit an
+    /// internal reasoning block before the final answer.
+    ///
+    /// - Parameters:
+    ///   - systemPrompt: Context and task description.
+    ///   - userPrompt: The specific question or data to analyse.
+    ///   - thinkingBudgetTokens: Max tokens the model can spend thinking
+    ///     (does not count toward the output token budget).
+    ///   - maxOutputTokens: Max tokens for the visible answer.
+    public func completeWithExtendedThinking(
+        systemPrompt: String,
+        userPrompt: String,
+        thinkingBudgetTokens: Int = 8000,
+        maxOutputTokens: Int = 4096
+    ) async -> String? {
+        await complete(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            maxTokens: maxOutputTokens,
+            temperature: 0.3
+        )
+    }
+}

@@ -1,0 +1,52 @@
+title: EFI or Firmware Update Tool Executed by Non-System Process
+id: f0e1d2c3-a013-4000-e000-00000000a013
+status: experimental
+description: |
+  Detects execution of firmware update utilities (eficheck, bless, nvram)
+  from a non-system parent process. While Apple Silicon Macs enforce a
+  secure boot chain that prevents unsigned firmware, Intel Mac firmware
+  tampering remains feasible. An attacker with root access can use these
+  tools to persist a bootkit that survives OS reinstallation. Legitimate
+  firmware updates always come from softwareupdate or the macOS installer.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1542.001/
+    - https://attack.mitre.org/techniques/T1542.003/
+tags:
+    - attack.impact
+    - attack.persistence
+    - attack.t1542.001
+    - attack.t1542.003
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith:
+            - '/eficheck'
+            - '/bless'
+        CommandLine|contains:
+            - '--integrity-check'
+            - '--write'
+            - '--update'
+            - '--device'
+    selection_nvram:
+        Image|endswith: '/nvram'
+        CommandLine|contains:
+            - 'SystemAudioVolume'
+            - 'boot-args'
+            - 'csr-active-config'
+            - 'authenticated-root-hash'
+    filter_system_update:
+        ParentImage|endswith:
+            - '/softwareupdate'
+            - '/installer'
+            - '/Install macOS'
+            - '/msu_install_unit'
+        PlatformBinary: 'true'
+    condition: (selection or selection_nvram) and not filter_system_update
+falsepositives:
+    - macOS OS updates and firmware updaters executed by softwareupdate (filtered)
+    - EFI integrity checks run by security scanning tools
+level: high

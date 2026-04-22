@@ -3,6 +3,60 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-04-22
+
+Major detection expansion: 37 new rules (417 total), 3 new sequence rules
+(38 total), 2 new CLI commands, 18 new tests (628 total), and deep LLM
+analysis for high-severity campaigns.
+
+### Added
+
+- **37 new Sigma-compatible rules** across exfiltration (rclone, cloud
+  provider CLI, messaging API data upload, ICMP tunnel, paste service),
+  lateral movement (Bonjour/mDNS host discovery, AirPlay to non-Apple
+  receiver), and wireless/container/impact/supply chain tactics.
+- **3 new sequence rules**: archive-then-cloud-exfil chain (T1560+T1567),
+  LLM API key harvest+exfil (CanisterWorm pattern, T1552+T1041), and
+  TEMPEST prep chain (SDR launch + outbound transfer, T1125+T1048).
+- **`maccrabctl vulns`** — dedicated subcommand surfacing CVE scanner
+  alerts (`maccrab.vuln.*`) with CVE ID, severity, affected app, and
+  remediation detail. Supports `--hours` and `--severity` filters.
+- **`maccrabctl privacy`** — dedicated subcommand surfacing egress
+  anomaly alerts (`maccrab.privacy.*`) with human-readable labels
+  (Bulk Egress / Domain Spike / Tracker Contact). Supports `--hours`.
+- **Extended thinking** (`LLMBackend.completeWithExtendedThinking`):
+  Claude Opus 4 backend uses `interleaved-thinking-2025-05-14` for
+  deep campaign analysis. All other backends fall back to regular
+  `complete()` transparently. `EventLoop` activates deep analysis for
+  HIGH/CRITICAL campaigns with ≥3 distinct tactics.
+- **UEBA weekday/weekend split**: per-user hour buckets are now
+  maintained separately for weekdays and weekends. Off-hours severity
+  escalation (0–4h and 22–23h = high, 5–6h and 19–21h = medium,
+  7–18h = low). Backward-compatible Codable; existing profiles load
+  with zeros for new fields.
+- **VulnerabilityScanner → alert store**: critical/high CVEs emit
+  `Alert` objects with deterministic IDs (`vuln-<cveId>`) that
+  deduplicate via `INSERT OR REPLACE` across hourly scans.
+- **AppPrivacyAuditor → alert store**: hourly egress anomaly checks
+  emit medium alerts with deterministic IDs (`privacy-<process>-<kind>`).
+- **DoH resolver expansion**: 28 IPs now detected (was 16). Added
+  Cloudflare for Families (1.1.1.2/1.1.1.3), Quad9 IPv6, OpenDNS IPv6,
+  AdGuard IPv6, Mullvad, ControlD, DNS.SB, and Comodo Secure DNS.
+- **AppPrivacyAuditor tracking domains** expanded from 20 to 70+
+  (Amplitude, Heap, Pendo, PostHog, Braze, Datadog, New Relic, Firebase,
+  FullStory, LogRocket, LaunchDarkly, and more).
+
+### Changed
+
+- Three supply chain rules with unsupported count aggregation
+  (`developer_credential_bulk_harvest`, `pip_install_triggers_credential_harvest`,
+  `process_scans_for_llm_tools`) have the count expression removed
+  (silently dropped by compiler). Replaced with stronger process filters.
+  Severity reduced from critical → high/medium to reflect single-access
+  detection threshold.
+- Two sequence rules fixed for invalid `|not|` Sigma modifier
+  (`keylogger_install_and_persist`, `package_typosquat_full_chain`).
+
 ## [1.4.9] — 2026-04-22
 
 Same-day hotfix for a CampaignDetector FP surfaced after 1.4.8.

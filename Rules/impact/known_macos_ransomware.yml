@@ -1,0 +1,55 @@
+title: Known macOS Ransomware Process Detected
+id: f0e1d2c3-a009-4000-e000-00000000a009
+status: experimental
+description: |
+  Detects process names and binary paths associated with known macOS
+  ransomware families: EvilQuest/ThiefQuest (2020), KeRanger (2016),
+  FileCoder (2014), MacRansom (2017), Patcher (2017), and the macOS
+  variant of LockBit (2023). This rule fires on known-bad names and
+  characteristic command-line patterns. Combine with behavioral scoring
+  and campaign detection for highest-confidence attribution.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1486/
+    - https://www.sentinelone.com/labs/evil-quest-thief-in-the-app-store/
+    - https://www.trendmicro.com/vinfo/us/threat-encyclopedia/malware/ransom_keranger.a
+tags:
+    - attack.impact
+    - attack.t1486
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_known_names:
+        Image|endswith:
+            - '/patch'
+            - '/Patcher'
+            - '/finder_update'
+            - '/MacRansom'
+            - '/filecoder'
+            - '/keranger'
+            - '/com.apple.finder.plist'
+        Image|contains:
+            - 'EvilQuest'
+            - 'ThiefQuest'
+            - 'KeRanger'
+    selection_lockbit_macos:
+        Image|contains:
+            - 'lockbit'
+            - 'LockBit'
+        CommandLine|contains:
+            - '--encrypted'
+            - '--encrypt'
+    selection_evilquest_patterns:
+        CommandLine|contains:
+            - 'com.apple.questd'
+            - 'patch.app'
+            - 'evilquest'
+        Image|contains:
+            - '/questd'
+            - '/patch'
+    condition: selection_known_names or selection_lockbit_macos or selection_evilquest_patterns
+falsepositives:
+    - None expected — these names are specific to known malware families
+level: critical

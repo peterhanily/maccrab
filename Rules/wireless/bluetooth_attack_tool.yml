@@ -1,0 +1,59 @@
+title: Bluetooth Attack or Scanning Tool Executed
+id: d1a2b3c4-0503-4000-a000-000000000503
+status: experimental
+description: >
+    Detects execution of Bluetooth attack frameworks and low-level scanning
+    tools that can enumerate nearby devices, sniff BLE advertisements,
+    crack Bluetooth PIN codes, or perform MITM attacks on paired devices.
+    Covers both compiled attack tools and Python libraries commonly used
+    for Bluetooth exploitation.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1557/
+    - https://github.com/securing/BTLEJuice
+    - https://github.com/virtualabs/btlejack
+tags:
+    - attack.wireless
+    - attack.collection
+    - attack.t1557
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_tools:
+        Image|endswith:
+            - '/btlejack'
+            - '/btlejuice'
+            - '/btlejuice-proxy'
+            - '/crackle'
+            - '/ubertooth-btle'
+            - '/ubertooth-scan'
+            - '/spooftooph'
+            - '/bluez-tools'
+            - '/hcidump'
+            - '/gatttool'
+            - '/bluepy-helper'
+    selection_blueutil:
+        Image|endswith: '/blueutil'
+        CommandLine|contains:
+            - '--inquiry'
+            - '--paired'
+            - '--format'
+            - '--connect'
+            - '--disconnect'
+    selection_python_bt:
+        Image|endswith:
+            - '/python3'
+            - '/python'
+        CommandLine|contains:
+            - 'btlejack'
+            - 'bluepy'
+            - 'pygatt'
+            - 'Dot11'
+            - 'ubertooth'
+    condition: selection_tools or selection_blueutil or selection_python_bt
+falsepositives:
+    - Bluetooth security researchers and penetration testers (authorized)
+    - IoT developers legitimately testing BLE devices during development
+level: high

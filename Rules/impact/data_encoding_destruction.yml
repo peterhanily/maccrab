@@ -1,0 +1,52 @@
+title: File Overwritten with Random or Zero Bytes Before Deletion
+id: f0e1d2c3-a015-4000-e000-00000000a015
+status: experimental
+description: |
+  Detects secure-erasure patterns that overwrite file contents with
+  random or null bytes before deletion to prevent forensic recovery.
+  While `disk_wipe_command.yml` covers whole-disk operations,
+  this rule targets per-file destruction: shred, srm (secure-rm),
+  wipe, and `dd` invocations targeting specific file paths rather
+  than block devices. This is characteristic of anti-forensics tooling
+  and the cleanup phase of a destructive attack.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1485/
+    - https://attack.mitre.org/techniques/T1070.004/
+tags:
+    - attack.impact
+    - attack.defense_evasion
+    - attack.t1485
+    - attack.t1070.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_shred:
+        Image|endswith:
+            - '/shred'
+            - '/srm'
+            - '/wipe'
+            - '/secure-delete'
+    selection_dd_source:
+        Image|endswith: '/dd'
+        CommandLine|contains:
+            - 'if=/dev/zero'
+            - 'if=/dev/urandom'
+    selection_dd_file_target:
+        CommandLine|contains: 'of=/'
+    filter_dd_device_target:
+        CommandLine|contains:
+            - 'of=/dev/'
+            - 'bs=1m count=0'
+    filter_homebrew:
+        ParentImage|contains:
+            - 'Homebrew'
+            - '/brew'
+    condition: selection_shred
+        or (selection_dd_source and selection_dd_file_target and not filter_dd_device_target)
+falsepositives:
+    - Security-conscious users using srm/shred for legitimate private file deletion
+    - Development workflows that overwrite test data files with dd
+level: medium

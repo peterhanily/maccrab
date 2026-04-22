@@ -1,0 +1,51 @@
+title: Wi-Fi Network Profile Added or Removed by Unsigned Process
+id: d1a2b3c4-0502-4000-a000-000000000502
+status: experimental
+description: >
+    Detects modification of saved Wi-Fi network profiles via `networksetup`
+    from an unsigned or untrusted parent process. Attackers add rogue
+    enterprise Wi-Fi profiles to redirect victim traffic through a
+    malicious access point, or remove corporate profiles to downgrade
+    security posture. Legitimate profile changes come from MDM agents,
+    System Settings, or IT provisioning tools.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1557/
+    - https://attack.mitre.org/techniques/T1565.002/
+tags:
+    - attack.wireless
+    - attack.defense_evasion
+    - attack.t1557
+    - attack.t1565.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/networksetup'
+        CommandLine|contains:
+            - '-addpreferredwirelessnetwork'
+            - '-removepreferredwirelessnetwork'
+            - '-removeallpreferredwirelessnetworks'
+            - '-setairportnetwork'
+            - '-setWirelessNetworkPassword'
+    filter_trusted_parents:
+        ParentImage|endswith:
+            - '/System Preferences'
+            - '/System Settings'
+            - '/jamf'
+            - '/kandji'
+            - '/mosyle'
+            - '/munki'
+            - '/launchd'
+        PlatformBinary: 'true'
+    filter_mdm:
+        ParentImage|contains:
+            - '/mdmclient'
+            - '/profiles'
+    condition: selection and not filter_trusted_parents and not filter_mdm
+falsepositives:
+    - Legitimate admin scripts managing Wi-Fi profiles during device provisioning
+    - MDM agents executing networksetup commands as child processes (covered by filter)
+level: medium

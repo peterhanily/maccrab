@@ -1,0 +1,57 @@
+title: Rogue Software Hotspot or Internet Sharing Enabled Programmatically
+id: d1a2b3c4-0505-4000-a000-000000000505
+status: experimental
+description: >
+    Detects programmatic enablement of macOS Internet Sharing or creation
+    of a software Wi-Fi hotspot (a "gateway" or "NAT" AP). When combined
+    with packet capture, this pattern creates an evil-twin or man-in-the-
+    middle access point that routes victim traffic through the attacker's
+    machine. System Preferences/Settings changes by the user are expected
+    and filtered; script-driven changes are not.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1557/
+tags:
+    - attack.wireless
+    - attack.collection
+    - attack.t1557
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_natd:
+        Image|endswith:
+            - '/natd'
+            - '/named'
+            - '/bootpd'
+        CommandLine|contains:
+            - 'interface'
+            - '-config'
+    selection_sharing_pref:
+        Image|endswith:
+            - '/defaults'
+            - '/PlistBuddy'
+        CommandLine|contains:
+            - 'InternetSharingEnabled'
+            - 'com.apple.internet-sharing'
+    selection_hostapd:
+        Image|endswith:
+            - '/hostapd'
+            - '/create_ap'
+        CommandLine|contains:
+            - '-i '
+            - 'wlan'
+            - 'en'
+    filter_system:
+        ParentImage|endswith:
+            - '/System Preferences'
+            - '/System Settings'
+            - '/launchd'
+        PlatformBinary: 'true'
+    condition: (selection_natd or selection_sharing_pref or selection_hostapd)
+        and not filter_system
+falsepositives:
+    - Network engineers setting up controlled test environments
+    - macOS servers with intentionally configured Internet Sharing via admin tools
+level: high

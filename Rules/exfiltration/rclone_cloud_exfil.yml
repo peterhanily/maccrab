@@ -1,0 +1,44 @@
+title: rclone Used for Cloud Storage Exfiltration
+id: e1f2a3b4-7006-4000-c000-000000007006
+status: experimental
+description: >
+    Detects rclone, a popular cloud-sync CLI, transferring data to remote cloud
+    storage providers. Adversaries increasingly use rclone in ransomware and espionage
+    operations (Conti, BlackCat, Lazarus Group) to exfiltrate large volumes of data
+    to attacker-controlled cloud buckets. Legitimate rclone use should be baselined;
+    use of providers not part of an organization's approved list is suspicious.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1567/002/
+    - https://thedfirreport.com/2021/03/29/sodinokibi-aka-revil-ransomware/
+    - https://www.cisa.gov/news-events/cybersecurity-advisories/aa22-276a
+tags:
+    - attack.exfiltration
+    - attack.t1567.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/rclone'
+        CommandLine|contains:
+            - 'copy'
+            - 'sync'
+            - 'move'
+            - 'copyto'
+    filter_config_only:
+        CommandLine|contains:
+            - 'config'
+            - 'listremotes'
+            - 'version'
+            - '--help'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection and not filter_config_only and not filter_system
+falsepositives:
+    - Authorized cloud backup workflows using rclone
+    - DevOps automation pipelines that sync build artifacts
+level: high

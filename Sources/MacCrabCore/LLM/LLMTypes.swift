@@ -26,7 +26,7 @@ public struct LLMConfig: Codable, Sendable {
 
     // MARK: - Claude (Anthropic)
     public var claudeAPIKey: String?
-    public var claudeModel: String = "claude-sonnet-4-20250514"
+    public var claudeModel: String = "claude-sonnet-4-6"
 
     // MARK: - OpenAI Compatible
     public var openaiURL: String = "https://api.openai.com/v1"
@@ -62,7 +62,7 @@ public struct LLMConfig: Codable, Sendable {
         provider = try c.decodeIfPresent(LLMProvider.self, forKey: .provider) ?? .ollama
         ollamaURL = try c.decodeIfPresent(String.self, forKey: .ollamaURL) ?? "http://localhost:11434"
         ollamaModel = try c.decodeIfPresent(String.self, forKey: .ollamaModel) ?? "llama3.1:8b"
-        claudeModel = try c.decodeIfPresent(String.self, forKey: .claudeModel) ?? "claude-sonnet-4-20250514"
+        claudeModel = try c.decodeIfPresent(String.self, forKey: .claudeModel) ?? "claude-sonnet-4-6"
         openaiURL = try c.decodeIfPresent(String.self, forKey: .openaiURL) ?? "https://api.openai.com/v1"
         openaiModel = try c.decodeIfPresent(String.self, forKey: .openaiModel) ?? "gpt-4o-mini"
         mistralModel = try c.decodeIfPresent(String.self, forKey: .mistralModel) ?? "mistral-small-latest"

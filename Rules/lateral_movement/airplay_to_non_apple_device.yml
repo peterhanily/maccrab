@@ -1,0 +1,52 @@
+title: AirPlay Screen Mirroring to Unknown or Non-Apple Receiver
+id: a1b2c3d4-1015-4000-b000-000000001015
+status: experimental
+description: >
+    Detects AirPlay screen mirroring or audio streaming to non-Apple or
+    unexpected receiver devices. Third-party AirPlay receivers (including
+    open-source implementations like shairplay, airtame, RPiPlay) can be
+    deployed covertly to capture screen content from nearby Macs. This
+    technique has been observed in insider threat scenarios and in physical
+    proximity attacks in shared office environments.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1125/
+    - https://attack.mitre.org/techniques/T1565/
+    - https://support.apple.com/guide/security/airplay-security-sece9c5e1f3b/web
+tags:
+    - attack.collection
+    - attack.t1125
+    - attack.lateral_movement
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_shairplay:
+        Image|endswith:
+            - '/shairplay'
+            - '/shairport'
+            - '/shairport-sync'
+            - '/airtame'
+            - '/rpplay'
+            - '/airtool'
+    selection_airplay_cli:
+        CommandLine|contains:
+            - 'AirPlayReceiver'
+            - 'airplay'
+            - '--airplay'
+        Image|endswith:
+            - '/ffmpeg'
+            - '/avconv'
+    filter_system:
+        SignerType: 'apple'
+    filter_apple_tv:
+        ParentImage|contains:
+            - 'AirPlayUIAgent'
+            - 'AirPlayXPCHelper'
+    condition: (selection_shairplay or selection_airplay_cli) and not filter_system and not filter_apple_tv
+falsepositives:
+    - Authorized AirPlay receiver software (Reflector, LonelyScreen, AirServer) for presentations
+    - Home automation setups using open-source AirPlay receivers
+    - Development and testing of AirPlay-compatible applications
+level: medium

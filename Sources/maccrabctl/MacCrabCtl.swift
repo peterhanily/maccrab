@@ -160,6 +160,24 @@ struct MacCrabCtl {
         case "extensions":
             let suspiciousOnly = args.contains("--suspicious")
             listExtensions(suspiciousOnly: suspiciousOnly)
+        case "vulns":
+            var hours: Double? = nil
+            var severityFilter: Severity? = nil
+            var idx = 2
+            while idx < args.count {
+                switch args[idx] {
+                case "--hours" where idx + 1 < args.count:
+                    hours = Double(args[idx + 1]); idx += 2
+                case "--severity" where idx + 1 < args.count:
+                    severityFilter = Severity(rawValue: args[idx + 1].lowercased()); idx += 2
+                default:
+                    idx += 1
+                }
+            }
+            await listVulns(hours: hours, severityFilter: severityFilter)
+        case "privacy":
+            let hours = args.count >= 4 && args[2] == "--hours" ? Double(args[3]) : nil
+            await listPrivacyAlerts(hours: hours)
         case "security":
             await showSecurityScore()
         case "deception":

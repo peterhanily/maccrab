@@ -1,0 +1,79 @@
+title: Phishing Attachment Opens Then Spawns Shell or Downloader
+id: e1f2a3b4-0028-4000-b000-000000000028
+status: experimental
+description: >
+    Detects a phishing document attack sequence: a mail client or browser
+    opens a document (PDF, Word, RTF, HTML), and within a short window the
+    document viewer spawns a shell interpreter or network downloader. This
+    pattern covers macro-enabled documents, malicious PDF JavaScript, and
+    HTML smuggling attacks where an embedded payload extracts and runs
+    a dropper binary.
+author: MacCrab Community
+date: 2026/04/22
+references:
+    - https://attack.mitre.org/techniques/T1566.001/
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.initial_access
+    - attack.execution
+    - attack.t1566.001
+    - attack.t1059
+
+type: sequence
+window: 90s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: doc_open
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_mail:
+              Image|endswith:
+                  - '/Mail'
+                  - '/Outlook'
+                  - '/Airmail'
+                  - '/Spark'
+                  - '/Thunderbird'
+          selection_viewer:
+              Image|endswith:
+                  - '/Preview'
+                  - '/Adobe Acrobat'
+                  - '/Microsoft Word'
+                  - '/Microsoft Excel'
+                  - '/LibreOffice'
+                  - '/Pages'
+                  - '/Numbers'
+          condition: selection_mail or selection_viewer
+
+    - id: shell_or_download
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_shell:
+              Image|endswith:
+                  - '/bash'
+                  - '/zsh'
+                  - '/sh'
+                  - '/python3'
+                  - '/python'
+                  - '/perl'
+                  - '/ruby'
+                  - '/osascript'
+          selection_net:
+              Image|endswith:
+                  - '/curl'
+                  - '/wget'
+                  - '/nc'
+                  - '/ncat'
+          condition: selection_shell or selection_net
+      process: doc_open.descendant
+
+trigger: all
+falsepositives:
+    - Microsoft Office macros that legitimately invoke shell commands (e.g., AppleScript for document workflows)
+    - PDF forms that launch external applications via registered URI handlers
+level: critical
