@@ -1,0 +1,41 @@
+title: System LaunchDaemon Plist Replaced
+id: d1a2b3c4-0500-4000-a000-000000000500
+status: experimental
+description: >
+    Detects writes to plist files under `/System/Library/LaunchDaemons/`
+    by non-Apple-signed processes. Those plists are normally managed by
+    Apple and immutable under SIP — a write there indicates either SIP
+    disabled, SIP bypass, or a privileged-install package replacing a
+    system-managed XPC or background service. Classic macOS rootkit
+    persistence technique.
+author: MacCrab Community
+date: 2026/04/23
+references:
+    - https://attack.mitre.org/techniques/T1543/004/
+    - https://objective-see.org/blog/blog_0x25.html
+tags:
+    - attack.persistence
+    - attack.privilege_escalation
+    - attack.defense_evasion
+    - attack.t1543.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|startswith: '/System/Library/LaunchDaemons/'
+        TargetFilename|endswith: '.plist'
+    filter_apple:
+        SignerType: 'apple'
+    filter_installer:
+        Image|endswith:
+            - '/installd'
+            - '/installer'
+            - '/system_installd'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_apple and not filter_installer and not filter_apple_parent
+falsepositives:
+    - macOS system updates staged outside the signed installer path (rare)
+    - Third-party disk tools with signed-installer manipulation (verify SIP state)
+level: critical

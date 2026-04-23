@@ -110,7 +110,11 @@ public actor NetworkCollector {
             await self.sweep()
 
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(self.pollInterval * 1_000_000_000))
+                // Network sweep frequency matters for detection latency, but
+                // a moderate slowdown on battery is still a good trade — use
+                // the default aggressiveness (1.0).
+                let adjusted = PowerGate.adjustedInterval(base: self.pollInterval)
+                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self.sweep()
             }

@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (628 tests in 135 suites)
+swift test                     # Unit tests (636 tests in 136 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -53,17 +53,17 @@ Sources/MacCrabCore/
   Output/         Notifications, webhooks, syslog, reports
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            417 Sigma-compatible YAML detection rules (17 tactic directories)
+Rules/            420 Sigma-compatible YAML detection rules (17 tactic directories)
   sequences/      38 multi-step sequence rules
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (628 tests in 135 suites)
+Tests/            Swift Testing unit tests (636 tests in 136 suites)
 ```
 
 ## Detection Stack (5 tiers)
 
-1. **Rules** -- 379 single-event Sigma-compatible YAML rules compiled to JSON predicates. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
+1. **Rules** -- 382 single-event Sigma-compatible YAML rules compiled to JSON predicates. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
 3. **Sequences** -- 38 temporal multi-step rules with process lineage correlation, 10K partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.

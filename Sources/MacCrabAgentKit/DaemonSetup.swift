@@ -548,6 +548,11 @@ enum DaemonSetup {
             print("Process tree ML: starting fresh learning period")
         }
 
+        // Topology anomaly detector -- complements ProcessTreeAnalyzer with
+        // shape-based hard rules (launchd→shell, system→staged binary, fork
+        // storm, deep descent). No persisted state; in-memory only.
+        let topologyAnomalyDetector = TopologyAnomalyDetector()
+
         // Fleet telemetry (optional -- configure via MACCRAB_FLEET_URL env var)
         let fleetClient = FleetClient()
         if let fleet = fleetClient {
@@ -897,6 +902,7 @@ enum DaemonSetup {
             statisticalDetector: statisticalDetector,
             crossProcessCorrelator: crossProcessCorrelator,
             processTreeAnalyzer: processTreeAnalyzer,
+            topologyAnomalyDetector: topologyAnomalyDetector,
             notifier: notifier,
             responseEngine: responseEngine,
             webhookOutput: webhookOutput,

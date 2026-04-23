@@ -70,8 +70,12 @@ public actor USBMonitor {
             guard let self else { return }
             while !Task.isCancelled {
                 await self.scan()
-                let interval = await self.pollInterval
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                // USB scanning is optional (security-tokens + exfil-device
+                // coverage). Slow down aggressively on battery — USB tampering
+                // that matters is usually a sustained event, not sub-second.
+                let base = await self.pollInterval
+                let adjusted = PowerGate.adjustedInterval(base: base, aggressiveness: 2.0)
+                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
             }
         }
     }

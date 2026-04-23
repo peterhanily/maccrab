@@ -55,7 +55,13 @@ public actor ClipboardMonitor {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.check()
-                try? await Task.sleep(nanoseconds: UInt64((self?.pollInterval ?? 2) * 1_000_000_000))
+                // Clipboard polling is aggressive (2s baseline) and purely
+                // optional — scale hard on battery/thermal pressure to avoid
+                // draining battery for a small detection uplift. Effective
+                // interval in low-power mode ≈ 10s.
+                let base = self?.pollInterval ?? 2
+                let adjusted = PowerGate.adjustedInterval(base: base, aggressiveness: 2.0)
+                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
             }
         }
     }

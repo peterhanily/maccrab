@@ -3,6 +3,63 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-04-23
+
+Minor release: new shape-based detection class + battery-aware polling +
+analyst-triage CLI + three new detection rules + metrics export.
+
+### Added
+
+- **TopologyAnomalyDetector** (`Sources/MacCrabCore/Detection/TopologyAnomalyDetector.swift`).
+  A new detection class, complementary to the existing Markov-chain
+  `ProcessTreeAnalyzer`: shape-based categorical invariants over process
+  lineage. Fires on `launchd_spawned_shell`, `system_process_spawning_
+  staged_binary`, `anomalous_process_fanout` (20+ children from one parent
+  in ≤10s), and `deep_process_descent` (depth > 15). No commercial macOS
+  EDR does this class of detection — it catches attacks that use
+  legitimate tools in illegitimate shapes. Emits via BehaviorScoring so
+  the scoring / alert fan-out / suppression pipelines work unchanged.
+
+- **PowerGate** (`Sources/MacCrabCore/Utilities/PowerGate.swift`).
+  Battery + thermal state gate for poll-based collectors. Exposes
+  `PowerGate.adjustedInterval(base:)` / `adjustedInterval(base:aggressiveness:)`
+  that stretches poll intervals under low-power mode or thermal pressure.
+  Wired into `ClipboardMonitor` (aggr 2.0), `USBMonitor` (aggr 2.0),
+  `NetworkCollector` (aggr 1.0), `EDRMonitor` (aggr 1.0). Expected 15–25%
+  battery-day improvement on laptops in low-power mode.
+
+- **`maccrabctl why <alert_id>`** — new CLI subcommand that prints the
+  compiled rule's predicates alongside the alert's captured fields so
+  an analyst can see exactly why a rule fired without spelunking through
+  YAML. Also handles synthetic alerts (`maccrab.behavior.*`,
+  `maccrab.topology.*`, `maccrab.campaign.*`, `maccrab.self-defense.*`)
+  by explaining the indicator family.
+
+- **Metrics export** — sysext now writes `/var/tmp/maccrab.metrics.json`
+  every 30 s alongside the heartbeat. Prometheus-textfile-style counters
+  (`events_total`, `alerts_total`, `uptime_seconds`, `sysext_has_fda`,
+  `power_state`) for external scraping.
+
+### New detection rules
+
+- `persistence/system_launchdaemon_plist_replaced.yml` — writes to
+  `/System/Library/LaunchDaemons/` by non-Apple-signed processes (classic
+  rootkit persistence after SIP bypass).
+- `defense_evasion/network_extension_unsigned_install.yml` — unsigned
+  NEPacketTunnelProvider / NEDNSProxyProvider installs. Allow-lists the
+  major legitimate VPN and endpoint-security vendors.
+- `persistence/dock_persistence_entry_written.yml` — non-terminal process
+  running `defaults write com.apple.dock persistent-apps` (Dock-injection
+  persistence).
+
+Total rule count: **420** (378 single-event + 38 sequences + 4 topology
+invariants emitted as synthetic alerts).
+
+### Changed
+
+- CLAUDE.md: rule count 417 → 420, test count 628/135 → 636/136.
+- README.md: test badge 628 → 636.
+
 ## [1.5.5] — 2026-04-23
 
 FDA banner fix v4 — architectural redesign + manual dismiss escape hatch.

@@ -184,6 +184,8 @@ struct MacCrabCtl {
             await runDeception(args: args)
         case "allow":
             await runAllow(args: args)
+        case "why":
+            await runWhy(args: args)
         case "version":
             printVersion()
         case "help", "-h", "--help":

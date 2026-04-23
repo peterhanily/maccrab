@@ -1,0 +1,69 @@
+title: Network Extension Installed by Unsigned Process
+id: d1a2b3c4-3005-4000-a000-000000003005
+status: experimental
+description: >
+    Detects writes to macOS Network Extension preference files by
+    non-Apple-signed processes. NEPacketTunnelProvider, NEDNSProxyProvider,
+    and NEFilterDataProvider extensions can silently reroute ALL system
+    traffic, proxy DNS, or drop/inspect TLS — ideal coverage vectors for
+    C2, credential theft, and MitM. Legitimate VPN and security software
+    also ships these, so this rule filters known vendor signers and
+    Apple-owned installer processes; anything else writing here is worth
+    an operator's attention.
+author: MacCrab Community
+date: 2026/04/23
+references:
+    - https://developer.apple.com/documentation/networkextension
+    - https://attack.mitre.org/techniques/T1557/
+tags:
+    - attack.defense_evasion
+    - attack.collection
+    - attack.t1557
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/Preferences/com.apple.networkextension.plist'
+            - '/Library/Preferences/com.apple.networkextension.cache.plist'
+            - '/Library/Preferences/com.apple.networkextension.uuidcache.plist'
+    filter_apple:
+        SignerType: 'apple'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_known_vpn:
+        Image|contains:
+            - 'WireGuard'
+            - 'Tailscale'
+            - 'Mullvad'
+            - 'NordVPN'
+            - 'ExpressVPN'
+            - 'ProtonVPN'
+            - 'Cisco AnyConnect'
+            - 'GlobalProtect'
+            - 'Cloudflare WARP'
+            - 'Tunnelblick'
+            - 'OpenVPN Connect'
+            - 'Viscosity'
+    filter_known_security:
+        Image|contains:
+            - 'Little Snitch'
+            - 'LuLu'
+            - 'Murus'
+            - 'Radio Silence'
+            - 'CrowdStrike'
+            - 'SentinelOne'
+            - 'Jamf'
+            - 'Kandji'
+            - 'Mosyle'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_apple and not filter_system and not filter_known_vpn and not filter_known_security and not filter_apple_parent
+falsepositives:
+    - New VPN or endpoint-security vendors not in the allow-list
+    - Enterprise MDM rollouts of custom network profiles — verify provenance
+level: high

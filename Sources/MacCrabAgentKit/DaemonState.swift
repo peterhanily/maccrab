@@ -29,6 +29,7 @@ final class DaemonState {
     let statisticalDetector: StatisticalAnomalyDetector
     let crossProcessCorrelator: CrossProcessCorrelator
     let processTreeAnalyzer: ProcessTreeAnalyzer
+    let topologyAnomalyDetector: TopologyAnomalyDetector
 
     // MARK: - Outputs
     let notifier: NotificationOutput
@@ -186,6 +187,7 @@ final class DaemonState {
         statisticalDetector: StatisticalAnomalyDetector,
         crossProcessCorrelator: CrossProcessCorrelator,
         processTreeAnalyzer: ProcessTreeAnalyzer,
+        topologyAnomalyDetector: TopologyAnomalyDetector,
         notifier: NotificationOutput,
         responseEngine: ResponseEngine,
         webhookOutput: WebhookOutput?,
@@ -281,6 +283,7 @@ final class DaemonState {
         self.statisticalDetector = statisticalDetector
         self.crossProcessCorrelator = crossProcessCorrelator
         self.processTreeAnalyzer = processTreeAnalyzer
+        self.topologyAnomalyDetector = topologyAnomalyDetector
         self.notifier = notifier
         self.responseEngine = responseEngine
         self.webhookOutput = webhookOutput

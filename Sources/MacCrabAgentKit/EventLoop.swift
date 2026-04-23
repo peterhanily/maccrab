@@ -387,6 +387,29 @@ enum EventLoop {
                         )
                     }
                 }
+
+                // === Topology Anomaly Detection ===
+                // Shape-based invariants complementary to the probabilistic
+                // Markov tree above. Rare, near-categorical signals — each
+                // finding translates to a BehaviorScoring indicator with a
+                // high weight, so a single hit is enough to fire an alert.
+                let parentPath = enrichedEvent.process.ancestors.first?.executable
+                let parentPID = enrichedEvent.process.ancestors.first?.pid ?? 0
+                let topologyFindings = await state.topologyAnomalyDetector.evaluate(
+                    processPath: enrichedEvent.process.executable,
+                    processPID: enrichedEvent.process.pid,
+                    parentPath: parentPath,
+                    parentPID: parentPID,
+                    ancestryDepth: enrichedEvent.process.ancestors.count
+                )
+                for finding in topologyFindings {
+                    await state.behaviorScoring.addIndicator(
+                        named: finding.kind.rawValue,
+                        detail: finding.detail,
+                        forProcess: enrichedEvent.process.pid,
+                        path: enrichedEvent.process.executable
+                    )
+                }
             }
 
             // === Quarantine provenance enrichment for file events ===

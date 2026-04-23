@@ -155,6 +155,12 @@ public actor BehaviorScoring {
         "prompt_injection_critical":    9.0,
         "prompt_injection_compound":   10.0,
 
+        // Topology anomalies (shape-based process-tree detection)
+        "launchd_spawned_shell":                8.0,
+        "system_process_spawning_staged_binary": 7.0,
+        "anomalous_process_fanout":             5.0,
+        "deep_process_descent":                 2.0,
+
         // Deep macOS internals
         "library_injection":            5.0,
         "event_tap_keylogger":          7.0,

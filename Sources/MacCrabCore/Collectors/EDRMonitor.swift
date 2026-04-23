@@ -288,7 +288,12 @@ public actor EDRMonitor {
             await self?.scan()
 
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64((self?.pollInterval ?? 120) * 1_000_000_000))
+                // EDR scan is 120s baseline — already a sparse poll, so use
+                // default aggressiveness. On battery it stretches to ~5min
+                // which is fine for EDR/RMM inventory tracking.
+                let base = self?.pollInterval ?? 120
+                let adjusted = PowerGate.adjustedInterval(base: base)
+                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self?.scan()
             }

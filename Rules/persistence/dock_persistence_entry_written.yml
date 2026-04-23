@@ -1,0 +1,64 @@
+title: Dock Persistence Entry Written via defaults
+id: d1a2b3c4-3006-4000-a000-000000003006
+status: experimental
+description: >
+    Detects non-terminal processes running `defaults write com.apple.dock
+    persistent-apps` or similar Dock-mutation commands. Dock persistence is
+    a subtle macOS technique: attackers inject a malicious .app into the
+    user's Dock so a mis-click launches the payload, bypassing typical
+    LaunchAgent/LaunchDaemon monitoring. Legitimate Dock edits almost
+    always originate from user-driven System Settings or a shell, not from
+    installers or unsigned binaries.
+author: MacCrab Community
+date: 2026/04/23
+references:
+    - https://attack.mitre.org/techniques/T1547/
+    - https://www.sentinelone.com/blog/macos-malware-persistence-dock/
+tags:
+    - attack.persistence
+    - attack.t1547
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        Image|endswith: '/defaults'
+        CommandLine|contains:
+            - 'com.apple.dock'
+    selection_mutation:
+        CommandLine|contains:
+            - 'write '
+            - 'delete '
+            - 'import '
+        CommandLine|contains:
+            - 'persistent-apps'
+            - 'persistent-others'
+            - 'recent-apps'
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and selection_mutation and not filter_terminal and not filter_system and not filter_apple_parent
+falsepositives:
+    - Dock-customization utilities (Dockey, uBar) — verify the exact parent binary
+    - Enterprise MDM Dock-preset scripts dispatched via profiles
+level: high

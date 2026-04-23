@@ -274,6 +274,7 @@ enum DaemonTimers {
                 try? await state.processTreeAnalyzer.save()
                 await state.deduplicator.sweep()
                 await state.crossProcessCorrelator.purgeStale()
+                await state.topologyAnomalyDetector.purgeStale()
                 await state.campaignDetector.sweep()
                 await state.tlsFingerprinter.sweep()
                 // Allowlist v2: prune expired suppressions. The sweep
@@ -330,15 +331,50 @@ enum DaemonTimers {
             // (where Unix perms + TCC both apply).
             let sysextHasFDA = probeSysextFDA()
 
+            let nowUnix = Date().timeIntervalSince1970
+            let uptime = Int(Date().timeIntervalSince(startTime))
+            let events = eventCount()
+            let alerts = alertCount()
+
             let payload: [String: Any] = [
-                "written_at_unix": Date().timeIntervalSince1970,
-                "uptime_seconds": Int(Date().timeIntervalSince(startTime)),
-                "events_processed": eventCount(),
-                "alerts_emitted": alertCount(),
+                "written_at_unix": nowUnix,
+                "uptime_seconds": uptime,
+                "events_processed": events,
+                "alerts_emitted": alerts,
                 "sysext_has_fda": sysextHasFDA,
-                "fda_checked_at_unix": Date().timeIntervalSince1970,
+                "fda_checked_at_unix": nowUnix,
                 "schema_version": 2,
             ]
+
+            // Metrics export — Prometheus-textfile-style JSON at a world-
+            // readable path. Counter-style semantics: scrapers compute
+            // rates from deltas. Using /var/tmp (survives reboots, no
+            // privilege boundary to cross) so external collectors can
+            // read without special entitlements.
+            let metricsPayload: [String: Any] = [
+                "schema": 1,
+                "written_at_unix": nowUnix,
+                "uptime_seconds": uptime,
+                "events_total": events,
+                "alerts_total": alerts,
+                "sysext_has_fda": sysextHasFDA,
+                "power_state": PowerGate.stateDescription,
+            ]
+            if let metricsData = try? JSONSerialization.data(
+                withJSONObject: metricsPayload,
+                options: [.sortedKeys]
+            ) {
+                let metricsPath = "/var/tmp/maccrab.metrics.json"
+                let metricsTmp = metricsPath + ".tmp"
+                do {
+                    try metricsData.write(to: URL(fileURLWithPath: metricsTmp))
+                    _ = try? FileManager.default.removeItem(atPath: metricsPath)
+                    try FileManager.default.moveItem(atPath: metricsTmp, toPath: metricsPath)
+                } catch {
+                    // Metrics writes are best-effort — no alert if /var/tmp
+                    // is unreadable for some reason; next tick will retry.
+                }
+            }
             guard let data = try? JSONSerialization.data(
                 withJSONObject: payload,
                 options: [.prettyPrinted, .sortedKeys]

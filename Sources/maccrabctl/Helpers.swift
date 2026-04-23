@@ -99,6 +99,9 @@ extension MacCrabCtl {
                                   (add / list / remove / stats)
           export [format] [N]     Export alerts (json|csv, default: json)
 
+        Triage:
+          why <alert_id>          Explain which rule fired, predicates + captured fields
+
         Deception (opt-in):
           deception <sub>         Honeyfile canaries
                                   (deploy / status / remove)
