@@ -27,7 +27,9 @@ struct SuppressionManagerView: View {
         }
         .padding()
         .frame(width: 520, height: 440)
-        .onAppear { Task { await reload() } }
+        // .task (vs .onAppear + Task) auto-cancels on view dismount, so
+        // tabbing away mid-load doesn't leave an orphaned fetch running.
+        .task { await reload() }
     }
 
     // MARK: - Sections

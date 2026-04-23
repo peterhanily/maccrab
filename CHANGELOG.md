@@ -3,6 +3,69 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] — 2026-04-23
+
+Dashboard polish release. Adds a theme system matching maccrab.com, proper
+About panel with a website link, SF Symbol statusbar icon, and a set of
+smaller fixes surfaced by three parallel specialist review agents
+(SwiftUI architecture, macOS-native UX, a11y+performance).
+
+### Added
+
+- **`MacCrabTheme`** (new `Sources/MacCrabApp/Theme/MacCrabTheme.swift`) —
+  ports maccrab.com's CSS custom properties verbatim: base/elevated/card
+  backgrounds, border pairs, text primary/dim/mute, `accent`/`accentHot`/
+  `accentDim`, `accentGhost` overlays, and severity palette. Each value
+  ships Light + Dark variants via an `NSColor` dynamic provider so the
+  dashboard tracks the system appearance setting. Applied via
+  `.tint(MacCrabTheme.accent)` at the scene root so every native control
+  (buttons, links, toggles, progress views, date pickers) picks up the
+  brand orange automatically.
+
+- **About MacCrab panel with maccrab.com link** — new
+  `CommandGroup(replacing: .appInfo)` invokes a styled About panel with
+  a clickable maccrab.com link in the credits, version + build, and
+  CaddyLabs copyright. Plus a new Help menu with "Visit maccrab.com",
+  "MacCrab Documentation", and "Report an Issue…" entries.
+
+- **SF Symbol status-bar icon** — replaces the emoji 🦀 with template-
+  rendered `shield.lefthalf.filled` (healthy) or
+  `shield.lefthalf.filled.trianglebadge.exclamationmark` (degraded), so
+  the icon adapts to light/dark menu bar automatically. Severity flash
+  uses palette-rendered red/orange system shields.
+
+### Fixed
+
+- **Alert popover `.white` background** — `MacCrabApp.swift:284` now uses
+  `NSColor.windowBackgroundColor` so the critical-alert NSPanel respects
+  Dark Mode instead of floating bright white.
+- **Hardcoded RGB severity colors in OverviewDashboard** — replaced with
+  `MacCrabTheme.severityCritical` / `.severityHigh` / `.ok`.
+- **`eventsPerSecond` churn** — idle polls no longer re-publish the same
+  value; full-app view invalidation on a quiet system drops from "every
+  10 s" to "when it actually changes."
+- **AlertDashboard filter churn** — single-pass lazy filter replaces the
+  three-stage `.filter → .map → .filter → .filter` chain. Each keystroke
+  in the search box now does ~1× array traversal instead of 3–4×, and
+  the intermediate AlertViewModel allocation on every pass is gone.
+- **Poll timer lifecycle** — `AppState.startPolling()` / `.stopPolling()`,
+  wired to `.onChange(of: scenePhase)`. Closing the dashboard window (or
+  backgrounding the app) now pauses the 10-second DB poll.
+- **Reduce Motion parity** — `CampaignView.swift:158, 181` and
+  `AIAnalysisView.swift:243` expand/collapse now respect
+  `\.accessibilityReduceMotion`.
+
+### Changed
+
+- `Info.plist` gains `LSApplicationCategoryType`, `NSHumanReadableCopyright`,
+  `NSFullDiskAccessUsageDescription`, `NSLocalNetworkUsageDescription`,
+  and an expanded `NSMicrophoneUsageDescription` — Security & Privacy
+  panel now shows meaningful strings for every permission.
+- `SuppressionManagerView` migrated from `.onAppear { Task { await ... } }`
+  to `.task { await ... }` (auto-cancels on view dismount).
+- Alert popover's `DispatchQueue.main.async` call site migrated to
+  `Task { @MainActor in ... }` idiom.
+
 ## [1.6.1] — 2026-04-23
 
 Field-driven noise reduction. v1.6.0 user dogfood showed 19 identical alerts

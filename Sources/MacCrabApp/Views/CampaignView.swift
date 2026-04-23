@@ -24,6 +24,11 @@ struct CampaignView: View {
 
     @State private var expandedCampaignId: String? = nil
     @State private var showDismissed = false
+    // Respect the Accessibility > Reduce Motion preference. When enabled,
+    // expand/collapse of campaign cards happens without the 0.2s easeInOut
+    // so users with vestibular sensitivities don't get animation-induced
+    // discomfort on every card click.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Multi-select state. When `selectMode` is true, each active campaign
     // card surfaces a checkbox; tapping the card body toggles membership
@@ -155,8 +160,12 @@ struct CampaignView: View {
                                         if selectMode {
                                             toggleSelection(campaign.id)
                                         } else {
-                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                            if reduceMotion {
                                                 expandedCampaignId = expandedCampaignId == campaign.id ? nil : campaign.id
+                                            } else {
+                                                withAnimation(.easeInOut(duration: 0.2)) {
+                                                    expandedCampaignId = expandedCampaignId == campaign.id ? nil : campaign.id
+                                                }
                                             }
                                         }
                                     },
@@ -178,8 +187,12 @@ struct CampaignView: View {
                                         isExpanded: expandedCampaignId == campaign.id,
                                         relatedAlerts: relatedAlerts(for: campaign),
                                         onToggle: {
-                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                            if reduceMotion {
                                                 expandedCampaignId = expandedCampaignId == campaign.id ? nil : campaign.id
+                                            } else {
+                                                withAnimation(.easeInOut(duration: 0.2)) {
+                                                    expandedCampaignId = expandedCampaignId == campaign.id ? nil : campaign.id
+                                                }
                                             }
                                         },
                                         onDismiss: nil,

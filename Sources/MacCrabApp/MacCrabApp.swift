@@ -24,6 +24,7 @@ struct MacCrabApp: App {
     @AppStorage("hasCompletedSetup") private var hasCompletedSetup = false
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @State private var showWelcome = false
+    @Environment(\.scenePhase) private var scenePhase
 
     // Sparkle auto-updater. `startingUpdater: true` kicks off the first
     // background check about 30s after launch and then every 24h
@@ -40,6 +41,14 @@ struct MacCrabApp: App {
         WindowGroup("MacCrab Dashboard") {
             MainView(appState: appState, sysextManager: sysextManager)
                 .frame(minWidth: 950, minHeight: 600)
+                // Tint every native control (buttons, links, toggles,
+                // progress views, sliders) with MacCrab's brand orange,
+                // mirroring the `--accent` color used on maccrab.com.
+                // Cascades through the entire view hierarchy so custom
+                // views that want the brand color can omit explicit
+                // .foregroundStyle(MacCrabTheme.accent) and let the tint
+                // do it.
+                .tint(MacCrabTheme.accent)
                 .onAppear {
                     appDelegate.setupStatusBar(appState: appState, updater: updaterController.updater)
                     // Kick off system-extension activation on first
@@ -70,12 +79,55 @@ struct MacCrabApp: App {
                 .sheet(isPresented: $showWelcome) {
                     WelcomeView(isPresented: $showWelcome, sysextManager: sysextManager)
                 }
+                // Pause AppState's 10-second DB poll when the dashboard
+                // window is hidden or the app is backgrounded. MacCrab is
+                // LSUIElement=true so closing the dashboard leaves the
+                // sysext running — we just don't need to keep polling for
+                // UI state updates that nobody is looking at.
+                .onChange(of: scenePhase) { newPhase in
+                    switch newPhase {
+                    case .active:   appState.startPolling()
+                    case .inactive, .background: appState.stopPolling()
+                    @unknown default: break
+                    }
+                }
         }
         .commands {
+            // Replace the default "About MacCrab" with a panel that
+            // includes a clickable maccrab.com link in the credits
+            // field. Keeps the native About UX (same window chrome,
+            // same keyboard behavior) but adds the website link users
+            // expect from a modern Mac app.
+            CommandGroup(replacing: .appInfo) {
+                Button("About MacCrab") {
+                    MacCrabApp.showAboutPanel()
+                }
+            }
             // "Check for Updates…" under the application menu next to
             // About. The button greys out while a check is in flight.
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(updater: updaterController.updater)
+            }
+            // Help menu: direct link to maccrab.com. Standard macOS
+            // convention — apps with a website put "Visit XXX Website"
+            // in the Help menu so users can find it consistently.
+            CommandGroup(replacing: .help) {
+                Button("Visit maccrab.com") {
+                    if let url = URL(string: "https://maccrab.com") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Button("MacCrab Documentation") {
+                    if let url = URL(string: "https://github.com/peterhanily/maccrab#readme") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Divider()
+                Button("Report an Issue…") {
+                    if let url = URL(string: "https://github.com/peterhanily/maccrab/issues/new") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
             }
         }
 
@@ -83,6 +135,59 @@ struct MacCrabApp: App {
         Settings {
             SettingsView(appState: appState)
         }
+    }
+
+    /// Show the About MacCrab panel with a clickable maccrab.com link in
+    /// the credits. Called from the `CommandGroup(replacing: .appInfo)`
+    /// button above. Reaches for `NSApp.orderFrontStandardAboutPanel`
+    /// because a SwiftUI-native "About" window doesn't exist yet (as of
+    /// macOS 15) — the AppKit panel is the right primitive and gets us
+    /// Dark Mode, keyboard behavior, and localization for free.
+    @MainActor static func showAboutPanel() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info["CFBundleVersion"] as? String ?? ""
+        let versionString = build == version ? version : "\(version) (\(build))"
+
+        // Credits: clickable maccrab.com link + a one-line tagline.
+        // NSMutableAttributedString + NSAttributedString.Key.link is the
+        // standard way to make rich links render in the About panel.
+        let credits = NSMutableAttributedString()
+        let tagline = NSAttributedString(
+            string: "Local-first macOS threat detection.\nNo cloud, no SIEM, no telemetry.\n\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: {
+                    let p = NSMutableParagraphStyle()
+                    p.alignment = .center
+                    return p
+                }()
+            ]
+        )
+        credits.append(tagline)
+        let website = NSAttributedString(
+            string: "maccrab.com",
+            attributes: [
+                .link: URL(string: "https://maccrab.com")!,
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .paragraphStyle: {
+                    let p = NSMutableParagraphStyle()
+                    p.alignment = .center
+                    return p
+                }()
+            ]
+        )
+        credits.append(website)
+
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "MacCrab",
+            .applicationVersion: versionString,
+            .version: "",  // hide the parenthetical build number duplication
+            .credits: credits,
+            .init(rawValue: "Copyright"): "© 2026 CaddyLabs",
+        ])
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
@@ -173,23 +278,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor private func updateStatusBarIcon() {
         guard let button = statusItem?.button else { return }
         let degraded = appState?.isProtectionDegraded ?? false
-        let newTitle = degraded ? "⚠️🦀" : "🦀"
-        if button.title != newTitle {
-            button.title = newTitle
-        }
+        Self.applyStatusBarImage(to: button, degraded: degraded)
     }
 
-    private func createStatusBarItem() {
+    /// Template-rendered SF Symbol for the menu-bar item. Using SF Symbols
+    /// means the icon participates in the system's light/dark menu bar
+    /// styling automatically — the emoji we previously shipped always
+    /// rendered as a colorful crab regardless of menu bar theme. Accessory
+    /// badge for degraded state keeps the visual state signal without a
+    /// color cue.
+    @MainActor private static func applyStatusBarImage(to button: NSStatusBarButton, degraded: Bool) {
+        let symbolName = degraded ? "shield.lefthalf.filled.trianglebadge.exclamationmark" : "shield.lefthalf.filled"
+        let accessibilityLabel = degraded ? "MacCrab — protection degraded" : "MacCrab"
+        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)?
+            .withSymbolConfiguration(config) else {
+            // Fall back to the old emoji if the symbol isn't available
+            // (should be impossible on macOS 13+ but safe nonetheless).
+            button.title = degraded ? "⚠️🦀" : "🦀"
+            button.image = nil
+            return
+        }
+        image.isTemplate = true
+        button.image = image
+        button.title = ""  // image-only; title was only a fallback path
+        button.imagePosition = .imageOnly
+    }
+
+    @MainActor private func createStatusBarItem() {
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            button.title = "🦀"
-            button.font = NSFont.systemFont(ofSize: 14)
+            Self.applyStatusBarImage(to: button, degraded: false)
         }
 
-        // Attach a menu — clicking the crab opens this menu
+        // Attach a menu — clicking the status icon opens this menu
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "🦀 MacCrab", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "MacCrab", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
 
         let dashboardItem = NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d")
@@ -243,7 +368,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Critical Alert Popover (Crab Speech Bubble)
 
     func showAlertPopover(alert: AlertViewModel) {
-        DispatchQueue.main.async { [weak self] in
+        // Using Task { @MainActor in ... } is the Swift 5.9 idiom for
+        // "bounce to main later" from a nonisolated call site. Equivalent
+        // semantics to the old DispatchQueue.main.async but integrates
+        // with the structured concurrency world the rest of the app uses.
+        Task { @MainActor [weak self] in
             guard let self else { return }
             guard alert.id != self.lastPopoverAlertId else { return }
             self.lastPopoverAlertId = alert.id
@@ -281,7 +410,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             panel.isFloatingPanel = true
             panel.titleVisibility = .hidden
             panel.titlebarAppearsTransparent = true
-            panel.backgroundColor = .white
+            // Use the system's current window-background color so the popover
+            // respects Light/Dark Mode. The old `.white` literal produced a
+            // bright-white NSPanel over the dark desktop in Dark Mode, which
+            // looked like a rendering bug to users.
+            panel.backgroundColor = .windowBackgroundColor
             panel.hasShadow = true
             panel.isMovableByWindowBackground = true
             panel.orderFrontRegardless()
@@ -301,14 +434,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func flashCrab(for severity: Severity) {
         guard let button = statusItem?.button else { return }
+        let originalImage = button.image
         let originalTitle = button.title
 
-        // Pulse the crab with severity indicator
-        let icon = severity == .critical ? "🔴🦀" : "🟠🦀"
-        button.title = icon
+        // Pulse the status icon: swap the template shield for a color-
+        // rendered severity indicator. MultiColor symbol rendering on
+        // macOS 13+ picks up the severity tint; we fall back to the
+        // template image after 10s. Using hierarchical palette so the
+        // shield still reads correctly at 16pt.
+        let symbolName = severity == .critical
+            ? "exclamationmark.shield.fill"
+            : "exclamationmark.triangle.fill"
+        let tint: NSColor = severity == .critical
+            ? NSColor.systemRed
+            : NSColor.systemOrange
+        if let flashImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MacCrab alert")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [tint])) {
+            button.image = flashImage
+            button.title = ""
+        }
 
-        // Reset after 10 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+        // Reset after 10 seconds — restore whatever icon was showing
+        // before, so a degraded-state icon doesn't revert to healthy.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            button.image = originalImage
             button.title = originalTitle
         }
     }

@@ -15,10 +15,12 @@ struct OverviewDashboard: View {
     @AppStorage("prevention.networkBlocker") private var networkBlockerEnabled = false
     @AppStorage("prevention.persistenceGuard") private var persistenceGuardEnabled = false
 
-    // Muted colors for a professional look
-    private let criticalColor = Color(red: 0.75, green: 0.22, blue: 0.22)
-    private let highColor = Color(red: 0.80, green: 0.52, blue: 0.20)
-    private let allClearColor = Color(red: 0.25, green: 0.60, blue: 0.35)
+    // Severity + status colors sourced from MacCrabTheme so the dashboard
+    // tracks the site's palette automatically and adapts to the system
+    // Light/Dark appearance without hardcoded RGB drift.
+    private var criticalColor: Color { MacCrabTheme.severityCritical }
+    private var highColor: Color { MacCrabTheme.severityHigh }
+    private var allClearColor: Color { MacCrabTheme.ok }
 
     private var preventionActive: Bool {
         dnsSinkholeEnabled || networkBlockerEnabled || persistenceGuardEnabled

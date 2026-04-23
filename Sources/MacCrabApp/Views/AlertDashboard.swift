@@ -36,37 +36,47 @@ struct AlertDashboard: View {
     }
 
     private var filteredAlerts: [AlertViewModel] {
-        // Campaigns have their own dedicated tab — exclude them from the Alerts list.
-        var results = appState.dashboardAlerts.filter { !$0.ruleId.hasPrefix("maccrab.campaign.") }
-
-        // Apply session-level suppression overlay and pattern suppression at render time.
-        // This is the authoritative check — dashboardAlerts may have stale suppressed=false
-        // values from a DB reload, but suppressedIDs is never cleared by reloads.
-        results = results.map { alert in
-            var a = alert
-            if appState.suppressedIDs.contains(a.id) { a.suppressed = true }
-            if !a.suppressed && appState.isPatternSuppressed(a) { a.suppressed = true }
-            return a
+        // Inline helper — the authoritative "is this alert effectively
+        // suppressed?" check that overlays session-level state on top of
+        // whatever the DB returned. Kept as a closure so both the filter
+        // path (when hiding suppressed) and the display-annotation path
+        // (when showing them) use the same logic.
+        let isEffectivelySuppressed: (AlertViewModel) -> Bool = { [appState] alert in
+            alert.suppressed
+                || appState.suppressedIDs.contains(alert.id)
+                || appState.isPatternSuppressed(alert)
         }
 
-        // Hide suppressed alerts unless the checkbox is checked
-        if !showSuppressed {
-            results = results.filter { !$0.suppressed }
+        let query = searchText.isEmpty ? nil : searchText.lowercased()
+
+        // Single-pass filter using lazy evaluation — no intermediate array
+        // allocations, no per-keystroke full-array rebuild. Campaigns are
+        // excluded structurally (they have their own tab). The old
+        // implementation rebuilt a 500-element AlertViewModel array every
+        // keystroke via .map before filtering; that was the hot path.
+        let filteredLazy = appState.dashboardAlerts.lazy.filter { alert in
+            if alert.ruleId.hasPrefix("maccrab.campaign.") { return false }
+            if !showSuppressed && isEffectivelySuppressed(alert) { return false }
+            if let sev = selectedSeverity, alert.severity != sev { return false }
+            if let q = query {
+                let hay = "\(alert.ruleTitle) \(alert.processName) \(alert.processPath) \(alert.description) \(alert.mitreTechniques)".lowercased()
+                if !hay.contains(q) { return false }
+            }
+            return true
         }
-        if let severity = selectedSeverity {
-            results = results.filter { $0.severity == severity }
-        }
-        if !searchText.isEmpty {
-            let query = searchText.lowercased()
-            results = results.filter { alert in
-                alert.ruleTitle.lowercased().contains(query)
-                    || alert.processName.lowercased().contains(query)
-                    || alert.processPath.lowercased().contains(query)
-                    || alert.description.lowercased().contains(query)
-                    || alert.mitreTechniques.lowercased().contains(query)
+
+        // Only materialize the effective-suppressed annotation when the user
+        // has explicitly asked to see suppressed rows; otherwise the filter
+        // already excluded them, so the stored `suppressed` flag is accurate.
+        if showSuppressed {
+            return filteredLazy.map { alert -> AlertViewModel in
+                guard !alert.suppressed, isEffectivelySuppressed(alert) else { return alert }
+                var a = alert
+                a.suppressed = true
+                return a
             }
         }
-        return results
+        return Array(filteredLazy)
     }
 
     var body: some View {

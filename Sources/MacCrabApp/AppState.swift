@@ -349,16 +349,34 @@ final class AppState: ObservableObject {
     // MARK: Initialization
 
     init() {
-        // Poll every 10 seconds (not 5 — reduces CPU by 50%)
+        startPolling()
+        loadSuppressPatterns()
+        loadSuppressedIDs()
+        Task { await refresh() }
+    }
+
+    /// Start the 10-second poll. Idempotent: safe to call when the
+    /// dashboard comes back to foreground from a background state. Views
+    /// invoke `stopPolling()` in `.onChange(of: scenePhase)` when the
+    /// dashboard window is hidden, so a background MacCrab app isn't
+    /// hammering SQLite for updates nobody is looking at.
+    func startPolling() {
+        guard pollTimer == nil else { return }
         pollTimer = Timer.publish(every: 10.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in await self.refresh() }
             }
-        loadSuppressPatterns()
-        loadSuppressedIDs()
-        Task { await refresh() }
+    }
+
+    /// Stop the poll timer and release its subscription. Called from the
+    /// dashboard window's `.onChange(of: scenePhase)` when the window is
+    /// hidden / the app is backgrounded. Saves one SQLite sweep every
+    /// 10 s plus the downstream view invalidation work.
+    func stopPolling() {
+        pollTimer?.cancel()
+        pollTimer = nil
     }
 
     /// Get or create cached alert store.
@@ -1089,7 +1107,18 @@ final class AppState: ObservableObject {
             let now = Date()
             let elapsed = max(1, Int(now.timeIntervalSince(lastStatsUpdate)))
             let delta = currentCount - previousEventCount
-            eventsPerSecond = delta > 0 ? max(1, delta / elapsed) : 0
+            let newValue = delta > 0 ? max(1, delta / elapsed) : 0
+            // Only publish when the displayed value actually changes. Every
+            // @Published assignment invalidates every SwiftUI view that
+            // subscribes to AppState — and many views (OverviewDashboard,
+            // StatusBarMenu, ESHealthView) read eventsPerSecond. On a quiet
+            // system the computed value is frequently 0, and re-publishing
+            // the same 0 every 10s forced a full-dashboard redraw with no
+            // visible change. Guarding on inequality drops idle re-renders
+            // to zero.
+            if newValue != eventsPerSecond {
+                eventsPerSecond = newValue
+            }
             previousEventCount = currentCount
             lastStatsUpdate = now
         } catch {}

@@ -21,17 +21,25 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.6.1</string>
+	<string>1.6.2</string>
 	<key>CFBundleVersion</key>
-	<string>1.6.1</string>
+	<string>1.6.2</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSFullDiskAccessUsageDescription</key>
+	<string>MacCrab needs Full Disk Access so the detection engine can read TCC state, observe access to protected paths, and detect tamper attempts against its own configuration.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 CaddyLabs. MacCrab is distributed under the Apache 2.0 License.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>MacCrab inspects local network connections made by running processes to surface suspicious outbound patterns. Metadata stays on-device.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>MacCrab monitors for ultrasonic voice injection attacks.</string>
+	<string>MacCrab monitors for ultrasonic voice-injection attacks (DolphinAttack / NUIT). Audio is processed on-device and never leaves your Mac.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSSystemExtensionUsageDescription</key>

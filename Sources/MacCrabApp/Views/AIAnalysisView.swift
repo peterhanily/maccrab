@@ -13,6 +13,7 @@ struct AIAnalysisView: View {
     @State private var huntResult: String = ""
     @State private var isHunting: Bool = false
     @State private var selectedAnalysis: AlertViewModel? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
 
     private var investigations: [AlertViewModel] {
@@ -240,8 +241,12 @@ struct AIAnalysisView: View {
 
             ForEach(alerts, id: \.id) { alert in
                 AnalysisCard(alert: alert, isExpanded: selectedAnalysis == alert) {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    if reduceMotion {
                         selectedAnalysis = selectedAnalysis == alert ? nil : alert
+                    } else {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedAnalysis = selectedAnalysis == alert ? nil : alert
+                        }
                     }
                 }
             }
