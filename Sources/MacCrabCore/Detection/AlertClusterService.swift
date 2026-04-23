@@ -102,10 +102,11 @@ public actor AlertClusterService {
         clusters.reserveCapacity(buckets.count)
         for (fp, members) in buckets {
             let sorted = members.sorted { $0.timestamp > $1.timestamp }
-            guard let representative = sorted.first else { continue }
+            guard let representative = sorted.first,
+                  let oldest = sorted.last else { continue }
 
-            let firstSeen = sorted.last!.timestamp
-            let lastSeen = sorted.first!.timestamp
+            let firstSeen = oldest.timestamp
+            let lastSeen = representative.timestamp
             let maxSev = sorted.map(\.severity).max() ?? representative.severity
             let processName = representative.processName
                 ?? representative.processPath.map { ($0 as NSString).lastPathComponent }
