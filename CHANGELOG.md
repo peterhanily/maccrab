@@ -3,6 +3,58 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] — 2026-04-23
+
+Field-driven FP reduction in alerts and campaigns. Three structural bugs
+and two rule-content fixes surfaced by user dogfooding after v1.6.2 shipped.
+
+### Fixed
+
+- **Coordinated-attack campaign no longer fires on single alerts with
+  multi-tactic tags.** A rule carrying both `attack.discovery` and
+  `attack.defense_evasion` (e.g., csrutil-status) counted as "2 tactics
+  from 1 process" and triggered `Coordinated Attack from single process`
+  despite only a single underlying event. The detector now requires ≥2
+  distinct rule IDs before cross-tactic correlation kicks in.
+  (`CampaignDetector.swift` — both PID and path branches.)
+
+- **Campaign detector allow-list broadened to cover auto-updaters and
+  package managers.** New `isKnownBenignProcess` helper covers Sparkle's
+  `Autoupdate` binary (any path containing `Sparkle.framework/` or
+  `.sparkle-project.Sparkle/Installation/`), Google's `GoogleUpdater` /
+  `GoogleSoftwareUpdate` / `Keystone`, Microsoft AutoUpdate, macOS
+  `softwareupdated` / `SoftwareUpdateNotificationManager`, and Homebrew.
+  Previously those binaries produced repeated `Coordinated Attack` and
+  `Kill Chain` campaigns during routine update cycles.
+
+- **Kill-chain threshold raised 3 → 4.** Three distinct tactics within
+  a 10-minute window was trivially hit on developer machines running
+  everyday admin commands (ps / lsof / find + csrutil status + curl).
+  Four tactics is a materially stronger signal while still matching
+  real multi-stage attack shapes (discovery → credential_access →
+  persistence → exfiltration).
+
+- **`csrutil_status_check.yml` restricted to status-like commands.**
+  The rule previously fired on any csrutil invocation; when a user ran
+  `csrutil disable`, BOTH that rule AND `sip_check_before_tampering.yml`
+  fired on the same event, producing two alerts tagged `discovery` and
+  `defense_evasion` respectively. Now only fires on `status`, `netboot`,
+  `authenticated-root status`, `--help`.
+
+- **`mdm_enrollment_check.yml` excludes auto-updater processes.** Google's
+  Updater runs `profiles status -type enrollment` as a legitimate
+  MDM-awareness check before applying a Chrome/Drive update. Added filters
+  for GoogleUpdater, GoogleSoftwareUpdate, Sparkle, SoftwareUpdate, and
+  `launcher` parent processes.
+
+### Tests
+
+643 tests pass (up 5) — new `CampaignDetectorFPRegressionTests` locks in
+the single-alert-multi-tag gate, the Sparkle + GoogleUpdater allow-list,
+and the kill-chain threshold. Counter-test proves two distinct alerts on
+the same process still fire coordinated-attack (the detector isn't just
+turned off).
+
 ## [1.6.3] — 2026-04-23
 
 Bring back the 🦀 menu-bar icon after immediate user feedback on v1.6.2.

@@ -32,6 +32,39 @@ detection:
             - 'jamf'
             - 'Mosyle'
             - 'Kandji'
+    # Auto-update frameworks legitimately check MDM-enrollment state so
+    # they can defer to enterprise-managed update policies. Google's
+    # Updater is the canonical one; Sparkle, Chrome's SparkleUpdate,
+    # Brave/Edge/Arc updaters, and Mozilla's updater all share the
+    # pattern. Filter on ParentImage (immediate parent) plus a
+    # wide path-contains so the whole updater process tree is
+    # excluded.
+    filter_auto_updater_parent:
+        ParentImage|contains:
+            - 'GoogleUpdater'
+            - 'GoogleSoftwareUpdate'
+            - 'Sparkle'
+            - 'Autoupdate'
+            - 'updater'
+            - 'Updater'
+            - 'softwareupdate'
+            - 'Brave Browser Helper'
+            - 'Microsoft AutoUpdate'
+            - 'Mozilla Maintenance Service'
+    filter_auto_updater_ancestry:
+        ParentImage|contains:
+            - '/Library/Google/GoogleSoftwareUpdate/'
+            - '/Application Support/Google/GoogleUpdater/'
+            - '/Library/Caches/com.google.Keystone/'
+            - '/Library/Caches/'
+            - '/Sparkle.framework/'
+            - '/Sparkle-'
+    filter_auto_updater_launcher:
+        # GoogleUpdater's subprocess chain is `launcher -> GoogleUpdater
+        # -> launcher -> ... -> profiles`; the immediate parent is often
+        # named `launcher`. Exact-name match keeps this scoped.
+        ParentImage|endswith:
+            - '/launcher'
     filter_terminal:
         ParentImage|endswith:
             - '/bash'
@@ -50,7 +83,7 @@ detection:
             - '/Code'
     filter_apple_parent:
         ParentSignerType: 'apple'
-    condition: selection and not filter_system and not filter_mdm and not filter_terminal and not filter_apple_parent
+    condition: selection and not filter_system and not filter_mdm and not filter_auto_updater_parent and not filter_auto_updater_ancestry and not filter_auto_updater_launcher and not filter_terminal and not filter_apple_parent
 falsepositives:
     - IT administrators checking enrollment status
     - Compliance verification scripts

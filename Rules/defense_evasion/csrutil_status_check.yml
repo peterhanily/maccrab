@@ -15,6 +15,18 @@ logsource:
 detection:
     selection:
         Image|endswith: '/csrutil'
+        # Only fire on reconnaissance queries, not on active-tampering
+        # invocations. `csrutil disable / clear / authenticated-root
+        # disable` are caught by `sip_check_before_tampering.yml` and
+        # tagged attack.defense_evasion; double-firing both rules on a
+        # single disable attempt was producing the "coordinated attack
+        # from single process" campaign on csrutil (discovery +
+        # defense_evasion from two rules on one invocation).
+        CommandLine|contains:
+            - ' status'
+            - ' netboot'
+            - ' authenticated-root status'
+            - ' --help'
     filter_apple:
         ParentImage|startswith: '/System/'
     filter_platform:

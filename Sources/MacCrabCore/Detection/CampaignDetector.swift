@@ -136,7 +136,14 @@ public actor CampaignDetector {
         stormThreshold: Int = 10,
         stormCriticalThreshold: Int = 50,
         stormWindow: TimeInterval = 300,
-        minTacticsForKillChain: Int = 3,
+        // v1.6.4: raised from 3 → 4. The old value was trivially hit on
+        // developer machines running routine admin commands (ps / lsof
+        // for discovery, csrutil status for defense_evasion, curl for
+        // exfiltration all within 10 minutes). 4 distinct tactics is
+        // a stronger signal while still catching real multi-stage
+        // attacks, which typically go discovery → credential_access →
+        // persistence → exfiltration (four tactics, by design).
+        minTacticsForKillChain: Int = 4,
         maxRecentAlerts: Int = 50_000,
         campaignDedupWindow: TimeInterval = 600
     ) {
@@ -297,6 +304,52 @@ public actor CampaignDetector {
             || path.hasPrefix("/System/Applications/Utilities/")
     }
 
+    /// Broader allow-list for processes that legitimately span multiple
+    /// tactics during normal operation: Apple system daemons plus known-
+    /// benign auto-update, package-manager, and MDM binaries. Used by
+    /// both the kill-chain tactic counter and the coordinated-attack
+    /// per-process filter.
+    ///
+    /// Empirically-driven: every entry here corresponds to a specific
+    /// field FP report. Sparkle's `Autoupdate` binary lives at a deep
+    /// path under `~/Library/Caches/<bundle-id>/org.sparkle-project.
+    /// Sparkle/Installation/**/Autoupdate` — matching the `/Sparkle/`
+    /// substring is safer than matching the full path variant that
+    /// includes a per-run nonce.
+    static func isKnownBenignProcess(processPath: String?) -> Bool {
+        guard let path = processPath else { return false }
+        if isAppleSystemDaemon(processPath: path) { return true }
+
+        // Sparkle auto-update framework — bundled into many third-party
+        // Mac apps (including MacCrab itself). The Autoupdate binary
+        // does signing checks, file writes, and plist modifications as
+        // part of an update; every one of those is a legitimate tactic.
+        if path.contains("/Sparkle.framework/") { return true }
+        if path.contains(".sparkle-project.Sparkle/Installation/") { return true }
+        if path.hasSuffix("/Autoupdate") && path.contains("/Sparkle") { return true }
+
+        // Google's auto-updater (GoogleUpdater, ex-Keystone). Ships with
+        // Chrome, Drive, and various Google apps. Checks MDM state,
+        // watches install receipts, writes to its own cache.
+        if path.contains("/GoogleUpdater/") { return true }
+        if path.contains("/GoogleSoftwareUpdate/") { return true }
+        if path.contains("/Library/Caches/com.google.Keystone/") { return true }
+
+        // Microsoft auto-update
+        if path.contains("Microsoft AutoUpdate") { return true }
+
+        // macOS native software-update stack
+        if path.hasSuffix("/softwareupdated") { return true }
+        if path.contains("SoftwareUpdateNotificationManager") { return true }
+
+        // Homebrew — `brew upgrade` legitimately touches many tactics.
+        if path.hasPrefix("/opt/homebrew/bin/brew") { return true }
+        if path.hasPrefix("/usr/local/bin/brew") { return true }
+        if path.contains("/Homebrew/Library/Homebrew/") { return true }
+
+        return false
+    }
+
     private func checkKillChain() -> Campaign? {
         // v1.4: only count tactics contributed by medium+ severity alerts.
         // Low-severity discovery rules (ps, lsof, dscl, ioreg, …) produce
@@ -316,7 +369,11 @@ public actor CampaignDetector {
             $0.severity >= .medium
             && !$0.ruleId.hasPrefix("maccrab.usb.")
             && !$0.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
-            && !Self.isAppleSystemDaemon(processPath: $0.processPath)
+            // v1.6.4: broadened daemon filter to isKnownBenignProcess —
+            // covers Sparkle/GoogleUpdater/brew/softwareupdated alongside
+            // Apple system daemons. Auto-updaters routinely touch
+            // multiple tactics during a single update cycle.
+            && !Self.isKnownBenignProcess(processPath: $0.processPath)
         }
         let allTactics = Set(tacticContributingAlerts.flatMap(\.tactics).map(normalizeTactic))
         guard allTactics.count >= 2 else { return nil }
@@ -477,7 +534,9 @@ public actor CampaignDetector {
         // rtcreportingd, nsurlsessiond, …) span tactics by design as part of
         // macOS bookkeeping. Don't emit a coordinated-attack campaign for
         // them — 15+ FPs in user's 24h field window.
-        if Self.isAppleSystemDaemon(processPath: latestAlert.processPath) {
+        // v1.6.4: broadened to isKnownBenignProcess which also covers Sparkle's
+        // Autoupdate, GoogleUpdater, softwareupdated, brew, and MDM agents.
+        if Self.isKnownBenignProcess(processPath: latestAlert.processPath) {
             return nil
         }
         // v1.4.9: trusted browser helpers (Google Chrome Helper, Safari
@@ -501,6 +560,15 @@ public actor CampaignDetector {
         if let pid = latestAlert.pid {
             let pidAlerts = windowAlerts.filter { $0.pid == pid }
             let pidTactics = aggregateNormalizedTactics(pidAlerts)
+            // v1.6.4: require ≥2 distinct rule IDs before claiming a
+            // "coordinated attack." A single alert that happens to carry
+            // both `attack.discovery` AND `attack.defense_evasion` tags
+            // (the classic csrutil-status pattern) inflated tactic count
+            // to 2 without actually being two events. This gate forces
+            // the campaign to reflect genuine multi-step activity —
+            // multiple rules firing, not one rule with rich tags.
+            let distinctRuleIds = Set(pidAlerts.map(\.ruleId))
+            guard distinctRuleIds.count >= 2 else { return nil }
 
             if pidTactics.count >= 3 {
                 let description = "Process PID \(pid) triggered alerts spanning \(pidTactics.count) tactics: \(pidTactics.sorted().joined(separator: ", "))"
@@ -537,6 +605,11 @@ public actor CampaignDetector {
         if let path = latestAlert.processPath {
             let pathAlerts = windowAlerts.filter { $0.processPath == path }
             let pathTactics = aggregateNormalizedTactics(pathAlerts)
+            // Same ≥2-distinct-ruleIds gate as the PID branch above —
+            // prevents multi-tag single-rule alerts from inflating
+            // the coordinated-attack signal.
+            let distinctRuleIds = Set(pathAlerts.map(\.ruleId))
+            guard distinctRuleIds.count >= 2 else { return nil }
 
             if pathTactics.count >= 3 {
                 let lastComponent = (path as NSString).lastPathComponent

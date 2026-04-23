@@ -60,8 +60,8 @@ targets:
         CFBundleDisplayName: MacCrab
         CFBundleIdentifier: com.maccrab.app
         CFBundleExecutable: MacCrab
-        CFBundleVersion: "1.6.3"
-        CFBundleShortVersionString: "1.6.3"
+        CFBundleVersion: "1.6.4"
+        CFBundleShortVersionString: "1.6.4"
         CFBundlePackageType: APPL
         CFBundleIconFile: AppIcon
         CFBundleIconName: AppIcon
@@ -128,8 +128,8 @@ targets:
         CFBundleDisplayName: MacCrab Endpoint Security Extension
         CFBundleIdentifier: com.maccrab.agent
         CFBundleExecutable: com.maccrab.agent
-        CFBundleVersion: "1.6.3"
-        CFBundleShortVersionString: "1.6.3"
+        CFBundleVersion: "1.6.4"
+        CFBundleShortVersionString: "1.6.4"
         # SYSX (not SYEX) — sysextd rejects any other value. The v1.3.3
         # bug history is in CHANGELOG; don't regress.
         CFBundlePackageType: SYSX
