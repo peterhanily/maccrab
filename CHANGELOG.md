@@ -3,6 +3,57 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.6] — 2026-04-23
+
+The biggest AI push in the codebase yet. Six independent services
+land in this release — every one covered by unit tests, every one
+feature-flaggable, every one designed around MacCrab's unique kernel
+vantage: **what agents actually do on the machine**, not just what
+they say to the model.
+
+### Added
+
+- **`AlertClusterService`** (`Sources/MacCrabCore/Detection/`) —
+  Deterministic-first alert clustering by `ruleId::processName`
+  fingerprint. Optional on-demand LLM rationale pass for clusters
+  the analyst expands. 11 unit tests.
+
+- **`LLMConsensusService`** (`Sources/MacCrabCore/LLM/`) — Fan out
+  a classification prompt to N configured backends in parallel;
+  declare consensus only when ≥ threshold backends agree on a
+  non-inconclusive label. Per-backend timeouts prevent the slowest
+  from gating the result. 17 unit tests.
+
+- **`TriageService`** (`Sources/MacCrabCore/LLM/`) — Single-backend
+  disposition recommender. Produces one of `suppress / keep /
+  escalate / inconclusive` with a one-sentence rationale. Advisory
+  only; no auto-action. 12 unit tests.
+
+- **`MCPBaselineService`** (`Sources/MacCrabCore/AIGuard/`) —
+  Runtime behavioral fingerprint per MCP server (file basenames,
+  DNS domains, child-process basenames). Dual-gate promotion
+  (observation count AND wall-clock window) from `learning` to
+  `enforcing`. Broadcasts `BaselineDeviation` via AsyncStream. 9
+  unit tests.
+
+- **`AgentLineageService`** (`Sources/MacCrabCore/AIGuard/`) —
+  Chronological timeline of LLM API calls, process spawns, file
+  I/O, network connections, and alerts per AI tool session.
+  Per-session ring buffer, LRU session eviction. 9 unit tests.
+
+- **`AgenticInvestigator`** (`Sources/MacCrabCore/LLM/`) — Bounded
+  multi-round loop over a campaign with three tool calls
+  (`describe_rule`, `alert_descriptions`, `process_children`) the
+  LLM can issue to pull local context. Returns a structured
+  `InvestigationReport` (verdict, summary, up to 5 findings,
+  recommended action). 12 unit tests.
+
+### Tests
+
+**719 tests pass (up from 649).** +70 new tests across six feature
+suites. Zero modifications to existing public APIs; each service
+wires in as an opt-in dependency.
+
 ## [1.6.5] — 2026-04-23
 
 Continuation of the v1.6.x FP-reduction thread. Eight distinct noise

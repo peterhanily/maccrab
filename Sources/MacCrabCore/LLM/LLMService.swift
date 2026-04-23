@@ -45,6 +45,14 @@ public actor LLMService {
         await backend.isAvailable()
     }
 
+    /// Best-effort human-readable backend name. Useful for logging and
+    /// for the consensus service, which needs a vote identifier even
+    /// when a query times out (no `LLMEnhancement` to read `.provider`
+    /// from).
+    public func describeProvider() async -> String {
+        await backend.providerName
+    }
+
     /// Send a prompt to the LLM with sanitization, caching, and rate limiting.
     public func query(
         systemPrompt: String,
