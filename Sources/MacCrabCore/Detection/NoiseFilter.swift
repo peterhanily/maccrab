@@ -88,6 +88,24 @@ public enum NoiseFilter {
         if isInteractiveAdminCommand(event: event) {
             matches.removeAll { $0.severity != .critical }
         }
+
+        // Gate 6: auto-updater process tree. GoogleUpdater, Sparkle's
+        // Autoupdate, Microsoft AutoUpdate, softwareupdated, brew, etc.
+        // legitimately touch multiple MITRE tactics during an update
+        // cycle (MDM-state probe, xattr removal, plist write, code-sig
+        // check). Drop non-critical matches when the subject OR any
+        // ancestor is a known auto-updater — the Sigma per-rule
+        // ParentImage filters we've added against GoogleUpdater /
+        // Sparkle require the DIRECT parent to match by name, which
+        // fails when Chrome → GoogleUpdater.app/Contents/MacOS/
+        // GoogleUpdater → launcher → GoogleUpdater → profiles chains
+        // shove the updater two ancestors up. This gate walks the
+        // full ancestor list so the backstop works regardless of chain
+        // depth. Critical still fires so a real compromise inside an
+        // updater tree isn't hidden.
+        if isAutoUpdaterOrAncestor(event: event) {
+            matches.removeAll { $0.severity != .critical }
+        }
     }
 
     /// True when an event's subject is a MacCrab process, a MacCrab file,
@@ -149,6 +167,25 @@ public enum NoiseFilter {
         }
         for ancestor in event.process.ancestors {
             if isInteractiveTerminalAncestor(ancestor.executable) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True when the event's subject process or any ancestor in its
+    /// lineage is a known auto-updater. Delegates to
+    /// `CampaignDetector.isAutoUpdater` (the narrow variant) — NOT
+    /// `isKnownBenignProcess`, which includes Apple system daemon paths
+    /// that would sweep in Terminal, Finder, and every
+    /// `/System/Applications/Utilities/` tool. Exposed publicly so the
+    /// campaign and sequence engines can reuse the same definition.
+    public static func isAutoUpdaterOrAncestor(event: Event) -> Bool {
+        if CampaignDetector.isAutoUpdater(processPath: event.process.executable) {
+            return true
+        }
+        for ancestor in event.process.ancestors {
+            if CampaignDetector.isAutoUpdater(processPath: ancestor.executable) {
                 return true
             }
         }

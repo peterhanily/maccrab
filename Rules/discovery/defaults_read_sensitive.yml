@@ -58,7 +58,19 @@ detection:
             - '/ruby'
     filter_apple_parent:
         ParentSignerType: 'apple'
-    condition: selection and selection_sensitive and not filter_system and not filter_apple_signed and not filter_platform and not filter_terminal and not filter_apple_parent
+    # Backstop: Apple ships /usr/bin/defaults as a platform binary.
+    # PlatformBinary / SignerType enrichment is not always populated
+    # on every event, so anchor on the binary's install location as a
+    # hard guarantee.
+    filter_system_path:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/System/'
+    condition: selection and selection_sensitive and not filter_system and not filter_apple_signed and not filter_platform and not filter_terminal and not filter_apple_parent and not filter_system_path
 falsepositives:
     - System administration and configuration scripts
     - Preference management tools

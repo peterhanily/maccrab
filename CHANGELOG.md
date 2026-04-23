@@ -3,6 +3,81 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.5] — 2026-04-23
+
+Continuation of the v1.6.x FP-reduction thread. Eight distinct noise
+patterns surfaced by overnight test-machine soak; four are fixed at the
+engine level (new ancestor-walk gate), four at the rule level.
+
+### Fixed
+
+- **New NoiseFilter Gate 6: auto-updater ancestor walk.** v1.6.4's
+  per-rule `ParentImage|contains 'GoogleUpdater'` filters only caught
+  the immediate parent. Real chains nest deeper —
+  Chrome → GoogleUpdater → launcher → GoogleUpdater → profiles — so
+  `profiles`'s parent is the second GoogleUpdater but MDM-enrollment
+  still fires. The new gate walks the full ancestor list, dropping
+  non-critical matches whenever the subject or any ancestor is a
+  known auto-updater (Sparkle, GoogleUpdater/Keystone, Microsoft
+  AutoUpdate, `softwareupdated`, Homebrew). Critical still fires.
+
+- **`isKnownBenignProcess` split into `isAutoUpdater` + daemon check.**
+  The previous single helper mixed Apple-system-daemon paths with
+  auto-updater paths; using it for ancestor-walk filtering swept in
+  Terminal.app as "benign" and would silently disable detection for
+  anything launched from a terminal. The narrower `isAutoUpdater`
+  variant excludes Apple system paths and is the one used by
+  Gate 6. Campaign detector continues to use the broader
+  `isKnownBenignProcess` where "is this an OS component or updater?"
+  is the right question.
+
+- **TCC bypass rule allow-lists auto-updaters.** GoogleUpdater
+  spawned from `/Applications/Google Chrome.app/` matched
+  `selection_bundle_path` but the updater binary lives under
+  `~/Library/Application Support/Google/…`, so
+  `filter_developer_signed: Image|startswith '/Applications/'`
+  didn't apply. Added explicit `filter_auto_updater_image` and
+  `filter_auto_updater_endswith` covering GoogleUpdater, Sparkle,
+  Keystone, Microsoft AutoUpdate, and the `launcher` basename.
+
+- **Credential-theft sequence rule adds Apple-daemon basename
+  filter.** `/usr/libexec/networkserviceproxy` fired
+  `credential_theft_exfil` at CRITICAL despite the existing
+  `filter_system_path`. The sequence engine's per-step filter
+  evaluation can race with SignerType enrichment, so the cred_read
+  step now also anchors on 16 well-known Apple daemon basenames
+  (nsurlsessiond, trustd, apsd, accountsd, identityservicesd,
+  cloudd, bird, fileproviderd, keychainsharingmessagingd, …).
+
+- **Discovery-rule platform-path backstop.**
+  `process_listing_by_unsigned.yml`, `defaults_read_sensitive.yml`,
+  `system_enumeration_burst.yml`, and `csrutil_status_check.yml` now
+  carry a `filter_system_path: Image|startswith` list covering
+  `/bin/`, `/sbin/`, `/usr/bin/`, `/usr/sbin/`, `/usr/libexec/`,
+  `/System/`. This is belt-and-braces with `filter_platform`
+  (`PlatformBinary: true`) — field data showed PlatformBinary
+  enrichment isn't always populated when ES events arrive before
+  code-sig resolution settles. Since these paths are SIP-protected
+  on a healthy system, a hard path anchor is a safe guarantee.
+
+- **Hidden-file rule hardware-vendor allow-list.** Logitech Options+
+  (`logioptionsplus_agent`) writes per-user dotfiles for state.
+  Added `filter_hw_vendor_bundle: Image|startswith` for
+  `/Library/Application Support/` subdirs Logitech, Razer, Elgato,
+  Corsair, SteelSeries, Blackmagic, plus `/Applications/Logi Options+
+  .app/` and `/Applications/Logitech*`. Vendor binaries rename
+  frequently (`logi_agent` → `LogiMgrDaemon` → `logioptionsplus_agent`)
+  so anchoring on install path is more durable than basename matching.
+
+### Tests
+
+649 tests pass (up from 643). New `AutoUpdaterAncestorGateTests`
+suite (6 tests) locks in Gate 6: GoogleUpdater-as-subject suppressed,
+`profiles` under 4-deep GoogleUpdater chain suppressed, Sparkle
+Autoupdate ancestor suppressed, critical-under-updater still fires
+(counter-test), non-updater ancestors NOT suppressed (counter-test),
+public API exposed for detector reuse.
+
 ## [1.6.4] — 2026-04-23
 
 Field-driven FP reduction in alerts and campaigns. Three structural bugs

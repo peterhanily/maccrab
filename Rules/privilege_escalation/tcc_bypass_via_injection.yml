@@ -41,7 +41,27 @@ detection:
             - '/Applications/'
             - '/System/'
         SignerType: 'developer'
-    condition: selection_bundle_path and not filter_apple_child and not filter_known_helpers and not filter_developer_signed
+    # Auto-updaters routinely spawn from inside their host app's bundle.
+    # Chrome → GoogleUpdater, Slack/Discord/VS Code → Sparkle Autoupdate,
+    # Edge/Teams → Microsoft AutoUpdate. The update binary lives outside
+    # `/Applications/` (commonly `~/Library/Application Support/…` or
+    # `~/Library/Caches/…`), so filter_developer_signed doesn't catch
+    # them. Match on the image path directly.
+    filter_auto_updater_image:
+        Image|contains:
+            - '/GoogleUpdater/'
+            - '/GoogleSoftwareUpdate/'
+            - '/Library/Caches/com.google.Keystone/'
+            - '/Sparkle.framework/'
+            - '.sparkle-project.Sparkle/Installation/'
+            - '/Microsoft AutoUpdate.app/'
+            - '/softwareupdated'
+    filter_auto_updater_endswith:
+        Image|endswith:
+            - '/GoogleUpdater'
+            - '/Autoupdate'
+            - '/launcher'
+    condition: selection_bundle_path and not filter_apple_child and not filter_known_helpers and not filter_developer_signed and not filter_auto_updater_image and not filter_auto_updater_endswith
 falsepositives:
     - Browser extensions spawning native messaging hosts
     - Legitimate application helper processes with valid code signatures

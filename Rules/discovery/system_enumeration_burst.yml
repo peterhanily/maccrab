@@ -52,7 +52,19 @@ detection:
             - '/ruby'
     filter_apple_child:
         SignerType: 'apple'
-    condition: selection and not filter_apple and not filter_platform and not filter_terminal and not filter_apple_child
+    # Backstop: every binary in the selection list ships under /usr/bin/
+    # or /usr/sbin/. Anchor on install location to guarantee we don't
+    # flag them even if PlatformBinary / SignerType enrichment is
+    # unavailable on a given event.
+    filter_system_path:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/System/'
+    condition: selection and not filter_apple and not filter_platform and not filter_terminal and not filter_apple_child and not filter_system_path
 falsepositives:
     - System administration scripts
     - Monitoring tools

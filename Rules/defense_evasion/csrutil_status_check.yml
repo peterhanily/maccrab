@@ -50,7 +50,19 @@ detection:
             - '/node'
     filter_apple_parent:
         ParentSignerType: 'apple'
-    condition: selection and not filter_apple and not filter_platform and not filter_terminal and not filter_apple_parent
+    # Backstop: /usr/bin/csrutil is an Apple platform binary. Anchor on
+    # the shipped path so the rule stays silent even when PlatformBinary
+    # / ParentSignerType enrichment is unavailable. This is belt-and-
+    # braces with filter_platform above.
+    filter_system_path:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/System/'
+    condition: selection and not filter_apple and not filter_platform and not filter_terminal and not filter_apple_parent and not filter_system_path
 falsepositives:
     - System administration
     - Security audit tools

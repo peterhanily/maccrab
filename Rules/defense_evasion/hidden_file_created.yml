@@ -37,7 +37,24 @@ detection:
             - 'logioptionsplus'
             - 'LogiMgr'
             - 'logi_'
-    condition: selection and not filter_apple and not filter_common and not filter_known_apps
+            - 'LogiOptionsPlus'
+    # v1.6.5: well-known hardware-vendor utilities installed to
+    # /Library/Application Support/ that manage devices (mice, keyboards,
+    # webcams, capture cards). They routinely write per-user dotfiles
+    # under $HOME for state persistence. Anchored on install path, not
+    # Image|contains, because vendor binaries rename frequently across
+    # releases (logi_agent → LogiMgrDaemon → logioptionsplus_agent).
+    filter_hw_vendor_bundle:
+        Image|startswith:
+            - '/Library/Application Support/Logitech'
+            - '/Library/Application Support/Razer'
+            - '/Library/Application Support/Elgato'
+            - '/Library/Application Support/Corsair'
+            - '/Library/Application Support/SteelSeries'
+            - '/Library/Application Support/Blackmagic'
+            - '/Applications/Logi Options+.app/'
+            - '/Applications/Logitech'
+    condition: selection and not filter_apple and not filter_common and not filter_known_apps and not filter_hw_vendor_bundle
 falsepositives:
     - Development tools creating dotfiles
     - Application configuration files

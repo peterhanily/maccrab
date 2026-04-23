@@ -304,21 +304,23 @@ public actor CampaignDetector {
             || path.hasPrefix("/System/Applications/Utilities/")
     }
 
-    /// Broader allow-list for processes that legitimately span multiple
-    /// tactics during normal operation: Apple system daemons plus known-
-    /// benign auto-update, package-manager, and MDM binaries. Used by
-    /// both the kill-chain tactic counter and the coordinated-attack
-    /// per-process filter.
+    /// Strict auto-updater allow-list. Narrower than
+    /// `isKnownBenignProcess` — does NOT include Apple system daemon
+    /// paths (those would sweep in Terminal, Finder, Safari, any
+    /// /System/Applications/Utilities/ tool). Use this helper when you
+    /// want the engine to drop non-critical matches based on subject-
+    /// or-ancestor path, because matching Terminal or Safari as
+    /// ancestor would silently disable detection for all Terminal-
+    /// launched activity.
     ///
-    /// Empirically-driven: every entry here corresponds to a specific
-    /// field FP report. Sparkle's `Autoupdate` binary lives at a deep
-    /// path under `~/Library/Caches/<bundle-id>/org.sparkle-project.
-    /// Sparkle/Installation/**/Autoupdate` — matching the `/Sparkle/`
-    /// substring is safer than matching the full path variant that
-    /// includes a per-run nonce.
-    static func isKnownBenignProcess(processPath: String?) -> Bool {
+    /// Empirically-driven: every entry corresponds to a specific field
+    /// FP. Sparkle's `Autoupdate` binary lives at a deep path under
+    /// `~/Library/Caches/<bundle-id>/org.sparkle-project.Sparkle/
+    /// Installation/**/Autoupdate` — matching the `/Sparkle/`
+    /// substring is safer than the full path variant with per-run
+    /// nonces.
+    static func isAutoUpdater(processPath: String?) -> Bool {
         guard let path = processPath else { return false }
-        if isAppleSystemDaemon(processPath: path) { return true }
 
         // Sparkle auto-update framework — bundled into many third-party
         // Mac apps (including MacCrab itself). The Autoupdate binary
@@ -348,6 +350,20 @@ public actor CampaignDetector {
         if path.contains("/Homebrew/Library/Homebrew/") { return true }
 
         return false
+    }
+
+    /// Broader allow-list for processes that legitimately span multiple
+    /// tactics during normal operation: Apple system daemons plus known-
+    /// benign auto-update, package-manager, and MDM binaries. Used by
+    /// the kill-chain tactic counter and the coordinated-attack per-
+    /// process filter where "is this process an OS component or an
+    /// updater?" is the right question. DO NOT use this helper in
+    /// ancestor-walk filters — Terminal.app would sweep in every admin
+    /// invocation. See `isAutoUpdater` for the narrower check.
+    static func isKnownBenignProcess(processPath: String?) -> Bool {
+        guard let path = processPath else { return false }
+        if isAppleSystemDaemon(processPath: path) { return true }
+        return isAutoUpdater(processPath: path)
     }
 
     private func checkKillChain() -> Campaign? {

@@ -632,3 +632,185 @@ struct InteractiveAdminGateTests {
                 "Gate 5 only applies to a whitelisted set of admin CLI basenames — curl is not one")
     }
 }
+
+// MARK: - Auto-updater ancestor gate (v1.6.5)
+
+/// Gate 6 regression: the auto-updater ancestor walk. Introduced after
+/// v1.6.4 shipped per-rule ParentImage filters for GoogleUpdater/Sparkle
+/// that only caught direct parents — a test machine still produced MDM-
+/// enrollment medium alerts when the chain was Chrome → GoogleUpdater →
+/// launcher → GoogleUpdater → profiles (`profiles`'s immediate parent
+/// was the second GoogleUpdater, but its *name* basename was mangled by
+/// Sigma's |contains matching). The engine-level gate walks all
+/// ancestors and drops non-critical matches regardless of chain depth.
+@Suite("FP regression: auto-updater ancestor gate")
+struct AutoUpdaterAncestorGateTests {
+
+    private func execUnderAncestors(
+        processPath: String,
+        ancestors: [ProcessAncestor],
+        signerType: SignerType? = .devId
+    ) -> Event {
+        let codeSig: CodeSignatureInfo? = signerType.map {
+            CodeSignatureInfo(
+                signerType: $0,
+                teamId: "EQHXZ8M8AV", signingId: nil, authorities: [],
+                flags: 0, isNotarized: true
+            )
+        }
+        let basename = (processPath as NSString).lastPathComponent
+        let proc = ProcessInfo(
+            pid: Int32.random(in: 1000...60000),
+            ppid: ancestors.first?.pid ?? 1, rpid: 1,
+            name: basename, executable: processPath,
+            commandLine: "\(processPath) status", args: [processPath, "status"],
+            workingDirectory: "/",
+            userId: 501, userName: "phanily", groupId: 20,
+            startTime: Date(),
+            codeSignature: codeSig,
+            ancestors: ancestors,
+            architecture: "arm64",
+            isPlatformBinary: false
+        )
+        return Event(
+            eventCategory: .process,
+            eventType: .start,
+            eventAction: "exec",
+            process: proc
+        )
+    }
+
+    @Test("GoogleUpdater as subject process suppresses non-critical matches")
+    func googleUpdaterSubjectSuppressed() async throws {
+        var matches = [
+            RuleMatch(ruleId: "d1a2b3c4-0410", ruleName: "TCC Bypass via Process Injection",
+                      severity: .high, description: "", mitreTechniques: [], tags: []),
+            RuleMatch(ruleId: "d1a2b3c4-0255", ruleName: "MDM Enrollment Status Check",
+                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execUnderAncestors(
+            processPath: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+            ancestors: [
+                ProcessAncestor(pid: 600, executable: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome"),
+            ]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "GoogleUpdater running as the subject process must suppress all non-critical rule matches")
+    }
+
+    @Test("profiles under deep GoogleUpdater chain is suppressed")
+    func profilesUnderDeepUpdaterChainSuppressed() async throws {
+        // Exact chain from user's test system: Chrome → GoogleUpdater →
+        // launcher → GoogleUpdater → profiles. Per-rule ParentImage
+        // filters only catch the immediate parent; Gate 6 must catch
+        // this regardless.
+        var matches = [
+            RuleMatch(ruleId: "d1a2b3c4-0255", ruleName: "MDM Enrollment Status Check",
+                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execUnderAncestors(
+            processPath: "/usr/bin/profiles",
+            ancestors: [
+                // Immediate parent — second GoogleUpdater invocation.
+                ProcessAncestor(
+                    pid: 7003,
+                    executable: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+                    name: "GoogleUpdater"
+                ),
+                ProcessAncestor(
+                    pid: 7002,
+                    executable: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/Helpers/launcher",
+                    name: "launcher"
+                ),
+                ProcessAncestor(
+                    pid: 7001,
+                    executable: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+                    name: "GoogleUpdater"
+                ),
+                ProcessAncestor(pid: 600, executable: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome"),
+            ],
+            signerType: .apple  // profiles itself is Apple
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "profiles spawned inside the GoogleUpdater subprocess tree must be suppressed by ancestor walk")
+    }
+
+    @Test("Sparkle Autoupdate ancestor suppresses matches on child tools")
+    func sparkleAutoupdateAncestorSuppressed() async throws {
+        var matches = [
+            RuleMatch(ruleId: "d1a2b3c4-0023", ruleName: "Hidden File Created in User Directory",
+                      severity: .low, description: "", mitreTechniques: [], tags: []),
+            RuleMatch(ruleId: "d1a2b3c4-0255", ruleName: "MDM Enrollment Status Check",
+                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execUnderAncestors(
+            processPath: "/usr/bin/xattr",
+            ancestors: [
+                ProcessAncestor(
+                    pid: 8100,
+                    executable: "/Users/phanily/Library/Caches/com.maccrab.app/org.sparkle-project.Sparkle/Installation/AbCd/EfGh/MacCrab.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+                    name: "Autoupdate"
+                ),
+                ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd"),
+            ]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "Sparkle's Autoupdate binary as ancestor must suppress child-process rule matches")
+    }
+
+    @Test("Critical matches under GoogleUpdater still fire (counter-test)")
+    func criticalUnderUpdaterStillFires() async throws {
+        // Counter-test: Gate 6 must not be a universal kill-switch.
+        // Ransomware deployed via a compromised updater tree should
+        // still alert at critical.
+        var matches = [
+            RuleMatch(ruleId: "critical.ransomware_note", ruleName: "Ransomware Note Created",
+                      severity: .critical, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execUnderAncestors(
+            processPath: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+            ancestors: []
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "Critical-severity matches must still fire under auto-updater ancestor gate")
+    }
+
+    @Test("Non-updater ancestor chain does NOT trigger gate (counter-test)")
+    func unrelatedAncestorNotSuppressed() async throws {
+        // Counter-test: proves gate only applies to known auto-updaters.
+        // A third-party utility with Chrome as parent must still be
+        // capable of triggering rules.
+        var matches = [
+            RuleMatch(ruleId: "d1a2b3c4-0410", ruleName: "TCC Bypass via Process Injection",
+                      severity: .high, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execUnderAncestors(
+            processPath: "/tmp/unknown_tool",
+            ancestors: [
+                ProcessAncestor(pid: 600, executable: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome"),
+            ]
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "An unknown tool spawned from Chrome (not an auto-updater) must not be silenced by Gate 6")
+    }
+
+    @Test("isAutoUpdaterOrAncestor exposes direct API for campaign detector reuse")
+    func publicHelperContract() async {
+        let updaterEvent = execUnderAncestors(
+            processPath: "/Users/x/Library/Application Support/Google/GoogleUpdater/148.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
+            ancestors: []
+        )
+        #expect(NoiseFilter.isAutoUpdaterOrAncestor(event: updaterEvent))
+
+        let benignEvent = execUnderAncestors(
+            processPath: "/usr/bin/whoami",
+            ancestors: [ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd")]
+        )
+        #expect(!NoiseFilter.isAutoUpdaterOrAncestor(event: benignEvent))
+    }
+}
