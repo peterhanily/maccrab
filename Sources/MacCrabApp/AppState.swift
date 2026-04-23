@@ -47,6 +47,14 @@ final class AppState: ObservableObject {
         var eventsProcessed: UInt64
         var alertsEmitted: UInt64
 
+        /// Sysext-reported Full Disk Access state. Nil means the heartbeat
+        /// predates schema v2 (older sysext) so we fall back to the
+        /// TCC.db / WAL heuristics. Non-nil is authoritative — the sysext
+        /// runs as root and directly tests FDA by opening the
+        /// TCC-protected system TCC.db; the app cannot do that because
+        /// Unix perms + TCC both apply to a user-process probe.
+        var sysextHasFDA: Bool?
+
         /// Ages past this are considered stale → detection engine is
         /// either hung, crashed, or replaced by a silent no-op. 120s
         /// is ~4× the 30s write cadence: tolerates one missed tick and
@@ -173,7 +181,8 @@ final class AppState: ObservableObject {
                     writtenAt: .distantPast,
                     uptimeSeconds: 0,
                     eventsProcessed: 0,
-                    alertsEmitted: 0
+                    alertsEmitted: 0,
+                    sysextHasFDA: nil
                 )
             }
             return
@@ -184,7 +193,8 @@ final class AppState: ObservableObject {
             eventsProcessed: (json["events_processed"] as? UInt64)
                 ?? UInt64(json["events_processed"] as? Int ?? 0),
             alertsEmitted: (json["alerts_emitted"] as? UInt64)
-                ?? UInt64(json["alerts_emitted"] as? Int ?? 0)
+                ?? UInt64(json["alerts_emitted"] as? Int ?? 0),
+            sysextHasFDA: json["sysext_has_fda"] as? Bool
         )
     }
 
@@ -202,11 +212,19 @@ final class AppState: ObservableObject {
     /// The app itself can read TCC.db — means Settings → Privacy & Security
     /// → Full Disk Access has MacCrab.app allowed.
     @Published var appHasFDA: Bool = true
-    /// The sysext has FDA for "MacCrab Endpoint Security Extension". Checked
-    /// by querying both the user TCC.db and the system TCC.db (macOS stores
-    /// the grant in different places across OS versions). Falls back to a
-    /// 30-minute WAL mtime window when neither database is readable.
+    /// The sysext has FDA for "MacCrab Endpoint Security Extension". The
+    /// primary signal is `heartbeat.sysextHasFDA` (the sysext probes its
+    /// own FDA as root and writes the result). Falls back to a user TCC.db
+    /// query when the heartbeat pre-dates schema v2, and to a 30-minute
+    /// WAL mtime window when no FDA data is available at all.
     @Published var sysextHasFDA: Bool = true
+
+    /// User explicitly dismissed the FDA banner via the "Dismiss" button.
+    /// An escape hatch for when our detection is wrong and the banner
+    /// persists despite FDA actually being granted. Persisted to
+    /// UserDefaults; auto-cleared when detection confirms both principals
+    /// are granted so future revocations re-surface the banner.
+    @Published var fdaBannerDismissedByUser: Bool = UserDefaults.standard.bool(forKey: "fdaBannerDismissedByUser")
     @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
     @Published var events: [EventViewModel] = []
@@ -365,6 +383,17 @@ final class AppState: ObservableObject {
 
     // MARK: Public interface
 
+    /// Hide the FDA banner. Called from the banner's "Dismiss" button as
+    /// an escape hatch when our automatic detection is wrong. The flag
+    /// is persisted to UserDefaults so the banner stays hidden across
+    /// launches, and is automatically cleared in `refresh()` if/when our
+    /// detection confirms both principals have FDA (so future FDA loss
+    /// still re-raises the banner).
+    func dismissFDABanner() {
+        fdaBannerDismissedByUser = true
+        UserDefaults.standard.set(true, forKey: "fdaBannerDismissedByUser")
+    }
+
     func refresh() async {
         // Check daemon connectivity: DB exists + has data = connected
         // Also check for WAL file which indicates active writer (daemon)
@@ -379,33 +408,58 @@ final class AppState: ObservableObject {
         let tccPath = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db"
         appHasFDA = fm.isReadableFile(atPath: tccPath)
 
-        // FDA probe for the SYSEXT principal.
-        // System Settings writes the grant into the user TCC.db for some
-        // macOS builds and into the system-level TCC.db for others (the
-        // sysext runs as root so macOS may use the system DB). Try both;
-        // the system DB open silently fails if we lack permission, which
-        // is fine. When neither DB is queryable we fall back to WAL mtime
-        // with a 30-minute window — a quiet system shouldn't lose its
-        // sysext-FDA indicator just because no events arrived recently.
-        let systemTCCPath = "/Library/Application Support/com.apple.TCC/TCC.db"
-        let foundInTCC = Self.querySysextFDA(userTCC: appHasFDA ? tccPath : nil,
-                                              systemTCC: systemTCCPath)
-        if foundInTCC {
-            sysextHasFDA = true
-        } else if appHasFDA {
-            // User TCC.db was readable; entry absent → sysext genuinely needs FDA.
-            sysextHasFDA = false
+        // FDA probe for the SYSEXT principal — three-tier detection.
+        //
+        // Tier 1 (authoritative, schema v2+ sysext): the sysext writes
+        // its own `has_fda` into heartbeat.json every 30 s. It runs as
+        // root and opens the TCC-protected system TCC.db to test —
+        // successful open means FDA, EPERM means no FDA. This is the
+        // only reliable signal because the app process cannot read the
+        // system TCC.db itself (Unix perms: 600 root:wheel plus TCC).
+        //
+        // Tier 2 (legacy sysext or pre-first-heartbeat): try the app's
+        // own user TCC.db for a sysext row. Works sometimes — grants
+        // land here on some macOS builds. Requires app FDA to open.
+        //
+        // Tier 3 (cold dashboard, pre-heartbeat, no app FDA): WAL mtime
+        // within 30 minutes — an active sysext implies FDA because ES
+        // subscription requires it.
+        //
+        // Read the heartbeat FIRST so the downstream decision uses the
+        // latest value. The existing `refreshHeartbeat()` call later in
+        // this method will also refresh, but ordering it here lets us
+        // gate Tier 1.
+        refreshHeartbeat()
+
+        if let hb = heartbeat, !hb.isStale, let hbFDA = hb.sysextHasFDA {
+            sysextHasFDA = hbFDA
         } else {
-            // No TCC.db was readable; use WAL as a loose proxy.
-            let walPath = dbPath + "-wal"
-            if let attrs = try? fm.attributesOfItem(atPath: walPath),
-               let mtime = attrs[.modificationDate] as? Date {
-                sysextHasFDA = Date().timeIntervalSince(mtime) < 1800 // 30 min
+            let systemTCCPath = "/Library/Application Support/com.apple.TCC/TCC.db"
+            let foundInTCC = Self.querySysextFDA(userTCC: appHasFDA ? tccPath : nil,
+                                                  systemTCC: systemTCCPath)
+            if foundInTCC {
+                sysextHasFDA = true
+            } else if appHasFDA {
+                sysextHasFDA = false
             } else {
-                sysextHasFDA = !isConnected ? false : sysextHasFDA
+                let walPath = dbPath + "-wal"
+                if let attrs = try? fm.attributesOfItem(atPath: walPath),
+                   let mtime = attrs[.modificationDate] as? Date {
+                    sysextHasFDA = Date().timeIntervalSince(mtime) < 1800
+                } else {
+                    sysextHasFDA = !isConnected ? false : sysextHasFDA
+                }
             }
         }
         fullDiskAccessGranted = appHasFDA && sysextHasFDA
+
+        // User override: once both principals are detected as granted,
+        // clear any prior "dismiss banner" flag so future FDA-revocation
+        // reliably raises the banner again.
+        if fullDiskAccessGranted && fdaBannerDismissedByUser {
+            fdaBannerDismissedByUser = false
+            UserDefaults.standard.set(false, forKey: "fdaBannerDismissedByUser")
+        }
 
         // Check fleet configuration
         let fleetURL = ProcessInfo.processInfo.environment["MACCRAB_FLEET_URL"] ?? ""

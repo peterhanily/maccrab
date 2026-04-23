@@ -74,10 +74,11 @@ struct OverviewDashboard: View {
                     // is the single biggest ease-of-use risk in the product.
                     // Tells the user WHICH principal is missing FDA — app,
                     // sysext, or both — so they don't go hunting.
-                    if !appState.fullDiskAccessGranted {
+                    if !appState.fullDiskAccessGranted && !appState.fdaBannerDismissedByUser {
                         FullDiskAccessWarningBanner(
                             appNeedsFDA: !appState.appHasFDA,
-                            sysextNeedsFDA: !appState.sysextHasFDA
+                            sysextNeedsFDA: !appState.sysextHasFDA,
+                            onDismiss: { appState.dismissFDABanner() }
                         )
                         .padding(.horizontal)
                     }
@@ -491,6 +492,10 @@ struct DetectionHealthBanner: View {
 struct FullDiskAccessWarningBanner: View {
     let appNeedsFDA: Bool
     let sysextNeedsFDA: Bool
+    /// Called when the user taps "Dismiss" — the escape hatch for when
+    /// detection is wrong and FDA is already granted. AppState persists
+    /// the dismissal and auto-clears it when detection later confirms FDA.
+    let onDismiss: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -565,6 +570,25 @@ struct FullDiskAccessWarningBanner: View {
                     .buttonStyle(.plain)
                     .accessibilityHint(Text("Opens Finder with MacCrab.app selected so you can drag it into the FDA settings pane"))
                 }
+
+                // Escape hatch. Our FDA detection has historically been
+                // unreliable across macOS versions; the dismiss button
+                // lets the user hide the banner when they know they've
+                // granted access. AppState auto-clears the dismissal
+                // once detection agrees, so this is not a forever-hide.
+                Button {
+                    onDismiss()
+                } label: {
+                    Text(String(
+                        localized: "overview.fda.dismiss",
+                        defaultValue: "Dismiss — I've granted access"
+                    ))
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.85))
+                    .underline()
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text("Hides this banner. If MacCrab later detects that Full Disk Access is actually missing, the banner will reappear."))
             }
         }
         .padding()

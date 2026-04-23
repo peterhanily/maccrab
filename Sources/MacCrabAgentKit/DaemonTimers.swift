@@ -1,5 +1,6 @@
 import Foundation
 import MacCrabCore
+import SQLite3
 import os.log
 
 /// Creates and starts all periodic timers (forensic scans, hourly tasks,
@@ -318,12 +319,25 @@ enum DaemonTimers {
         let heartbeatTimer = DispatchSource.makeTimerSource(queue: .global())
         heartbeatTimer.schedule(deadline: .now() + 5, repeating: 30)
         heartbeatTimer.setEventHandler {
+            // Probe sysext Full Disk Access authoritatively. The sysext
+            // runs as root but TCC still gates its access to the user and
+            // system TCC databases. If we can open + query the system
+            // TCC.db, FDA is granted (TCC bypasses the service). If TCC
+            // denies us, sqlite3_open / sqlite3_prepare will fail.
+            // The dashboard reads this field and uses it as the primary
+            // sysext-FDA signal — way more reliable than inferring from
+            // WAL mtime or trying to read TCC.db from the non-root app
+            // (where Unix perms + TCC both apply).
+            let sysextHasFDA = probeSysextFDA()
+
             let payload: [String: Any] = [
                 "written_at_unix": Date().timeIntervalSince1970,
                 "uptime_seconds": Int(Date().timeIntervalSince(startTime)),
                 "events_processed": eventCount(),
                 "alerts_emitted": alertCount(),
-                "schema_version": 1,
+                "sysext_has_fda": sysextHasFDA,
+                "fda_checked_at_unix": Date().timeIntervalSince1970,
+                "schema_version": 2,
             ]
             guard let data = try? JSONSerialization.data(
                 withJSONObject: payload,
@@ -355,4 +369,47 @@ enum DaemonTimers {
             heartbeatTimer: heartbeatTimer
         )
     }
+}
+
+/// Probe whether this sysext process currently has Full Disk Access.
+///
+/// Strategy: try to open `/Library/Application Support/com.apple.TCC/TCC.db`
+/// and execute a trivial query. That database is TCC-protected under the
+/// `kTCCServiceSystemPolicyAllFiles` (FDA) service, so:
+///   • With FDA → TCC allows the open → query succeeds → return true
+///   • Without FDA → TCC denies (EPERM) → sqlite3_open_v2 or the first
+///     prepare fails → return false
+///
+/// This is authoritative for the sysext because it runs as root (so Unix
+/// permissions are not the gate — TCC is). It's cheap (< 1 ms) and is run
+/// every 30 s inside the heartbeat timer.
+///
+/// Intentionally file-scope (not inside the enum) so it remains callable
+/// from the DispatchSource closure without `self.` captures.
+private func probeSysextFDA() -> Bool {
+    let systemTCC = "/Library/Application Support/com.apple.TCC/TCC.db"
+    guard FileManager.default.fileExists(atPath: systemTCC) else { return false }
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(
+        systemTCC,
+        &db,
+        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
+        nil
+    ) == SQLITE_OK else { return false }
+    defer { sqlite3_close(db) }
+    // A bare SELECT on the access table confirms real read access —
+    // on older macOS versions, sqlite3_open might return OK for a
+    // path the process can't actually read, with prepare being the
+    // real gate.
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(
+        db,
+        "SELECT 1 FROM access LIMIT 1",
+        -1,
+        &stmt,
+        nil
+    ) == SQLITE_OK else { return false }
+    defer { sqlite3_finalize(stmt) }
+    let rc = sqlite3_step(stmt)
+    return rc == SQLITE_ROW || rc == SQLITE_DONE
 }

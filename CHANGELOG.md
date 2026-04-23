@@ -3,6 +3,37 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] — 2026-04-23
+
+FDA banner fix v4 — architectural redesign + manual dismiss escape hatch.
+
+### Fixed
+
+- **Sysext FDA state is now reported by the sysext, not inferred by the app.**
+  v1.5.2 through v1.5.4 all tried to detect sysext FDA by reading TCC.db
+  from the app process. That approach is fundamentally broken: the system
+  TCC.db (`/Library/Application Support/com.apple.TCC/TCC.db`, where the
+  sysext's FDA grant actually lives) is mode `600 root:wheel` PLUS TCC-gated
+  — a non-root process cannot open it regardless of its own FDA.
+
+  The sysext runs as root and CAN reliably probe its own FDA by trying to
+  read the system TCC.db (TCC gates the open, so success implies FDA). It
+  now does this on every 30 s heartbeat tick and writes the result into
+  `heartbeat.json` as `sysext_has_fda`. The app reads that field as the
+  authoritative signal. The v1.5.2–1.5.4 TCC.db probe + WAL heuristic are
+  kept as fallbacks for legacy sysexts that haven't written a schema v2
+  heartbeat yet.
+
+- **"Dismiss — I've granted access" button added to the FDA banner.**
+  Escape hatch so the user is never stuck behind a stale banner if our
+  detection fails again. The dismissal is persisted to UserDefaults and
+  auto-cleared once detection later confirms both principals have FDA,
+  so a future FDA revocation still re-surfaces the banner.
+
+- Heartbeat schema bumped to version 2 (adds `sysext_has_fda` and
+  `fda_checked_at_unix` fields). App handles v1 heartbeats gracefully via
+  the fallback path.
+
 ## [1.5.4] — 2026-04-23
 
 Install UX + hardening: suppress false tamper alert on first launch,
