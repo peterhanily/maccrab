@@ -2,9 +2,14 @@ title: Regular C2 Beacon Pattern Detected
 id: d1a2b3c4-0366-4000-a000-000000000366
 status: experimental
 description: >
-    Detects processes making regular-interval HTTPS connections to the same
-    destination, indicative of C2 beacon behavior. Low variance in connection
-    timing is a strong indicator of automated callback malware.
+    Flags processes making HTTPS connections on ports 443/8443/4443 when the
+    process is not in the allow list. The rule name promises timing-variance
+    analysis but Sigma cannot express it; a proper timing-based beacon
+    detector is on the roadmap as a sequence/statistical rule. Until then
+    this rule is best thought of as "unusual HTTPS egress from non-browser,
+    non-system, non-messaging, non-dev-tool process." Severity intentionally
+    low because a single hit does not constitute evidence of a beacon — it is
+    one signal among many the behavioral scoring engine combines.
 author: MacCrab Community
 date: 2026/04/05
 references:
@@ -35,6 +40,10 @@ detection:
             - '/System/'
             - '/usr/libexec/'
             - '/usr/sbin/'
+            - '/usr/bin/'
+            - '/sbin/'
+            - '/Applications/Xcode.app/Contents/Developer/'
+            - '/Library/Developer/CommandLineTools/'
     filter_messaging:
         Image|contains:
             - 'WhatsApp'
@@ -103,4 +112,6 @@ detection:
 falsepositives:
     - Legitimate heartbeat/health-check connections
     - Auto-update services
-level: medium
+    - User-invoked curl/wget (now filtered via /usr/bin/ in filter_system)
+    - Xcode-embedded git, curl, python (now filtered via Xcode path)
+level: low

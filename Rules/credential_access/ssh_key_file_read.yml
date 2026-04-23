@@ -40,7 +40,30 @@ detection:
             - '/usr/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_ssh and not filter_system and not filter_apple_signed
+    filter_ide:
+        Image|contains:
+            - '/Visual Studio Code'
+            - '/Cursor.app/'
+            - '/Code Helper'
+            - '/JetBrains'
+            - '/IntelliJ'
+            - '/GoLand'
+            - '/PyCharm'
+            - '/WebStorm'
+            - '/Xcode.app/'
+            - '/Claude.app/'
+            - '/ChatGPT Atlas'
+            - '/Codex.app'
+    filter_backup:
+        Image|contains:
+            - '/Time Machine'
+            - '/Backblaze'
+            - '/CarbonCopyCloner'
+            - '/SuperDuper!'
+            - '/Arq'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_ssh and not filter_system and not filter_apple_signed and not filter_ide and not filter_backup and not filter_apple_parent
 falsepositives:
     - Backup tools copying SSH directory
     - IDE SSH integrations

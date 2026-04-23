@@ -46,7 +46,26 @@ detection:
     filter_apple:
         SignerType:
             - 'apple'
-    condition: selection_find and selection_sensitive_patterns and not filter_apple
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection_find and selection_sensitive_patterns and not filter_apple and not filter_terminal and not filter_apple_parent
 falsepositives:
     - Security auditing tools scanning for key exposure
     - Developers searching their own project directories

@@ -23,11 +23,19 @@ enum DaemonTimers {
         forensicTimer.schedule(deadline: .now() + 120, repeating: 300) // First at 2min, then every 5min
         forensicTimer.setEventHandler {
             Task {
-                // Crash report mining
+                // Crash report mining.
+                // Route every synthetic alert here through the shared
+                // AlertDeduplicator. Without it, a single long-lived process
+                // (lldb-rpc-server, WindowServer, etc.) emitting the same
+                // finding on successive scans produces a fresh alert every
+                // tick — observed in production as 19 identical alerts per
+                // 48 h for a single Xcode debug session.
                 let exploits = await state.crashReportMiner.scan()
                 for exploit in exploits {
+                    let ruleId = "maccrab.forensic.crash-exploit-\(exploit.indicator)"
+                    if await state.deduplicator.shouldSuppress(ruleId: ruleId, processPath: exploit.reportPath) { continue }
                     let alert = Alert(
-                        ruleId: "maccrab.forensic.crash-exploit-\(exploit.indicator)",
+                        ruleId: ruleId,
                         ruleTitle: "Exploitation Indicator in Crash Report: \(exploit.processName)",
                         severity: exploit.severity,
                         eventId: UUID().uuidString,
@@ -37,15 +45,19 @@ enum DaemonTimers {
                         suppressed: false
                     )
                     do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    await state.deduplicator.recordAlert(ruleId: ruleId, processPath: exploit.reportPath)
                     if exploit.severity >= .high { await state.notifier.notify(alert: alert) }
                     print("[CRASH] \(exploit.indicator) in \(exploit.processName)")
                 }
 
-                // Power anomaly detection
+                // Power anomaly detection.
                 let anomalies = await state.powerAnomalyDetector.scan()
                 for anomaly in anomalies {
+                    let ruleId = "maccrab.forensic.power-\(anomaly.type.rawValue)"
+                    let key = anomaly.processName  // processPath is nil for power events
+                    if await state.deduplicator.shouldSuppress(ruleId: ruleId, processPath: key) { continue }
                     let alert = Alert(
-                        ruleId: "maccrab.forensic.power-\(anomaly.type.rawValue)",
+                        ruleId: ruleId,
                         ruleTitle: "Power Anomaly: \(anomaly.processName) \(anomaly.type.rawValue)",
                         severity: anomaly.severity,
                         eventId: UUID().uuidString,
@@ -55,13 +67,19 @@ enum DaemonTimers {
                         suppressed: false
                     )
                     do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    await state.deduplicator.recordAlert(ruleId: ruleId, processPath: key)
                 }
 
-                // Library inventory scan (every other cycle -- resource intensive)
+                // Library inventory scan (every other cycle -- resource intensive).
+                // LibraryInventory also does its own (pid, libraryPath) dedup
+                // internally so the same loaded dylib doesn't re-alert across
+                // scans even if the surrounding AlertDeduplicator window expires.
                 let injected = await state.libraryInventory.scanAllProcesses()
                 for lib in injected {
+                    let ruleId = "maccrab.forensic.injected-library"
+                    if await state.deduplicator.shouldSuppress(ruleId: ruleId, processPath: lib.processPath) { continue }
                     let alert = Alert(
-                        ruleId: "maccrab.forensic.injected-library",
+                        ruleId: ruleId,
                         ruleTitle: "Injected Library: \(lib.processName) loaded \((lib.libraryPath as NSString).lastPathComponent)",
                         severity: lib.severity,
                         eventId: UUID().uuidString,
@@ -71,6 +89,7 @@ enum DaemonTimers {
                         suppressed: false
                     )
                     do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    await state.deduplicator.recordAlert(ruleId: ruleId, processPath: lib.processPath)
                     if lib.severity >= .high { await state.notifier.notify(alert: alert) }
                     print("[INJECT] \(lib.processName) <- \(lib.libraryPath)")
                 }

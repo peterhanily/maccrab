@@ -51,6 +51,56 @@ public actor LibraryInventory {
         "/var/tmp/",
     ]
 
+    /// Processes whose loaded-library inventory should be skipped entirely.
+    /// These are legitimately loading unsigned dylibs as part of their normal
+    /// job description (debuggers loading user-compiled symbols, interpreter
+    /// JIT loaders, etc.). Flagging them generates noise with zero signal.
+    ///
+    /// Field dogfooding showed this collector producing 19 alerts/day on a
+    /// quiet machine, 100% of them on `lldb-rpc-server` loading a user's
+    /// `.debug.dylib` — a completely normal Xcode workflow.
+    private static let processAllowlist: [String] = [
+        // Xcode: LLDB RPC server loads the user's compiled .debug.dylib
+        // symbols for every active debug session.
+        "lldb-rpc-server",
+        "lldb",
+        "debugserver",
+        // Instruments probes load user-compiled dylibs for profiling.
+        "Instruments",
+        "RemoteTestRunner",
+        // App extensions, XPC helpers, and test runners routinely load
+        // dylibs from their containing app bundle — but sometimes those
+        // paths resolve outside the bundle via symlink, and the bundle
+        // walker in `scanProcess` can't follow every case.
+        "xctest",
+        "XCTRunner",
+    ]
+
+    /// Library path suffixes / substrings that indicate build-system or
+    /// debug-symbol output rather than a genuine runtime dependency. These
+    /// never represent an injection attack — they're the output of `xcodebuild`,
+    /// `swift build`, `cargo`, etc.
+    private static let buildArtifactPatterns: [String] = [
+        ".debug.dylib",      // Xcode debug symbol libraries
+        "/DerivedData/",     // Xcode per-project build output
+        "/Build/Products/",  // Xcode build products
+        "/.build/debug/",    // SwiftPM debug output
+        "/.build/release/",  // SwiftPM release output
+        "/target/debug/",    // Cargo debug output
+        "/target/release/",  // Cargo release output
+    ]
+
+    /// Already-alerted (pid, library) pairs within this daemon lifetime.
+    /// The forensic scan repeats every 5 minutes and the AlertDeduplicator
+    /// only gates repeats on identical `ruleId+processPath` — but a single
+    /// process legitimately loads the same user-compiled dylib across many
+    /// scans, so ruleId+processPath alone can let the same alert through
+    /// the dedup on the emission side too. Tracking (pid, library) here
+    /// guarantees at-most-one alert per running process per library per
+    /// lifetime, regardless of dedup window.
+    private var alertedPairs: Set<String> = []
+    private let alertedPairsLimit = 5000
+
     /// Signature cache: many processes load the same few dozen dylibs, so we
     /// cache the "is this library signed by a trusted authority" verdict per
     /// path to avoid re-running `SecStaticCodeCheckValidity` on every scan.
@@ -76,8 +126,23 @@ public actor LibraryInventory {
         let processPath = getProcessPath(pid: pid)
         let processName = (processPath as NSString).lastPathComponent
 
-        // Skip system processes
+        // Skip system processes — these legitimately load dylibs in unusual
+        // places as part of macOS internal plumbing.
         if processPath.hasPrefix("/System/") || processPath.hasPrefix("/usr/libexec/") {
+            return []
+        }
+
+        // Skip allowlisted processes (Xcode debugger, XCTest runners, etc.).
+        // These legitimately load user-compiled, unsigned dylibs — flagging
+        // them produces pure noise with zero attack signal.
+        if Self.processAllowlist.contains(processName) {
+            return []
+        }
+
+        // Skip processes whose executable lives under /Applications/Xcode.app/.
+        // Xcode-embedded binaries (xctest, xcrun, swift-testing, etc.) load
+        // user build artifacts from DerivedData as part of normal operation.
+        if processPath.hasPrefix("/Applications/Xcode.app/") {
             return []
         }
 
@@ -125,6 +190,13 @@ public actor LibraryInventory {
 
             if flaggedSuspicious { continue }
 
+            // Skip build-system output (debug symbols, DerivedData, cargo
+            // target/, SwiftPM .build/). These are routinely unsigned but
+            // are produced by the user's compiler, not an attacker.
+            if Self.buildArtifactPatterns.contains(where: { lib.contains($0) }) {
+                continue
+            }
+
             // Any dylib outside the system/package-manager prefixes is only
             // flagged if it lacks a trusted (Apple or Developer ID) signature.
             // Legitimately signed third-party libraries in unusual locations
@@ -137,6 +209,18 @@ public actor LibraryInventory {
                 !lib.hasPrefix("/System/") &&
                 !lib.hasPrefix("/Library/") {
                 if !isTrustedSigned(path: lib) {
+                    // Pair-dedup: don't re-emit the same (pid, library) alert
+                    // across forensic scan cycles. Complements the process-
+                    // level AlertDeduplicator which keys only on ruleId +
+                    // processPath and would let a per-scan reload of the
+                    // same dylib through.
+                    let pairKey = "\(pid):\(lib)"
+                    if alertedPairs.contains(pairKey) { continue }
+                    if alertedPairs.count >= alertedPairsLimit {
+                        // Drop oldest half. O(n); cheap because we cap at 5k.
+                        alertedPairs.removeAll(keepingCapacity: true)
+                    }
+                    alertedPairs.insert(pairKey)
                     injected.append(InjectedLibrary(
                         pid: pid, processName: processName, processPath: processPath,
                         libraryPath: lib,

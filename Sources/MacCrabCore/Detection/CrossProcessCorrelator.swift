@@ -545,6 +545,13 @@ public actor CrossProcessCorrelator {
         // CDN IP). These belong to /System/ or /usr/ paths and are never
         // attack convergence regardless of what IP they share.
         if allEventsAreAppleSystemProcesses(windowEvents) { return nil }
+        // Skip when every contacting process is part of a legitimate
+        // developer workflow (git push/pull spawning git-remote-http +
+        // openssl, GitHub Desktop Helper + git subprocesses, Xcode's
+        // embedded git + curl on release builds). These produce the
+        // most common false "N processes contacting github.com"
+        // convergence alerts on developer machines.
+        if allEventsAreDevWorkflow(windowEvents) { return nil }
 
         let severity = computeNetworkSeverity(events: windowEvents)
         let chain = buildChain(
@@ -718,6 +725,61 @@ public actor CrossProcessCorrelator {
                    path.hasPrefix("/usr/sbin/") ||
                    path.hasPrefix("/sbin/")
         }
+    }
+
+    /// True when every event's process is a legitimate developer workflow
+    /// binary contacting the same destination — git workflow (GitHub
+    /// Desktop, the various git-remote-* helpers, openssl for TLS),
+    /// Xcode-embedded tooling, or package-manager installers (brew, npm,
+    /// pip) that routinely fan out several short-lived children against
+    /// the same registry host.
+    ///
+    /// Field dogfooding showed this path producing "N processes contacting
+    /// github.com" alerts on every git push/pull sequence — high volume,
+    /// zero signal. Real attack convergence involves processes outside
+    /// this well-known set (a dropper + a shell + a staged payload).
+    private func allEventsAreDevWorkflow(_ events: [ChainEvent]) -> Bool {
+        guard !events.isEmpty else { return false }
+        return events.allSatisfy { event in isDevWorkflowPath(event.processPath) }
+    }
+
+    private nonisolated func isDevWorkflowPath(_ path: String) -> Bool {
+        // Path-prefix allowlist — covers app-bundle helpers + IDE toolchains
+        let prefixAllowlist = [
+            "/Applications/GitHub Desktop.app/",
+            "/Applications/Xcode.app/Contents/Developer/",
+            "/Library/Developer/CommandLineTools/",
+            "/Applications/Docker.app/",
+            "/opt/homebrew/Cellar/",
+            "/opt/homebrew/bin/",
+            "/opt/homebrew/opt/",
+            "/usr/local/Cellar/",
+            "/usr/local/bin/brew",
+        ]
+        if prefixAllowlist.contains(where: { path.hasPrefix($0) }) { return true }
+
+        // Exact-path allowlist — legitimate system tools that developers
+        // invoke directly from terminals for git/HTTP workflows.
+        let exactAllowlist: Set<String> = [
+            "/usr/bin/git",
+            "/usr/bin/git-receive-pack",
+            "/usr/bin/git-upload-pack",
+            "/usr/bin/ssh",
+            "/usr/bin/curl",
+            "/usr/bin/wget",
+        ]
+        if exactAllowlist.contains(path) { return true }
+
+        // Basename allowlist — covers `git` invoked via PATH lookup when
+        // the resolved path is a symlink we haven't pre-enumerated.
+        let base = (path as NSString).lastPathComponent
+        let basenameAllowlist: Set<String> = [
+            "git", "git-remote-http", "git-remote-https",
+            "git-credential-osxkeychain", "git-lfs",
+            "GitHub Desktop Helper", "GitHub Desktop Helper (Renderer)",
+            "GitHub Desktop Helper (GPU)", "GitHub Desktop Helper (Plugin)",
+        ]
+        return basenameAllowlist.contains(base)
     }
 
     /// Returns the outermost `.app/` directory for an executable path, or nil

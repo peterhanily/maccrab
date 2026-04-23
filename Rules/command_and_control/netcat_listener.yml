@@ -23,7 +23,26 @@ detection:
         CommandLine|contains:
             - ' -l'
             - ' --listen'
-    condition: selection and selection_listen
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and selection_listen and not filter_terminal and not filter_apple_parent
 falsepositives:
     - Network debugging and troubleshooting
     - Development testing of network services

@@ -27,7 +27,26 @@ detection:
             - 'SimpleHTTPServer'
             - 'CGIHTTPServer'
             - 'http.server --bind'
-    condition: selection_python and selection_server
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection_python and selection_server and not filter_terminal and not filter_apple_parent
 falsepositives:
     - Developers using Python HTTP server for local testing
     - Documentation tooling that serves static files

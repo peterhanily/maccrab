@@ -350,20 +350,31 @@ enum EventLoop {
                     processPath: enrichedEvent.process.executable,
                     timestamp: enrichedEvent.timestamp
                 ) {
-                    let alert = Alert(
-                        ruleId: "maccrab.correlator.network-convergence",
-                        ruleTitle: "Multiple Processes Contacting Same Destination",
-                        severity: chain.severity,
-                        eventId: UUID().uuidString,
-                        processPath: chain.events.last?.processPath,
-                        processName: chain.events.last?.processName,
-                        description: chain.description,
-                        mitreTactics: "attack.command_and_control",
-                        mitreTechniques: "attack.t1071",
-                        suppressed: false
-                    )
-                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.notifier.notify(alert: alert)
+                    // Dedup on rule + destination (not the triggering process)
+                    // so three different processes converging on the same
+                    // github.com IP don't each produce a fresh alert when the
+                    // correlator window re-evaluates.
+                    let ruleId = "maccrab.correlator.network-convergence"
+                    let dedupKey = net.destinationHostname ?? net.destinationIp
+                    if await state.deduplicator.shouldSuppress(ruleId: ruleId, processPath: dedupKey) {
+                        // Fall through — chain state already consumed.
+                    } else {
+                        let alert = Alert(
+                            ruleId: ruleId,
+                            ruleTitle: "Multiple Processes Contacting Same Destination",
+                            severity: chain.severity,
+                            eventId: UUID().uuidString,
+                            processPath: chain.events.last?.processPath,
+                            processName: chain.events.last?.processName,
+                            description: chain.description,
+                            mitreTactics: "attack.command_and_control",
+                            mitreTechniques: "attack.t1071",
+                            suppressed: false
+                        )
+                        do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                        await state.deduplicator.recordAlert(ruleId: ruleId, processPath: dedupKey)
+                        await state.notifier.notify(alert: alert)
+                    }
                 }
             }
 

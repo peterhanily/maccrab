@@ -3,6 +3,54 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] — 2026-04-23
+
+Field-driven noise reduction. v1.6.0 user dogfood showed 19 identical alerts
+per 48h on a developer machine — all Xcode-session false positives. This
+release fixes the structural and content issues behind that pattern.
+
+### Fixed
+
+- **Forensic-loop alerts now go through the AlertDeduplicator.** CrashReportMiner,
+  PowerAnomalyDetector, and LibraryInventory in `DaemonTimers.swift` were
+  inserting directly into AlertStore, bypassing `shouldSuppress(ruleId:processPath:)`.
+  A long-lived process emitting the same finding on every forensic scan now
+  suppresses correctly after the first alert.
+
+- **LibraryInventory skips legitimate debug/build workflows.** Process allow-list
+  (`lldb-rpc-server`, `lldb`, `debugserver`, `Instruments`, `xctest`, `XCTRunner`)
+  + Xcode.app path prefix + build-artifact pattern match (`.debug.dylib`,
+  `/DerivedData/`, `/.build/debug/`, `/target/debug/`). Also an internal
+  `(pid, library)` pair dedup so the same loaded dylib can't re-alert across
+  scan cycles even if the outer dedup window expires.
+
+- **`c2_beacon_pattern.yml` filters developer tools.** Added `/usr/bin/` (where
+  curl/wget/git/python live), `/Applications/Xcode.app/Contents/Developer/`,
+  `/Library/Developer/CommandLineTools/`, and `/sbin/` to `filter_system`.
+  Severity downgraded medium → low (timing-variance analysis not actually
+  implemented in a Sigma rule; flagged in description for a future sequence
+  rule). Eliminates the Xcode-git-pull "alert storm" campaign trigger.
+
+- **CrossProcessCorrelator: dev-workflow allow-list.** New `allEventsAreDevWorkflow`
+  gate in `evaluateNetworkChain` — skips convergence alerts when every
+  contributing process is under `/Applications/GitHub Desktop.app/`,
+  `/Applications/Xcode.app/`, `/Library/Developer/CommandLineTools/`,
+  `/opt/homebrew/`, or is one of a small allow-list of exact paths
+  (`/usr/bin/git`, `/usr/bin/curl`, `/usr/bin/wget`, `/usr/bin/ssh`). Also
+  wires dedup around the convergence-alert emission path in `EventLoop.swift`.
+
+- **Six high-FP-likelihood Sigma rules gained `filter_terminal` + `filter_apple_parent`.**
+  `command_and_control/curl_to_raw_ip.yml`, `command_and_control/python_http_server.yml`,
+  `command_and_control/netcat_listener.yml`, `command_and_control/ngrok_or_tunnel.yml`,
+  `discovery/sensitive_file_search.yml`, `credential_access/ssh_key_file_read.yml`.
+  Also added IDE + backup-tool filters to the SSH key rule.
+
+### Tests
+
+638 tests pass (up from 636) — 2 new regression tests in
+`LibraryInventoryAllowlistTests.swift` that compile-time-lock the allowlist
+members so a future refactor can't silently remove them.
+
 ## [1.6.0] — 2026-04-23
 
 Minor release: new shape-based detection class + battery-aware polling +

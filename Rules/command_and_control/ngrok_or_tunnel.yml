@@ -31,7 +31,26 @@ detection:
         CommandLine|contains:
             - 'cloudflared tunnel'
             - 'cloudflared access'
-    condition: selection_binary or selection_ngrok_args or selection_cloudflared_args
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: (selection_binary or selection_ngrok_args or selection_cloudflared_args) and not filter_terminal and not filter_apple_parent
 falsepositives:
     - Developers testing webhooks or sharing local services
     - Legitimate Cloudflare Tunnel deployments
