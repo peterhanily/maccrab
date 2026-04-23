@@ -31,8 +31,29 @@ public actor SelfDefense {
     /// Hash of the maccrabd binary at startup.
     private let binaryHash: String?
 
-    /// Hash of compiled rules directory at startup.
-    private let rulesHash: String?
+    /// Hash of compiled rules directory. Mutable because legitimate bundle
+    /// syncs (fresh install, Sparkle-delivered rule updates, first-boot
+    /// sequences subdir creation) re-baseline it so subsequent integrity
+    /// checks don't keep firing on an already-observed legitimate change.
+    private var rulesHash: String?
+
+    /// Compiled rules directory path — retained so the write handler can
+    /// recompute the hash on-demand when a file change is observed.
+    private let rulesDir: String
+
+    /// Wall-clock time the actor began monitoring. Writes to the rules
+    /// directory within `startupGracePeriod` of this timestamp are treated
+    /// as legitimate (install / upgrade bundle sync) and re-baseline the
+    /// hash without firing a tamper alert. Without this, the sysext's
+    /// SelfDefense watches an empty rules dir at first boot, then
+    /// `RuleBundleInstaller` copies rules in, which fires a bogus
+    /// "rules modified" critical alert on every fresh install.
+    private var startupTime: Date?
+
+    /// How long after `.start()` rules-directory writes are treated as
+    /// legitimate bundle-sync churn. 60 seconds is comfortably above any
+    /// observed install / Sparkle-upgrade copy duration.
+    private let startupGracePeriod: TimeInterval = 60
 
     /// File descriptor sources for dispatch-based file monitoring.
     private var fileMonitorSources: [DispatchSourceFileSystemObject] = []
@@ -103,6 +124,7 @@ public actor SelfDefense {
         }()
         self.binaryHash = Self.sha256(fileAt: binaryPath)
 
+        self.rulesDir = rulesDir
         self.rulesHash = Self.directoryHash(at: rulesDir)
 
         // Build list of paths to monitor
@@ -170,6 +192,7 @@ public actor SelfDefense {
     public func start(handler: @escaping TamperHandler) {
         self.tamperHandler = handler
         self.isActive = true
+        self.startupTime = Date()
 
         // 1. Anti-debug check
         if Self.isBeingDebugged() {
@@ -305,6 +328,10 @@ public actor SelfDefense {
     // MARK: - File System Monitoring
 
     private func startFileMonitoring() {
+        // Capture rulesDir out of actor isolation so the global-queue
+        // DispatchSource closure can compute hashes without awaiting.
+        let rulesDirForClosure = self.rulesDir
+
         for monitored in monitoredPaths {
             let fd = open(monitored.path, O_EVTONLY)
             guard fd >= 0 else {
@@ -341,7 +368,22 @@ public actor SelfDefense {
                     message = "\(desc) was RENAMED/MOVED: \(path)"
                 } else if data.contains(.write) {
                     if path.contains("rules") || path.contains("compiled") {
-                        eventType = .rulesModified
+                        // Rules-dir writes need hash comparison + startup-grace
+                        // logic to suppress the bogus tamper alert on fresh
+                        // install (RuleBundleInstaller copies rules INTO the
+                        // monitored dir from the app bundle). Compute the new
+                        // hash here on the global queue so the actor doesn't
+                        // block on N shasum subprocess calls, then hand off.
+                        let newHash = Self.directoryHash(at: rulesDirForClosure)
+                        Task {
+                            await self.handleRulesWriteEvent(
+                                path: path,
+                                desc: desc,
+                                critical: critical,
+                                newHash: newHash
+                            )
+                        }
+                        return
                     } else if path.contains("events.db") {
                         // The daemon writes to events.db constantly — this is normal.
                         // Only flag DB modifications as tampering for critical paths.
@@ -382,6 +424,56 @@ public actor SelfDefense {
         }
 
         logger.info("File monitoring active on \(self.fileMonitorSources.count) paths")
+    }
+
+    /// Handle a write event on the rules directory with hash-aware baseline
+    /// logic. Called from the DispatchSource closure via a Task so the
+    /// `shasum` subprocess work happens on the global queue while the
+    /// actor-isolated state mutation stays properly synchronized.
+    ///
+    /// Three outcomes:
+    ///   1. Inside the startup grace window → rebaseline silently. This
+    ///      covers the fresh-install and Sparkle-upgrade cases where
+    ///      RuleBundleInstaller copies rules into the monitored dir just
+    ///      after the sysext starts, plus DaemonSetup creating the
+    ///      `sequences/` subdir at boot.
+    ///   2. Past the grace window but hash unchanged → silent (benign
+    ///      metadata write; no actual rule mutation happened).
+    ///   3. Past the grace window, hash changed → rebaseline AND fire
+    ///      the `.rulesModified` alert.
+    private func handleRulesWriteEvent(
+        path: String,
+        desc: String,
+        critical: Bool,
+        newHash: String?
+    ) {
+        if let startupTime, Date().timeIntervalSince(startupTime) < startupGracePeriod {
+            rulesHash = newHash
+            logger.debug("Rules write during startup grace window — baseline updated, no alert")
+            return
+        }
+        if let original = rulesHash, newHash == original {
+            return // benign — no actual change to rule content
+        }
+        rulesHash = newHash
+        let severity: Severity = critical ? .critical : .high
+        let event = TamperEvent(
+            type: .rulesModified,
+            description: "\(desc) was modified: \(path)",
+            path: path,
+            severity: severity
+        )
+        handleTamperEvent(event)
+    }
+
+    /// Explicitly re-baseline the rules directory hash. Intended for callers
+    /// that are about to perform a legitimate rules update outside the
+    /// startup grace window — e.g., a future sentinel-based Sparkle upgrade
+    /// hook. Not called anywhere today; kept public so the integration point
+    /// exists when needed.
+    public func snapshotRules() {
+        rulesHash = Self.directoryHash(at: rulesDir)
+        logger.info("Rules baseline re-snapshotted (intentional sync)")
     }
 
     // MARK: - Periodic Checks

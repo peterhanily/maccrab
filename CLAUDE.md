@@ -53,7 +53,7 @@ Sources/MacCrabCore/
   Output/         Notifications, webhooks, syslog, reports
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            417 Sigma-compatible YAML detection rules (18 tactic directories)
+Rules/            417 Sigma-compatible YAML detection rules (17 tactic directories)
   sequences/      38 multi-step sequence rules
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server

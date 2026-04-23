@@ -213,7 +213,7 @@ struct DocsView: View {
     private var detectionsContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             DocTitle("What It Detects")
-            DocBody("417 detection rules across 16 MITRE ATT&CK tactics — plus 38 temporal sequence rules:")
+            DocBody("417 detection rules across 17 tactic categories — plus 38 temporal sequence rules:")
 
             DocTable(headers: ["Tactic", "Examples", "Rules"], rows: [
                 ["Execution", "Reverse shells, osascript abuse, Python/Ruby one-liners", "46"],
@@ -230,6 +230,7 @@ struct DocsView: View {
                 ["Lateral Movement", "SSH tunneling, VNC, remote desktop", "15"],
                 ["Exfiltration", "Large file uploads, DNS exfil, archive staging", "12"],
                 ["TCC Abuse", "Privacy permission grants, accessibility hijacking", "11"],
+                ["Wireless", "SDR tooling, rogue AP detection, Bluetooth/AirDrop anomalies", "8"],
                 ["Impact", "Data destruction, ransomware indicators, disk wipe", "8"],
                 ["Container", "Docker daemon abuse, container escapes", "6"],
             ])

@@ -688,13 +688,20 @@ final class AppState: ObservableObject {
     }
 
     /// Open one TCC.db and look for an authorized sysext FDA entry.
-    /// Uses LIKE so a `.systemextension` suffix on the client value
-    /// (seen on some macOS builds) doesn't cause a miss.
+    /// Matches a closed set of known client identifiers — the plain bundle
+    /// ID and the `.systemextension` suffix variant seen on some macOS
+    /// builds. A prior revision used `LIKE 'com.maccrab.agent%'` which
+    /// matched too broadly (any future `com.maccrab.agent.*` would collide).
     private static func querySysextFDAInDB(_ tccPath: String) -> Bool {
+        // `sqlite3_open_v2` follows symlinks. A privileged attacker who can
+        // swap the TCC.db path for a symlink pointing at a malicious DB could
+        // steer our probe. Reject symlinks up front; regular files only.
+        // Mirrors the pattern used in EventStore / AlertStore.
+        guard !Self.isSymlink(tccPath) else { return false }
         var db: OpaquePointer?
         guard sqlite3_open_v2(tccPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else { return false }
         defer { sqlite3_close(db) }
-        let sql = "SELECT auth_value FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND (client='com.maccrab.agent' OR client LIKE 'com.maccrab.agent%')"
+        let sql = "SELECT auth_value FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND client IN ('com.maccrab.agent', 'com.maccrab.agent.systemextension')"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
         defer { sqlite3_finalize(stmt) }
@@ -702,6 +709,16 @@ final class AppState: ObservableObject {
             if sqlite3_column_int(stmt, 0) == 2 { return true }
         }
         return false
+    }
+
+    /// Return true if `path` is a symbolic link (lstat does NOT follow).
+    /// Missing files return false — the caller's sqlite3_open_v2 will handle
+    /// the not-found case.
+    private static func isSymlink(_ path: String) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
+            return false
+        }
+        return (attrs[.type] as? FileAttributeType) == .typeSymbolicLink
     }
 
     // MARK: - UI-state storage

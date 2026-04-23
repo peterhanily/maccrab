@@ -3,6 +3,39 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] — 2026-04-23
+
+Install UX + hardening: suppress false tamper alert on first launch,
+harden TCC.db probe, tighten FDA client match, correct documentation drift.
+
+### Fixed
+
+- **No more `rules_modified` tamper alert on fresh install.** SelfDefense
+  now suppresses rules-directory write alerts during a 60-second startup
+  grace window, covering the RuleBundleInstaller copy and DaemonSetup's
+  `sequences/` subdir creation. Each write rebaselines the hash silently
+  during the window; writes after the window keep the original hash
+  comparison + critical-alert behavior. Also added a public
+  `SelfDefense.snapshotRules()` entry point for a future Sparkle-upgrade
+  sentinel flow.
+
+- **TCC.db probe now rejects symlinks.** `querySysextFDAInDB` in AppState
+  now calls `lstat` before `sqlite3_open_v2` (matching the existing pattern
+  in EventStore / AlertStore). Closes a theoretical read-redirect attack
+  where an attacker with write access to `/Library/Application Support/com.apple.TCC/`
+  could swap the DB for a symlink.
+
+- **FDA client match tightened.** Replaced the broad `LIKE 'com.maccrab.agent%'`
+  clause with an explicit `IN ('com.maccrab.agent', 'com.maccrab.agent.systemextension')`
+  set so future bundle IDs under that prefix don't get silently treated as
+  the sysext.
+
+### Changed
+
+- Documentation: DocsView tactic count 16→17 (adds missing "Wireless" row),
+  CLAUDE.md tactic directory count 18→17, README test count badge alignment
+  (588 → 628 in body text).
+
 ## [1.5.3] — 2026-04-23
 
 Fix sysext FDA detection: query both user and system TCC.db; widen WAL fallback to 30 min.
