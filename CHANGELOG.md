@@ -3,6 +3,20 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] — 2026-04-23
+
+Bring back the 🦀 menu-bar icon after immediate user feedback on v1.6.2.
+
+### Fixed
+
+- **Menu-bar icon is a crab again.** v1.6.2 replaced the emoji 🦀 with a
+  template-rendered `shield.lefthalf.filled` SF Symbol for "proper" macOS
+  styling — but the crab is the brand. Restored the emoji; kept the
+  accessibility label ("MacCrab" / "MacCrab — protection degraded") and
+  the degraded-state variant (⚠️🦀). Severity flash now prepends a
+  colored severity dot to the crab (🔴🦀 for critical, 🟠🦀 for high)
+  instead of replacing it with a shield.
+
 ## [1.6.2] — 2026-04-23
 
 Dashboard polish release. Adds a theme system matching maccrab.com, proper

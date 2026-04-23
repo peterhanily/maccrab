@@ -281,28 +281,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Self.applyStatusBarImage(to: button, degraded: degraded)
     }
 
-    /// Template-rendered SF Symbol for the menu-bar item. Using SF Symbols
-    /// means the icon participates in the system's light/dark menu bar
-    /// styling automatically — the emoji we previously shipped always
-    /// rendered as a colorful crab regardless of menu bar theme. Accessory
-    /// badge for degraded state keeps the visual state signal without a
-    /// color cue.
+    /// Crab emoji in the menu bar — the brand identity. We tried a
+    /// template-rendered SF Symbol shield in v1.6.2 and got immediate
+    /// user feedback: "bring back the crab." The tradeoff with emoji is
+    /// that it renders in color regardless of menu bar theme (macOS
+    /// doesn't template-render emoji), but that's explicitly fine here —
+    /// many popular Mac apps (1Password, Discord, Notion) use colorful
+    /// menu-bar icons for the same brand-recognition reason.
+    ///
+    /// Degraded state prepends a warning triangle; healthy is just the
+    /// crab. Both variants carry an explicit accessibility description
+    /// via `setAccessibilityLabel` so VoiceOver users get a meaningful
+    /// announcement instead of "crab emoji."
     @MainActor private static func applyStatusBarImage(to button: NSStatusBarButton, degraded: Bool) {
-        let symbolName = degraded ? "shield.lefthalf.filled.trianglebadge.exclamationmark" : "shield.lefthalf.filled"
-        let accessibilityLabel = degraded ? "MacCrab — protection degraded" : "MacCrab"
-        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-        guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityLabel)?
-            .withSymbolConfiguration(config) else {
-            // Fall back to the old emoji if the symbol isn't available
-            // (should be impossible on macOS 13+ but safe nonetheless).
-            button.title = degraded ? "⚠️🦀" : "🦀"
-            button.image = nil
-            return
+        let title = degraded ? "⚠️🦀" : "🦀"
+        let label = degraded ? "MacCrab — protection degraded" : "MacCrab"
+        if button.title != title {
+            button.title = title
         }
-        image.isTemplate = true
-        button.image = image
-        button.title = ""  // image-only; title was only a fallback path
-        button.imagePosition = .imageOnly
+        button.image = nil
+        button.imagePosition = .noImage
+        button.font = NSFont.systemFont(ofSize: 14)
+        button.setAccessibilityLabel(label)
     }
 
     @MainActor private func createStatusBarItem() {
@@ -312,9 +312,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Self.applyStatusBarImage(to: button, degraded: false)
         }
 
-        // Attach a menu — clicking the status icon opens this menu
+        // Attach a menu — clicking the crab opens this menu
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "MacCrab", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "🦀 MacCrab", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
 
         let dashboardItem = NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d")
@@ -434,32 +434,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func flashCrab(for severity: Severity) {
         guard let button = statusItem?.button else { return }
-        let originalImage = button.image
         let originalTitle = button.title
+        let originalAccessibilityLabel = button.accessibilityLabel() ?? "MacCrab"
 
-        // Pulse the status icon: swap the template shield for a color-
-        // rendered severity indicator. MultiColor symbol rendering on
-        // macOS 13+ picks up the severity tint; we fall back to the
-        // template image after 10s. Using hierarchical palette so the
-        // shield still reads correctly at 16pt.
-        let symbolName = severity == .critical
-            ? "exclamationmark.shield.fill"
-            : "exclamationmark.triangle.fill"
-        let tint: NSColor = severity == .critical
-            ? NSColor.systemRed
-            : NSColor.systemOrange
-        if let flashImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MacCrab alert")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [tint])) {
-            button.image = flashImage
-            button.title = ""
-        }
+        // Prepend a colored severity dot to the crab emoji so a live alert
+        // is visible at a glance in the menu bar without losing the brand.
+        // 🔴 for critical, 🟠 for high. Reset to the previous state after 10s.
+        let prefix = severity == .critical ? "🔴" : "🟠"
+        button.title = "\(prefix)🦀"
+        button.setAccessibilityLabel("MacCrab — \(severity.rawValue) severity alert")
 
-        // Reset after 10 seconds — restore whatever icon was showing
-        // before, so a degraded-state icon doesn't revert to healthy.
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 10_000_000_000)
-            button.image = originalImage
             button.title = originalTitle
+            button.setAccessibilityLabel(originalAccessibilityLabel)
         }
     }
 
