@@ -184,6 +184,7 @@ struct SettingsView: View {
                                 in: 1...365,
                                 step: 1
                             )
+                            .onChange(of: retentionDays) { _ in syncStorageOverrides() }
                         }
                         Text(String(localized: "settings.retentionHelp", defaultValue: "Events, alerts, and baseline data older than this will be automatically pruned."))
                             .font(.caption)
@@ -202,6 +203,7 @@ struct SettingsView: View {
                                 in: 100...5000,
                                 step: 100
                             )
+                            .onChange(of: maxDatabaseSizeMB) { _ in syncStorageOverrides() }
                         }
 
                         HStack {
@@ -881,6 +883,58 @@ struct SettingsView: View {
         // Update AppState so UI reflects immediately
         appState.llmStatus.isConfigured = llmEnabled
         appState.llmStatus.provider = llmProvider
+    }
+
+    /// v1.6.14: write `maxDatabaseSizeMB` + `retentionDays` to
+    /// `~/Library/Application Support/MacCrab/user_overrides.json`
+    /// and SIGHUP the sysext so the new values take effect on the
+    /// next size-cap tick. Until this landed, both sliders wrote
+    /// only to `@AppStorage` (the app's UserDefaults) and the daemon
+    /// never saw them — a user could drop the cap from 500 MB to
+    /// 100 MB in Settings and the DB would keep growing unbounded.
+    ///
+    /// The daemon overlays this file on top of its own
+    /// `daemon_config.json` in `DaemonConfig.applyUserOverrides`.
+    /// The file is restricted to these two numeric fields so a
+    /// writable user-home file can never perturb security-sensitive
+    /// settings (thresholds, outputs, LLM provider).
+    private func syncStorageOverrides() {
+        let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let path = configDir + "/user_overrides.json"
+
+        let payload: [String: Any] = [
+            "maxDatabaseSizeMB": maxDatabaseSizeMB,
+            "retentionDays": retentionDays,
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+
+        // Atomic write so the daemon's overlay reader never catches
+        // a half-written file during the 50 ms between slider moves.
+        let tmp = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp))
+            _ = try? FileManager.default.removeItem(atPath: path)
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
+        } catch {
+            return
+        }
+
+        // Nudge the sysext to reload. Best-effort: if the sysext
+        // isn't running or pkill isn't permitted we silently fall
+        // through — the new value will still land the next time
+        // the daemon starts or on the next hourly tick (the size-
+        // cap timer now reads `state.maxDatabaseSizeMB` live, but
+        // only the SIGHUP path reloads it from disk).
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-HUP", "com.maccrab.agent"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        try? task.run()
     }
 
     // MARK: - About

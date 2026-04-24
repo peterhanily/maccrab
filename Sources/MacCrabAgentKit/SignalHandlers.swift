@@ -62,6 +62,31 @@ enum SignalHandlers {
                     } else {
                         print("[SIGHUP] Retroactive scan: no new detections in \(recentEvents.count) events")
                     }
+
+                    // v1.6.14: reload storage config so the operator's
+                    // Settings slider value (written to daemon_config.json
+                    // by the dashboard) takes effect without a daemon
+                    // restart. Before this change, `maxDatabaseSizeMB`
+                    // and `retentionDays` were captured into the timer
+                    // closures at setup time and a SIGHUP only reloaded
+                    // rules — so lowering the cap in Settings required
+                    // a full reinstall or reboot to land.
+                    let freshConfig = DaemonConfig.load(from: state.supportDir)
+                    let oldCap = state.maxDatabaseSizeMB
+                    let oldRet = state.retentionDays
+                    let newCap = max(50, freshConfig.maxDatabaseSizeMB)
+                    let newRet = freshConfig.retentionDays
+                    state.maxDatabaseSizeMB = newCap
+                    state.retentionDays = newRet
+                    if oldCap != newCap || oldRet != newRet {
+                        print("[SIGHUP] Storage config reloaded: maxDatabaseSizeMB \(oldCap)->\(newCap), retentionDays \(oldRet)->\(newRet)")
+                        // Kick an immediate size-cap sweep so a lowered
+                        // cap visibly prunes without waiting up to an
+                        // hour. No-op if currently under the new cap.
+                        await enforceDatabaseSizeCapNow(state: state)
+                    } else {
+                        print("[SIGHUP] Storage config unchanged (cap=\(newCap) MB, retention=\(newRet)d)")
+                    }
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }

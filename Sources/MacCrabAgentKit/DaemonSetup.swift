@@ -107,6 +107,19 @@ enum DaemonSetup {
         logger.info("Rules directory: \(rulesDir)")
         logger.info("Support directory: \(supportDir)")
 
+        // v1.6.14: quarantine orphan user-domain DBs left behind by a
+        // pre-sysext dev daemon. Before the sysext ships, `swift run
+        // maccrabd` writes to `~/<user>/Library/Application Support/
+        // MacCrab/events.db`. After install, the sysext writes to
+        // `/Library/Application Support/MacCrab/events.db`, but the
+        // user-domain DB lingers — sometimes 100s of MB of stale data
+        // the dashboard's most-recent-mtime picker confusingly
+        // selects. Rename (don't delete) any such orphan that's been
+        // idle >24h so the operator can inspect or purge it.
+        if isRoot {
+            reapOrphanUserDomainDBs(logger: logger)
+        }
+
         // Load daemon configuration (optional JSON file with tuning overrides)
         let config = DaemonConfig.load(from: supportDir)
 
@@ -1095,5 +1108,61 @@ enum DaemonSetup {
             return value
         }
         return spec.token
+    }
+}
+
+// MARK: - Orphan user-domain DB reaper (v1.6.14)
+
+/// Rename any stale `~<user>/Library/Application Support/MacCrab/events.db*`
+/// files left over from a pre-sysext dev daemon. Preserves forensic
+/// evidence (no delete) and stops the dashboard's most-recent-mtime
+/// picker from selecting the orphan over the authoritative sysext DB.
+///
+/// Only invoked when the sysext runs as root. A user-space dev daemon
+/// legitimately writes to this path and must not reap its own DB.
+///
+/// Criteria for quarantine:
+///   • `events.db` exists
+///   • Not modified in the last 24h (live dev DB is untouched)
+///   • Rename to `events.db.orphan-<YYYYMMDD-HHMMSS>` so a later sweep
+///     can distinguish repeated quarantines.
+///
+/// WAL/SHM sidecars are renamed alongside the main file. Failures
+/// are logged but don't abort daemon startup — a leftover orphan is
+/// cosmetic, not a safety issue.
+func reapOrphanUserDomainDBs(logger: os.Logger) {
+    let fm = FileManager.default
+    // Enumerate each real (non-system) user's home directory and
+    // check for the MacCrab support dir. In a single-user setup this
+    // is usually just the console user, but on a multi-user box the
+    // orphan could live in any home — /Users/* excluding Shared.
+    guard let homes = try? fm.contentsOfDirectory(atPath: "/Users") else { return }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd-HHmmss"
+    let stamp = formatter.string(from: Date())
+
+    for user in homes where user != "Shared" && !user.hasPrefix(".") {
+        let dbPath = "/Users/\(user)/Library/Application Support/MacCrab/events.db"
+        guard fm.fileExists(atPath: dbPath) else { continue }
+        let attrs = try? fm.attributesOfItem(atPath: dbPath)
+        guard let mtime = attrs?[.modificationDate] as? Date else { continue }
+        let ageSeconds = Date().timeIntervalSince(mtime)
+        guard ageSeconds > 86_400 else {
+            logger.info("Orphan-DB check: /Users/\(user) events.db modified <24h ago, leaving alone")
+            continue
+        }
+        let size = (attrs?[.size] as? UInt64) ?? 0
+        let sizeMB = Int(size / 1_000_000)
+        logger.warning("Orphan-DB reaper: quarantining /Users/\(user)/Library/Application Support/MacCrab/events.db (\(sizeMB) MB, \(Int(ageSeconds / 86400))d stale)")
+        for suffix in ["", "-wal", "-shm"] {
+            let src = dbPath + suffix
+            let dst = dbPath + ".orphan-" + stamp + suffix
+            guard fm.fileExists(atPath: src) else { continue }
+            do {
+                try fm.moveItem(atPath: src, toPath: dst)
+            } catch {
+                logger.warning("Orphan-DB reaper: rename \(src) → \(dst) failed: \(error.localizedDescription)")
+            }
+        }
     }
 }

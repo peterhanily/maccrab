@@ -3,6 +3,82 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.14] — 2026-04-24
+
+Closes the end-to-end gap on the size-cap path: v1.6.12 wired the
+daemon, v1.6.13 hardened it, v1.6.14 actually connects the dashboard
+slider to the daemon and fixes two silent-decode bugs in
+`daemon_config.json` parsing that had been voiding operator configs
+for many releases.
+
+### Surfaced bugs
+
+- **Settings slider was inert.** `@AppStorage("maxDatabaseSizeMB")`
+  and `@AppStorage("retentionDays")` wrote to the app's
+  `UserDefaults` (`~/Library/Preferences/com.maccrab.app.plist`).
+  Nothing copied those values to `daemon_config.json`, which is what
+  the sysext reads. Operators who moved the slider got no behavior
+  change — the sysext kept the 500 MB / 30 d defaults.
+- **`daemon_config.json` decoder was silently broken.** Two
+  compounding hazards: `JSONDecoder.keyDecodingStrategy =
+  .convertFromSnakeCase` mangles trailing-uppercase abbreviations
+  (`max_database_size_mb` → `maxDatabaseSizeMb`, but the property is
+  `maxDatabaseSizeMB`), and Swift's auto-synthesized `Decodable`
+  ignores stored-property defaults — every non-Optional field must
+  be present. Either hazard caused a full decode failure, which
+  `load()` swallowed via `try?` and returned `DaemonConfig()`. Any
+  operator-supplied `daemon_config.json` (snake_case or partial) has
+  been silently reverting to all defaults on every field since the
+  feature shipped.
+- **Size cap ignored WAL.** Enforcer measured only the main `.db`
+  file. A 480 MB main + 40 MB WAL presented as "under cap" while
+  consuming 520 MB on disk.
+- **Orphan user-domain DB from pre-sysext dev runs.** After a
+  reinstall, the sysext writes to `/Library/.../events.db` while
+  old `~/Library/.../events.db` (sometimes hundreds of MB) lingered
+  untouched. Dashboard's mtime-based DB picker could select the
+  orphan.
+
+### Fixes
+
+- `SettingsView.swift`: slider `onChange` writes to
+  `~/Library/Application Support/MacCrab/user_overrides.json` and
+  sends `pkill -HUP com.maccrab.agent`.
+- `DaemonConfig.decode()`: overlays the user's JSON dict onto a
+  freshly-encoded defaults dict (handles partial configs) and
+  rewrites known snake_case keys to exact camelCase before decode
+  (handles trailing-uppercase mismatches). `applyUserOverrides()`
+  merges the dashboard's overrides file, bounded to the two
+  storage keys and gated by home-dir uid ownership.
+- `SignalHandlers.swift`: SIGHUP now reloads `DaemonConfig` and
+  kicks an immediate size-cap sweep when `maxDatabaseSizeMB` or
+  `retentionDays` changed.
+- `DaemonTimers.swift`: `measureDatabaseFootprintMB()` sums
+  `db + db-wal + db-shm`. Prune and size-cap timers read the cap /
+  retention live from `state` each tick so SIGHUP reloads are
+  honored on the next sweep.
+- `DaemonSetup.swift`: orphan-DB reaper renames stale (>24h)
+  `/Users/*/Library/Application Support/MacCrab/events.db*` to
+  `events.db.orphan-<stamp>*` at sysext startup — forensic
+  evidence preserved, dashboard picker stops selecting the orphan.
+
+### Tests
+
+**783 tests pass (up from 776).** New suites:
+
+- `DaemonConfigOverridesTests` — snake_case, camelCase, partial,
+  and defaults decode paths all lock in.
+- `DatabaseFootprintTests` — db-only, db+wal+shm, and missing-files
+  footprint math.
+
+### Upgrading
+
+Install v1.6.14, open Settings → Storage Limit, set the cap you want.
+The slider now writes to disk and SIGHUP triggers an immediate
+sweep. `log show --predicate 'subsystem == "com.maccrab.agent"'
+--last 5m | grep -i "storage config\|size-cap"` confirms the sysext
+received the new value. No data migration.
+
 ## [1.6.13] — 2026-04-24
 
 Hardens the size-cap enforcer landed in v1.6.12 against real-world

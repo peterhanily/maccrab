@@ -271,12 +271,14 @@ enum DaemonTimers {
 
         // Retention pruning (daily). Clamp retentionDays to [1, 3650] so a
         // misconfigured value can't delete everything on the next tick or
-        // overflow the TimeInterval math.
-        let retentionDays = max(1, min(state.retentionDays, 3650))
+        // overflow the TimeInterval math. Read the value live from `state`
+        // at each tick so a SIGHUP-driven config reload is honored on the
+        // next sweep without needing a daemon restart.
         let pruneTimer = DispatchSource.makeTimerSource(queue: .global())
         pruneTimer.schedule(deadline: .now() + 3600, repeating: 86400) // First at 1h, then daily
         pruneTimer.setEventHandler {
             Task {
+                let retentionDays = max(1, min(state.retentionDays, 3650))
                 let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86400)
                 let prunedEvents = (try? await state.eventStore.prune(olderThan: cutoff)) ?? 0
                 let prunedAlerts = (try? await state.alertStore.prune(olderThan: cutoff)) ?? 0
@@ -294,32 +296,32 @@ enum DaemonTimers {
         // noticed. This timer checks file size every hour and
         // iteratively prunes the oldest events + VACUUMs until the
         // file drops below 80% of the cap.
-        let maxSizeMB = max(50, state.maxDatabaseSizeMB)
-        let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
+        let startupMaxSizeMB = max(50, state.maxDatabaseSizeMB)
+        let startupTargetSizeMB = Int(Double(startupMaxSizeMB) * 0.8)
         let dbFilePath = state.supportDir + "/events.db"
 
         // Startup log so operators can verify the cap is armed by
         // grepping the first 15 minutes of daemon logs. Measures
-        // current size too, so "why is this taking so long to
-        // prune?" has an immediate answer (big starting DB).
-        let startupSizeMB: Int = {
-            let attrs = try? FileManager.default.attributesOfItem(atPath: dbFilePath)
-            let bytes = (attrs?[.size] as? UInt64) ?? 0
-            return Int(bytes / 1_000_000)
-        }()
-        if startupSizeMB > maxSizeMB {
-            logger.notice("Size-cap timer armed: cap=\(maxSizeMB) MB, target=\(targetSizeMB) MB, currently \(startupSizeMB) MB (OVER CAP — first sweep in 15 min, hourly thereafter)")
+        // current size too (db + wal + shm), so "why is this taking
+        // so long to prune?" has an immediate answer (big starting DB).
+        let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
+        if startupSizeMB > startupMaxSizeMB {
+            logger.notice("Size-cap timer armed: cap=\(startupMaxSizeMB) MB, target=\(startupTargetSizeMB) MB, currently \(startupSizeMB) MB (OVER CAP — first sweep in 15 min, hourly thereafter)")
         } else {
-            logger.info("Size-cap timer armed: cap=\(maxSizeMB) MB, target=\(targetSizeMB) MB, currently \(startupSizeMB) MB (under cap)")
+            logger.info("Size-cap timer armed: cap=\(startupMaxSizeMB) MB, target=\(startupTargetSizeMB) MB, currently \(startupSizeMB) MB (under cap)")
         }
 
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         // v1.6.13: first sweep at 15 min (up from 10) so collectors
         // + inventory warm-up settle before we compete for IO.
-        // Hourly thereafter.
+        // Hourly thereafter. v1.6.14: cap + target are read live from
+        // `state` at each tick so a SIGHUP-driven config reload is
+        // honored without a daemon restart.
         sizeCapTimer.schedule(deadline: .now() + 900, repeating: 3600)
         sizeCapTimer.setEventHandler {
             Task {
+                let maxSizeMB = max(50, state.maxDatabaseSizeMB)
+                let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
                 await enforceDatabaseSizeCap(
                     dbPath: dbFilePath,
                     maxSizeMB: maxSizeMB,
@@ -473,6 +475,47 @@ enum DaemonTimers {
     }
 }
 
+// MARK: - DB footprint measurement (v1.6.14)
+
+/// Return the SQLite database footprint in MB, summing the main
+/// `.db` file plus its `-wal` and `-shm` sidecars. v1.6.14: earlier
+/// releases measured only the main `.db`, so a 480 MB main file
+/// plus a 40 MB WAL presented as "under cap" despite consuming
+/// 520 MB on disk. Operators setting a tight cap were surprised
+/// when `du` and the daemon's cap disagreed; now they match.
+///
+/// Returns 0 on stat failure — downstream callers already treat
+/// 0 as "skip enforcement" via the `> maxSizeMB` guard.
+func measureDatabaseFootprintMB(dbPath: String) -> Int {
+    let fm = FileManager.default
+    func size(_ p: String) -> UInt64 {
+        guard let attrs = try? fm.attributesOfItem(atPath: p),
+              let b = attrs[.size] as? UInt64 else { return 0 }
+        return b
+    }
+    let total = size(dbPath) + size(dbPath + "-wal") + size(dbPath + "-shm")
+    return Int(total / 1_000_000)
+}
+
+// MARK: - On-demand sweep entry point (v1.6.14)
+
+/// Trigger a size-cap sweep immediately, outside the hourly timer.
+/// Used by the SIGHUP handler so operators can lower the cap in
+/// Settings, send SIGHUP, and see the DB shrink in seconds instead
+/// of waiting up to an hour for the next tick. Reads cap + target
+/// from `state` so the freshly-reloaded `DaemonConfig` is honored.
+func enforceDatabaseSizeCapNow(state: DaemonState) async {
+    let maxSizeMB = max(50, state.maxDatabaseSizeMB)
+    let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
+    let dbFilePath = state.supportDir + "/events.db"
+    await enforceDatabaseSizeCap(
+        dbPath: dbFilePath,
+        maxSizeMB: maxSizeMB,
+        targetSizeMB: targetSizeMB,
+        eventStore: state.eventStore
+    )
+}
+
 // MARK: - Size-cap enforcement (hardened in v1.6.13)
 
 /// Hardened size-cap enforcer. Runs on the hourly timer and from
@@ -505,8 +548,6 @@ private func enforceDatabaseSizeCap(
     targetSizeMB: Int,
     eventStore: EventStore
 ) async {
-    let fm = FileManager.default
-
     // Reentrancy: if another sweep is already running (hourly timer
     // + on-demand invocation can race), exit cleanly.
     guard await eventStore.beginSizeCapPrune() else {
@@ -516,9 +557,9 @@ private func enforceDatabaseSizeCap(
     defer { Task { await eventStore.endSizeCapPrune() } }
 
     func currentSizeMB() -> Int {
-        let attrs = try? fm.attributesOfItem(atPath: dbPath)
-        let bytes = (attrs?[.size] as? UInt64) ?? 0
-        return Int(bytes / 1_000_000)
+        // v1.6.14: sum db + wal + shm so the cap reflects total
+        // on-disk footprint, not just the main file.
+        return measureDatabaseFootprintMB(dbPath: dbPath)
     }
 
     /// Free space on the volume holding the DB, in MB. Returns
