@@ -26,11 +26,9 @@ the release pipeline and CI posture being honest about what they do.
   workflow level. Previously inherited the default `contents: write`
   scope which gave fork-PR runners more than they needed.
 - **Release scripts checked in.** `scripts/release.sh`,
-  `scripts/build-release.sh`, and `scripts/notarize.sh` (previously
-  gitignored) are now tracked. One Developer-ID example string in
-  `release.sh` sanitised to a generic `Your Name (TEAMID)` placeholder.
-  No real credentials were ever in these scripts — they read from
-  `~/.maccrab-release-env` which stays outside the repo.
+  `scripts/build-release.sh`, and `scripts/notarize.sh` are now
+  tracked so CI and fresh clones can run the release pipeline.
+  Configuration is read from environment variables at runtime.
   `scripts/build-pkg.sh` remains gitignored and was removed locally.
 
 ## [1.6.10] — 2026-04-24
