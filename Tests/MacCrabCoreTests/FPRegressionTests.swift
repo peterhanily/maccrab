@@ -581,11 +581,19 @@ struct InteractiveAdminGateTests {
                 "lsof reached via tmux multiplexer under iTerm must still be treated as interactive")
     }
 
-    @Test("ps from launchd (no terminal ancestor) still fires")
+    @Test("Critical ps from launchd still fires through Gate 7")
     func psFromLaunchdStillFires() async throws {
+        // v1.6.8: Gate 7 now suppresses all non-critical matches on
+        // Apple platform binaries (/bin/ps included) regardless of
+        // ancestor chain. The "ps spawned from launchd" scenario that
+        // this test originally documented is now suppressed at non-
+        // critical severity. A critical-severity rule must still fire
+        // so a genuine daemon-compromise pattern isn't hidden.
         var matches = [
-            RuleMatch(ruleId: "d1a2b3c4-0123", ruleName: "Process Listing by Unsigned Process",
-                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+            RuleMatch(ruleId: "critical.daemon-exec",
+                      ruleName: "Rare Daemon-Spawned Recon",
+                      severity: .critical, description: "",
+                      mitreTechniques: [], tags: [])
         ]
         let event = interactiveAdminExec(
             basename: "ps",
@@ -593,7 +601,7 @@ struct InteractiveAdminGateTests {
         )
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
         #expect(matches.count == 1,
-                "ps spawned by launchd is suspicious and must still alert")
+                "Critical-severity rules survive Gate 7 even on Apple platform binaries")
     }
 
     @Test("CRITICAL-severity admin CLI match survives interactive gate")
@@ -614,22 +622,36 @@ struct InteractiveAdminGateTests {
                 "Critical-severity rules on admin CLI must still fire even from a terminal")
     }
 
-    @Test("Non-admin-CLI processes are unaffected by Gate 5")
+    @Test("Non-admin-CLI, non-platform-binary processes are unaffected by Gate 5")
     func unrelatedProcessUnaffected() async throws {
+        // v1.6.8: updated to use /opt/homebrew/bin/http which is NOT
+        // a platform binary and NOT in the Gate 5 admin-CLI basename
+        // list. Previously used /usr/bin/curl, but Gate 7 now
+        // suppresses platform-binary paths — so the test no longer
+        // isolated Gate 5's scope; it also had to dodge Gate 7.
         var matches = [
             RuleMatch(ruleId: "test.unrelated", ruleName: "Some Rule",
                       severity: .medium, description: "", mitreTechniques: [], tags: [])
         ]
-        let event = interactiveAdminExec(
-            basename: "curl",
+        let proc = ProcessInfo(
+            pid: 5555, ppid: 900, rpid: 1,
+            name: "http", executable: "/opt/homebrew/bin/http",
+            commandLine: "/opt/homebrew/bin/http", args: [],
+            workingDirectory: "/tmp",
+            userId: 501, userName: "testuser", groupId: 20,
+            startTime: Date(),
+            codeSignature: nil,
             ancestors: [
                 ProcessAncestor(pid: 900, executable: "/bin/zsh", name: "zsh"),
-                terminalAncestor(),
-            ]
+                ProcessAncestor(pid: 800, executable: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal", name: "Terminal"),
+            ],
+            architecture: "arm64",
+            isPlatformBinary: false
         )
+        let event = Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: proc)
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
         #expect(matches.count == 1,
-                "Gate 5 only applies to a whitelisted set of admin CLI basenames — curl is not one")
+                "Gate 5 only applies to admin-CLI basenames; http under Homebrew isn't one")
     }
 }
 
@@ -812,5 +834,145 @@ struct AutoUpdaterAncestorGateTests {
             ancestors: [ProcessAncestor(pid: 1, executable: "/sbin/launchd", name: "launchd")]
         )
         #expect(!NoiseFilter.isAutoUpdaterOrAncestor(event: benignEvent))
+    }
+}
+
+// MARK: - Apple platform binary gate (v1.6.8)
+
+/// Gate 7 regression: the ultimate FP backstop for `/bin/ps`,
+/// `/usr/bin/defaults`, `/usr/bin/csrutil`, `/usr/bin/sw_vers`, and
+/// every other Apple-shipped platform binary. Field data across
+/// v1.6.2-v1.6.7 showed the same LOW-severity enumeration rules
+/// firing on these over and over — filter_system_path was added at
+/// the rule level in v1.6.5, but enrichment races and stale-rule-
+/// cache scenarios kept letting them through. Gate 7 catches them
+/// at the engine level regardless of rule filters.
+@Suite("FP regression: Apple platform binary gate")
+struct ApplePlatformBinaryGateTests {
+
+    private func execWithSigner(
+        path: String,
+        signerType: SignerType?,
+        isPlatformBinary: Bool
+    ) -> Event {
+        let codeSig: CodeSignatureInfo? = signerType.map {
+            CodeSignatureInfo(
+                signerType: $0, teamId: nil, signingId: nil,
+                authorities: [], flags: 0, isNotarized: false
+            )
+        }
+        let proc = ProcessInfo(
+            pid: 5000, ppid: 4000, rpid: 1,
+            name: (path as NSString).lastPathComponent,
+            executable: path,
+            commandLine: path, args: [path],
+            workingDirectory: "/",
+            userId: 501, userName: "testuser", groupId: 20,
+            startTime: Date(),
+            codeSignature: codeSig,
+            ancestors: [],
+            architecture: "arm64",
+            isPlatformBinary: isPlatformBinary
+        )
+        return Event(
+            eventCategory: .process, eventType: .start,
+            eventAction: "exec", process: proc
+        )
+    }
+
+    @Test("/bin/ps with isPlatformBinary=true suppresses non-critical")
+    func psPlatformBinarySuppressed() {
+        var matches = [
+            RuleMatch(ruleId: "rule.ps", ruleName: "Process Listing",
+                      severity: .low, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execWithSigner(
+            path: "/bin/ps", signerType: nil, isPlatformBinary: true
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty)
+    }
+
+    @Test("/usr/bin/defaults anchored only by path still suppressed")
+    func defaultsByPathAloneSuppressed() {
+        // No platform-binary flag, no code signature — just the path.
+        // This is the enrichment-race case we actually saw in the field.
+        var matches = [
+            RuleMatch(ruleId: "rule.def", ruleName: "Defaults Read Sensitive",
+                      severity: .low, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execWithSigner(
+            path: "/usr/bin/defaults", signerType: nil, isPlatformBinary: false
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "SIP-protected path must suppress even when enrichment hasn't populated signer info")
+    }
+
+    @Test("/usr/bin/csrutil and /usr/bin/sw_vers are suppressed")
+    func csrutilAndSwVersSuppressed() {
+        for path in ["/usr/bin/csrutil", "/usr/bin/sw_vers", "/usr/sbin/system_profiler"] {
+            var matches = [
+                RuleMatch(ruleId: "r", ruleName: "R", severity: .low,
+                          description: "", mitreTechniques: [], tags: [])
+            ]
+            let event = execWithSigner(path: path, signerType: nil, isPlatformBinary: false)
+            NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+            #expect(matches.isEmpty, "\(path) must be suppressed by Gate 7")
+        }
+    }
+
+    @Test("Apple-signed /Applications/Keynote.app binary is suppressed")
+    func keynoteSuppressed() {
+        var matches = [
+            RuleMatch(ruleId: "c2.beacon", ruleName: "Regular C2 Beacon Pattern",
+                      severity: .medium, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execWithSigner(
+            path: "/Applications/Keynote.app/Contents/MacOS/Keynote",
+            signerType: .apple, isPlatformBinary: false
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "Apple-signed /Applications/ app must be suppressed by Gate 7")
+    }
+
+    @Test("Critical match on /bin/ps STILL fires (counter-test)")
+    func criticalSurvives() {
+        var matches = [
+            RuleMatch(ruleId: "critical.ransomware", ruleName: "Ransomware Note",
+                      severity: .critical, description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execWithSigner(path: "/bin/ps", signerType: .apple, isPlatformBinary: true)
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1, "Gate 7 must not suppress critical severity")
+    }
+
+    @Test("Non-Apple binary at /tmp/evil is NOT suppressed (counter-test)")
+    func nonApplePreserved() {
+        var matches = [
+            RuleMatch(ruleId: "rule.x", ruleName: "X", severity: .medium,
+                      description: "", mitreTechniques: [], tags: [])
+        ]
+        let event = execWithSigner(
+            path: "/tmp/evil", signerType: .unsigned, isPlatformBinary: false
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1, "Gate 7 must not sweep up non-Apple paths")
+    }
+
+    @Test("isAppleSystemBinary public API: all three signals work")
+    func publicAPIContract() {
+        let byPlatformFlag = execWithSigner(path: "/tmp/ps", signerType: nil, isPlatformBinary: true)
+        #expect(NoiseFilter.isAppleSystemBinary(event: byPlatformFlag))
+
+        let bySigner = execWithSigner(path: "/tmp/ps", signerType: .apple, isPlatformBinary: false)
+        #expect(NoiseFilter.isAppleSystemBinary(event: bySigner))
+
+        let byPath = execWithSigner(path: "/usr/bin/defaults", signerType: nil, isPlatformBinary: false)
+        #expect(NoiseFilter.isAppleSystemBinary(event: byPath))
+
+        let notApple = execWithSigner(path: "/tmp/evil", signerType: .unsigned, isPlatformBinary: false)
+        #expect(!NoiseFilter.isAppleSystemBinary(event: notApple))
     }
 }

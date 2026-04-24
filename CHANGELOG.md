@@ -3,6 +3,55 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.8] — 2026-04-24
+
+FP backstop closing out the v1.6.x discovery-rule thread, first AI
+Suite dashboard surface, and two UI fixes for the allowlist manager
+and campaign-card tap behavior.
+
+### Fixed
+
+- **NoiseFilter Gate 7: Apple platform binary backstop.** The recurring
+  `/bin/ps`, `/usr/bin/defaults`, `/usr/bin/csrutil`, `/usr/bin/sw_vers`,
+  and `/usr/sbin/system_profiler` FPs now suppress at the engine level
+  regardless of rule-level filters. Gate 7 fires when the event's
+  subject is flagged `isPlatformBinary`, code-sig-enriched as Apple,
+  or running from a SIP-protected path prefix. Critical rules still
+  fire.
+- **`c2_beacon_pattern.yml` filter_apple_signed.** Keynote, Pages,
+  Numbers, Mail, and every other Apple-bundled `/Applications/` app
+  no longer fires the regular-interval beacon pattern when they make
+  their routine iCloud syncs. Added `filter_apple_signed: SignerType:
+  'apple'` to the rule.
+- **Allowlist "Manage" button count vs content mismatch.** Button
+  label previously used `AppState.suppressionPatterns.count` (v1
+  legacy pattern list), dialog rendered v2 `SuppressionManager` entries
+  from disk. Now `AppState.allowlistEntryCount` is authoritative and
+  sourced from the same `SuppressionManager` the dialog uses;
+  refreshed on every poll and on dialog dismiss.
+- **Campaign row tap doesn't expand.** Only the header-HStack button
+  toggled expand; clicking the summary text or tactics pills did
+  nothing. Wrapped the collapsed-region VStack in `.contentShape(Rectangle())`
+  + `.onTapGesture { onToggle() }` so every pixel toggles. Expanded-
+  area buttons (Dismiss / Restore / Copy Details) sit outside the
+  tap block so they retain their own hit regions.
+
+### Added
+
+- **`ClusterSheet`** — first UI surface for the v1.6.6 `AlertClusterService`.
+  Opened from AlertDashboard's toolbar ("Clusters" button), groups the
+  current alert list by `ruleId::processName` fingerprint, shows size
+  + max severity + tactics union + first/last-seen per cluster.
+  Expanded rows show contributing alerts; "Suppress all in cluster"
+  bulk-silences every member in one click.
+
+### Tests
+
+748 tests pass (up from 741). +7 new tests for Gate 7 including
+counter-tests (critical-on-ps still fires; non-Apple `/tmp/evil`
+still fires at medium). Two pre-existing Gate 5 tests updated to
+reflect Gate 7 interplay.
+
 ## [1.6.7] — 2026-04-24
 
 Follow-up to v1.6.6's AI Suite: credential-audit hardening, EventLoop

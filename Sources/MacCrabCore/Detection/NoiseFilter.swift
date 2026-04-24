@@ -106,6 +106,24 @@ public enum NoiseFilter {
         if isAutoUpdaterOrAncestor(event: event) {
             matches.removeAll { $0.severity != .critical }
         }
+
+        // Gate 7: Apple-signed platform binary. The ultimate backstop
+        // for the long-running FP thread around `/bin/ps`,
+        // `/usr/bin/defaults`, `/usr/bin/csrutil`, `/usr/bin/sw_vers`,
+        // `/usr/sbin/system_profiler`, and friends. Per-rule
+        // `filter_system_path` and `filter_platform` already attempt
+        // to catch these, but field data across v1.6.2-1.6.7 shows
+        // the same alerts recurring — either because rules aren't
+        // reloaded on the running daemon, or because the ES event's
+        // code-sig enrichment hasn't settled by the time the rule
+        // engine evaluates. When the subject is unambiguously an
+        // Apple-shipped platform binary — flagged by macOS itself via
+        // `isPlatformBinary`, OR anchored on a SIP-protected path
+        // prefix — drop non-critical matches regardless. Critical
+        // rules (ransomware, SIP disable, known-bad hash) still fire.
+        if isAppleSystemBinary(event: event) {
+            matches.removeAll { $0.severity != .critical }
+        }
     }
 
     /// True when an event's subject is a MacCrab process, a MacCrab file,
@@ -170,6 +188,38 @@ public enum NoiseFilter {
                 return true
             }
         }
+        return false
+    }
+
+    /// True when the event's subject is an Apple-shipped platform
+    /// binary. Union of three signals, any of which is sufficient:
+    ///
+    /// 1. `event.process.isPlatformBinary` — set by ES when macOS
+    ///    recognises the binary as platform-shipped. Most reliable.
+    /// 2. `process.codeSignature.signerType == .apple` — kernel
+    ///    code-sig enrichment recognised the signer.
+    /// 3. Image path under a SIP-protected prefix — `/bin/`,
+    ///    `/sbin/`, `/usr/bin/`, `/usr/sbin/`, `/usr/libexec/`,
+    ///    `/System/`. Since SIP prevents writing to these paths on a
+    ///    healthy system, anything running from them is guaranteed
+    ///    Apple-shipped. Anchoring here makes the gate resilient to
+    ///    enrichment races where neither isPlatformBinary nor
+    ///    signerType arrive before the rule fires.
+    ///
+    /// Intentionally scoped to the SUBJECT process only; we don't
+    /// walk ancestors. A /bin/ps invoked from /tmp/malicious shell
+    /// will still be suppressed — but /tmp/malicious itself won't
+    /// be, because Gate 7 only fires on Apple subjects. That's the
+    /// right split: we trust the platform binary, we don't trust
+    /// its caller.
+    public static func isAppleSystemBinary(event: Event) -> Bool {
+        if event.process.isPlatformBinary { return true }
+        if event.process.codeSignature?.signerType == .apple { return true }
+        let path = event.process.executable
+        if path.hasPrefix("/bin/") || path.hasPrefix("/sbin/") { return true }
+        if path.hasPrefix("/usr/bin/") || path.hasPrefix("/usr/sbin/") { return true }
+        if path.hasPrefix("/usr/libexec/") { return true }
+        if path.hasPrefix("/System/") { return true }
         return false
     }
 

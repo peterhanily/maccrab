@@ -303,30 +303,37 @@ struct CampaignCard: View {
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
-                // Header row — clickable to expand
-                Button(action: onToggle) {
-                    HStack {
-                        Image(systemName: campaign.severity.sfSymbol)
-                            .foregroundColor(campaign.severityColor)
-                            .font(.title3)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(campaign.ruleTitle)
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                            Text(campaignType)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Text(campaign.timeAgoString)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                // v1.6.8: the whole collapsed region (header + summary
+                // + tactics pills) toggles expand. Previously only the
+                // inner Button wrapping the header HStack was tappable;
+                // users kept clicking the summary text or the tactics
+                // row expecting the card to open. Wrapping this
+                // VStack-slice in a `.contentShape(Rectangle())` +
+                // `.onTapGesture` makes every bit of the collapsed
+                // region tappable, while the Buttons in the expanded
+                // detail section (Dismiss / Restore / Copy) sit
+                // outside this block and retain their own hit regions.
+                VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: campaign.severity.sfSymbol)
+                        .foregroundColor(campaign.severityColor)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(campaign.ruleTitle)
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        Text(campaignType)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                    Spacer()
+                    Text(campaign.timeAgoString)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.plain)
 
                 // Summary line
                 Text(campaign.description)
@@ -349,6 +356,9 @@ struct CampaignCard: View {
                         }
                     }
                 }
+                }  // end of tappable collapsed-region VStack
+                .contentShape(Rectangle())
+                .onTapGesture { onToggle() }
 
                 // Expanded detail section
                 if isExpanded {

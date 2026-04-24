@@ -19,6 +19,7 @@ struct AlertDashboard: View {
     @State private var undoAlertIDs: [String] = []
     @State private var exportInProgress = false
     @State private var showSuppressionManager = false
+    @State private var showClusterSheet = false
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     /// Derived severity filter from the persisted raw value.
@@ -107,17 +108,41 @@ struct AlertDashboard: View {
                     .font(.caption)
                     .accessibilityLabel("Show suppressed alerts")
 
-                if !appState.suppressionPatterns.isEmpty {
-                    Button {
-                        showSuppressionManager = true
-                    } label: {
-                        Label("Manage (\(appState.suppressionPatterns.count))", systemImage: "eye.slash.circle")
-                    }
-                    .font(.caption)
-                    .popover(isPresented: $showSuppressionManager) {
-                        SuppressionManagerView(appState: appState)
-                    }
+                // v1.6.8: the "Manage (N)" button previously used
+                // appState.suppressionPatterns.count — the v1 pattern
+                // list — but opened SuppressionManagerView, which
+                // shows v2 Allowlist entries from SuppressionManager
+                // on disk. The two data stores are disjoint, so the
+                // count and the dialog contents didn't match.
+                // Fixed by having AppState surface the v2 count, and
+                // by always offering the button (not just when v1 is
+                // non-empty).
+                Button {
+                    showSuppressionManager = true
+                } label: {
+                    Label("Manage (\(appState.allowlistEntryCount))", systemImage: "eye.slash.circle")
                 }
+                .font(.caption)
+                .popover(isPresented: $showSuppressionManager) {
+                    SuppressionManagerView(appState: appState)
+                        .onDisappear { Task { await appState.refreshAllowlistEntryCount() } }
+                }
+                .help("Manage the \(appState.allowlistEntryCount) active allowlist entries")
+
+                // v1.6.8: clusters sheet. Groups the current alert list
+                // by ruleId + processName so the analyst can suppress
+                // or triage by family in one click instead of scrolling
+                // through dozens of near-identical rows.
+                Button {
+                    showClusterSheet = true
+                } label: {
+                    Label("Clusters", systemImage: "square.stack.3d.up")
+                }
+                .font(.caption)
+                .sheet(isPresented: $showClusterSheet) {
+                    ClusterSheet(appState: appState)
+                }
+                .help("Group similar alerts by rule + process")
 
                 TextField("Search...", text: $searchText)
                     .textFieldStyle(.roundedBorder)

@@ -525,6 +525,12 @@ final class AppState: ObservableObject {
             await loadTCCEvents()
             rulesLoaded_cached = true
         }
+
+        // v1.6.8: keep the allowlist-count badge (Manage button on
+        // AlertDashboard) in sync with the on-disk SuppressionManager
+        // state. Refreshed every poll so a CLI-added entry shows up
+        // without requiring a dashboard reopen.
+        await refreshAllowlistEntryCount()
     }
 
     /// If the heartbeat has been stale for long enough AND we haven't
@@ -653,6 +659,33 @@ final class AppState: ObservableObject {
 
     /// Suppression rules: (ruleTitle, processName) patterns to auto-hide.
     @Published var suppressionPatterns: [(ruleTitle: String, processName: String)] = []
+
+    /// Active v2 allowlist entry count (non-expired Suppression records
+    /// loaded from `suppressions.json`). Kept in sync with what
+    /// `SuppressionManagerView` shows so the "Manage (N)" button's
+    /// count is authoritative. Refreshed on view-open and on view-
+    /// close; the SuppressionManager is the source of truth, we just
+    /// cache the count for a fast read on the main actor.
+    @Published var allowlistEntryCount: Int = 0
+
+    /// Fetch the current v2 allowlist count from disk and publish it.
+    /// Safe to call from any context; always lands the mutation on
+    /// the main actor.
+    func refreshAllowlistEntryCount() async {
+        let dir = allowlistDataDir()
+        let mgr = SuppressionManager(dataDir: dir)
+        await mgr.load()
+        let count = await mgr.list(includeExpired: false).count
+        await MainActor.run { self.allowlistEntryCount = count }
+    }
+
+    private func allowlistDataDir() -> String {
+        if let env = ProcessInfo.processInfo.environment["MACCRAB_DATA_DIR"],
+           FileManager.default.fileExists(atPath: env) { return env }
+        let system = "/Library/Application Support/MacCrab"
+        if FileManager.default.fileExists(atPath: system) { return system }
+        return NSHomeDirectory() + "/Library/Application Support/MacCrab"
+    }
 
     func suppressAlert(_ alertId: String) async {
         // Update authoritative set and in-memory state immediately — no loadAlerts() needed.

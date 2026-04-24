@@ -108,7 +108,16 @@ detection:
             - '/python3'
             - '/ruby'
             - '/ollama'
-    condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services and not filter_dev_tools and not filter_homebrew_node
+    # v1.6.8: Apple-signed applications. Keynote, Pages, Numbers,
+    # GarageBand, iMovie, Photos, Mail, Messages, Weather, News, TV, and
+    # every other Apple-bundled `/Applications/` app legitimately makes
+    # periodic outbound HTTPS to Apple services (iCloud sync, update
+    # checks, telemetry, receipts). They aren't under `/System/` so
+    # `filter_system` misses them. Anchor on signer so they don't need
+    # to be enumerated by bundle name.
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services and not filter_dev_tools and not filter_homebrew_node and not filter_apple_signed
 falsepositives:
     - Legitimate heartbeat/health-check connections
     - Auto-update services
