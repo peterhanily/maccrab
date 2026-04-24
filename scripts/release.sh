@@ -71,19 +71,31 @@ VERSION="$VERSION" ./scripts/build-release.sh
 # a 1.9KB stub archive that opened in Installer.app but contained
 # no payload. DMG + Homebrew are the supported install paths.
 
-# Step 4: Update Homebrew formula
+# Step 4: Update Homebrew formulae
+#
+# The repo historically has TWO cask files — homebrew/maccrab.rb (legacy,
+# in-tree docs) and Casks/maccrab.rb (what the Homebrew tap actually
+# reads when this repo is tapped via `brew tap peterhanily/maccrab`).
+# Pre-v1.6.14 the script only updated homebrew/maccrab.rb, so every
+# release since v1.6.5 landed with a stale Casks/maccrab.rb — brew
+# users saw old versions for nine releases before anyone noticed.
+# Both files are now updated in lockstep.
 DMG_PATH=".build/MacCrab-v$VERSION.dmg"
 if [ -f "$DMG_PATH" ]; then
-    echo "Step 4/5: Updating Homebrew formula..."
+    echo "Step 4/5: Updating Homebrew formulae..."
     SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
-    sed -i '' "s/version \".*\"/version \"$VERSION\"/" homebrew/maccrab.rb
-    sed -i '' "s/sha256 .*/sha256 \"$SHA\"/" homebrew/maccrab.rb
-    echo "  Updated homebrew/maccrab.rb (sha256: ${SHA:0:16}...)"
+    for formula in homebrew/maccrab.rb Casks/maccrab.rb; do
+        if [ -f "$formula" ]; then
+            sed -i '' "s/version \".*\"/version \"$VERSION\"/" "$formula"
+            sed -i '' "s/sha256 .*/sha256 \"$SHA\"/" "$formula"
+            echo "  Updated $formula (sha256: ${SHA:0:16}...)"
+        fi
+    done
 fi
 
 # Step 5: Create GitHub release
 echo "Step 5/5: Creating GitHub release..."
-git add homebrew/maccrab.rb
+git add homebrew/maccrab.rb Casks/maccrab.rb 2>/dev/null || true
 git diff --cached --quiet || git commit -m "chore: update Homebrew formula to v$VERSION"
 git tag "v$VERSION"
 git push origin main --tags
