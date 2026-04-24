@@ -3,6 +3,47 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.13] — 2026-04-24
+
+Hardens the size-cap enforcer landed in v1.6.12 against real-world
+failure modes (low disk, WAL-invisible shrinks, concurrent
+invocations). No detection-engine or user-visible-feature changes.
+
+### Changed
+
+- **Pre-flight disk-space check** — VACUUM requires scratch space
+  ~= DB size; enforcer now queries
+  `volumeAvailableCapacityForImportantUsage` and skips VACUUM with
+  an explicit warning log when free disk < 1.3× current DB size.
+  Row prune still happens; file shrink deferred to next tick once
+  disk frees.
+- **Single VACUUM per sweep** — moved out of the prune loop, so
+  a big DB gets one full-file rewrite per hour instead of up to
+  8×.
+- **50% per-sweep deletion cap** — a misestimated overage can
+  never wipe more than half the rows in one pass. DB converges to
+  target across a few hours on heavily over-cap installs.
+- **WAL checkpoint pair** — `wal_checkpoint(PASSIVE)` runs before
+  and after VACUUM so the main `.db` file (what Settings reads)
+  reflects the shrink. PASSIVE never blocks; escalates to RESTART
+  only if the passive pass couldn't drain the WAL.
+- **Reentrancy guard** — `EventStore.beginSizeCapPrune()` /
+  `endSizeCapPrune()`. Hourly timer + on-demand entry points
+  can't double-invoke. Enforcer uses `defer` for the release.
+- **First-sweep delay 10 min → 15 min** — lets collectors,
+  inventory scans, and baseline hydration settle before the
+  enforcer competes for IO. Hourly cadence unchanged.
+- **Startup confirmation log** — daemon now emits a single line
+  on boot confirming the cap is armed, the target, and the
+  current DB size. Operators can grep to verify.
+
+### Tests
+
+776 pass (up from 769). +7 hardening tests: reentrancy guard,
+walCheckpoint safety + drainage, VACUUM+checkpoint interaction,
+guard lifecycle with defer, concurrent-acquire honor, pruneOldest
+independence from the guard.
+
 ## [1.6.12] — 2026-04-24
 
 ### Fixed

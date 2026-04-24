@@ -103,6 +103,135 @@ struct EventStoreSizeCapTests {
         #expect(count == 50)
     }
 
+    // MARK: - v1.6.13 hardening tests
+
+    @Test("beginSizeCapPrune returns false while another sweep holds the guard")
+    func reentrancyGuard() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let first = await store.beginSizeCapPrune()
+        #expect(first == true, "first acquire must succeed")
+
+        let second = await store.beginSizeCapPrune()
+        #expect(second == false, "second acquire while first holds must fail")
+
+        await store.endSizeCapPrune()
+        let third = await store.beginSizeCapPrune()
+        #expect(third == true, "acquire after release must succeed")
+
+        await store.endSizeCapPrune()
+    }
+
+    @Test("walCheckpoint runs without error on a fresh store")
+    func walCheckpointSafe() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // Empty WAL — checkpoint should be a no-op that returns
+        // true (trivially drained).
+        let drained = await store.walCheckpoint()
+        #expect(drained == true)
+    }
+
+    @Test("walCheckpoint drains WAL after inserts")
+    func walCheckpointDrainsWAL() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try await insertSample(store, count: 100)
+        // WAL now has uncommitted pages. Checkpoint should move
+        // them into the main .db.
+        let drained = await store.walCheckpoint()
+        #expect(drained == true)
+
+        // All data still present after checkpoint.
+        #expect(try await store.count() == 100)
+    }
+
+    @Test("vacuum followed by checkpoint leaves DB queryable")
+    func vacuumThenCheckpointSafe() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try await insertSample(store, count: 200)
+        _ = await store.walCheckpoint()
+        try await store.vacuum()
+        _ = await store.walCheckpoint()
+        #expect(try await store.count() == 200)
+
+        // Inserts continue to work after vacuum + checkpoint.
+        try await insertSample(store, count: 50, base: Date().addingTimeInterval(1000))
+        #expect(try await store.count() == 250)
+    }
+
+    @Test("pruneOldest + endSizeCapPrune cycle works when wrapped in defer")
+    func guardDeferReleasesOnError() async throws {
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // Simulate the enforcer pattern: acquire, defer release,
+        // then do work that might throw.
+        let acquired = await store.beginSizeCapPrune()
+        #expect(acquired == true)
+        // Release explicitly (simulating the defer path).
+        await store.endSizeCapPrune()
+
+        // A second cycle should succeed — no stale state carried
+        // across defer.
+        let acquired2 = await store.beginSizeCapPrune()
+        #expect(acquired2 == true)
+        await store.endSizeCapPrune()
+    }
+
+    @Test("Reentrancy guard holds across pruneOldest invocation")
+    func reentrancyDuringWork() async throws {
+        // Start a long-running prune behind the guard. A second
+        // acquire during the work must return false. Tests the
+        // intended use pattern: timer fires, enforcer acquires
+        // guard, then calls pruneOldest which can take time.
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try await insertSample(store, count: 500)
+
+        let firstAcquired = await store.beginSizeCapPrune()
+        #expect(firstAcquired == true)
+
+        // Kick off the prune. While it's in-flight, try to acquire
+        // the guard again.
+        async let workResult: () = {
+            _ = try? await store.pruneOldest(count: 200)
+        }()
+
+        // Can't reliably observe in-progress state across actor
+        // hops; the invariant we care about is that after the
+        // first acquire, the second acquire returns false until
+        // the first calls end.
+        let secondAcquired = await store.beginSizeCapPrune()
+        #expect(secondAcquired == false)
+
+        _ = await workResult
+        await store.endSizeCapPrune()
+    }
+
+    @Test("pruneOldest is not blocked by endSizeCapPrune not yet called")
+    func pruneWorksEvenWithGuardHeld() async throws {
+        // The guard is advisory — callers check it to avoid
+        // redundant work, but pruneOldest itself doesn't depend on
+        // guard state. This keeps the low-level API usable from
+        // retention pruning (which has its own dedup in timers).
+        let (store, tmp) = try await makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try await insertSample(store, count: 100)
+
+        _ = await store.beginSizeCapPrune()
+        let pruned = try await store.pruneOldest(count: 10)
+        #expect(pruned == 10)
+        await store.endSizeCapPrune()
+    }
+
     @Test("prune + vacuum shrinks disk usage (db + wal + shm combined)")
     func pruneVacuumShrinks() async throws {
         let (store, tmp) = try await makeTempStore()

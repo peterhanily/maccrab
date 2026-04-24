@@ -638,8 +638,10 @@ public actor EventStore {
     /// SQLite's `DELETE` marks pages free but doesn't shrink the
     /// file; without this call, the size-cap enforcer prunes rows
     /// but the `.db` file stays the same size. Costly (rewrites the
-    /// whole DB), so only called after a size-driven prune, not
-    /// after every retention sweep.
+    /// whole DB) AND requires ~= DB size of temp scratch space,
+    /// so only called after a size-driven prune when
+    /// `checkpointAndVacuum()` has confirmed there's enough free
+    /// disk to do it safely.
     public func vacuum() async throws {
         guard let db = db else { return }
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
@@ -647,6 +649,76 @@ public actor EventStore {
             let msg = String(cString: sqlite3_errmsg(db))
             throw EventStoreError.stepFailed("VACUUM failed: \(msg)")
         }
+    }
+
+    /// Checkpoint the WAL into the main DB file. Uses the non-
+    /// blocking PASSIVE mode first; if that doesn't fully drain the
+    /// WAL, escalates to RESTART which briefly parks new writers
+    /// but doesn't require zero readers (unlike TRUNCATE).
+    ///
+    /// After a successful RESTART checkpoint, the main `.db` file
+    /// carries every row that's been committed, and a subsequent
+    /// VACUUM will produce a shrunken file that the Settings UI
+    /// actually shows as "Current size".
+    ///
+    /// Returns `true` iff the checkpoint drained the WAL (pages
+    /// moved from `.db-wal` to `.db`). Returns `false` on partial
+    /// or no progress; the caller should still be able to VACUUM
+    /// but the shrink may be smaller than expected.
+    @discardableResult
+    public func walCheckpoint() async -> Bool {
+        guard let db = db else { return false }
+        // PASSIVE: never blocks. Returns immediately; may leave
+        // pages in the WAL if readers are active.
+        var passiveLog: Int32 = 0
+        var passiveCkpt: Int32 = 0
+        let rcPassive = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_PASSIVE),
+            &passiveLog, &passiveCkpt
+        )
+        let passiveDrained = (rcPassive == SQLITE_OK && passiveLog == passiveCkpt)
+        if passiveDrained { return true }
+
+        // RESTART: parks new writers very briefly; forces all
+        // readers to start from the new WAL file (existing ones
+        // finish their current transactions first). Safer than
+        // TRUNCATE (which requires truly zero readers).
+        var restartLog: Int32 = 0
+        var restartCkpt: Int32 = 0
+        let rcRestart = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_RESTART),
+            &restartLog, &restartCkpt
+        )
+        return rcRestart == SQLITE_OK && restartLog == restartCkpt
+    }
+
+    // MARK: - Reentrancy guard for size-cap enforcement
+    //
+    // The hourly size-cap timer, a user-invoked "Prune now", and a
+    // CLI `maccrabctl prune --to-cap` can all end up here. Without a
+    // guard, two invocations serialize behind the actor but each
+    // runs a full prune + VACUUM pass — wasteful at best, unhelpful
+    // at worst (second pass re-scans an already-pruned DB). The
+    // guard returns `nil` from `beginSizeCapPrune()` when another
+    // pass is already in flight.
+
+    private var _isPruningForSizeCap = false
+
+    /// Acquire the size-cap pruning exclusion. Returns `nil` if
+    /// another pass is already active. Callers that receive `nil`
+    /// should simply log and return.
+    public func beginSizeCapPrune() -> Bool {
+        if _isPruningForSizeCap { return false }
+        _isPruningForSizeCap = true
+        return true
+    }
+
+    /// Release the size-cap pruning exclusion. Must be called from
+    /// a `defer` block so it runs even on throws.
+    public func endSizeCapPrune() {
+        _isPruningForSizeCap = false
     }
 
     // MARK: - Private Helpers

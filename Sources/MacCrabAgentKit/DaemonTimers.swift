@@ -297,8 +297,27 @@ enum DaemonTimers {
         let maxSizeMB = max(50, state.maxDatabaseSizeMB)
         let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
         let dbFilePath = state.supportDir + "/events.db"
+
+        // Startup log so operators can verify the cap is armed by
+        // grepping the first 15 minutes of daemon logs. Measures
+        // current size too, so "why is this taking so long to
+        // prune?" has an immediate answer (big starting DB).
+        let startupSizeMB: Int = {
+            let attrs = try? FileManager.default.attributesOfItem(atPath: dbFilePath)
+            let bytes = (attrs?[.size] as? UInt64) ?? 0
+            return Int(bytes / 1_000_000)
+        }()
+        if startupSizeMB > maxSizeMB {
+            logger.notice("Size-cap timer armed: cap=\(maxSizeMB) MB, target=\(targetSizeMB) MB, currently \(startupSizeMB) MB (OVER CAP — first sweep in 15 min, hourly thereafter)")
+        } else {
+            logger.info("Size-cap timer armed: cap=\(maxSizeMB) MB, target=\(targetSizeMB) MB, currently \(startupSizeMB) MB (under cap)")
+        }
+
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
-        sizeCapTimer.schedule(deadline: .now() + 600, repeating: 3600) // first at 10 min, then hourly
+        // v1.6.13: first sweep at 15 min (up from 10) so collectors
+        // + inventory warm-up settle before we compete for IO.
+        // Hourly thereafter.
+        sizeCapTimer.schedule(deadline: .now() + 900, repeating: 3600)
         sizeCapTimer.setEventHandler {
             Task {
                 await enforceDatabaseSizeCap(
@@ -454,17 +473,32 @@ enum DaemonTimers {
     }
 }
 
-// MARK: - Size-cap enforcement (v1.6.12)
+// MARK: - Size-cap enforcement (hardened in v1.6.13)
 
-/// Iteratively prune oldest events + VACUUM until the DB file drops
-/// below `targetSizeMB`. No-op when the DB is already under the cap.
-/// Called hourly from the size-cap timer.
+/// Hardened size-cap enforcer. Runs on the hourly timer and from
+/// any on-demand entry point. Design goals (v1.6.13):
 ///
-/// Strategy: check file size, estimate rows to prune based on the
-/// fractional overage, delete that batch, VACUUM, re-measure. Loop
-/// up to `maxIterations` passes; in the extremely unlikely case the
-/// file still exceeds the cap after that, log a warning and try
-/// again on the next hourly tick.
+/// - **Bounded blast radius.** Delete at most 50% of rows per sweep;
+///   if still over cap, next tick does another 50%. Converges to the
+///   target across a few hours instead of wiping in one pass.
+/// - **Never crash on out-of-disk.** VACUUM needs ~= DB size of
+///   scratch space. Pre-flight statvfs check; skip VACUUM if free <
+///   1.3× current DB size. The row deletion still happened (pages
+///   are freed internally), so the cap will close over subsequent
+///   ticks as disk frees up.
+/// - **Single VACUUM per sweep.** Prune everything first, then
+///   VACUUM once at the end. Previous v1.6.12 code called VACUUM
+///   per iteration — up to 8× full-file rewrites on a big DB.
+/// - **WAL-aware.** Checkpoint the WAL (PASSIVE → RESTART
+///   fallback) before and after VACUUM so the main .db file (what
+///   the Settings UI measures) actually reflects the shrink.
+/// - **Reentrancy-safe.** Hourly timer + on-demand "prune now"
+///   can collide; guard via `EventStore.beginSizeCapPrune()`.
+/// - **Structured log output.** Every sweep emits one line with
+///   starting/ending sizes, rows pruned, disk-space decision, and
+///   vacuum result. Operators can `log show --predicate 'subsystem
+///   == "com.maccrab.agent"'` and see exactly what the enforcer
+///   did.
 private func enforceDatabaseSizeCap(
     dbPath: String,
     maxSizeMB: Int,
@@ -473,50 +507,95 @@ private func enforceDatabaseSizeCap(
 ) async {
     let fm = FileManager.default
 
+    // Reentrancy: if another sweep is already running (hourly timer
+    // + on-demand invocation can race), exit cleanly.
+    guard await eventStore.beginSizeCapPrune() else {
+        logger.info("Size-cap enforcer: another sweep already active, skipping")
+        return
+    }
+    defer { Task { await eventStore.endSizeCapPrune() } }
+
     func currentSizeMB() -> Int {
         let attrs = try? fm.attributesOfItem(atPath: dbPath)
         let bytes = (attrs?[.size] as? UInt64) ?? 0
         return Int(bytes / 1_000_000)
     }
 
-    let initialMB = currentSizeMB()
-    guard initialMB > maxSizeMB else { return }
-
-    logger.warning("DB size \(initialMB) MB exceeds cap \(maxSizeMB) MB. Pruning to \(targetSizeMB) MB.")
-
-    let maxIterations = 8
-    for iteration in 0..<maxIterations {
-        let sizeMB = currentSizeMB()
-        if sizeMB <= targetSizeMB { break }
-
-        // Estimate how many events to prune this pass. If we're 2×
-        // over, delete ~60% of rows; if just 10% over, delete ~15%.
-        // We can't know bytes-per-row precisely (varies with command-
-        // line length, enrichments, etc.) so this is best-effort.
-        let overageFraction = Double(sizeMB - targetSizeMB) / Double(sizeMB)
-        let totalEvents = (try? await eventStore.count()) ?? 0
-        let pruneCount = max(10_000, Int(Double(totalEvents) * min(0.6, overageFraction + 0.1)))
-
-        let pruned = (try? await eventStore.pruneOldest(count: pruneCount)) ?? 0
-        if pruned == 0 {
-            logger.warning("Size-cap enforcer: no rows left to prune at iter \(iteration), but file still \(sizeMB) MB. Stopping.")
-            break
+    /// Free space on the volume holding the DB, in MB. Returns
+    /// UInt64.max on error so that a statvfs failure doesn't
+    /// mistakenly skip VACUUM (we fall back to "try it and let
+    /// SQLite fail gracefully").
+    func freeDiskMB() -> Int {
+        let url = URL(fileURLWithPath: dbPath).deletingLastPathComponent()
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let bytes = values?.volumeAvailableCapacityForImportantUsage, bytes > 0 {
+            return Int(bytes / 1_000_000)
         }
-
-        // VACUUM reclaims the freed pages into the file size. Without
-        // this, DELETE just marks pages free but the file stays the
-        // same size — the enforcement is moot. Costly (rewrites the
-        // whole DB) but we've already established the cap is
-        // exceeded, so the cost is acceptable.
-        try? await eventStore.vacuum()
+        return Int.max
     }
+
+    let initialMB = currentSizeMB()
+    guard initialMB > maxSizeMB else {
+        // Quiet no-op. Normal hourly tick on a well-sized DB.
+        return
+    }
+
+    logger.warning("Size-cap enforcer armed: DB \(initialMB) MB exceeds cap \(maxSizeMB) MB; target \(targetSizeMB) MB.")
+
+    // --- Phase 1: prune rows (bounded at 50% of total per sweep) ---
+    //
+    // Deleting more than half the rows in one go is almost always a
+    // bug: either the overage estimate is wrong, or the cap changed
+    // radically. Cap per-sweep deletion so a misestimate never
+    // wipes the whole store.
+
+    let totalEventsBefore = (try? await eventStore.count()) ?? 0
+    let maxPerSweep = totalEventsBefore / 2
+    let overageFraction = Double(initialMB - targetSizeMB) / Double(initialMB)
+    let estimatedPrune = max(10_000, Int(Double(totalEventsBefore) * min(0.6, overageFraction + 0.1)))
+    let pruneCount = min(estimatedPrune, maxPerSweep)
+
+    let pruned = (try? await eventStore.pruneOldest(count: pruneCount)) ?? 0
+    let sizeAfterPruneMB = currentSizeMB()
+    logger.notice("Size-cap phase 1: pruned \(pruned) rows (estimated \(estimatedPrune), cap \(maxPerSweep)); logical size now \(sizeAfterPruneMB) MB")
+
+    // --- Phase 2: VACUUM if we have the disk headroom ---
+    //
+    // VACUUM needs ~= current DB size of scratch space. We require
+    // 1.3× as buffer. If the volume is tight, we skip VACUUM
+    // entirely — the `.db` file won't shrink this pass, but pages
+    // are freed internally so the DB won't grow again until the
+    // freed pages are reused. On the next hourly tick (or once
+    // disk frees), we'll revisit.
+
+    let needMB = Int(Double(sizeAfterPruneMB) * 1.3)
+    let freeMB = freeDiskMB()
+    let canVacuum = freeMB >= needMB
+
+    if !canVacuum {
+        logger.warning("Size-cap phase 2: skipping VACUUM — need \(needMB) MB free, have \(freeMB) MB. File size unchanged; will retry next tick.")
+        let endMB = currentSizeMB()
+        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), vacuum: skipped)")
+        return
+    }
+
+    // Checkpoint the WAL first so VACUUM sees all committed pages
+    // consolidated in the main file.
+    let checkpointBefore = await eventStore.walCheckpoint()
+    do {
+        try await eventStore.vacuum()
+    } catch {
+        logger.error("Size-cap phase 2: VACUUM failed (\(error.localizedDescription)). File size likely unchanged; will retry next tick.")
+        let endMB = currentSizeMB()
+        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), vacuum: failed)")
+        return
+    }
+
+    // Second checkpoint drains any WAL left by the VACUUM itself.
+    _ = await eventStore.walCheckpoint()
 
     let finalMB = currentSizeMB()
-    if finalMB > maxSizeMB {
-        logger.error("Size-cap enforcer left DB at \(finalMB) MB (cap \(maxSizeMB) MB) after \(maxIterations) iterations")
-    } else {
-        logger.notice("Size-cap enforcer: \(initialMB) MB → \(finalMB) MB (cap \(maxSizeMB) MB)")
-    }
+    logger.notice("Size-cap sweep complete: \(initialMB) MB → \(finalMB) MB (rows pruned: \(pruned), vacuum: success, checkpoint_before_drained: \(checkpointBefore))")
 }
 
 /// Probe whether this sysext process currently has Full Disk Access.
