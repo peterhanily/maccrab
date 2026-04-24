@@ -1,7 +1,7 @@
 title: Hidden File Created in User Directory
 id: d1a2b3c4-0023-4000-a000-000000000023
 status: experimental
-description: Detects creation of hidden files (dot-prefix) in user home directories by non-Apple processes. Malware commonly uses hidden files for staging.
+description: Detects creation of hidden files (dot-prefix) in user home directories by UNSIGNED or ad-hoc-signed processes. Malware drops staged payloads as dotfiles to avoid Finder visibility; legitimate apps that write dotfiles (vendor drivers, dev tools, Electron apps) are developer-ID signed and bypass this rule at the signer check.
 author: MacCrab Community
 date: 2026/03/31
 references:
@@ -16,8 +16,19 @@ detection:
     selection:
         TargetFilename|startswith: '/Users/'
         TargetFilename|re: '/Users/[^/]+/\.[^/]+'
-    filter_apple:
-        SignerType: 'apple'
+    # v1.6.10: require an unsigned or ad-hoc-signed subject. Across
+    # v1.6.5-v1.6.9 this rule kept firing on developer-ID-signed
+    # vendor drivers (Logitech Options+, Razer Synapse, etc.) despite
+    # increasingly long vendor allow-lists — because vendor binaries
+    # rename between releases and the allow-list was brittle. The
+    # signer anchor flips the model: only explicitly-untrusted
+    # binaries can fire at all. Developer-ID signed Logitech /
+    # Razer / Elgato agents are trusted by the OS signature graph;
+    # they don't need an allow-list entry here.
+    selection_signer:
+        SignerType:
+            - 'unsigned'
+            - 'adHoc'
     filter_common:
         TargetFilename|contains:
             - '/.Trash/'
@@ -32,30 +43,24 @@ detection:
             - '/.zsh_history'
             - '/.bash_history'
             - '/Library/'
-    filter_known_apps:
-        Image|contains:
-            - 'logioptionsplus'
-            - 'LogiMgr'
-            - 'logi_'
-            - 'LogiOptionsPlus'
-    # v1.6.5: well-known hardware-vendor utilities installed to
-    # /Library/Application Support/ that manage devices (mice, keyboards,
-    # webcams, capture cards). They routinely write per-user dotfiles
-    # under $HOME for state persistence. Anchored on install path, not
-    # Image|contains, because vendor binaries rename frequently across
-    # releases (logi_agent → LogiMgrDaemon → logioptionsplus_agent).
-    filter_hw_vendor_bundle:
-        Image|startswith:
-            - '/Library/Application Support/Logitech'
-            - '/Library/Application Support/Razer'
-            - '/Library/Application Support/Elgato'
-            - '/Library/Application Support/Corsair'
-            - '/Library/Application Support/SteelSeries'
-            - '/Library/Application Support/Blackmagic'
-            - '/Applications/Logi Options+.app/'
-            - '/Applications/Logitech'
-    condition: selection and not filter_apple and not filter_common and not filter_known_apps and not filter_hw_vendor_bundle
+    # Terminal-launched admin tools (writing .zshrc, .bash_profile
+    # via editor, etc.) are user-intentional even if the editor
+    # itself is unsigned.
+    filter_terminal_parent:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+    condition: selection and selection_signer and not filter_common and not filter_terminal_parent
 falsepositives:
-    - Development tools creating dotfiles
-    - Application configuration files
+    - Unsigned developer tools writing dotfiles (suppress via allowlist / NoiseFilter Gate 5)
+    - Unsigned update agents — rarely seen in practice; file a noise report if you hit this
 level: low

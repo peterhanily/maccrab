@@ -117,7 +117,20 @@ detection:
     # to be enumerated by bundle name.
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services and not filter_dev_tools and not filter_homebrew_node and not filter_apple_signed
+    # v1.6.10: developer-ID-signed apps installed to /Applications/.
+    # Covers the long tail of paid 3rd-party apps that do routine
+    # HTTPS to their vendor's servers for licensing, analytics,
+    # update checks, telemetry. Notary-approved and Gatekeeper-
+    # approved; if one turns malicious the signer is revoked and
+    # other rules (notarization check, developer-revoked app) will
+    # surface it. "Keynote Creator Studio" was the field-report FP
+    # that motivated this filter. Remains narrower than a generic
+    # "devId signer" filter because the /Applications/ anchor
+    # excludes dropper-staged binaries in /tmp or ~/Downloads.
+    filter_devid_applications:
+        Image|startswith: '/Applications/'
+        SignerType: 'devId'
+    condition: selection and not filter_browsers and not filter_system and not filter_messaging and not filter_known_services and not filter_dev_tools and not filter_homebrew_node and not filter_apple_signed and not filter_devid_applications
 falsepositives:
     - Legitimate heartbeat/health-check connections
     - Auto-update services

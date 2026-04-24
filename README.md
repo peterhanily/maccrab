@@ -4,8 +4,8 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-761%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-1.6.9-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Tests](https://img.shields.io/badge/tests-764%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-1.6.10-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()

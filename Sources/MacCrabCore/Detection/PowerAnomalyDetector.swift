@@ -86,6 +86,20 @@ public actor PowerAnomalyDetector {
         "Google Meet", "Zoom", "Cisco Webex",
         // Smartcard / security token flows hold assertions during auth
         "SEPAuthSession", "SmartCardServices",
+        // v1.6.10: dasd (Duet Activity Scheduler) holds power
+        // assertions for every BackgroundTask it runs
+        // (DASActivity:*:com.apple.signpost.*, etc.). Its job is
+        // *literally* to keep the machine awake long enough to run
+        // scheduled background work. Also add the xpc_activity
+        // helpers and the scheduler's companions.
+        "dasd", "xpcproxy", "ScheduleProxy", "BackgroundTask",
+        "signpost_reporter_activity",
+        // Also: common always-on cloud sync clients that were
+        // missed. Each holds PreventUserIdleSystemSleep during
+        // long syncs and produced repeated preventing_sleep alerts.
+        "Dropbox", "OneDrive", "Google Drive", "iCloud Drive",
+        "Box", "Box Drive", "Boxclient",
+        "pboard", "PowerChime",
     ]
 
     /// Thermal level threshold above which we flag an anomaly.

@@ -3,6 +3,43 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.10] — 2026-04-24
+
+Three FP patterns surfaced by an overnight soak after v1.6.9 shipped.
+Each one has a structural fix rather than an allowlist addition — the
+same pattern: anchor on something the vendor can't rename around.
+
+### Fixed
+
+- **`hidden_file_created.yml` re-scoped to unsigned/adhoc only.**
+  v1.6.5's Logitech vendor allowlist kept failing as Logitech renamed
+  its binaries. Replaced with `selection_signer: SignerType in
+  [unsigned, adHoc]` — every developer-ID-signed vendor peripheral
+  agent is now excluded at the selection stage, no allowlist needed.
+  Terminal-launched editors writing dotfiles still bypass via a
+  `filter_terminal_parent`.
+- **`c2_beacon_pattern.yml` filters developer-ID-signed
+  `/Applications/` apps.** "Keynote Creator Studio" (3rd-party paid
+  app) fired 3× in 5h because its 1-hour dedup window expired between
+  beacons. Added `filter_devid_applications` — drops matches where
+  the process is devId-signed AND installed in `/Applications/`.
+  Covers paid app licensing / analytics / update HTTPS without
+  allowlisting each vendor by name. Unsigned dropper-staged binaries
+  still fire.
+- **`PowerAnomalyDetector.knownLegitimate` adds `dasd`.** Duet
+  Activity Scheduler is macOS's background-task scheduler; power
+  assertions are its entire job. Added `dasd` + companions
+  (`xpcproxy`, `ScheduleProxy`, `BackgroundTask`,
+  `signpost_reporter_activity`) plus always-on cloud-sync clients
+  (`Dropbox`, `OneDrive`, `Google Drive`, `iCloud Drive`, `Box`,
+  `Boxclient`) that were missed in the v1.4.5 pass.
+
+### Tests
+
+764 tests pass (up from 761). +3 regression tests covering the
+compiled-rule signer anchor, the devId+Applications filter
+translation, and the live-scan dasd suppression.
+
 ## [1.6.9] — 2026-04-24
 
 The architectural FP fix that ends the v1.6.x `networkserviceproxy`
