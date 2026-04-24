@@ -219,21 +219,24 @@ public actor AgenticInvestigator {
             callsSeen += 1
             let body = trimmed.dropFirst("TOOL:".count).trimmingCharacters(in: .whitespaces)
             if body.hasPrefix("describe_rule") {
-                if let ruleId = Self.extractParam(body, key: "RULE_ID") {
+                if let ruleId = Self.extractParam(body, key: "RULE_ID"),
+                   Self.isSafeRuleId(ruleId) {
                     let desc = await fetchers.describeRule(ruleId) ?? "(no description available)"
                     results.append("describe_rule \(ruleId): \(desc)")
                 }
             } else if body.hasPrefix("alert_descriptions") {
                 if let ids = Self.extractParam(body, key: "RULE_IDS") {
-                    let list = ids.split(separator: ",").map {
-                        $0.trimmingCharacters(in: .whitespaces)
-                    }
-                    let map = await fetchers.alertDescriptions(list)
+                    let list = ids.split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { Self.isSafeRuleId($0) }
+                        .prefix(maxRuleIdsPerCall)
+                    let map = await fetchers.alertDescriptions(Array(list))
                     let rendered = map.map { "\($0.key): \($0.value)" }.joined(separator: "; ")
                     results.append("alert_descriptions: \(rendered.isEmpty ? "(no matches)" : rendered)")
                 }
             } else if body.hasPrefix("process_children") {
-                if let path = Self.extractParam(body, key: "PROCESS_PATH") {
+                if let path = Self.extractParam(body, key: "PROCESS_PATH"),
+                   Self.isSafeProcessPath(path) {
                     let kids = await fetchers.recentProcessChildren(path)
                     results.append("process_children \(path): \(kids.isEmpty ? "(none)" : kids.joined(separator: ", "))")
                 }
@@ -241,6 +244,19 @@ public actor AgenticInvestigator {
         }
         return results.joined(separator: "\n")
     }
+
+    /// Upper bound on how many rule IDs a single `alert_descriptions`
+    /// tool call may batch. v1.6.9 hardening — without this cap an
+    /// LLM could emit a 50 KB comma-list that forces thousands of
+    /// AlertStore queries.
+    static let maxRuleIdsPerCall = 20
+
+    /// Max length for any single extracted tool-call parameter value.
+    /// v1.6.9 hardening — bounds the attack surface of the fetcher
+    /// closures (they already query a local store, so this is
+    /// defense-in-depth, but it prevents a pathological LLM response
+    /// from driving unbounded-length queries into the event store).
+    static let maxParamValueLength = 256
 
     static func extractParam(_ body: String, key: String) -> String? {
         let lowerKey = (key + "=").lowercased()
@@ -251,7 +267,43 @@ public actor AgenticInvestigator {
         // Value runs to the next whitespace or end. Strip surrounding quotes if any.
         let endIdx = value.firstIndex(where: \.isWhitespace) ?? value.endIndex
         let raw = String(value[..<endIdx])
-        return raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+        let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+        // Length cap — drop anything absurdly long rather than passing
+        // it through. Returning nil mirrors "param missing" which the
+        // caller already handles gracefully.
+        guard trimmed.count <= maxParamValueLength else { return nil }
+        return trimmed
+    }
+
+    /// Rule IDs are compiled UUIDs or short dotted identifiers —
+    /// nothing exotic should appear here. Reject anything with path
+    /// separators, control characters, or whitespace so a crafted
+    /// tool call can't reach past the expected identifier shape.
+    static func isSafeRuleId(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= 128 else { return false }
+        for c in s {
+            if c.isLetter || c.isNumber { continue }
+            if c == "-" || c == "_" || c == "." { continue }
+            return false
+        }
+        return true
+    }
+
+    /// Process paths must be absolute and well-formed. Reject path
+    /// traversal (`..`), null bytes, and newlines so the fetcher
+    /// closure can never be fed something that would escape its
+    /// intended scope. The closures we ship only query in-memory
+    /// state, but an integrator might wire a filesystem-touching
+    /// closure later — belt-and-braces.
+    static func isSafeProcessPath(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= maxParamValueLength else { return false }
+        guard s.hasPrefix("/") else { return false }
+        if s.contains("..") { return false }
+        for c in s {
+            if c.isASCII == false { return false }
+            if c == "\0" || c == "\n" || c == "\r" { return false }
+        }
+        return true
     }
 
     // MARK: Report parsing

@@ -975,4 +975,57 @@ struct ApplePlatformBinaryGateTests {
         let notApple = execWithSigner(path: "/tmp/evil", signerType: .unsigned, isPlatformBinary: false)
         #expect(!NoiseFilter.isAppleSystemBinary(event: notApple))
     }
+
+    @Test("v1.6.9: networkserviceproxy sequence match passes through Gate 7 suppression")
+    func sequenceMatchOnApplePlatformBinary() {
+        // The regression that motivated the v1.6.9 NoiseFilter
+        // re-layering: `credential_theft_exfil` is a SEQUENCE rule,
+        // and sequence matches used to be appended AFTER
+        // `NoiseFilter.apply` — so Gate 7 never got a chance to
+        // suppress them. This tests that a sequence-rule-shaped
+        // match on `/usr/libexec/networkserviceproxy` now gets
+        // dropped by Gate 7 when `apply` runs against all three
+        // detection layers.
+        var matches = [
+            RuleMatch(ruleId: "e1f2a3b4-0009-4000-b000-000000000009",
+                      ruleName: "Credential File Access Followed by Network Upload",
+                      severity: .high, description: "",
+                      mitreTechniques: ["attack.t1555", "attack.t1041"],
+                      tags: ["attack.credential_access", "attack.exfiltration"])
+        ]
+        let event = execWithSigner(
+            path: "/usr/libexec/networkserviceproxy",
+            signerType: .apple, isPlatformBinary: true
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "High-severity sequence match on networkserviceproxy must be suppressed by Gate 7")
+    }
+
+    @Test("v1.6.9: allSatisfy(.critical) short-circuit preserves criticals")
+    func criticalOnlyShortCircuit() {
+        var matches = [
+            RuleMatch(ruleId: "r1", ruleName: "R1", severity: .critical,
+                      description: "", mitreTechniques: [], tags: []),
+            RuleMatch(ruleId: "r2", ruleName: "R2", severity: .critical,
+                      description: "", mitreTechniques: [], tags: []),
+        ]
+        // Event would normally trigger several gates, but every
+        // match is already critical — apply() short-circuits.
+        let event = execWithSigner(
+            path: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
+            signerType: .devId, isPlatformBinary: false
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: true)
+        #expect(matches.count == 2,
+                "Critical-only match list must survive with no work")
+    }
+
+    @Test("v1.6.9: empty matches list short-circuits cleanly")
+    func emptyMatchesShortCircuit() {
+        var matches: [RuleMatch] = []
+        let event = execWithSigner(path: "/usr/bin/ps", signerType: nil, isPlatformBinary: true)
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty)
+    }
 }

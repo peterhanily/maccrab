@@ -133,8 +133,21 @@ public actor MCPBaselineService {
     /// minutes.
     public static let defaultLearningWindow: TimeInterval = 300  // 5 min
 
+    /// v1.6.9 DoS hardening: hard caps on how many distinct baselines
+    /// we track and how large each baseline's fingerprint sets can
+    /// grow. Without these, a malicious MCP-attributable process can
+    /// spoof `serverName` per call and drive unbounded heap growth.
+    /// Conservative defaults — 256 servers is ~100x more than a
+    /// plausible developer setup, and 512 distinct values per set
+    /// captures the long tail of a legitimate server without being a
+    /// useful oracle for an attacker.
+    public static let defaultMaxBaselines = 256
+    public static let defaultMaxFingerprintSetSize = 512
+
     private let learningObservations: Int
     private let learningWindow: TimeInterval
+    private let maxBaselines: Int
+    private let maxSetSize: Int
 
     private var baselines: [String: MCPServerBaseline] = [:]
 
@@ -143,10 +156,16 @@ public actor MCPBaselineService {
 
     public init(
         learningObservations: Int = defaultLearningObservations,
-        learningWindow: TimeInterval = defaultLearningWindow
+        learningWindow: TimeInterval = defaultLearningWindow,
+        maxBaselines: Int = defaultMaxBaselines,
+        maxSetSize: Int = defaultMaxFingerprintSetSize
     ) {
         self.learningObservations = learningObservations
         self.learningWindow = learningWindow
+        self.maxBaselines = max(1, maxBaselines)
+        // Floor at 1 so tests can exercise tight caps; production
+        // callers pass `defaultMaxFingerprintSetSize=512`.
+        self.maxSetSize = max(1, maxSetSize)
         var captured: AsyncStream<BaselineDeviation>.Continuation!
         self.deviations = AsyncStream(bufferingPolicy: .bufferingNewest(128)) {
             captured = $0
@@ -163,6 +182,20 @@ public actor MCPBaselineService {
     @discardableResult
     public func observe(_ obs: MCPBaselineObservation) -> [BaselineDeviation] {
         let key = obs.serverKey
+
+        // v1.6.9: before instantiating a NEW baseline, enforce the
+        // per-service cap. If we're at the limit AND this would
+        // create a new entry, evict the LRU (oldest `lastSeen`)
+        // first. A well-behaved MCP setup never hits the cap; a
+        // rotating-serverName attack will churn the eviction list
+        // but never exceed `maxBaselines`.
+        if baselines[key] == nil, baselines.count >= maxBaselines {
+            if let oldest = baselines.values.min(by: { $0.lastSeen < $1.lastSeen }) {
+                baselines.removeValue(forKey: oldest.serverKey)
+                logger.notice("MCP baseline cap hit (\(self.baselines.count + 1) > \(self.maxBaselines)); evicted oldest server \(oldest.serverName)")
+            }
+        }
+
         var baseline = baselines[key] ?? MCPServerBaseline(
             serverKey: key, tool: obs.tool, serverName: obs.serverName,
             firstSeen: obs.timestamp, lastSeen: obs.timestamp
@@ -178,7 +211,9 @@ public actor MCPBaselineService {
                         value: basename, timestamp: obs.timestamp
                     ))
                 }
-                baseline.fileBasenames.insert(basename)
+                if baseline.fileBasenames.count < maxSetSize {
+                    baseline.fileBasenames.insert(basename)
+                }
             }
         }
         if let domain = obs.domain, !domain.isEmpty {
@@ -189,7 +224,9 @@ public actor MCPBaselineService {
                     value: normalized, timestamp: obs.timestamp
                 ))
             }
-            baseline.domains.insert(normalized)
+            if baseline.domains.count < maxSetSize {
+                baseline.domains.insert(normalized)
+            }
         }
         if let child = obs.childProcessBasename, !child.isEmpty {
             if !baseline.childBasenames.contains(child), baseline.state == .enforcing {
@@ -198,7 +235,9 @@ public actor MCPBaselineService {
                     value: child, timestamp: obs.timestamp
                 ))
             }
-            baseline.childBasenames.insert(child)
+            if baseline.childBasenames.count < maxSetSize {
+                baseline.childBasenames.insert(child)
+            }
         }
 
         baseline.lastSeen = obs.timestamp

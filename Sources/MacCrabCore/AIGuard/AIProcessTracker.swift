@@ -67,6 +67,7 @@ public actor AIProcessTracker {
             networkConnections: [],
             alertCount: 0
         )
+        updateActiveSessionsFlag()
 
         logger.info("AI session started: \(type.rawValue) (PID \(pid)) in \(projectDir)")
     }
@@ -102,6 +103,7 @@ public actor AIProcessTracker {
                         startTime: Date(), childPids: [], filesWritten: [],
                         filesRead: [], networkConnections: [], alertCount: 0
                     )
+                    updateActiveSessionsFlag()
                 }
                 childToSession[pid] = aiAncestor.pid
                 sessions[aiAncestor.pid]?.childPids.insert(pid)
@@ -157,6 +159,7 @@ public actor AIProcessTracker {
                 childToSession.removeValue(forKey: child)
             }
             sessions.removeValue(forKey: pid)
+            updateActiveSessionsFlag()
             logger.info("AI session ended: \(session.toolType.rawValue) (PID \(pid)), \(session.alertCount) alerts")
         }
     }
@@ -173,4 +176,36 @@ public actor AIProcessTracker {
 
     /// Get session count.
     public var sessionCount: Int { sessions.count }
+
+    // MARK: - v1.6.9 fast path
+    //
+    // `hasActiveSessionsHint` is a race-tolerant mirror of
+    // `sessions.isEmpty` that the hot event loop can read WITHOUT
+    // an actor hop. The event loop typically pays one actor hop per
+    // event just to ask "is this process a child of an AI tool?";
+    // when the answer is trivially no (no AI tools running —
+    // majority of field installs), we want to short-circuit before
+    // even making the hop. A stale read that's behind `sessions`
+    // by one event is harmless — the next event will see the flag
+    // true, and lineage bookkeeping continues correctly from there.
+    //
+    // Backed by `OSAllocatedUnfairLock<Bool>` so reads are lock-
+    // protected without the overhead of full atomics. macOS 13.3+
+    // API; MacCrab targets 13.0, but the lock is available as a
+    // backport via the Combine runtime. For very old targets we'd
+    // fall back to NSLock, but 13.3 has been the practical floor
+    // across the v1.6.x run.
+    public nonisolated var hasActiveSessionsHint: Bool {
+        _hasActiveSessionsFlag.withLock { $0 }
+    }
+
+    private let _hasActiveSessionsFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+    /// Called by the actor's own mutating methods after any change
+    /// to `sessions`. Updates the nonisolated hint that
+    /// `hasActiveSessionsHint` exposes.
+    fileprivate func updateActiveSessionsFlag() {
+        let nowEmpty = sessions.isEmpty
+        _hasActiveSessionsFlag.withLock { $0 = !nowEmpty }
+    }
 }

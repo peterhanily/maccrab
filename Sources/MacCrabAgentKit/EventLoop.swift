@@ -18,6 +18,16 @@ enum EventLoop {
             }
 
             // === AI Tool Detection ===
+            //
+            // v1.6.9 fast path: if the subject isn't itself an AI
+            // tool AND no AI tool is currently registered,
+            // short-circuit out of the whole AI-child block. On
+            // idle machines this skips ~4 actor hops per event.
+            // `hasActiveSessionsHint` is a nonisolated lock-protected
+            // mirror of `sessions.isEmpty` — a stale read is
+            // harmless (one event's lineage missed; next event
+            // heals). Using `isAITool` twice below is fine;
+            // `aiRegistry.isAITool` is nonisolated and O(1).
             let aiProc = enrichedEvent.process
             if let aiType = state.aiRegistry.isAITool(executablePath: aiProc.executable) {
                 await state.aiTracker.registerAIProcess(pid: aiProc.pid, type: aiType, projectDir: aiProc.workingDirectory)
@@ -33,7 +43,10 @@ enum EventLoop {
                 )
                 enrichedEvent.enrichments["ai_tool"] = aiType.rawValue
                 enrichedEvent.enrichments["ai_tool_name"] = aiType.displayName
-            } else {
+            } else if state.aiTracker.hasActiveSessionsHint {
+                // Only pay the isAIChild actor hop when there are
+                // actually AI sessions running that this event could
+                // belong to.
                 let (isChild, aiType, projectDir) = await state.aiTracker.isAIChild(pid: aiProc.pid, ancestors: aiProc.ancestors)
                 if isChild {
                     enrichedEvent.enrichments["ai_tool"] = aiType?.rawValue ?? "unknown"
@@ -755,12 +768,6 @@ enum EventLoop {
             // Layer 1: Single-event Sigma rules
             var matches = await state.ruleEngine.evaluate(enrichedEvent)
 
-            // Apply shared noise filters — also called from the FSEvents
-            // path in MonitorTasks and the SIGHUP retroactive scan in
-            // SignalHandlers, so behavior stays consistent across every
-            // rule-evaluation entry point.
-            NoiseFilter.apply(&matches, event: enrichedEvent, isWarmingUp: state.isWarmingUp)
-
             // Layer 2: Temporal sequence rules (Phase 2)
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
             matches.append(contentsOf: sequenceMatches)
@@ -801,7 +808,8 @@ enum EventLoop {
             }
 
             // Layer 3: Baseline anomaly detection (Phase 3)
-            if let baselineMatch = await state.baselineEngine.evaluate(enrichedEvent) {
+            let baselineMatchResult = await state.baselineEngine.evaluate(enrichedEvent)
+            if let baselineMatch = baselineMatchResult {
                 matches.append(baselineMatch)
 
                 // LLM baseline anomaly analysis (non-blocking)
@@ -895,6 +903,26 @@ enum EventLoop {
                     }
                 }
             }
+
+            // v1.6.9: Apply shared noise filters AFTER all three
+            // detection layers (Sigma / Sequence / Baseline +
+            // Behavioral Composite) have appended their matches.
+            //
+            // Prior to v1.6.9 this ran AFTER Layer 1 only, which is
+            // why /usr/libexec/networkserviceproxy kept firing the
+            // credential_theft_exfil SEQUENCE rule despite every
+            // rule-level filter we added (v1.6.5 filter_apple_daemons),
+            // Gate 6 (v1.6.5), and Gate 7 (v1.6.8) — sequence matches
+            // were appended to `matches` AFTER NoiseFilter.apply, so
+            // they never saw any gate. Moving the call to here makes
+            // every gate apply universally to every layer, which is
+            // what every FP fix since v1.6.2 silently assumed.
+            //
+            // Also called from the FSEvents fallback in MonitorTasks
+            // and the SIGHUP retroactive scan in SignalHandlers, so
+            // behavior stays consistent across every rule-evaluation
+            // entry point.
+            NoiseFilter.apply(&matches, event: enrichedEvent, isWarmingUp: state.isWarmingUp)
 
             if !matches.isEmpty {
                 // Batch-collect alerts from rule matches, then insert as a single

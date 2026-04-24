@@ -33,95 +33,93 @@ public enum NoiseFilter {
         event: Event,
         isWarmingUp: Bool
     ) {
-        // Gate 1: unattributable event. FSEvents fires file events without
-        // a process; Sigma rules with `Image|contains` filters designed to
-        // exclude trusted system processes fail open in that case. Dropping
-        // non-critical matches here means we never alert on activity we
-        // cannot triage.
+        // Short-circuit: nothing to filter. Saves 7 gate checks on
+        // every event whose rule engine produced zero matches — which
+        // is the overwhelming majority of events on a healthy system.
+        guard !matches.isEmpty else { return }
+
+        // Fast path: any match that is already critical survives
+        // every gate, so if the only work the gates do is "drop non-
+        // critical", we can skip all 7 if every remaining match is
+        // critical. Rare, but the check is cheap and the win is
+        // bypassing ancestor walks on critical-only events.
+        if matches.allSatisfy({ $0.severity == .critical }) { return }
+
+        // Gate ordering rationale (v1.6.9 reorder):
+        //
+        // Gates are ordered cheapest-first AND by expected hit rate
+        // on a healthy macOS system. The cost of each gate roughly:
+        //
+        //   Gate 7  bool + enum cmp  → O(1)       [60-80% of events hit]
+        //   Gate 1  string cmp       → O(1)       [<1% hit]
+        //   Gate 2  bool             → O(1)       [first 60s only]
+        //   Gate 4  basename + path  → O(1)       [<5% hit]
+        //   Gate 3  prefix scan 35   → O(35)      [~20% hit — browsers/Electron]
+        //   Gate 5  basename + walk  → O(A)       [~10% hit — terminals]
+        //   Gate 6  subject + walk   → O(A)       [<5% hit — updaters]
+        //
+        // Gate 7 first is the biggest win: most process events on a
+        // healthy Mac are Apple platform binaries (launchd spawning
+        // mdworker, syspolicyd, etc.). A single bool on process.
+        // isPlatformBinary short-circuits the remaining 6 gates for
+        // those cases. Pre-v1.6.9 gate order paid the O(A) ancestor
+        // walks (Gates 5 + 6) on every event regardless.
+
+        // Gate 7 — Apple platform binary. Hot: the majority of events
+        // on a healthy Mac. See `isAppleSystemBinary` for signals.
+        if isAppleSystemBinary(event: event) {
+            matches.removeAll { $0.severity != .critical }
+            if matches.isEmpty { return }
+        }
+
+        // Gate 1 — unattributable event. FSEvents fires file events
+        // without a process; rules with `Image|contains` filters
+        // fail open in that case. Dropping non-critical matches
+        // means we never alert on activity we cannot triage.
         if event.process.name == "unknown" || event.process.executable.isEmpty {
             matches.removeAll { $0.severity != .critical }
+            if matches.isEmpty { return }
         }
 
-        // Gate 2: startup warm-up window. Inventory scans (browser
-        // extensions, quarantine baseline, process-tree model hydration)
-        // complete in the first 60 s and generate a one-shot burst that
-        // isn't live-threat signal. Critical still fires so a ransomware
-        // note at T+10s isn't missed.
+        // Gate 2 — startup warm-up window. Inventory scans complete
+        // in the first 60s and produce a one-shot burst that isn't
+        // live-threat signal. Critical still fires.
         if isWarmingUp {
             matches.removeAll { $0.severity != .critical }
+            if matches.isEmpty { return }
         }
 
-        // Gate 3: trusted browser / Electron helper. Chromium apps spawn
-        // large helper trees that fire individual Sigma rules in isolation
-        // (reading their own cookie DB, writing their own cache, opening
-        // long-lived HTTPS, spawning child tools for profile migration).
-        // A single bundle-prefix short-circuit drops non-critical matches
-        // without needing per-rule-per-helper allowlists.
-        if isTrustedBrowserHelper(path: event.process.executable) {
-            matches.removeAll { $0.severity != .critical }
-        }
-
-        // Gate 4: MacCrab self-activity. Our install pipeline modifies its
-        // own compiled_rules/ directory, its own bundles get signed by its
-        // own Developer ID, and the sysext fires TCC + XPC events at
-        // sysextd during normal operation. Without this gate, every
-        // upgrade fires our own tamper-detection rules against ourselves,
-        // every sysext XPC interaction looks like an EDR remote-session
-        // start, and user-initiated FDA grants look like "automated TCC
-        // manipulation". Drop non-critical matches whose subject is
-        // MacCrab itself — critical still fires so a real integrity
-        // compromise against our binaries isn't hidden.
+        // Gate 4 — MacCrab self-activity. Tamper-detection rules on
+        // our own install dirs; sysext XPC events on ourselves.
+        // Cheap: basename match + path prefix check.
         if isMacCrabSelf(event: event) {
             matches.removeAll { $0.severity != .critical }
+            if matches.isEmpty { return }
         }
 
-        // Gate 5: interactive admin CLI from a terminal parent. ps, top,
-        // defaults, dscl, id, lsof, etc. are what every developer and
-        // sysadmin runs constantly. Sigma rules flag them as "recon" at
-        // Medium severity because in an attack chain those commands
-        // really ARE enumeration — but fired in isolation from Terminal →
-        // zsh → ps, they're nobody's evidence of intrusion. Suppress
-        // non-critical matches when (a) the event process is a known
-        // admin CLI and (b) any ancestor is a desktop terminal emulator.
-        // Critical still fires so a genuine post-exploitation pattern
-        // (unsigned parent, dropped-to-disk binary) isn't hidden.
+        // Gate 3 — trusted browser / Electron helper. Chromium apps
+        // spawn large helper trees that fire individual Sigma rules
+        // in isolation. Single bundle-prefix short-circuit.
+        if isTrustedBrowserHelper(path: event.process.executable) {
+            matches.removeAll { $0.severity != .critical }
+            if matches.isEmpty { return }
+        }
+
+        // Gate 5 — interactive admin CLI from a terminal parent. ps,
+        // top, defaults, dscl, etc. fired from Terminal→zsh→ps.
+        // Short-circuits on basename check so non-admin-CLI subjects
+        // exit before the ancestor walk.
         if isInteractiveAdminCommand(event: event) {
             matches.removeAll { $0.severity != .critical }
+            if matches.isEmpty { return }
         }
 
-        // Gate 6: auto-updater process tree. GoogleUpdater, Sparkle's
-        // Autoupdate, Microsoft AutoUpdate, softwareupdated, brew, etc.
-        // legitimately touch multiple MITRE tactics during an update
-        // cycle (MDM-state probe, xattr removal, plist write, code-sig
-        // check). Drop non-critical matches when the subject OR any
-        // ancestor is a known auto-updater — the Sigma per-rule
-        // ParentImage filters we've added against GoogleUpdater /
-        // Sparkle require the DIRECT parent to match by name, which
-        // fails when Chrome → GoogleUpdater.app/Contents/MacOS/
-        // GoogleUpdater → launcher → GoogleUpdater → profiles chains
-        // shove the updater two ancestors up. This gate walks the
-        // full ancestor list so the backstop works regardless of chain
-        // depth. Critical still fires so a real compromise inside an
-        // updater tree isn't hidden.
+        // Gate 6 — auto-updater process tree. GoogleUpdater, Sparkle's
+        // Autoupdate, Microsoft AutoUpdate, softwareupdated, brew.
+        // Full ancestor walk so chains like Chrome → GoogleUpdater →
+        // launcher → GoogleUpdater → profiles get caught regardless
+        // of nesting depth.
         if isAutoUpdaterOrAncestor(event: event) {
-            matches.removeAll { $0.severity != .critical }
-        }
-
-        // Gate 7: Apple-signed platform binary. The ultimate backstop
-        // for the long-running FP thread around `/bin/ps`,
-        // `/usr/bin/defaults`, `/usr/bin/csrutil`, `/usr/bin/sw_vers`,
-        // `/usr/sbin/system_profiler`, and friends. Per-rule
-        // `filter_system_path` and `filter_platform` already attempt
-        // to catch these, but field data across v1.6.2-1.6.7 shows
-        // the same alerts recurring — either because rules aren't
-        // reloaded on the running daemon, or because the ES event's
-        // code-sig enrichment hasn't settled by the time the rule
-        // engine evaluates. When the subject is unambiguously an
-        // Apple-shipped platform binary — flagged by macOS itself via
-        // `isPlatformBinary`, OR anchored on a SIP-protected path
-        // prefix — drop non-critical matches regardless. Critical
-        // rules (ransomware, SIP disable, known-bad hash) still fire.
-        if isAppleSystemBinary(event: event) {
             matches.removeAll { $0.severity != .critical }
         }
     }

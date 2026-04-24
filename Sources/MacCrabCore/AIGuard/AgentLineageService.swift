@@ -118,12 +118,65 @@ public actor AgentLineageService {
     private let maxEventsPerSession: Int
     private let maxSessions: Int
 
+    /// Fixed-capacity circular buffer for events. Replaces the
+    /// `[AgentEvent]` + `removeFirst(n)` combo from v1.6.6, which
+    /// paid an O(n) array memmove on every append past the cap.
+    /// At the 10_000-event cap and a heavy AI workload this was the
+    /// dominant cost of the actor. Ring buffer is O(1) append,
+    /// O(1) overflow drop, O(N) snapshot (only on dashboard refresh).
+    fileprivate struct EventRing {
+        private var storage: [AgentEvent?]
+        private var head: Int = 0           // next write position
+        private var count: Int = 0          // current element count (≤ capacity)
+        let capacity: Int
+
+        init(capacity: Int) {
+            precondition(capacity > 0, "EventRing capacity must be positive")
+            self.capacity = capacity
+            self.storage = Array(repeating: nil, count: capacity)
+        }
+
+        mutating func append(_ event: AgentEvent) {
+            storage[head] = event
+            head = (head + 1) % capacity
+            if count < capacity { count += 1 }
+        }
+
+        /// Ordered snapshot — oldest-first by timestamp. Reads in
+        /// insertion order first (ring is insertion-ordered), then
+        /// sorts by timestamp. The sort is O(N log N) but this is a
+        /// cold path (only called from dashboard refresh / MCP
+        /// snapshot export), and it defends against the rare case
+        /// where ES events arrive out of order due to collector-
+        /// merge or delayed enrichment.
+        func snapshotOrdered() -> [AgentEvent] {
+            var out: [AgentEvent] = []
+            out.reserveCapacity(count)
+            // When count < capacity the ring hasn't wrapped yet;
+            // indices 0..<count hold the inserted events in order.
+            if count < capacity {
+                for i in 0..<count {
+                    if let e = storage[i] { out.append(e) }
+                }
+            } else {
+                // Wrapped: read capacity-many entries starting from head.
+                for offset in 0..<capacity {
+                    let idx = (head + offset) % capacity
+                    if let e = storage[idx] { out.append(e) }
+                }
+            }
+            return out.sorted { $0.timestamp < $1.timestamp }
+        }
+
+        var currentCount: Int { count }
+    }
+
     private struct SessionRecord {
         let aiPid: Int32
         let toolType: AIToolType
         var projectDir: String?
         let startTime: Date
-        var events: [AgentEvent]
+        var events: EventRing
         var lastActivity: Date
     }
 
@@ -148,7 +201,7 @@ public actor AgentLineageService {
             aiPid: aiPid, toolType: toolType,
             projectDir: projectDir,
             startTime: startTime,
-            events: [],
+            events: EventRing(capacity: maxEventsPerSession),
             lastActivity: startTime
         )
     }
@@ -162,12 +215,14 @@ public actor AgentLineageService {
     /// Append an event to a session's timeline. If the PID isn't a
     /// known session, this is silently dropped — the EventLoop may
     /// route events before a corresponding `startSession` lands.
+    ///
+    /// v1.6.9: backed by `EventRing` — O(1) append, O(1) drop when at
+    /// capacity. Previously used `[AgentEvent]` + `removeFirst(n)`
+    /// which memmoved the entire tail array every time we overflowed
+    /// the cap.
     public func record(aiPid: Int32, event: AgentEvent) {
         guard var record = sessions[aiPid] else { return }
         record.events.append(event)
-        if record.events.count > maxEventsPerSession {
-            record.events.removeFirst(record.events.count - maxEventsPerSession)
-        }
         record.lastActivity = event.timestamp
         sessions[aiPid] = record
     }
@@ -184,7 +239,7 @@ public actor AgentLineageService {
         return AgentSessionSnapshot(
             aiPid: record.aiPid, toolType: record.toolType,
             projectDir: record.projectDir, startTime: record.startTime,
-            events: record.events.sorted { $0.timestamp < $1.timestamp }
+            events: record.events.snapshotOrdered()
         )
     }
 
@@ -196,18 +251,18 @@ public actor AgentLineageService {
                 AgentSessionSnapshot(
                     aiPid: record.aiPid, toolType: record.toolType,
                     projectDir: record.projectDir, startTime: record.startTime,
-                    events: record.events.sorted { $0.timestamp < $1.timestamp }
+                    events: record.events.snapshotOrdered()
                 )
             }
     }
 
     /// Events from a given session that intersect a time window. The
-    /// underlying storage is already chronological; this helper just
-    /// binary-searches bounds and returns the slice.
+    /// underlying ring is already insertion-ordered; `snapshotOrdered`
+    /// returns oldest-first, so we just filter.
     public func events(aiPid: Int32, since start: Date? = nil, until end: Date? = nil) -> [AgentEvent] {
         guard let record = sessions[aiPid] else { return [] }
-        let sorted = record.events.sorted { $0.timestamp < $1.timestamp }
-        return sorted.filter { event in
+        let ordered = record.events.snapshotOrdered()
+        return ordered.filter { event in
             if let start, event.timestamp < start { return false }
             if let end, event.timestamp > end { return false }
             return true

@@ -3,6 +3,60 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.9] — 2026-04-24
+
+The architectural FP fix that ends the v1.6.x `networkserviceproxy`
+thread, plus a security + performance audit pass on the v1.6.6 AI
+Suite.
+
+### Fixed
+
+- **NoiseFilter now applies to every detection layer.** The
+  longstanding `networkserviceproxy` credential-exfil FP was
+  caused by `EventLoop` calling `NoiseFilter.apply` ONLY against
+  Layer 1 (Sigma) matches — Layer 2 (Sequence) and Layer 3
+  (Baseline / Behavioral Composite) matches were appended to the
+  match list AFTER the filter ran, bypassing every gate we'd
+  added since v1.6.2. Moved the call to after all three layers
+  append.
+
+### Added (security hardening — from audit)
+
+- **`MCPBaselineService` DoS caps.** New `maxBaselines` (default
+  256) and `maxSetSize` (default 512) parameters. Rotating
+  `serverName` spoofing now triggers LRU eviction at the service
+  level; per-server file/domain/child sets cap at `maxSetSize`.
+- **`AgenticInvestigator` input validation.** `extractParam` caps
+  values at 256 chars; `isSafeRuleId` rejects path separators and
+  shell meta-characters; `isSafeProcessPath` rejects path traversal
+  and control characters; `alert_descriptions` caps batch size at
+  20 rule IDs per call.
+
+### Changed (performance — from audit)
+
+- **NoiseFilter gate reorder.** Gate 7 (Apple platform binary —
+  O(1) bool check) runs first instead of seventh. Majority of Mac
+  events short-circuit at the cheapest gate, bypassing the O(N-
+  ancestors) Gate 6. Estimated ~40% CPU cut under burst.
+- **NoiseFilter short-circuits.** `guard !matches.isEmpty` and
+  `allSatisfy(.critical)` exits before the first gate in the
+  cases where no gate could possibly change the outcome.
+- **EventLoop AI-child fast path.** `AIProcessTracker.hasActiveSessionsHint`
+  — a nonisolated, lock-protected Bool mirror of `sessions.isEmpty`.
+  When no AI tools are running the whole AI-child detection block
+  is skipped, saving ~3 actor hops per event on idle machines.
+- **`AgentLineageService` ring buffer.** Replaced `[AgentEvent]` +
+  `removeFirst(n)` with a fixed-capacity circular `EventRing`. O(1)
+  append, O(1) overflow drop. Old code memmoved the entire tail on
+  every overflow.
+
+### Tests
+
+761 tests pass (up from 748). +13 new tests covering the sequence
+match regression, MCPBaseline cap enforcement under DoS-style
+input, AgenticInvestigator input validation, and NoiseFilter
+short-circuits.
+
 ## [1.6.8] — 2026-04-24
 
 FP backstop closing out the v1.6.x discovery-rule thread, first AI

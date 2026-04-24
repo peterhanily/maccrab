@@ -116,6 +116,85 @@ struct BaselineDomainNormalisationTests {
     }
 }
 
+@Suite("MCPBaselineService: DoS hardening (v1.6.9)")
+struct BaselineDoSHardeningTests {
+
+    @Test("Exceeding maxBaselines evicts the LRU entry, doesn't grow unbounded")
+    func baselineCountCap() async {
+        let svc = MCPBaselineService(
+            learningObservations: 1, learningWindow: 0,
+            maxBaselines: 3, maxSetSize: 64
+        )
+        let base = Date()
+        // Insert 10 distinct servers. Cap is 3.
+        for i in 0..<10 {
+            _ = await svc.observe(.init(
+                tool: "claude", serverName: "s\(i)",
+                filePath: "/x", timestamp: base.addingTimeInterval(Double(i))
+            ))
+        }
+        let all = await svc.allBaselines()
+        #expect(all.count == 3,
+                "maxBaselines=3 must be hard-enforced under rotating serverName input")
+    }
+
+    @Test("Oldest baseline evicted first (LRU by lastSeen)")
+    func lruEvictionOrder() async {
+        let svc = MCPBaselineService(
+            learningObservations: 1, learningWindow: 0,
+            maxBaselines: 2, maxSetSize: 64
+        )
+        let base = Date()
+        _ = await svc.observe(.init(tool: "claude", serverName: "oldest", filePath: "/a", timestamp: base))
+        _ = await svc.observe(.init(tool: "claude", serverName: "middle", filePath: "/b", timestamp: base.addingTimeInterval(10)))
+        // At cap. Next should evict "oldest".
+        _ = await svc.observe(.init(tool: "claude", serverName: "newest", filePath: "/c", timestamp: base.addingTimeInterval(20)))
+        let all = await svc.allBaselines().map(\.serverName).sorted()
+        #expect(all == ["middle", "newest"],
+                "LRU eviction must drop the server with the oldest lastSeen")
+    }
+
+    @Test("Exceeding maxSetSize stops inserting but doesn't crash")
+    func fingerprintSetCap() async {
+        let svc = MCPBaselineService(
+            learningObservations: 1, learningWindow: 0,
+            maxBaselines: 10, maxSetSize: 5
+        )
+        let base = Date()
+        // 20 distinct basenames for one server, cap at 5.
+        for i in 0..<20 {
+            _ = await svc.observe(.init(
+                tool: "claude", serverName: "s1",
+                filePath: "/dir/file\(i).txt",
+                timestamp: base.addingTimeInterval(Double(i))
+            ))
+        }
+        let b = await svc.baseline(for: "claude", serverName: "s1")!
+        #expect(b.fileBasenames.count <= 5,
+                "fileBasenames must not exceed maxSetSize (got \(b.fileBasenames.count))")
+    }
+
+    @Test("Cap enforcement applies separately to files, domains, child processes")
+    func perFieldCaps() async {
+        let svc = MCPBaselineService(
+            learningObservations: 1, learningWindow: 0,
+            maxBaselines: 10, maxSetSize: 3
+        )
+        // Cross 3-cap on all three fields for one server.
+        for i in 0..<10 {
+            _ = await svc.observe(.init(
+                tool: "claude", serverName: "s1",
+                filePath: "/f\(i).txt", domain: "d\(i).example.com",
+                childProcessBasename: "c\(i)"
+            ))
+        }
+        let b = await svc.baseline(for: "claude", serverName: "s1")!
+        #expect(b.fileBasenames.count <= 3)
+        #expect(b.domains.count <= 3)
+        #expect(b.childBasenames.count <= 3)
+    }
+}
+
 @Suite("MCPBaselineService: reset semantics")
 struct BaselineResetTests {
 

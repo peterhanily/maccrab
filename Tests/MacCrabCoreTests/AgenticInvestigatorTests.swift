@@ -161,6 +161,95 @@ struct InvestigatorToolCallTests {
         #expect(AgenticInvestigator.extractParam("describe_rule RULE_ID=\"foo\"", key: "RULE_ID") == "foo")
         #expect(AgenticInvestigator.extractParam("missing", key: "RULE_ID") == nil)
     }
+
+    // MARK: - v1.6.9 security hardening
+
+    @Test("Param extraction rejects values longer than 256 chars")
+    func paramLengthCap() {
+        let long = String(repeating: "a", count: 300)
+        #expect(AgenticInvestigator.extractParam("x RULE_ID=\(long)", key: "RULE_ID") == nil,
+                "Long param must be rejected to prevent unbounded downstream queries")
+    }
+
+    @Test("isSafeRuleId allows UUID and dotted identifiers, rejects junk")
+    func safeRuleIdContract() {
+        // Accept
+        #expect(AgenticInvestigator.isSafeRuleId("d1a2b3c4-0123-4000-a000-000000000123"))
+        #expect(AgenticInvestigator.isSafeRuleId("maccrab.behavior.composite"))
+        #expect(AgenticInvestigator.isSafeRuleId("rule_with_underscores"))
+        // Reject
+        #expect(!AgenticInvestigator.isSafeRuleId(""))
+        #expect(!AgenticInvestigator.isSafeRuleId("rule with spaces"))
+        #expect(!AgenticInvestigator.isSafeRuleId("../etc/passwd"))
+        #expect(!AgenticInvestigator.isSafeRuleId("rule\nwith\nnewlines"))
+        #expect(!AgenticInvestigator.isSafeRuleId("rule;DROP TABLE alerts"))
+        #expect(!AgenticInvestigator.isSafeRuleId(String(repeating: "x", count: 200)))
+    }
+
+    @Test("isSafeProcessPath rejects path traversal, non-absolute, and control chars")
+    func safeProcessPathContract() {
+        // Accept
+        #expect(AgenticInvestigator.isSafeProcessPath("/usr/bin/ps"))
+        #expect(AgenticInvestigator.isSafeProcessPath("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
+        // Reject
+        #expect(!AgenticInvestigator.isSafeProcessPath("relative/path"))
+        #expect(!AgenticInvestigator.isSafeProcessPath("/tmp/../etc/passwd"))
+        #expect(!AgenticInvestigator.isSafeProcessPath("/path\0with\0null"))
+        #expect(!AgenticInvestigator.isSafeProcessPath("/path\nwith\nnewline"))
+        #expect(!AgenticInvestigator.isSafeProcessPath(""))
+    }
+
+    @Test("alert_descriptions caps rule-id list length")
+    func alertDescriptionsCapped() async {
+        var askedCount = 0
+        let fetchers = InvestigationContextFetchers(
+            alertDescriptions: { ids in
+                askedCount = ids.count
+                return [:]
+            }
+        )
+        let hugeList = (0..<100).map { "rule\($0)" }.joined(separator: ",")
+        _ = await AgenticInvestigator.handleToolCalls(
+            response: "TOOL: alert_descriptions RULE_IDS=\(hugeList)",
+            fetchers: fetchers
+        )
+        #expect(askedCount <= 20,
+                "alert_descriptions must cap batch size to prevent LLM-driven amplification")
+    }
+
+    @Test("Malicious path in process_children is rejected")
+    func maliciousPathRejected() async {
+        var askedPath: String?
+        let fetchers = InvestigationContextFetchers(
+            recentProcessChildren: { path in
+                askedPath = path
+                return []
+            }
+        )
+        _ = await AgenticInvestigator.handleToolCalls(
+            response: "TOOL: process_children PROCESS_PATH=/tmp/../etc/passwd",
+            fetchers: fetchers
+        )
+        #expect(askedPath == nil,
+                "Path containing `..` must be rejected before reaching the fetcher")
+    }
+
+    @Test("Malicious rule ID in describe_rule is rejected")
+    func maliciousRuleIdRejected() async {
+        var askedId: String?
+        let fetchers = InvestigationContextFetchers(
+            describeRule: { id in
+                askedId = id
+                return nil
+            }
+        )
+        _ = await AgenticInvestigator.handleToolCalls(
+            response: "TOOL: describe_rule RULE_ID=;rm -rf /",
+            fetchers: fetchers
+        )
+        #expect(askedId == nil,
+                "Rule ID with semicolon/shell meta-chars must be rejected")
+    }
 }
 
 @Suite("AgenticInvestigator: campaign formatting")
