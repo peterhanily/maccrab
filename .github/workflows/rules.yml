@@ -6,6 +6,11 @@ on:
   pull_request:
     paths: ['Rules/**']
 
+# Defense-in-depth: scope this workflow to read-only.
+# Fork PRs cannot escalate beyond the permissions granted here.
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: macos-15

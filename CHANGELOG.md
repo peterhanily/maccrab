@@ -3,6 +3,36 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.11] — 2026-04-24
+
+Pre-publication hygiene release. No detection-engine changes — just
+the release pipeline and CI posture being honest about what they do.
+
+### Fixed
+
+- **`MacCrab-v*.pkg` was broken in every release.** `productbuild`'s
+  distribution XML referenced `#maccrab.pkg` while the actual
+  component pkg is named `maccrab-component-$$.pkg`. Result: a
+  valid-looking 1.9 KB xar archive that installed nothing. Fixed by
+  removing the PKG path entirely — `scripts/release.sh` and
+  `.github/workflows/release.yml` no longer call `build-pkg.sh` and
+  the asset is dropped from GitHub release uploads. DMG + Homebrew
+  are the supported install paths.
+
+### Changed
+
+- **PR workflow permissions hardened.** `.github/workflows/build.yml`
+  and `rules.yml` now declare `permissions: contents: read` at the
+  workflow level. Previously inherited the default `contents: write`
+  scope which gave fork-PR runners more than they needed.
+- **Release scripts checked in.** `scripts/release.sh`,
+  `scripts/build-release.sh`, and `scripts/notarize.sh` (previously
+  gitignored) are now tracked. One Developer-ID example string in
+  `release.sh` sanitised to a generic `Your Name (TEAMID)` placeholder.
+  No real credentials were ever in these scripts — they read from
+  `~/.maccrab-release-env` which stays outside the repo.
+  `scripts/build-pkg.sh` remains gitignored and was removed locally.
+
 ## [1.6.10] — 2026-04-24
 
 Three FP patterns surfaced by an overnight soak after v1.6.9 shipped.

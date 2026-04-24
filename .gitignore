@@ -82,11 +82,12 @@ notarization-history.json
 *.tar.gz
 *.tgz
 
-# Release scripts (private build/sign/notarize tooling)
-scripts/build-release.sh
+# v1.6.11: release.sh / build-release.sh / notarize.sh are now committed
+# (sanitized — credentials read from env vars only). The PKG path was
+# dropped because productbuild produced a broken stub artifact; the
+# old scripts/build-pkg.sh stays gitignored so a stale local copy
+# doesn't get re-introduced.
 scripts/build-pkg.sh
-scripts/notarize.sh
-scripts/release.sh
 
 # MacCrab-specific signing/release home-dir artifacts. Kept outside the repo
 # under ~/.maccrab-*/ — but add the names so an accidental copy into the repo

@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Defense-in-depth: scope this workflow to read-only.
+# Fork PRs use the base-repo workflow definition by default, so any
+# malicious PR cannot escalate beyond what we grant here. The job
+# only needs to read the source tree.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-15

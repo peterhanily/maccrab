@@ -98,9 +98,10 @@ jobs:
           mkdir -p compiled_rules
           python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir compiled_rules/
 
-      - name: Build .pkg installer
-        run: |
-          VERSION="${VERSION#v}" ./scripts/build-pkg.sh || echo "PKG build optional — continuing"
+      # PKG build removed in v1.6.11 — productbuild's distribution-XML
+      # pkg-ref name didn't match the component pkg filename, producing
+      # a 1.9KB stub archive that opened in Installer.app but contained
+      # no payload. DMG + Homebrew are the supported install paths.
 
       - name: Package
         run: |
@@ -148,5 +149,4 @@ jobs:
           files: |
             dist/maccrab-*.tar.gz
             .build/MacCrab-v*.dmg
-            .build/MacCrab-v*.pkg
           generate_release_notes: true
