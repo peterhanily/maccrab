@@ -167,6 +167,22 @@ final class DaemonState {
     /// initializer signature.
     var retentionDays: Int = 30
 
+    // MARK: - v1.6.6 AI Suite
+    //
+    // These six services ship as the AI Suite. Stateless-or-internally-
+    // stateful ones are constructed with defaults here; the ones that
+    // depend on `llmService` are optional and populated by DaemonSetup
+    // after the LLM service is wired. Exposed via the DaemonState bag
+    // so EventLoop, dashboard pollers, and the MCP server can reach
+    // them without touching the designated initialiser.
+
+    var alertClusterService: AlertClusterService = AlertClusterService()
+    var mcpBaselineService: MCPBaselineService = MCPBaselineService()
+    var agentLineageService: AgentLineageService = AgentLineageService()
+    var triageService: TriageService?
+    var llmConsensusService: LLMConsensusService?
+    var agenticInvestigator: AgenticInvestigator?
+
     init(
         isRoot: Bool,
         supportDir: String,

@@ -22,6 +22,15 @@ enum EventLoop {
             if let aiType = state.aiRegistry.isAITool(executablePath: aiProc.executable) {
                 await state.aiTracker.registerAIProcess(pid: aiProc.pid, type: aiType, projectDir: aiProc.workingDirectory)
                 await state.projectBoundary.registerBoundary(aiPid: aiProc.pid, projectDir: aiProc.workingDirectory)
+                // v1.6.7: start a lineage session so subsequent events
+                // (file, network, alert) under this AI tool populate a
+                // chronological timeline.
+                await state.agentLineageService.startSession(
+                    aiPid: aiProc.pid,
+                    toolType: aiType,
+                    projectDir: aiProc.workingDirectory,
+                    startTime: enrichedEvent.timestamp
+                )
                 enrichedEvent.enrichments["ai_tool"] = aiType.rawValue
                 enrichedEvent.enrichments["ai_tool_name"] = aiType.displayName
             } else {
@@ -30,6 +39,56 @@ enum EventLoop {
                     enrichedEvent.enrichments["ai_tool"] = aiType?.rawValue ?? "unknown"
                     enrichedEvent.enrichments["ai_tool_child"] = "true"
                     if let dir = projectDir { enrichedEvent.enrichments["ai_project_dir"] = dir }
+
+                    // v1.6.7: record lineage events for this AI child.
+                    // The session's root PID is the nearest AI-tool
+                    // ancestor; walk the provided ancestry list to
+                    // find it rather than re-querying the tracker.
+                    if let aiAncestor = aiProc.ancestors.first(where: {
+                        state.aiRegistry.isAITool(executablePath: $0.executable) != nil
+                    }) {
+                        let rootPid = aiAncestor.pid
+                        // Always record the spawn for any AI-child exec.
+                        await state.agentLineageService.record(
+                            aiPid: rootPid,
+                            kind: .processSpawn(
+                                basename: aiProc.name,
+                                pid: aiProc.pid
+                            ),
+                            timestamp: enrichedEvent.timestamp
+                        )
+                        // For file events, record the read/write. Our
+                        // FileAction enum has no "read"; reads come
+                        // through as `.close` in most ES subtypes.
+                        if let file = enrichedEvent.file {
+                            let kind: AgentEvent.Kind
+                            switch file.action {
+                            case .write, .create, .rename, .link:
+                                kind = .fileWrite(path: file.path)
+                            case .delete:
+                                kind = .fileWrite(path: file.path)
+                            case .close:
+                                kind = .fileRead(path: file.path)
+                            }
+                            await state.agentLineageService.record(
+                                aiPid: rootPid, kind: kind,
+                                timestamp: enrichedEvent.timestamp
+                            )
+                        }
+                        // For network events, record the destination.
+                        // `destinationIp` is non-optional but can be
+                        // empty when the collector only resolved a
+                        // hostname; fall through on empty ip so we
+                        // don't create synthetic "0.0.0.0" rows.
+                        if let net = enrichedEvent.network, !net.destinationIp.isEmpty {
+                            let host = net.destinationHostname ?? net.destinationIp
+                            await state.agentLineageService.record(
+                                aiPid: rootPid,
+                                kind: .network(host: host, port: net.destinationPort),
+                                timestamp: enrichedEvent.timestamp
+                            )
+                        }
+                    }
 
                     // AI child spawning a shell -- track it
                     let shellNames = ["/bash", "/zsh", "/sh", "/dash", "/fish"]

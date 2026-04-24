@@ -15,7 +15,7 @@ public enum LLMProvider: String, Codable, Sendable {
 }
 
 /// Configuration for the LLM subsystem.
-public struct LLMConfig: Codable, Sendable {
+public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     /// Which provider to use. Default: ollama (local, private).
     public var provider: LLMProvider = .ollama
 
@@ -69,6 +69,44 @@ public struct LLMConfig: Codable, Sendable {
         geminiModel = try c.decodeIfPresent(String.self, forKey: .geminiModel) ?? "gemini-2.0-flash"
         sanitizeForCloud = try c.decodeIfPresent(Bool.self, forKey: .sanitizeForCloud) ?? true
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+    }
+
+    // MARK: - Safe string descriptions
+    //
+    // `LLMConfig` holds API keys as public `var` fields. Any accidental
+    // `print(config)`, `String(describing: config)`, or logger call
+    // that takes the struct would dump those keys via Mirror-based
+    // reflection. Override both `description` and `debugDescription`
+    // so the stringified form never carries the keys — only a
+    // redacted marker + the first/last character of each configured
+    // key for troubleshooting.
+
+    public var description: String {
+        "LLMConfig(provider=\(provider.rawValue), " +
+        "ollamaModel=\(ollamaModel), claudeModel=\(claudeModel), " +
+        "openaiModel=\(openaiModel), mistralModel=\(mistralModel), " +
+        "geminiModel=\(geminiModel), sanitizeForCloud=\(sanitizeForCloud), " +
+        "enabled=\(enabled), " +
+        "ollamaAPIKey=\(Self.maskKey(ollamaAPIKey)), " +
+        "claudeAPIKey=\(Self.maskKey(claudeAPIKey)), " +
+        "openaiAPIKey=\(Self.maskKey(openaiAPIKey)), " +
+        "mistralAPIKey=\(Self.maskKey(mistralAPIKey)), " +
+        "geminiAPIKey=\(Self.maskKey(geminiAPIKey)))"
+    }
+
+    public var debugDescription: String { description }
+
+    /// Redact an API key for log/debug output. Returns `"<unset>"`
+    /// for nil, `"<empty>"` for empty, else `"<len=N,first=X,last=Y>"`
+    /// — enough for a human to confirm "the key I expected is
+    /// configured" without the key itself leaving the log.
+    static func maskKey(_ key: String?) -> String {
+        guard let key, !key.isEmpty else {
+            return key == nil ? "<unset>" : "<empty>"
+        }
+        let first = String(key.prefix(1))
+        let last = String(key.suffix(1))
+        return "<len=\(key.count),first=\(first),last=\(last)>"
     }
 }
 

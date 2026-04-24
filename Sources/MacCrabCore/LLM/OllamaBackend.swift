@@ -20,6 +20,19 @@ public actor OllamaBackend: LLMBackend {
         self.apiKey = apiKey?.isEmpty == true ? nil : apiKey
     }
 
+    /// Return true when `url` is plaintext HTTP to a non-loopback
+    /// host. `http://localhost`, `http://127.0.0.1`, and `http://[::1]`
+    /// are safe; `http://10.0.0.5` is not. Used as a guard before
+    /// attaching an API key.
+    static func isPlaintextRemote(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "http" else { return false }
+        guard let host = url.host?.lowercased() else { return true }
+        if host == "localhost" { return false }
+        if host == "127.0.0.1" || host.hasPrefix("127.") { return false }
+        if host == "::1" || host == "[::1]" { return false }
+        return true
+    }
+
     public func isAvailable() async -> Bool {
         let url = baseURL.appendingPathComponent("api/tags")
         guard let (_, response) = try? await session.data(from: url),
@@ -45,7 +58,19 @@ public actor OllamaBackend: LLMBackend {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        if let apiKey {
+            // v1.6.7: if a key is configured, refuse to send it over
+            // plaintext HTTP to anything other than loopback. The
+            // default Ollama URL is `http://localhost:11434`, which is
+            // fine — but remote-Ollama setups that forget to switch to
+            // https would leak the Bearer token in clear.
+            if Self.isPlaintextRemote(self.baseURL) {
+                let urlForLog = self.baseURL.absoluteString
+                logger.error("Refusing to send Ollama Bearer token over plaintext HTTP to non-loopback host (\(urlForLog)). Use https:// or drop the API key.")
+                return nil
+            }
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         request.timeoutInterval = 120
 

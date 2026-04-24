@@ -272,6 +272,17 @@ let tools: [[String: Any]] = [
             "required": ["text"],
         ] as [String: Any],
     ],
+    [
+        "name": "cluster_alerts",
+        "description": "Group recent alerts into clusters by shared rule and process. Reduces an N-alert triage view to a handful of fingerprints that the analyst can suppress, escalate, or explain one at a time. Each cluster carries size, max severity, MITRE tactics union, first/last seen timestamps, and a stable id so the client can track expand/collapse state. Pass `hours` to bound the window (default 24). Pass `min_severity` to drop low-severity noise (values: low/medium/high/critical).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "hours": ["type": "integer", "description": "Hours of history to cluster (default 24, max 168)"],
+                "min_severity": ["type": "string", "description": "Minimum severity to include (low/medium/high/critical)"],
+            ],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Tool Handlers
@@ -302,9 +313,80 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleGetAIAlerts(args)
     case "scan_text":
         return await handleScanText(args)
+    case "cluster_alerts":
+        return await handleClusterAlerts(args)
     default:
         return ["content": [["type": "text", "text": "Unknown tool: \(name)"]]]
     }
+}
+
+// MARK: - cluster_alerts (v1.6.7)
+
+/// Group recent alerts by rule+process fingerprint so the triage view
+/// collapses to clusters instead of individual events.
+func handleClusterAlerts(_ args: [String: Any]) async -> Any {
+    let hours = max(1, min((args["hours"] as? Int) ?? 24, 168))
+    let minSevString = (args["min_severity"] as? String)?.lowercased() ?? ""
+    let minSeverity: Severity? = {
+        switch minSevString {
+        case "low": return .low
+        case "medium": return .medium
+        case "high": return .high
+        case "critical": return .critical
+        default: return nil
+        }
+    }()
+
+    let store: AlertStore
+    do {
+        let path = dataDir + "/events.db"
+        store = try AlertStore(path: path)
+    } catch {
+        return ["content": [["type": "text", "text": "Failed to open AlertStore: \(error.localizedDescription)"]]]
+    }
+
+    let since = Date().addingTimeInterval(-Double(hours) * 3600)
+    let alerts: [Alert]
+    do {
+        alerts = try await store.alerts(since: since, severity: nil, suppressed: false, limit: 5000)
+    } catch {
+        return ["content": [["type": "text", "text": "Failed to query alerts: \(error.localizedDescription)"]]]
+    }
+
+    let filtered: [Alert] = {
+        guard let min = minSeverity else { return alerts }
+        return alerts.filter { $0.severity >= min }
+    }()
+
+    let svc = AlertClusterService()
+    let clusters = await svc.cluster(alerts: filtered)
+
+    let payload = clusters.map { c -> [String: Any] in
+        [
+            "id": c.id,
+            "fingerprint": c.fingerprint,
+            "rule_id": c.ruleId,
+            "rule_title": c.ruleTitle,
+            "process_name": c.processName,
+            "process_path": c.processPath as Any,
+            "severity": c.severity.rawValue,
+            "size": c.size,
+            "tactics": Array(c.tactics).sorted(),
+            "first_seen": ISO8601DateFormatter().string(from: c.firstSeen),
+            "last_seen": ISO8601DateFormatter().string(from: c.lastSeen),
+            "member_alert_ids": c.memberAlertIds,
+        ]
+    }
+
+    let summary = "Window: last \(hours)h — \(filtered.count) alerts → \(clusters.count) clusters"
+    let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    let jsonText = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+    return [
+        "content": [
+            ["type": "text", "text": summary],
+            ["type": "text", "text": jsonText],
+        ]
+    ]
 }
 
 func handleGetAlerts(_ args: [String: Any]) async -> Any {

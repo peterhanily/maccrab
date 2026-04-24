@@ -3,6 +3,55 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.7] — 2026-04-24
+
+Follow-up to v1.6.6's AI Suite: credential-audit hardening, EventLoop
+wiring for the new services, first MCP tool for the Suite.
+
+### Added
+
+- **`LLMSanitizer` now redacts every known API-key shape** — Anthropic
+  (`sk-ant-…`), OpenAI (`sk-…` / `sk-proj-…`), Google (`AIza…`), AWS
+  (`AKIA…`/`ASIA…`/`AGPA…`/etc.), GitHub (`ghp_…`/`gho_…`/`ghu_…`/
+  `github_pat_…`), Slack (`xox[aboprs]-…`), and generic `Bearer` tokens
+  — regardless of surrounding context. Previously these were only
+  caught when embedded in a recognized flag (`--api-key=…`).
+- **IPv6 private-range redaction** — link-local (`fe80::/10`) and
+  unique-local (`fc00::/7`) now redact to `[PRIVATE_IPV6]`. Public
+  `2001:db8::` is preserved.
+- **Mac `ComputerName` redaction** — `Peters-MacBook-Pro`,
+  `Corp-Ops-iMac`, etc. redact to `[COMPUTER_NAME]`. Scoped to Mac
+  product keywords so ordinary hyphenated prose passes through.
+- **`OllamaBackend.isPlaintextRemote` guard** — refuses to send a
+  Bearer token to a non-loopback host over plain `http://`, logs a
+  diagnostic explaining how to fix (use `https://` or drop the key).
+- **`cluster_alerts` MCP tool** — stateless alert clustering over the
+  persisted alert DB, exposed to AI agents via the MCP server. Takes
+  `hours` and `min_severity` filters, returns clusters with size,
+  max severity, MITRE tactics union, first/last-seen timestamps.
+
+### Changed
+
+- **`LLMConfig` gains `CustomStringConvertible`/`debugDescription`**
+  that masks API keys as `<len=N,first=X,last=Y>`. Accidental
+  `print(config)` or `String(describing: config)` no longer dumps
+  secrets via Mirror reflection.
+- **`EventLoop` now routes AI-child events into `AgentLineageService`**
+  automatically — file I/O, network connections, and process spawns
+  under an AI-tool ancestor populate the timeline without any
+  caller action. Fresh sessions start when an AI-tool process is
+  seen; process spawns in its subtree record chronologically.
+- **`DaemonState` gains six fields for the v1.6.6 AI Suite services**
+  so EventLoop, polling timers, and MCP handlers can reach them
+  through the standard `state.*` plumbing.
+
+### Tests
+
+**741 tests pass (up from 719).** +22 new tests covering
+`LLMSanitizer` API-key redaction, IPv6 private ranges, Mac
+ComputerName matching, `LLMConfig` description masking, and the
+`OllamaBackend` plaintext-remote guard.
+
 ## [1.6.6] — 2026-04-23
 
 The biggest AI push in the codebase yet. Six independent services
