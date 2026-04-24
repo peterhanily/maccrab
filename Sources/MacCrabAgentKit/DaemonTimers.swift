@@ -12,6 +12,7 @@ enum DaemonTimers {
         let hourlyTimer: DispatchSourceTimer
         let statsTimer: DispatchSourceTimer
         let pruneTimer: DispatchSourceTimer
+        let sizeCapTimer: DispatchSourceTimer
         let maintenanceTimer: DispatchSourceTimer
         let feedbackTimer: DispatchSourceTimer
         let heartbeatTimer: DispatchSourceTimer
@@ -284,6 +285,32 @@ enum DaemonTimers {
         }
         pruneTimer.resume()
 
+        // v1.6.12: DB size-cap enforcement (hourly). The retention
+        // timer above only deletes events older than `retentionDays`,
+        // which on a high-event-rate machine lets the SQLite file
+        // grow past the configured `maxDatabaseSizeMB` cap anyway.
+        // Field case: 30d retention, ~50 events/s → DB grew to
+        // 18.95 GB (38× the 500 MB cap) before the discrepancy was
+        // noticed. This timer checks file size every hour and
+        // iteratively prunes the oldest events + VACUUMs until the
+        // file drops below 80% of the cap.
+        let maxSizeMB = max(50, state.maxDatabaseSizeMB)
+        let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
+        let dbFilePath = state.supportDir + "/events.db"
+        let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
+        sizeCapTimer.schedule(deadline: .now() + 600, repeating: 3600) // first at 10 min, then hourly
+        sizeCapTimer.setEventHandler {
+            Task {
+                await enforceDatabaseSizeCap(
+                    dbPath: dbFilePath,
+                    maxSizeMB: maxSizeMB,
+                    targetSizeMB: targetSizeMB,
+                    eventStore: state.eventStore
+                )
+            }
+        }
+        sizeCapTimer.resume()
+
         // Periodic baseline save + dedup sweep (every 5 minutes)
         let maintenanceTimer = DispatchSource.makeTimerSource(queue: .global())
         maintenanceTimer.schedule(deadline: .now() + 300, repeating: 300)
@@ -419,10 +446,76 @@ enum DaemonTimers {
             hourlyTimer: hourlyTimer,
             statsTimer: statsTimer,
             pruneTimer: pruneTimer,
+            sizeCapTimer: sizeCapTimer,
             maintenanceTimer: maintenanceTimer,
             feedbackTimer: feedbackTimer,
             heartbeatTimer: heartbeatTimer
         )
+    }
+}
+
+// MARK: - Size-cap enforcement (v1.6.12)
+
+/// Iteratively prune oldest events + VACUUM until the DB file drops
+/// below `targetSizeMB`. No-op when the DB is already under the cap.
+/// Called hourly from the size-cap timer.
+///
+/// Strategy: check file size, estimate rows to prune based on the
+/// fractional overage, delete that batch, VACUUM, re-measure. Loop
+/// up to `maxIterations` passes; in the extremely unlikely case the
+/// file still exceeds the cap after that, log a warning and try
+/// again on the next hourly tick.
+private func enforceDatabaseSizeCap(
+    dbPath: String,
+    maxSizeMB: Int,
+    targetSizeMB: Int,
+    eventStore: EventStore
+) async {
+    let fm = FileManager.default
+
+    func currentSizeMB() -> Int {
+        let attrs = try? fm.attributesOfItem(atPath: dbPath)
+        let bytes = (attrs?[.size] as? UInt64) ?? 0
+        return Int(bytes / 1_000_000)
+    }
+
+    let initialMB = currentSizeMB()
+    guard initialMB > maxSizeMB else { return }
+
+    logger.warning("DB size \(initialMB) MB exceeds cap \(maxSizeMB) MB. Pruning to \(targetSizeMB) MB.")
+
+    let maxIterations = 8
+    for iteration in 0..<maxIterations {
+        let sizeMB = currentSizeMB()
+        if sizeMB <= targetSizeMB { break }
+
+        // Estimate how many events to prune this pass. If we're 2×
+        // over, delete ~60% of rows; if just 10% over, delete ~15%.
+        // We can't know bytes-per-row precisely (varies with command-
+        // line length, enrichments, etc.) so this is best-effort.
+        let overageFraction = Double(sizeMB - targetSizeMB) / Double(sizeMB)
+        let totalEvents = (try? await eventStore.count()) ?? 0
+        let pruneCount = max(10_000, Int(Double(totalEvents) * min(0.6, overageFraction + 0.1)))
+
+        let pruned = (try? await eventStore.pruneOldest(count: pruneCount)) ?? 0
+        if pruned == 0 {
+            logger.warning("Size-cap enforcer: no rows left to prune at iter \(iteration), but file still \(sizeMB) MB. Stopping.")
+            break
+        }
+
+        // VACUUM reclaims the freed pages into the file size. Without
+        // this, DELETE just marks pages free but the file stays the
+        // same size — the enforcement is moot. Costly (rewrites the
+        // whole DB) but we've already established the cap is
+        // exceeded, so the cost is acceptable.
+        try? await eventStore.vacuum()
+    }
+
+    let finalMB = currentSizeMB()
+    if finalMB > maxSizeMB {
+        logger.error("Size-cap enforcer left DB at \(finalMB) MB (cap \(maxSizeMB) MB) after \(maxIterations) iterations")
+    } else {
+        logger.notice("Size-cap enforcer: \(initialMB) MB → \(finalMB) MB (cap \(maxSizeMB) MB)")
     }
 }
 

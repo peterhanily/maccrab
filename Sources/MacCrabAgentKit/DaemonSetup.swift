@@ -984,6 +984,12 @@ enum DaemonSetup {
         // operator's chosen window rather than the hardcoded default.
         state.retentionDays = config.retentionDays
 
+        // Apply configured DB size cap so the hourly size-cap timer
+        // (v1.6.12) reads the operator's Settings value. Minimum
+        // clamped at 50 MB so a hostile config can't make the
+        // enforcer delete everything on first run.
+        state.maxDatabaseSizeMB = max(50, config.maxDatabaseSizeMB)
+
         return state
     }
 

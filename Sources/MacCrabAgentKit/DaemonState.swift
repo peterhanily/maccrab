@@ -167,6 +167,15 @@ final class DaemonState {
     /// initializer signature.
     var retentionDays: Int = 30
 
+    /// Hard cap on the SQLite database file size, in megabytes. v1.6.12
+    /// ends a long-standing bug where this config field was defined and
+    /// surfaced in Settings but no code ever read it — the daily pruner
+    /// only enforced time-based retention. A user's DB grew to ~19 GB
+    /// before the discrepancy was noticed. Populated from
+    /// `DaemonConfig.maxDatabaseSizeMB`; consumed by the hourly size-
+    /// cap timer in DaemonTimers.
+    var maxDatabaseSizeMB: Int = 500
+
     // MARK: - v1.6.6 AI Suite
     //
     // These six services ship as the AI Suite. Stateless-or-internally-

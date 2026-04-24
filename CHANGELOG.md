@@ -3,6 +3,31 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.12] — 2026-04-24
+
+### Fixed
+
+- **`maxDatabaseSizeMB` now actually caps the database size.** The
+  field had been defined in `DaemonConfig` and surfaced in Settings
+  since forever, but no code ever read it — retention was time-only
+  (`retentionDays`). A field report showed the SQLite file at
+  18.95 GB against a 500 MB configured cap. Fixed by:
+  - Adding `EventStore.pruneOldest(count:)` — batch-deletes oldest
+    events + FTS rows, 100K per batch with `Task.yield()` between.
+  - Adding `EventStore.vacuum()` — runs `VACUUM` to reclaim pages
+    into on-disk file size (without this, `DELETE` doesn't shrink
+    the file).
+  - New hourly `sizeCapTimer` in `DaemonTimers` that checks the
+    `events.db` file size and iteratively prunes + vacuums until
+    the file drops below 80% of the configured cap.
+  - `DaemonState.maxDatabaseSizeMB` plumbed through from
+    `DaemonConfig` (clamped at 50 MB minimum).
+
+### Tests
+
+769 tests pass (up from 764). +5 tests cover the new `pruneOldest`
+and `vacuum` APIs including cumulative disk-usage shrinkage.
+
 ## [1.6.11] — 2026-04-24
 
 Pre-publication hygiene release. No detection-engine changes — just

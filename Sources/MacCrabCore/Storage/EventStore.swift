@@ -577,6 +577,78 @@ public actor EventStore {
         return totalDeleted
     }
 
+    /// Delete the oldest `count` events (by timestamp). Used by the
+    /// size-cap enforcer when the DB file exceeds `maxDatabaseSizeMB`
+    /// despite retention-based pruning — e.g. a 30-day retention on a
+    /// heavy-event machine. Prunes events and their FTS rows together.
+    ///
+    /// Batching matches `prune(olderThan:)` so a single 1M-event
+    /// prune doesn't hold the write lock too long.
+    @discardableResult
+    public func pruneOldest(count: Int) async throws -> Int {
+        guard count > 0 else { return 0 }
+        let batchSize: Int32 = min(100_000, Int32(count))
+        var remaining = count
+        var totalDeleted = 0
+
+        // Same pattern as prune(olderThan:) — delete FTS first so the
+        // rowid subquery sees a stable event set, then the events.
+        let deleteFTS = """
+            DELETE FROM events_fts WHERE rowid IN (
+                SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
+            )
+            """
+        let deleteEvents = """
+            DELETE FROM events WHERE rowid IN (
+                SELECT rowid FROM events ORDER BY timestamp ASC LIMIT ?1
+            )
+            """
+
+        while remaining > 0 {
+            let thisBatch = min(batchSize, Int32(remaining))
+
+            let ftsStmt = try prepare(deleteFTS)
+            sqlite3_bind_int(ftsStmt, 1, thisBatch)
+            let rc1 = sqlite3_step(ftsStmt)
+            sqlite3_finalize(ftsStmt)
+            guard rc1 == SQLITE_DONE else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                throw EventStoreError.stepFailed("FTS oldest-prune failed: \(msg)")
+            }
+
+            let evtStmt = try prepare(deleteEvents)
+            sqlite3_bind_int(evtStmt, 1, thisBatch)
+            let rc2 = sqlite3_step(evtStmt)
+            sqlite3_finalize(evtStmt)
+            guard rc2 == SQLITE_DONE else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                throw EventStoreError.stepFailed("Event oldest-prune failed: \(msg)")
+            }
+
+            let deleted = Int(sqlite3_changes(db))
+            if deleted == 0 { break }  // table empty
+            totalDeleted += deleted
+            remaining -= deleted
+            await Task.yield()
+        }
+        return totalDeleted
+    }
+
+    /// Run `VACUUM` to reclaim free pages into on-disk file size.
+    /// SQLite's `DELETE` marks pages free but doesn't shrink the
+    /// file; without this call, the size-cap enforcer prunes rows
+    /// but the `.db` file stays the same size. Costly (rewrites the
+    /// whole DB), so only called after a size-driven prune, not
+    /// after every retention sweep.
+    public func vacuum() async throws {
+        guard let db = db else { return }
+        let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw EventStoreError.stepFailed("VACUUM failed: \(msg)")
+        }
+    }
+
     // MARK: - Private Helpers
 
     /// A sum type for binding values to prepared statements.
