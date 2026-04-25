@@ -9,6 +9,7 @@ enum SignalHandlers {
         let sigHupSource: DispatchSourceSignal
         let sigTermSource: DispatchSourceSignal
         let sigIntSource: DispatchSourceSignal
+        let sigUsr1Source: DispatchSourceSignal
     }
 
     static func install(state: DaemonState, supervisor: MonitorSupervisor) -> Handles {
@@ -129,10 +130,26 @@ enum SignalHandlers {
         sigIntSource.setEventHandler { shutdownHandler() }
         sigIntSource.resume()
 
+        // v1.6.17: SIGUSR1 triggers a one-shot threat-intel feed
+        // refresh. Used by the dashboard's "Refresh Now" button so
+        // operators don't have to wait the full 4 h cadence after
+        // editing custom IOCs or after a feed outage.
+        let sigUsr1Source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        signal(SIGUSR1, SIG_IGN)
+        sigUsr1Source.setEventHandler {
+            print("[SIGUSR1] Threat intel feed refresh requested by dashboard")
+            Task {
+                await state.threatIntel.refreshNow()
+                print("[SIGUSR1] Threat intel refresh complete")
+            }
+        }
+        sigUsr1Source.resume()
+
         return Handles(
             sigHupSource: sigHupSource,
             sigTermSource: sigTermSource,
-            sigIntSource: sigIntSource
+            sigIntSource: sigIntSource,
+            sigUsr1Source: sigUsr1Source
         )
     }
 }

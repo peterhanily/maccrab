@@ -223,29 +223,30 @@ struct ThreatIntelFeedCachedStatsTests {
     }
 
     @Test("Returns counts and lastUpdate when cache file is present")
-    func presentFileReturnsCounts() throws {
+    func presentFileReturnsCounts() async throws {
         let dir = NSTemporaryDirectory() + "maccrab-ti-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
 
-        // Write a CacheData-shaped JSON the same way the daemon does.
-        let lastUpdate = Date(timeIntervalSince1970: 1_700_000_000)
-        let payload: [String: Any] = [
-            "hashes":  ["aa", "bb", "cc"],
-            "ips":     ["1.1.1.1", "2.2.2.2"],
-            "domains": ["bad.example", "evil.test", "phish.example", "c2.test"],
-            "urls":    ["http://bad.example/x"],
-            "lastUpdate": lastUpdate.timeIntervalSinceReferenceDate
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        try data.write(to: URL(fileURLWithPath: dir + "/feed_cache.json"))
+        // Use a real `ThreatIntelFeed` to seed the on-disk cache so
+        // we go through the same encoder the daemon does — tests
+        // continue to exercise the real schema after the v1.6.17
+        // schema change to per-IOC `IOCRecord`.
+        let feed = ThreatIntelFeed(cacheDir: dir, updateInterval: 86400)
+        await feed.addCustomIOCs(
+            hashes: ["aa", "bb", "cc"],
+            ips: ["1.1.1.1", "2.2.2.2"],
+            domains: ["bad.example", "evil.test", "phish.example", "c2.test"]
+        )
+        await feed.refreshNow()  // forces cache write via internal saveCache
 
         let stats = ThreatIntelFeed.cachedStats(at: dir)
         #expect(stats != nil)
         #expect(stats?.hashes == 3)
         #expect(stats?.ips == 2)
         #expect(stats?.domains == 4)
-        #expect(stats?.urls == 1)
+        // urls == 0 — addCustomIOCs doesn't accept URLs.
+        #expect(stats?.urls == 0)
     }
 
     @Test("Returns nil on garbage JSON (does not crash)")
@@ -257,28 +258,29 @@ struct ThreatIntelFeedCachedStatsTests {
         #expect(ThreatIntelFeed.cachedStats(at: dir) == nil)
     }
 
-    @Test("cachedIOCs returns the full IOC set, not just counts")
-    func cachedIOCsReturnsFullSet() throws {
+    @Test("cachedIOCs returns the full IOC set with metadata records")
+    func cachedIOCsReturnsFullSet() async throws {
         let dir = NSTemporaryDirectory() + "maccrab-ti-iocs-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
 
-        let payload: [String: Any] = [
-            "hashes":  ["aabb", "ccdd"],
-            "ips":     ["1.1.1.1"],
-            "domains": ["evil.example", "phish.test"],
-            "urls":    ["http://evil.example/x"],
-            "lastUpdate": Date().timeIntervalSinceReferenceDate
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        try data.write(to: URL(fileURLWithPath: dir + "/feed_cache.json"))
+        let feed = ThreatIntelFeed(cacheDir: dir, updateInterval: 86400)
+        await feed.addCustomIOCs(
+            hashes: ["aabb", "ccdd"],
+            ips: ["1.1.1.1"],
+            domains: ["evil.example", "phish.test"]
+        )
+        await feed.refreshNow()
 
         let iocs = ThreatIntelFeed.cachedIOCs(at: dir)
         #expect(iocs != nil)
-        #expect(iocs?.hashes == ["aabb", "ccdd"])
-        #expect(iocs?.ips == ["1.1.1.1"])
+        #expect(iocs?.hashes.count == 2)
+        #expect(iocs?.ips.count == 1)
         #expect(iocs?.domains.count == 2)
-        #expect(iocs?.urls == ["http://evil.example/x"])
+        // Records carry their source — custom imports must be tagged
+        // "Custom" so the dashboard can color them differently.
+        #expect(iocs?.hashes.allSatisfy { $0.source == "Custom" } == true)
+        #expect(iocs?.ips.first?.value == "1.1.1.1")
     }
 
     @Test("cachedIOCs returns nil when cache file is missing")

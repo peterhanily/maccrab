@@ -578,20 +578,21 @@ private struct FormatRow: View {
 //     actually caught — answers the analyst question "what's being
 //     considered a match?" that wasn't surfaced before v1.6.16
 
+enum IOCCategory: String, CaseIterable, Identifiable {
+    case hashes = "Hashes"
+    case ips = "IPs"
+    case domains = "Domains"
+    case urls = "URLs"
+    var id: String { rawValue }
+}
+
 private struct IOCBrowserSection: View {
     @ObservedObject var appState: AppState
     @State private var category: IOCCategory = .hashes
     @State private var query: String = ""
+    @State private var refreshing: Bool = false
 
-    enum IOCCategory: String, CaseIterable, Identifiable {
-        case hashes = "Hashes"
-        case ips = "IPs"
-        case domains = "Domains"
-        case urls = "URLs"
-        var id: String { rawValue }
-    }
-
-    private var iocs: [String] {
+    private var allRecords: [ThreatIntelFeed.IOCRecord] {
         let set = appState.threatIntelIOCs
         switch category {
         case .hashes:  return set?.hashes ?? []
@@ -601,109 +602,160 @@ private struct IOCBrowserSection: View {
         }
     }
 
-    private var filtered: [String] {
+    /// Filtered + sorted records. Sort is newest-first by
+    /// `lastSeenInFeed` so the highest-signal entries (just
+    /// observed in the wild) appear at the top.
+    private var filtered: [ThreatIntelFeed.IOCRecord] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return iocs }
-        return iocs.filter { $0.lowercased().contains(q) }
+        let base = allRecords.sorted { $0.lastSeenInFeed > $1.lastSeenInFeed }
+        guard !q.isEmpty else { return base }
+        return base.filter {
+            $0.value.lowercased().contains(q)
+                || ($0.malwareFamily?.lowercased().contains(q) ?? false)
+                || $0.tags.contains(where: { $0.lowercased().contains(q) })
+                || $0.source.lowercased().contains(q)
+                || ($0.fileType?.lowercased().contains(q) ?? false)
+        }
     }
 
-    /// Renders the first N results to keep the SwiftUI list snappy on
-    /// 100K-hash sets. Search narrows the cap; users can pivot to the
-    /// CLI for deeper analysis.
-    private static let renderCap = 200
+    /// Renders the first N results to keep SwiftUI snappy on 100K+
+    /// records. Search narrows the cap; users can pivot to `maccrabctl`
+    /// for deeper analysis.
+    private static let renderCap = 250
 
     private var sourceCaption: String {
         switch category {
-        case .hashes:  return "From abuse.ch MalwareBazaar (SHA-256 of known-malicious binaries) + custom imports."
-        case .ips:     return "From abuse.ch Feodo Tracker (active C2 infrastructure) + custom imports."
-        case .domains: return "From abuse.ch URLhaus (parent-domain matched) + custom imports."
-        case .urls:    return "From abuse.ch URLhaus (full URL substring matched, capped at 50 000) + custom imports."
+        case .hashes:  return "SHA-256 of binaries seen in malware samples. Source: abuse.ch MalwareBazaar + custom imports."
+        case .ips:     return "Active command-and-control IP addresses. Source: abuse.ch Feodo Tracker + custom imports."
+        case .domains: return "Hosts serving malware (URL parent domains). Source: abuse.ch URLhaus + custom imports."
+        case .urls:    return "Full URLs hosting malware payloads. Source: abuse.ch URLhaus + custom imports."
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Empty-state callout when the daemon hasn't written a
-            // cache yet (fresh install, daemon paused, or feed update
-            // failed — all distinguishable from "loaded zero IOCs"
-            // because `threatIntelIOCs` stays nil rather than empty).
+            headerRow
+
+            // Per-feed health row — visible signal when an upstream
+            // feed is failing (502, network blocked, etc.) instead of
+            // the analyst guessing why counts haven't moved.
+            FeedHealthRow(iocs: appState.threatIntelIOCs)
+
             if appState.threatIntelIOCs == nil {
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("No threat intel cache yet", systemImage: "clock.arrow.circlepath")
-                            .font(.subheadline)
-                        Text("The daemon refreshes feeds every 4 hours. Wait for the first sync, or trigger a manual update via the Feeds tab.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                noCacheBanner
             }
 
-            // Category picker + search field
-            HStack {
+            // Category picker + search.
+            HStack(spacing: 12) {
                 Picker("Category", selection: $category) {
                     ForEach(IOCCategory.allCases) { cat in
-                        Text(cat.rawValue).tag(cat)
+                        Text("\(cat.rawValue) (\(countFor(cat).formatted()))").tag(cat)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 360)
                 .accessibilityLabel("IOC category")
 
-                Spacer()
-
-                TextField("Search…", text: $query)
+                TextField("Search value, family, tag, source…", text: $query)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
+                    .frame(maxWidth: 280)
                     .accessibilityLabel("Search IOCs")
             }
 
-            // Source attribution + visible-vs-total counter
             HStack {
                 Text(sourceCaption)
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                Text("\(filtered.count.formatted()) of \(iocs.count.formatted())\(filtered.count > Self.renderCap ? " (showing first \(Self.renderCap))" : "")")
+                Text(visibilityCaption)
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
 
-            // IOC list — bounded for render perf
+            // Rich rows per record.
             GroupBox {
                 if filtered.isEmpty {
-                    Text(query.isEmpty ? "No IOCs in this category." : "No IOCs match \"\(query)\".")
+                    Text(query.isEmpty
+                         ? "No IOCs loaded in this category."
+                         : "Nothing in this category matches “\(query)”.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(filtered.prefix(Self.renderCap), id: \.self) { value in
-                            HStack {
-                                Text(value)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .textSelection(.enabled)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Spacer()
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(filtered.prefix(Self.renderCap), id: \.value) { record in
+                                IOCRecordRow(record: record, category: category)
+                                Divider().opacity(0.4)
                             }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.secondary.opacity(0.04))
                         }
                     }
-                    .frame(maxHeight: 280)
+                    .frame(maxHeight: 360)
                 }
             }
 
-            // Recent matches — alerts whose ruleId indicates the IOC
-            // list actually fired on a real event. Surfaces what the
-            // analyst is most likely to want to know: not just "what's
-            // in the list" but "what's been caught by it."
             recentMatchesSection
+        }
+    }
+
+    private var headerRow: some View {
+        HStack {
+            Text("Browse IOCs")
+                .font(.headline)
+            Spacer()
+            if let last = appState.threatIntelStats.lastUpdate {
+                Text("Last sync: \(last.formatted(.relative(presentation: .named)))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Never synced")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Button {
+                refreshing = true
+                Task {
+                    await appState.refreshThreatIntelNow()
+                    refreshing = false
+                }
+            } label: {
+                Label(refreshing ? "Refreshing…" : "Refresh Now", systemImage: "arrow.clockwise")
+            }
+            .disabled(refreshing)
+            .help("Trigger a one-shot feed refresh on the daemon. Without this, feeds refresh every 4 hours.")
+        }
+    }
+
+    private var noCacheBanner: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("No threat intel cache yet", systemImage: "clock.arrow.circlepath")
+                    .font(.subheadline)
+                Text("The daemon refreshes feeds every 4 hours. Click Refresh Now or wait for the first sync.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var visibilityCaption: String {
+        let total = allRecords.count
+        let shown = min(filtered.count, Self.renderCap)
+        if filtered.count > Self.renderCap {
+            return "Showing \(shown.formatted()) of \(total.formatted()) (use search to narrow)"
+        }
+        return "Showing \(shown.formatted()) of \(total.formatted())"
+    }
+
+    private func countFor(_ cat: IOCCategory) -> Int {
+        let set = appState.threatIntelIOCs
+        switch cat {
+        case .hashes:  return set?.hashes.count ?? 0
+        case .ips:     return set?.ips.count ?? 0
+        case .domains: return set?.domains.count ?? 0
+        case .urls:    return set?.urls.count ?? 0
         }
     }
 
@@ -743,11 +795,206 @@ private struct IOCBrowserSection: View {
     }
 }
 
+// MARK: - Feed health row
+
+private struct FeedHealthRow: View {
+    let iocs: ThreatIntelFeed.IOCSet?
+
+    private let feedNames = ["MalwareBazaar", "Feodo", "URLhaus"]
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ForEach(feedNames, id: \.self) { feed in
+                FeedHealthBadge(
+                    feed: feed,
+                    lastUpdate: iocs?.perFeedLastUpdate[feed],
+                    error: iocs?.perFeedLastError[feed]
+                )
+            }
+            Spacer()
+        }
+    }
+}
+
+private struct FeedHealthBadge: View {
+    let feed: String
+    let lastUpdate: Date?
+    let error: ThreatIntelFeed.FeedError?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
+            Text(feed)
+                .font(.caption2)
+                .fontWeight(.medium)
+            Text(detail)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .help(tooltip)
+    }
+
+    private var color: Color {
+        guard let lastUpdate else { return .secondary }
+        // Healthy = updated within 1.5× the daemon's 4 h cadence.
+        if let error, error.at > lastUpdate { return .red }
+        if Date().timeIntervalSince(lastUpdate) < 6 * 3600 { return .green }
+        return .orange
+    }
+
+    private var detail: String {
+        if let error, lastUpdate.map({ error.at > $0 }) ?? true {
+            return "failing"
+        }
+        guard let lastUpdate else { return "never" }
+        return lastUpdate.formatted(.relative(presentation: .numeric))
+    }
+
+    private var tooltip: String {
+        if let error {
+            return "Last error: \(error.reason) at \(error.at.formatted())"
+        }
+        if let lastUpdate {
+            return "Last successful sync: \(lastUpdate.formatted())"
+        }
+        return "No sync recorded yet — daemon may not be running, or the first refresh hasn't completed."
+    }
+}
+
+// MARK: - Rich IOC row
+
+private struct IOCRecordRow: View {
+    let record: ThreatIntelFeed.IOCRecord
+    let category: IOCCategory
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .font(.caption)
+                .foregroundColor(iconColor)
+                .frame(width: 14)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(displayValue)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    SourceChip(source: record.source)
+                }
+                contextRow
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var icon: String {
+        switch category {
+        case .hashes:  return "number.circle.fill"
+        case .ips:     return "network"
+        case .domains: return "globe.americas.fill"
+        case .urls:    return "link.circle.fill"
+        }
+    }
+
+    private var iconColor: Color {
+        switch category {
+        case .hashes:  return .red
+        case .ips:     return .orange
+        case .domains: return .blue
+        case .urls:    return .purple
+        }
+    }
+
+    /// Hashes are 64 hex chars — show first/last 12 with an ellipsis
+    /// so they fit a row without truncating to "7e2f1c…" useless.
+    private var displayValue: String {
+        if category == .hashes, record.value.count == 64 {
+            let prefix = record.value.prefix(12)
+            let suffix = record.value.suffix(12)
+            return "\(prefix)…\(suffix)"
+        }
+        return record.value
+    }
+
+    @ViewBuilder
+    private var contextRow: some View {
+        HStack(spacing: 6) {
+            if let family = record.malwareFamily, !family.isEmpty {
+                ContextPill(text: family, color: .red)
+            }
+            if let fileType = record.fileType, !fileType.isEmpty {
+                ContextPill(text: fileType, color: .gray)
+            }
+            ForEach(record.tags.prefix(3), id: \.self) { tag in
+                ContextPill(text: tag, color: .secondary)
+            }
+            if record.tags.count > 3 {
+                Text("+\(record.tags.count - 3)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            if let firstSeen = record.firstSeen {
+                Text("first seen \(firstSeen.formatted(date: .abbreviated, time: .omitted))")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
+private struct SourceChip: View {
+    let source: String
+
+    private var color: Color {
+        switch source {
+        case "MalwareBazaar": return .red
+        case "Feodo":         return .orange
+        case "URLhaus":       return .blue
+        case "Custom":        return .green
+        default:              return .secondary
+        }
+    }
+
+    var body: some View {
+        Text(source)
+            .font(.caption2)
+            .fontWeight(.medium)
+            .foregroundColor(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.12))
+            .clipShape(Capsule())
+    }
+}
+
+private struct ContextPill: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundColor(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.1))
+            .clipShape(Capsule())
+    }
+}
+
 private struct ThreatIntelMatchRow: View {
     let alert: AlertViewModel
 
-    /// "hash" / "domain" / "ip" classification driven by the
-    /// triggering rule. Used to color the icon column.
     private var kind: (label: String, icon: String, color: Color) {
         if alert.ruleId.contains("hash-match") {
             return ("hash", "number", .red)

@@ -284,6 +284,51 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Trigger a one-shot threat-intel feed refresh on the daemon and
+    /// re-pull the local cache view as soon as the daemon writes the
+    /// new file. Sends SIGUSR1 to the sysext (preferred) and to the
+    /// legacy `maccrabd` standalone daemon (dev fallback). Force-
+    /// invalidates the mtime gate so the next poll picks up the new
+    /// snapshot regardless of timestamps.
+    func refreshThreatIntelNow() async {
+        // SIGUSR1 to both candidate process names — pkill is silent
+        // when the named process doesn't exist, so this is safe to
+        // run in either dev or release context.
+        _ = runShell(["/usr/bin/pkill", "-USR1", "-f", "com.maccrab.agent"])
+        _ = runShell(["/usr/bin/pkill", "-USR1", "-x", "maccrabd"])
+
+        // Drop the mtime gate so the next refresh re-decodes even if
+        // the daemon writes the file with the same mtime second.
+        lastThreatIntelMtime = nil
+
+        // Wait briefly for the daemon to fetch + write, then re-pull.
+        // Real-world abuse.ch CSV download is ~2-5s; we sleep 6s to
+        // give it headroom, but we also keep polling on the regular
+        // 10s pollTimer so a slow refresh resolves on its own.
+        try? await Task.sleep(nanoseconds: 6 * 1_000_000_000)
+        refreshThreatIntelStats()
+    }
+
+    /// Run a shell command and return its exit status. Used for the
+    /// SIGUSR1 refresh path. Errors are swallowed because both pkill
+    /// targets may be absent (sysext not yet activated or maccrabd
+    /// not running) and that's not an error condition.
+    @discardableResult
+    private func runShell(_ argv: [String]) -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: argv[0])
+        p.arguments = Array(argv.dropFirst())
+        p.standardOutput = nil
+        p.standardError = nil
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus
+        } catch {
+            return -1
+        }
+    }
+
     /// Lazily construct (or rebuild on config drift) the user-side LLM
     /// stack: `LLMService` + `TriageService`. The config lives in
     /// `~/Library/Application Support/MacCrab/llm_config.json` and is

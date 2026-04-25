@@ -3,6 +3,49 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.17] — 2026-04-25
+
+Threat Intelligence panel rebuilt for context. The v1.6.16 browser
+exposed bare strings; v1.6.17 carries source / firstSeen / malware
+family / tags / fileType per IOC, switches feeds from "_recent"
+endpoints to full CSV exports (10–100× more IOCs), adds per-feed
+health badges, a Refresh Now button (SIGUSR1 to daemon), and
+per-category caps with 30-day age-based eviction.
+
+### New
+
+- **`ThreatIntelFeed.IOCRecord`** — per-IOC metadata struct replaces
+  `Set<String>` storage. New `recordFor*` accessors return the full
+  record for alert enrichment.
+- **CSV-backed feeds** — Feodo full `ipblocklist.csv`, URLhaus
+  `csv_online/`, MalwareBazaar `csv/recent/`. Brings family + tag +
+  first-seen metadata that the txt endpoints don't carry.
+- **Rich Browse IOCs rows** — color source chip, family pill, tags,
+  fileType, first-seen date, hash compaction. Search matches across
+  all fields. Picker shows per-category counts.
+- **Per-feed health row** — green/orange/red badges + tooltip with
+  last-success / last-error timestamp + reason.
+- **Refresh Now button** — SIGUSR1 to the daemon triggers a one-shot
+  feed refresh; AppState invalidates the mtime gate and re-decodes
+  on the next poll.
+- **Per-category caps + age eviction** — 200K hashes / 25K IPs /
+  100K domains / 75K URLs hard caps, 30-day stale eviction. Custom
+  imports pinned through both.
+- **`SIGUSR1` handler** in `SignalHandlers` calls
+  `state.threatIntel.refreshNow()`.
+
+### Schema
+
+`feed_cache.json` changed shape. Daemon rewrites within hours of
+upgrade; dashboard may show "no cache yet" briefly until the first
+v1.6.17 refresh completes.
+
+### Tests
+
+**801 pass.** Two existing `ThreatIntelFeedCachedStatsTests` cases
+updated to drive a real `ThreatIntelFeed` actor through the new
+encoder.
+
 ## [1.6.16] — 2026-04-25
 
 Makes the Threat Intelligence panel actually inspectable. v1.6.15
