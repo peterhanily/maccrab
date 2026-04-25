@@ -281,46 +281,193 @@ public actor ThreatIntelFeed {
         self.onFeedUpdate = handler
     }
 
-    /// Add custom IOCs (user-provided).
-    public func addCustomIOCs(hashes: [String] = [], ips: [String] = [], domains: [String] = []) {
+    /// Result of an import call. The dashboard renders these counts so
+    /// users see "imported 47, rejected 3 malformed entries: foo, bar,
+    /// TODO" instead of silently polluting the IOC list with garbage.
+    public struct ImportResult: Sendable {
+        public let accepted: Int
+        public let rejected: [String]   // first N malformed values, capped
+    }
+
+    /// Maximum number of rejected lines reported back to the caller —
+    /// enough to spot the pattern, bounded so a 100K-line garbage file
+    /// doesn't blow up the result struct.
+    public static let importRejectionReportCap = 25
+
+    /// Add custom IOCs (user-provided). Each input is validated before
+    /// insertion: garbage strings are rejected and reported back rather
+    /// than polluting the IOC store. Pre-v1.6.18 this method accepted
+    /// any string regardless of shape — a user pasting "hello world"
+    /// got it inserted as a domain.
+    @discardableResult
+    public func addCustomIOCs(
+        hashes: [String] = [],
+        ips: [String] = [],
+        domains: [String] = []
+    ) -> ImportResult {
         let now = Date()
+        var accepted = 0
+        var rejected: [String] = []
+
         for h in hashes {
-            let key = h.lowercased()
-            hashRecords[key] = IOCRecord(value: key, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            let trimmed = h.trimmingCharacters(in: .whitespaces)
+            guard let normalized = Self.validateHash(trimmed) else {
+                if rejected.count < Self.importRejectionReportCap { rejected.append(trimmed) }
+                continue
+            }
+            hashRecords[normalized] = IOCRecord(value: normalized, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            accepted += 1
         }
         for ip in ips {
-            ipRecords[ip] = IOCRecord(value: ip, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            let trimmed = ip.trimmingCharacters(in: .whitespaces)
+            guard let normalized = Self.validateIP(trimmed) else {
+                if rejected.count < Self.importRejectionReportCap { rejected.append(trimmed) }
+                continue
+            }
+            ipRecords[normalized] = IOCRecord(value: normalized, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            accepted += 1
         }
         for d in domains {
-            let key = d.lowercased()
-            domainRecords[key] = IOCRecord(value: key, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            let trimmed = d.trimmingCharacters(in: .whitespaces)
+            guard let normalized = Self.validateDomain(trimmed) else {
+                if rejected.count < Self.importRejectionReportCap { rejected.append(trimmed) }
+                continue
+            }
+            domainRecords[normalized] = IOCRecord(value: normalized, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            accepted += 1
         }
+        if !rejected.isEmpty {
+            logger.warning("Custom IOC import: rejected \(rejected.count) malformed entries (accepted \(accepted))")
+        }
+        return ImportResult(accepted: accepted, rejected: rejected)
     }
 
     /// Load IOCs from a custom file (one per line, # comments).
-    public func loadCustomFile(path: String, type: IOCType) throws {
+    /// Validates per the file's declared `type`. Returns counts so the
+    /// caller can surface "loaded N, rejected K" rather than silently
+    /// dropping malformed lines.
+    @discardableResult
+    public func loadCustomFile(path: String, type: IOCType) throws -> ImportResult {
         let content = try String(contentsOfFile: path, encoding: .utf8)
         let lines = content.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
 
         let now = Date()
+        var accepted = 0
+        var rejected: [String] = []
         for line in lines {
-            let key = line.lowercased()
-            let rec = IOCRecord(value: key, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            let normalized: String?
             switch type {
-            case .hash:   hashRecords[key] = rec
-            case .ip:     ipRecords[line] = rec
-            case .domain: domainRecords[key] = rec
-            case .url:    urlRecords[key] = rec
+            case .hash:   normalized = Self.validateHash(line)
+            case .ip:     normalized = Self.validateIP(line)
+            case .domain: normalized = Self.validateDomain(line)
+            case .url:    normalized = Self.validateURL(line)
             }
+            guard let normalized else {
+                if rejected.count < Self.importRejectionReportCap { rejected.append(line) }
+                continue
+            }
+            let rec = IOCRecord(value: normalized, source: "Custom", firstSeen: now, lastSeenInFeed: now)
+            switch type {
+            case .hash:   hashRecords[normalized] = rec
+            case .ip:     ipRecords[normalized] = rec
+            case .domain: domainRecords[normalized] = rec
+            case .url:    urlRecords[normalized] = rec
+            }
+            accepted += 1
         }
 
-        logger.info("Loaded \(lines.count) custom \(type.rawValue) IOCs from \(path)")
+        logger.info("Loaded \(accepted) custom \(type.rawValue) IOCs from \(path)\(rejected.isEmpty ? "" : " (rejected \(rejected.count) malformed)")")
+        return ImportResult(accepted: accepted, rejected: rejected)
     }
 
     public enum IOCType: String {
         case hash, ip, domain, url
+    }
+
+    // MARK: - IOC validators
+    //
+    // Conservative shape checks. Goal is to catch obvious garbage
+    // (placeholder text, partial pastes, unparseable strings), not to
+    // perfectly canonicalize every edge case. False rejections from
+    // these are recoverable — the user sees the rejection in the UI
+    // and can fix the input — whereas false acceptances pollute the
+    // IOC list silently.
+
+    /// SHA-256 (preferred), SHA-1, or MD5. Returns the lowercased,
+    /// trimmed hex string; nil for anything that isn't pure hex of
+    /// one of those lengths.
+    public static func validateHash(_ s: String) -> String? {
+        let h = s.trimmingCharacters(in: .whitespaces).lowercased()
+        guard h.count == 64 || h.count == 40 || h.count == 32 else { return nil }
+        return h.allSatisfy({ $0.isHexDigit }) ? h : nil
+    }
+
+    /// Numeric IPv4 (`a.b.c.d`, each 0-255) or IPv6 (any colon-bearing
+    /// form `getaddrinfo` accepts). Returns the input string on
+    /// success, nil otherwise. Hostnames are NOT accepted — those
+    /// belong in the domains category.
+    public static func validateIP(_ s: String) -> String? {
+        let v = s.trimmingCharacters(in: .whitespaces)
+        guard !v.isEmpty else { return nil }
+        // IPv4: 4 dot-separated octets in [0..255]
+        let parts = v.split(separator: ".")
+        if parts.count == 4, parts.allSatisfy({
+            if let n = Int($0), n >= 0, n <= 255, String(n) == String($0) { return true }
+            return false
+        }) {
+            return v
+        }
+        // IPv6: must contain at least one colon and be parseable by
+        // getaddrinfo with AI_NUMERICHOST so we never accept a name.
+        if v.contains(":") {
+            var hints = addrinfo()
+            hints.ai_family = AF_UNSPEC
+            hints.ai_flags = AI_NUMERICHOST
+            var result: UnsafeMutablePointer<addrinfo>? = nil
+            if getaddrinfo(v, nil, &hints, &result) == 0 {
+                if let r = result { freeaddrinfo(r) }
+                return v
+            }
+        }
+        return nil
+    }
+
+    /// Domain shape: at least one dot, only domain-legal characters,
+    /// each label 1-63 chars, total <=253. Lowercased.
+    public static func validateDomain(_ s: String) -> String? {
+        let d = s.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !d.isEmpty, d.count <= 253 else { return nil }
+        // Reject if it looks like a URL or has a path/query — that's a
+        // URL, not a domain, and silently stripping confuses operators.
+        if d.contains("://") || d.contains("/") || d.contains("?")
+           || d.contains("#") || d.contains(" ") {
+            return nil
+        }
+        let labels = d.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2, labels.allSatisfy({
+            !$0.isEmpty && $0.count <= 63 && $0.allSatisfy({ ch in
+                ch.isLetter || ch.isNumber || ch == "-" || ch == "_"
+            }) && !$0.hasPrefix("-") && !$0.hasSuffix("-")
+        }) else { return nil }
+        // Reject domains where the rightmost label (TLD) is purely
+        // numeric — likely a bare IPv4 the user mis-categorized.
+        if let last = labels.last, last.allSatisfy({ $0.isNumber }) {
+            return nil
+        }
+        return d
+    }
+
+    /// URL must be parseable by Foundation `URL` AND have a scheme of
+    /// http/https/ftp (the schemes URLhaus carries) AND have a host.
+    public static func validateURL(_ s: String) -> String? {
+        let u = s.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: u),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https", "ftp"].contains(scheme),
+              let host = url.host, !host.isEmpty else { return nil }
+        return u.lowercased()
     }
 
     // MARK: - Feed Updates
@@ -651,11 +798,11 @@ public actor ThreatIntelFeed {
         for file in files {
             let path = cacheDir + "/" + file
             if file.hasSuffix(".hashes.txt") {
-                try? loadCustomFile(path: path, type: .hash)
+                _ = try? loadCustomFile(path: path, type: .hash)
             } else if file.hasSuffix(".ips.txt") {
-                try? loadCustomFile(path: path, type: .ip)
+                _ = try? loadCustomFile(path: path, type: .ip)
             } else if file.hasSuffix(".domains.txt") {
-                try? loadCustomFile(path: path, type: .domain)
+                _ = try? loadCustomFile(path: path, type: .domain)
             }
         }
     }

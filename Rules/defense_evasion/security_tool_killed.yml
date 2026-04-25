@@ -1,9 +1,10 @@
 title: Security Tool Process Terminated
 id: d1a2b3c4-0022-4000-a000-000000000022
 status: experimental
-description: Detects kill signals sent to known macOS security tool processes.
+description: Detects fatal kill signals sent to known macOS security tool processes.
 author: MacCrab Community
 date: 2026/03/31
+modified: 2026/04/25
 references:
     - https://attack.mitre.org/techniques/T1562/001/
 tags:
@@ -29,12 +30,33 @@ detection:
             - 'Netiquette'
             - 'DNSMonitor'
             - 'Santa'
-            - 'maccrabd'
             - 'CrowdStrike'
             - 'Falcon'
             - 'SentinelOne'
             - 'Elastic Agent'
-    condition: selection_kill and selection_target
+    # v1.6.18: exclude non-fatal control signals — these don't
+    # actually terminate the target. SIGHUP is the standard "reload
+    # config" signal MacCrab itself uses for rule reload + storage
+    # config; SIGUSR1/USR2 are the threat-intel feed-refresh and
+    # user-defined signals MacCrab uses for dashboard→daemon control.
+    # MacCrab's own daemon (maccrabd, com.maccrab.agent) was also
+    # removed from selection_target — the dashboard signals it on
+    # every operator action and we don't want to alert on our own
+    # IPC. Other security tools that someone might genuinely try to
+    # disable (Falcon, SentinelOne, etc.) stay in the list.
+    filter_nonfatal_signal:
+        CommandLine|contains:
+            - '-HUP'
+            - '-USR1'
+            - '-USR2'
+            - 'SIGHUP'
+            - 'SIGUSR1'
+            - 'SIGUSR2'
+    filter_maccrab_self:
+        CommandLine|contains:
+            - 'com.maccrab.agent'
+            - 'maccrabd'
+    condition: selection_kill and selection_target and not (filter_nonfatal_signal or filter_maccrab_self)
 falsepositives:
     - System administrators intentionally stopping security tools for maintenance
 level: critical

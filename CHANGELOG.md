@@ -3,6 +3,47 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.18] — 2026-04-25
+
+Three-issue follow-up to v1.6.17.
+
+### Fixed
+
+- **FP on own daemon at install.** v1.6.17's Refresh Now button sends
+  `pkill -USR1 com.maccrab.agent` / `maccrabd`, which tripped the
+  `security_tool_killed` rule (had `maccrabd` in target list and no
+  non-fatal-signal filter). Removed `maccrabd` from both rules
+  (`security_tool_killed.yml` and `defense_evasion_kill_persist.yml`),
+  added `filter_nonfatal_signal` (`-HUP`, `-USR1`, `-USR2`,
+  `SIGHUP`, `SIGUSR1`, `SIGUSR2`) and `filter_maccrab_self` (excludes
+  command lines naming our own daemons). Other security tools still
+  alert as before.
+- **Custom-import IOC validation.** `addCustomIOCs` /
+  `loadCustomFile` accepted any string — a user pasting "TODO" got
+  it inserted as a domain. Five new public validators
+  (`validateHash`, `validateIP`, `validateDomain`, `validateURL`)
+  reject malformed entries. Both import APIs now return an
+  `ImportResult { accepted, rejected }`. Dashboard import flow shows
+  "Imported N of M. Rejected K malformed: ..." status.
+- **CFBundleShortVersionString drift.** `Xcode/project.yml` had been
+  stuck at `1.6.4` since that release. `prerelease-check.sh` only
+  validated `CFBundleVersion` so the drift went unnoticed for 13
+  releases. Bumped to 1.6.18 + added `prerelease-check.sh` guard.
+
+### New
+
+- `ThreatIntelFeed.ImportResult` struct + return values from
+  `addCustomIOCs(...)` and `loadCustomFile(path:type:)`.
+- Public validators: `validateHash`, `validateIP`, `validateDomain`,
+  `validateURL`. Used by both the daemon-side imports and the
+  dashboard's local pre-validation.
+
+### Tests
+
+**807 pass (up from 801).** Six new in `ThreatIntelValidatorTests`.
+Two existing cache tests updated to use real 64-hex-char SHA-256
+fixtures.
+
 ## [1.6.17] — 2026-04-25
 
 Threat Intelligence panel rebuilt for context. The v1.6.16 browser

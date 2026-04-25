@@ -32,8 +32,21 @@ steps:
                   - 'BlockBlock'
                   - 'OverSight'
                   - 'Santa'
-                  - 'maccrabd'
-          condition: selection
+          # v1.6.18: don't fire on MacCrab signaling its own daemon —
+          # SIGHUP / SIGUSR1 from the dashboard are routine IPC for
+          # rule reload + threat-intel refresh, not defense evasion.
+          # Removed `maccrabd` from the target list; non-fatal-signal
+          # filter keeps `kill -HUP / -USR1 / -USR2` from matching
+          # other security tools either.
+          filter_nonfatal_signal:
+              CommandLine|contains:
+                  - '-HUP'
+                  - '-USR1'
+                  - '-USR2'
+                  - 'SIGHUP'
+                  - 'SIGUSR1'
+                  - 'SIGUSR2'
+          condition: selection and not filter_nonfatal_signal
 
     - id: persist
       logsource:

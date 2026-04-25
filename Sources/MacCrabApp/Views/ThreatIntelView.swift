@@ -419,7 +419,34 @@ struct ThreatIntelView: View {
 
         guard !lines.isEmpty else { return }
 
-        // Write to a temp file for the daemon to pick up
+        // v1.6.18: validate locally before writing the file the daemon
+        // will pick up. Pre-validation pollution was the bug — pasting
+        // "hello world" or "TODO" got silently inserted as a domain.
+        var accepted: [String] = []
+        var rejected: [String] = []
+        for line in lines {
+            let normalized: String?
+            switch importType {
+            case .hashes:  normalized = ThreatIntelFeed.validateHash(line)
+            case .ips:     normalized = ThreatIntelFeed.validateIP(line)
+            case .domains: normalized = ThreatIntelFeed.validateDomain(line)
+            }
+            if let normalized {
+                accepted.append(normalized)
+            } else {
+                rejected.append(line)
+            }
+        }
+
+        if accepted.isEmpty {
+            let preview = rejected.prefix(3).joined(separator: ", ")
+            importStatus = "Rejected all \(rejected.count) entries — none look like valid \(importType.rawValue.lowercased()): \(preview)\(rejected.count > 3 ? "…" : "")"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { importStatus = nil }
+            return
+        }
+
+        // Write only the validated entries to the file the daemon
+        // re-reads on next refresh.
         let importDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
         try? FileManager.default.createDirectory(atPath: importDir, withIntermediateDirectories: true)
 
@@ -431,15 +458,19 @@ struct ThreatIntelView: View {
         }
 
         let path = importDir + "/" + filename
-        // Append to existing
         var existing = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-        existing += lines.joined(separator: "\n") + "\n"
+        existing += accepted.joined(separator: "\n") + "\n"
         try? existing.write(toFile: path, atomically: true, encoding: .utf8)
 
-        importStatus = "Imported \(lines.count) \(importType.rawValue.lowercased()). Restart daemon to apply."
+        if rejected.isEmpty {
+            importStatus = "Imported \(accepted.count) \(importType.rawValue.lowercased()). Click Refresh Now in Browse IOCs to apply."
+        } else {
+            let preview = rejected.prefix(3).joined(separator: ", ")
+            importStatus = "Imported \(accepted.count) of \(lines.count). Rejected \(rejected.count) malformed: \(preview)\(rejected.count > 3 ? "…" : "")"
+        }
         importText = ""
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { importStatus = nil }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { importStatus = nil }
     }
 
     private func importFromFile(_ url: URL) {

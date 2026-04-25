@@ -231,10 +231,16 @@ struct ThreatIntelFeedCachedStatsTests {
         // Use a real `ThreatIntelFeed` to seed the on-disk cache so
         // we go through the same encoder the daemon does — tests
         // continue to exercise the real schema after the v1.6.17
-        // schema change to per-IOC `IOCRecord`.
+        // schema change to per-IOC `IOCRecord`. Hashes must satisfy
+        // the v1.6.18 validator (SHA-256 = 64 hex chars), so use
+        // real-shape fixtures.
         let feed = ThreatIntelFeed(cacheDir: dir, updateInterval: 86400)
         await feed.addCustomIOCs(
-            hashes: ["aa", "bb", "cc"],
+            hashes: [
+                String(repeating: "a", count: 64),
+                String(repeating: "b", count: 64),
+                String(repeating: "c", count: 64)
+            ],
             ips: ["1.1.1.1", "2.2.2.2"],
             domains: ["bad.example", "evil.test", "phish.example", "c2.test"]
         )
@@ -266,7 +272,10 @@ struct ThreatIntelFeedCachedStatsTests {
 
         let feed = ThreatIntelFeed(cacheDir: dir, updateInterval: 86400)
         await feed.addCustomIOCs(
-            hashes: ["aabb", "ccdd"],
+            hashes: [
+                String(repeating: "1", count: 64),
+                String(repeating: "2", count: 64)
+            ],
             ips: ["1.1.1.1"],
             domains: ["evil.example", "phish.test"]
         )
@@ -289,6 +298,103 @@ struct ThreatIntelFeedCachedStatsTests {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
         #expect(ThreatIntelFeed.cachedIOCs(at: dir) == nil)
+    }
+}
+
+// MARK: - Custom-import validators
+//
+// v1.6.18: addCustomIOCs / loadCustomFile now validate inputs before
+// inserting. Pre-v1.6.18 a user pasting "hello world" or "TODO" got
+// it inserted as a domain. These tests lock in the validator shapes.
+
+@Suite("ThreatIntelFeed validators")
+struct ThreatIntelValidatorTests {
+
+    @Test("validateHash accepts SHA-256, SHA-1, MD5 hex strings")
+    func validateHashShapes() {
+        let sha256 = String(repeating: "a", count: 64)
+        let sha1   = String(repeating: "b", count: 40)
+        let md5    = String(repeating: "c", count: 32)
+        #expect(ThreatIntelFeed.validateHash(sha256) == sha256)
+        #expect(ThreatIntelFeed.validateHash(sha1) == sha1)
+        #expect(ThreatIntelFeed.validateHash(md5) == md5)
+        // Lowercases.
+        #expect(ThreatIntelFeed.validateHash("ABCDEF" + String(repeating: "0", count: 58)) == ("abcdef" + String(repeating: "0", count: 58)))
+    }
+
+    @Test("validateHash rejects garbage and wrong-length strings")
+    func validateHashRejects() {
+        #expect(ThreatIntelFeed.validateHash("hello") == nil)
+        #expect(ThreatIntelFeed.validateHash("TODO") == nil)
+        #expect(ThreatIntelFeed.validateHash("") == nil)
+        #expect(ThreatIntelFeed.validateHash(String(repeating: "z", count: 64)) == nil) // not hex
+        #expect(ThreatIntelFeed.validateHash(String(repeating: "a", count: 50)) == nil) // wrong length
+    }
+
+    @Test("validateIP accepts valid IPv4 and IPv6, rejects garbage")
+    func validateIPShapes() {
+        #expect(ThreatIntelFeed.validateIP("8.8.8.8") == "8.8.8.8")
+        #expect(ThreatIntelFeed.validateIP("192.168.0.1") == "192.168.0.1")
+        #expect(ThreatIntelFeed.validateIP("2001:db8::1") == "2001:db8::1")
+        // Hostnames must NOT be accepted as IPs.
+        #expect(ThreatIntelFeed.validateIP("evil.example") == nil)
+        // Out-of-range octets.
+        #expect(ThreatIntelFeed.validateIP("999.999.999.999") == nil)
+        #expect(ThreatIntelFeed.validateIP("256.0.0.1") == nil)
+        // Garbage.
+        #expect(ThreatIntelFeed.validateIP("hello world") == nil)
+        #expect(ThreatIntelFeed.validateIP("TODO") == nil)
+        #expect(ThreatIntelFeed.validateIP("") == nil)
+    }
+
+    @Test("validateDomain requires a real domain shape")
+    func validateDomainShapes() {
+        #expect(ThreatIntelFeed.validateDomain("evil.example") == "evil.example")
+        #expect(ThreatIntelFeed.validateDomain("a.b.c.example.org") == "a.b.c.example.org")
+        // Lowercases.
+        #expect(ThreatIntelFeed.validateDomain("EVIL.EXAMPLE.com") == "evil.example.com")
+        // No path/query/scheme/space.
+        #expect(ThreatIntelFeed.validateDomain("https://evil.example") == nil)
+        #expect(ThreatIntelFeed.validateDomain("evil.example/path") == nil)
+        #expect(ThreatIntelFeed.validateDomain("evil example") == nil)
+        // Single-label rejected.
+        #expect(ThreatIntelFeed.validateDomain("localhost") == nil)
+        // Bare IPv4 rejected.
+        #expect(ThreatIntelFeed.validateDomain("8.8.8.8") == nil)
+        // Garbage rejected.
+        #expect(ThreatIntelFeed.validateDomain("TODO") == nil)
+        #expect(ThreatIntelFeed.validateDomain("hello world") == nil)
+    }
+
+    @Test("validateURL requires scheme + host")
+    func validateURLShapes() {
+        #expect(ThreatIntelFeed.validateURL("http://evil.example") == "http://evil.example")
+        #expect(ThreatIntelFeed.validateURL("https://evil.example/path?q=1") == "https://evil.example/path?q=1")
+        #expect(ThreatIntelFeed.validateURL("HTTPS://EVIL.EXAMPLE") == "https://evil.example")
+        // No scheme.
+        #expect(ThreatIntelFeed.validateURL("evil.example") == nil)
+        // Wrong scheme.
+        #expect(ThreatIntelFeed.validateURL("javascript:alert(1)") == nil)
+        // Garbage.
+        #expect(ThreatIntelFeed.validateURL("TODO") == nil)
+        #expect(ThreatIntelFeed.validateURL("") == nil)
+    }
+
+    @Test("addCustomIOCs reports rejected lines instead of inserting them")
+    func addCustomIOCsRejects() async {
+        let feed = ThreatIntelFeed(cacheDir: NSTemporaryDirectory() + "ti-validate-\(UUID().uuidString)",
+                                   updateInterval: 86400)
+        let result = await feed.addCustomIOCs(
+            hashes: [String(repeating: "a", count: 64), "hello", "TODO"],
+            ips:    ["8.8.8.8", "999.999.999.999", "evil.example"],
+            domains: ["evil.example", "https://nope", "8.8.8.8"]
+        )
+        #expect(result.accepted == 3)
+        #expect(result.rejected.count == 6)
+        let stats = await feed.stats()
+        #expect(stats.hashes == 1)
+        #expect(stats.ips == 1)
+        #expect(stats.domains == 1)
     }
 }
 

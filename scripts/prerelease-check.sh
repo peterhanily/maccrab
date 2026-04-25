@@ -72,6 +72,16 @@ else
     ok "Xcode/project.yml → $VERSION (app + sysext)"
 fi
 
+# v1.6.18: also validate CFBundleShortVersionString. The pre-v1.6.18
+# check covered CFBundleVersion only, so the short version drifted to
+# 1.6.4 across 13 releases until a manual audit caught it.
+PROJECT_YML_SHORT_COUNT=$(grep -c "CFBundleShortVersionString: \"$VERSION\"" Xcode/project.yml 2>/dev/null || echo 0)
+if [[ "$PROJECT_YML_SHORT_COUNT" -lt 2 ]]; then
+    err "Xcode/project.yml: CFBundleShortVersionString not set to $VERSION in both targets (found $PROJECT_YML_SHORT_COUNT)"
+else
+    ok "Xcode/project.yml → CFBundleShortVersionString $VERSION (app + sysext)"
+fi
+
 # Info.plist — must contain the version string somewhere
 for plist in Xcode/Resources/MacCrabApp-Info.plist Xcode/Resources/MacCrabAgent-Info.plist; do
     if grep -q "<string>$VERSION</string>" "$plist" 2>/dev/null; then
