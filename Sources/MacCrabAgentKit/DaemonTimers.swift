@@ -200,6 +200,13 @@ enum DaemonTimers {
                     }
                 }
 
+                // v1.6.15: refresh the on-disk integrations snapshot so
+                // the dashboard's IntegrationsView shows the daemon's
+                // enriched results (running-state checks done at root
+                // privilege) instead of re-scanning from user context.
+                let integrationsSnapshotPath = state.supportDir + "/integrations_snapshot.json"
+                await state.toolIntegrations.writeSnapshot(to: integrationsSnapshotPath)
+
                 // Scheduled reports -- daily digest + weekly HTML report
                 let recentAlerts = (try? await state.alertStore.alerts(
                     since: Date().addingTimeInterval(-7 * 86400),
@@ -458,6 +465,17 @@ enum DaemonTimers {
                 // File may already exist; retry as overwrite.
                 try? FileManager.default.removeItem(atPath: path)
                 try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+            }
+
+            // v1.6.15: write the AI lineage snapshot on the same 30 s
+            // cadence as the heartbeat. The dashboard's
+            // AIActivityTimelineView reads this file on each refresh,
+            // so a 30 s delay is the worst-case staleness an analyst
+            // sees. Cheap: O(N) over total events, capped by
+            // EventRing capacity, ~1 ms even at full caps.
+            let lineagePath = state.supportDir + "/agent_lineage.json"
+            Task {
+                await state.agentLineageService.writeSnapshot(to: lineagePath)
             }
         }
         heartbeatTimer.resume()

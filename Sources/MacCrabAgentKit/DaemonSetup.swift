@@ -537,6 +537,10 @@ enum DaemonSetup {
             let running = installedTools.filter(\.isRunning).map(\.name)
             print("Security tools detected: \(installedTools.map(\.name).joined(separator: ", "))\(running.isEmpty ? "" : " (running: \(running.joined(separator: ", ")))")")
         }
+        // v1.6.15: persist a snapshot at startup so the dashboard's
+        // IntegrationsView picks up the daemon's results immediately.
+        // Refreshed hourly by DaemonTimers.
+        await toolIntegrations.writeSnapshot(to: supportDir + "/integrations_snapshot.json")
 
         // Notarization checker -- verifies notarization status of executed binaries
         let notarizationChecker = NotarizationChecker()

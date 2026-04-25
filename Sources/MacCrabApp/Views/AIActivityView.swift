@@ -118,6 +118,19 @@ struct AIActivityView: View {
                         )
                     }
 
+                    // v1.6.15: per-AI-tool agent activity timeline. Reads
+                    // the daemon-written `agent_lineage.json` snapshot
+                    // (refreshed every 30 s) so the dashboard substantiates
+                    // the "MacCrab sees what your agents actually did"
+                    // positioning. Renders empty-state copy when no
+                    // sessions exist instead of hiding entirely — the
+                    // empty state is the discovery surface for the
+                    // feature on a quiet machine.
+                    GroupBox {
+                        AIActivityTimelineView(appState: appState)
+                            .padding(8)
+                    }
+
                     // Activity by AI tool — shows which tool generated alerts
                     if !alertsByTool.isEmpty {
                         GroupBox {

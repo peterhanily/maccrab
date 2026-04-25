@@ -3,6 +3,86 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.15] — 2026-04-25
+
+A four-bundle audit-driven release. Closes the same "intent-vs-reality"
+gap that bit v1.6.9 / v1.6.12 / v1.6.14 — every shipped feature now
+has daemon code consuming or producing it. Adds the agent-activity
+timeline view that substantiates the "MacCrab sees what your agents
+actually did" positioning that has been aspirational since v1.6.7.
+
+### Bundle A — Wire the orphans
+
+- **`TriageService`, `LLMConsensusService`, `AgenticInvestigator`** were
+  declared in `DaemonState` but had zero callers. Moved to `AppState` —
+  outbound HTTPS with vendor API keys does not belong at root
+  privilege when the dashboard already owns the LLM config.
+  `TriageService` is now wired to `AlertDetailView` as a one-click
+  "Get AI Triage Recommendation" with `suppress` / `keep` / `escalate`
+  / `inconclusive` disposition + rationale.
+- **`threatIntelStats`** was a published property nothing wrote to.
+  `ThreatIntelView` rendered "Malicious Hashes/IPs/Domains/URLs: 0"
+  forever. Wired to `ThreatIntelFeed.cachedStats(at:)` reading the
+  daemon's IOC cache.
+- **`alertClusterService` + `mcpBaselineService`** instantiated on
+  `DaemonState` but never invoked. Removed — `ClusterSheet` already
+  creates per-render copies and `MCPBaselineService` lacks its
+  producer half.
+
+### Bundle B — Cache eviction perf
+
+- **`LLMCache`**: O(n log n) full-dict sort on every overflow → O(n)
+  min-scan over existing `accessSeq` counter. Header doc now matches
+  implementation.
+- **`RuleEngine` + `SequenceEngine` regex caches**: the same O(n)
+  `lastIndex+remove+append` LRU pattern that commit `de5ed04`
+  replaced in `LLMCache` was still in both engines. At the 2048-entry
+  cap and 420 rules under burst this was the dominant rule-eval cost.
+  Both rewritten to O(1) hit promotion via sequence-number sidecar.
+
+### Bundle C — Stop double-scanning
+
+- **`SecurityToolIntegrations`**: daemon now writes
+  `integrations_snapshot.json` at startup and refreshes hourly.
+  `IntegrationsView` reads the snapshot first, falls back to a local
+  scan when missing. `BrowserExtensionsView` left intentionally
+  unchanged — the sysext can't reliably read user-home paths so the
+  dashboard's local scan is the authoritative producer.
+
+### Bundle D — Agent activity timeline
+
+- **`AgentEvent` + `AgentSessionSnapshot` Codable**, new
+  `LineageSnapshot` wrapper. Daemon writes
+  `agent_lineage.json` every 30 s on the heartbeat tick.
+- **New `AIActivityTimelineView`** rendered under AI Guard: session
+  picker chips, per-session kind-counts, chronological event rows
+  with kind-specific SF Symbols and severity-colored alert rows,
+  inline cap with "Show all" disclosure. Empty-state lists the 8
+  supported tools.
+
+### Stability hardening
+
+- In-flight guard on `AgentLineageService.writeSnapshot` so a slow
+  disk can't pile up Tasks under the heartbeat timer.
+- Atomic-swap race fixed: `moveItem` first, fall back to
+  `removeItem + moveItem` only on conflict (matches the existing
+  heartbeat-write pattern).
+- mtime gate on `AppState.refreshAgentLineage` so the dashboard's
+  10 s poll doesn't re-decode an unchanged 30 s file 2/3 of the time.
+- Orphan `.tmp` cleanup on encoder error in both writers.
+
+### Tests
+
+**799 pass (up from 783).** Sixteen new across:
+
+- `LLMServiceFactoryTests` (3) — disabled / claude-no-key /
+  openai-no-key paths.
+- `ThreatIntelFeedCachedStatsTests` (3).
+- `SecurityToolIntegrationsSnapshotTests` (4).
+- `AgentLineageSnapshotTests` (4) — full round-trip across all 6
+  event kinds, plus the in-flight guard regression.
+- `LLMCacheTests.evictsBulkOverflow` (1).
+
 ## [1.6.14] — 2026-04-24
 
 Closes the end-to-end gap on the size-cap path: v1.6.12 wired the

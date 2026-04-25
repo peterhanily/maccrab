@@ -612,6 +612,15 @@ struct AlertDetailView: View {
                     InvestigationSection(investigation: investigation)
                 }
 
+                // v1.6.10: user-side AI triage recommendation. The
+                // dashboard owns the LLM config, so this lives at app
+                // privilege rather than in the sysext. Button is
+                // visible only when LLM is configured. Result lands in
+                // `appState.triageRecommendations[alert.id]`.
+                if let appState, appState.llmStatus.isConfigured {
+                    TriageRecommendationSection(alert: alert, appState: appState)
+                }
+
                 // What to do — actionable guidance based on alert context
                 GroupBox(String(localized: "alertDetail.whatToDo", defaultValue: "What To Do")) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1003,6 +1012,103 @@ struct DetailRow: View {
             Text(value)
                 .font(.system(.body, design: .monospaced))
                 .textSelection(.enabled)
+        }
+    }
+}
+
+// MARK: - Triage Recommendation Section
+//
+// User-side LLM triage: ask the configured backend whether this alert
+// looks like a real issue, a benign one to suppress, or a borderline
+// case to keep watching. Renders as a GroupBox inside AlertDetailView.
+// Lives in `AlertDashboard.swift` next to the rest of the detail-view
+// helpers rather than in its own file because it has zero callers
+// elsewhere — keep it inline for grep-ability.
+
+struct TriageRecommendationSection: View {
+    let alert: AlertViewModel
+    @ObservedObject var appState: AppState
+    @State private var inFlight: Bool = false
+
+    var body: some View {
+        GroupBox("AI Triage Recommendation") {
+            VStack(alignment: .leading, spacing: 8) {
+                if let entry = appState.triageRecommendations[alert.id] {
+                    if let recommendation = entry {
+                        renderResult(recommendation)
+                    } else {
+                        // Sentinel "thinking" — request was queued but
+                        // the LLM hasn't returned yet.
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Waiting for the configured LLM…")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } else {
+                    Text("Ask the configured AI backend (\(appState.llmStatus.provider)) to suggest a disposition for this alert. Advisory only — never auto-applied.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Button {
+                        inFlight = true
+                        Task {
+                            await appState.triageAlert(alert)
+                            inFlight = false
+                        }
+                    } label: {
+                        Label(
+                            inFlight ? "Asking…" : "Get Recommendation",
+                            systemImage: "wand.and.stars"
+                        )
+                    }
+                    .controlSize(.regular)
+                    .disabled(inFlight)
+                }
+            }
+            .padding(4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func renderResult(_ rec: TriageRecommendation) -> some View {
+        let (label, color, icon) = Self.dispositionStyle(rec.disposition)
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(.callout)
+                .fontWeight(.semibold)
+                .foregroundColor(color)
+            Spacer()
+            Text("\(rec.provider) · \(String(format: "%.1fs", rec.latencySeconds))\(rec.usedCache ? " · cached" : "")")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        if !rec.rationale.isEmpty {
+            Text(rec.rationale)
+                .font(.caption)
+                .foregroundColor(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        Button("Re-run triage") {
+            // Drop the cached entry so the button re-appears.
+            appState.triageRecommendations.removeValue(forKey: alert.id)
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+    }
+
+    private static func dispositionStyle(
+        _ disposition: TriageDisposition
+    ) -> (String, Color, String) {
+        switch disposition {
+        case .escalate:    return ("Escalate", .red, "exclamationmark.triangle.fill")
+        case .keep:        return ("Keep watching", .orange, "eye.fill")
+        case .suppress:    return ("Suppress", .green, "eye.slash.fill")
+        case .inconclusive: return ("Inconclusive", .secondary, "questionmark.circle.fill")
         }
     }
 }

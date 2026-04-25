@@ -282,9 +282,12 @@ public actor SequenceEngine {
 
     /// LRU cache of compiled `NSRegularExpression` instances keyed by pattern.
     /// On cache hit the entry is promoted; on eviction the least-recently-used
-    /// entry is removed. Matches RuleEngine's LRU cache strategy.
+    /// entry is removed. Matches RuleEngine's LRU cache strategy: a sequence-
+    /// number sidecar dict drives O(1) hit promotion and O(n) overflow-only
+    /// eviction (vs. the previous O(n) lastIndex+remove+append on every hit).
     private var regexCache: [String: NSRegularExpression] = [:]
-    private var regexAccessOrder: [String] = []
+    private var regexAccessSeq: [String: UInt64] = [:]
+    private var regexAccessCounter: UInt64 = 0
     private static let maxRegexCacheSize = 2048
 
     /// Reference to a partial match by rule ID and creation time, used for
@@ -330,23 +333,24 @@ public actor SequenceEngine {
     /// LRU cache to avoid recompilation. Returns `nil` if the pattern is invalid.
     private func cachedRegex(for pattern: String) -> NSRegularExpression? {
         if let cached = regexCache[pattern] {
-            // Promote to most-recently-used
-            if let idx = regexAccessOrder.lastIndex(of: pattern) {
-                regexAccessOrder.remove(at: idx)
-            }
-            regexAccessOrder.append(pattern)
+            regexAccessCounter += 1
+            regexAccessSeq[pattern] = regexAccessCounter
             return cached
         }
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return nil
         }
-        // Evict least-recently-used when cache is full
-        if regexCache.count >= Self.maxRegexCacheSize, let lru = regexAccessOrder.first {
-            regexCache.removeValue(forKey: lru)
-            regexAccessOrder.removeFirst()
+        // Evict least-recently-used when cache is full. O(n) min scan only
+        // on overflow, not per hit.
+        if regexCache.count >= Self.maxRegexCacheSize {
+            if let lru = regexAccessSeq.min(by: { $0.value < $1.value })?.key {
+                regexCache.removeValue(forKey: lru)
+                regexAccessSeq.removeValue(forKey: lru)
+            }
         }
+        regexAccessCounter += 1
         regexCache[pattern] = regex
-        regexAccessOrder.append(pattern)
+        regexAccessSeq[pattern] = regexAccessCounter
         return regex
     }
 

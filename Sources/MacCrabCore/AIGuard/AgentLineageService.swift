@@ -28,11 +28,11 @@ import os.log
 
 /// A single event in an agent-session timeline. Every event carries a
 /// timestamp; the event payload varies by kind.
-public struct AgentEvent: Sendable, Hashable {
+public struct AgentEvent: Sendable, Hashable, Codable {
     public let timestamp: Date
     public let kind: Kind
 
-    public enum Kind: Sendable, Hashable {
+    public enum Kind: Sendable, Hashable, Codable {
         /// The agent made an outbound call to a cloud LLM provider.
         /// `endpoint` is the scheme-less URL path, `bytesUp` is the
         /// request payload size, `bytesDown` the response size.
@@ -62,20 +62,28 @@ public struct AgentEvent: Sendable, Hashable {
 
 // MARK: - AgentSessionSnapshot
 
-public struct AgentSessionSnapshot: Sendable, Hashable {
+public struct AgentSessionSnapshot: Sendable, Hashable, Codable {
     public let aiPid: Int32
     public let toolType: AIToolType
     public let projectDir: String?
     public let startTime: Date
     public let events: [AgentEvent]
+    /// Wall-clock of the most recent event in this snapshot. Used by
+    /// the dashboard to mark "stale" sessions and sort the timeline
+    /// view by recency without walking the events array.
+    public let lastActivity: Date
 
     public init(aiPid: Int32, toolType: AIToolType, projectDir: String?,
-                startTime: Date, events: [AgentEvent]) {
+                startTime: Date, events: [AgentEvent],
+                lastActivity: Date? = nil) {
         self.aiPid = aiPid
         self.toolType = toolType
         self.projectDir = projectDir
         self.startTime = startTime
         self.events = events
+        self.lastActivity = lastActivity
+            ?? events.last?.timestamp
+            ?? startTime
     }
 
     /// Number of events in the timeline.
@@ -182,6 +190,17 @@ public actor AgentLineageService {
 
     private var sessions: [Int32: SessionRecord] = [:]
 
+    /// In-flight guard for `writeSnapshot`. The heartbeat timer fires
+    /// every 30 s and dispatches a `Task` to encode + write. Without
+    /// this guard a slow disk (full /Library, contention with VACUUM,
+    /// high IO load) would queue successive Tasks indefinitely — each
+    /// holding a capture of the actor and the full encoded payload —
+    /// until the actor mailbox grew unbounded. With the guard we drop
+    /// snapshots while a previous write is still in flight; the
+    /// dashboard sees the stale-by-30s threshold but never a memory
+    /// blow-up.
+    private var snapshotWriteInFlight: Bool = false
+
     public init(maxEventsPerSession: Int = defaultMaxEventsPerSession,
                 maxSessions: Int = defaultMaxSessions) {
         self.maxEventsPerSession = maxEventsPerSession
@@ -251,9 +270,83 @@ public actor AgentLineageService {
                 AgentSessionSnapshot(
                     aiPid: record.aiPid, toolType: record.toolType,
                     projectDir: record.projectDir, startTime: record.startTime,
-                    events: record.events.snapshotOrdered()
+                    events: record.events.snapshotOrdered(),
+                    lastActivity: record.lastActivity
                 )
             }
+    }
+
+    // MARK: - Cross-process snapshot (sysext → app)
+
+    /// On-disk snapshot wrapper. The dashboard's `AIActivityView`
+    /// reads this file from `<supportDir>/agent_lineage.json` to render
+    /// the chronological timeline. Daemon writes through
+    /// `writeSnapshot(to:)`; app reads through
+    /// `AgentLineageService.readSnapshot(at:)`.
+    public struct LineageSnapshot: Sendable, Codable {
+        public let writtenAt: Date
+        public let sessions: [AgentSessionSnapshot]
+        public init(writtenAt: Date, sessions: [AgentSessionSnapshot]) {
+            self.writtenAt = writtenAt
+            self.sessions = sessions
+        }
+    }
+
+    /// Serialize the live in-memory state to JSON at `path`. Atomic
+    /// via temp+rename — the dashboard reader never observes a partial
+    /// write. World-readable so the user-side dashboard can pick it up
+    /// across the privilege boundary.
+    ///
+    /// Drops the write if a previous one is still in flight (slow
+    /// disk, contention with VACUUM). At the default caps the bound on
+    /// in-memory state is `32 sessions × 10_000 events × ~120 B` ≈ 38 MB
+    /// — real workloads stay under 1 MB but the guard matters because
+    /// the heartbeat fires every 30 s and we can't afford to queue
+    /// snapshots if a single write stalls.
+    public func writeSnapshot(to path: String) {
+        guard !snapshotWriteInFlight else {
+            logger.info("Skipping lineage snapshot — previous write still in flight")
+            return
+        }
+        snapshotWriteInFlight = true
+        defer { snapshotWriteInFlight = false }
+
+        let snapshot = LineageSnapshot(writtenAt: Date(), sessions: allSessions())
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+
+        // Match the heartbeat-write pattern in DaemonTimers: try a
+        // direct rename first (avoids the brief "destination missing"
+        // window between removeItem and moveItem). Fall back to
+        // remove+rename only if the direct path failed because the
+        // destination already exists. `Data.write(_:options:.atomic)`
+        // already publishes the tmp file atomically, so this is a
+        // 2-stage rather than 3-stage atomic.
+        let tmpPath = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
+            do {
+                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+            } catch {
+                try? FileManager.default.removeItem(atPath: path)
+                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+            }
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: path
+            )
+        } catch {
+            logger.warning("Failed to write agent lineage snapshot: \(error.localizedDescription, privacy: .public)")
+            // Best-effort cleanup of the orphaned tmp file so we don't
+            // leak partial state across daemon restarts.
+            try? FileManager.default.removeItem(atPath: tmpPath)
+        }
+    }
+
+    /// Read a daemon-written snapshot. Returns nil on missing or
+    /// malformed file — callers fall back to "no sessions" UI state.
+    public static func readSnapshot(at path: String) -> LineageSnapshot? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? JSONDecoder().decode(LineageSnapshot.self, from: data)
     }
 
     /// Events from a given session that intersect a time window. The

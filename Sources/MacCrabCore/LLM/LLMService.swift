@@ -40,6 +40,46 @@ public actor LLMService {
         self.shouldSanitize = !isLocalProvider && config.sanitizeForCloud
     }
 
+    /// Build an `LLMService` from an `LLMConfig`, picking the right
+    /// backend per `config.provider`. Returns nil when the config is
+    /// disabled, when the chosen provider needs an API key that is
+    /// empty, or when the backend reports itself unavailable.
+    ///
+    /// Used by both the daemon (DaemonSetup) and the app (AppState) so
+    /// the construction path stays identical on both sides of the
+    /// privilege boundary. The dashboard side is the v1.6.10 home for
+    /// the LLM-orchestration trio (TriageService, LLMConsensusService,
+    /// AgenticInvestigator) — making outbound HTTPS at root privilege
+    /// is unnecessary trust surface, so those callers use the user-side
+    /// service instead.
+    public static func makeFromConfig(_ config: LLMConfig) async -> LLMService? {
+        guard config.enabled else { return nil }
+        let backend: any LLMBackend
+        switch config.provider {
+        case .ollama:
+            backend = OllamaBackend(
+                baseURL: config.ollamaURL,
+                model: config.ollamaModel,
+                apiKey: config.ollamaAPIKey
+            )
+        case .claude:
+            guard let key = config.claudeAPIKey, !key.isEmpty else { return nil }
+            backend = ClaudeBackend(apiKey: key, model: config.claudeModel)
+        case .openai:
+            guard let key = config.openaiAPIKey, !key.isEmpty else { return nil }
+            backend = OpenAIBackend(baseURL: config.openaiURL, apiKey: key, model: config.openaiModel)
+        case .mistral:
+            guard let key = config.mistralAPIKey, !key.isEmpty else { return nil }
+            backend = MistralBackend(apiKey: key, model: config.mistralModel)
+        case .gemini:
+            guard let key = config.geminiAPIKey, !key.isEmpty else { return nil }
+            backend = GeminiBackend(apiKey: key, model: config.geminiModel)
+        }
+        let service = LLMService(backend: backend, config: config)
+        guard await service.isAvailable() else { return nil }
+        return service
+    }
+
     /// Check if the LLM backend is available.
     public func isAvailable() async -> Bool {
         await backend.isAvailable()

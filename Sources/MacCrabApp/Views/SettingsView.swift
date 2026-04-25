@@ -883,6 +883,11 @@ struct SettingsView: View {
         // Update AppState so UI reflects immediately
         appState.llmStatus.isConfigured = llmEnabled
         appState.llmStatus.provider = llmProvider
+
+        // Drop the user-side LLM stack so the next triage call rebuilds
+        // from this freshly-written config rather than waiting for the
+        // 30 s re-check window.
+        appState.invalidateLLMConfigCache()
     }
 
     /// v1.6.14: write `maxDatabaseSizeMB` + `retentionDays` to

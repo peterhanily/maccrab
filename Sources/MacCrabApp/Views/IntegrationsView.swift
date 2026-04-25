@@ -161,11 +161,23 @@ struct IntegrationsView: View {
         .task { await scanTools() }
     }
 
+    /// Prefer the daemon-written snapshot so the dashboard sees
+    /// `isRunning` checks done at root privilege (the user-side actor
+    /// can't always see launchds the sysext can). Falls back to a local
+    /// scan if the snapshot file is missing — covers the dev-without-
+    /// daemon case and a brand-new install where the first hourly tick
+    /// hasn't fired yet.
     private func scanTools() async {
         isScanning = true
+        defer { isScanning = false }
+
+        let snapshotPath = appState.integrationsSnapshotPath()
+        if let snapshot = SecurityToolIntegrations.readSnapshot(at: snapshotPath) {
+            installedTools = snapshot.tools
+            return
+        }
         let integrations = SecurityToolIntegrations()
         installedTools = await integrations.detectInstalledTools()
-        isScanning = false
     }
 
     private func exportLSRules() {

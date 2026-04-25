@@ -14,7 +14,7 @@ public actor SecurityToolIntegrations {
 
     // MARK: - Tool Detection
 
-    public struct InstalledTool: Sendable {
+    public struct InstalledTool: Sendable, Codable, Hashable {
         public let name: String
         public let path: String
         public let version: String?
@@ -30,6 +30,59 @@ public actor SecurityToolIntegrations {
             self.logPath = logPath
             self.capabilities = capabilities
         }
+    }
+
+    /// On-disk snapshot of `detectInstalledTools()` output. Written by
+    /// the daemon (DaemonTimers) and read by the app (AppState) so the
+    /// dashboard sees the daemon's enriched view (`isRunning` checks
+    /// run from root and pick up launchds the user can't query) instead
+    /// of repeating the scan from a less-privileged context.
+    public struct Snapshot: Sendable, Codable {
+        public let writtenAt: Date
+        public let tools: [InstalledTool]
+
+        public init(writtenAt: Date, tools: [InstalledTool]) {
+            self.writtenAt = writtenAt
+            self.tools = tools
+        }
+    }
+
+    /// Write the current detection results to disk for cross-process
+    /// consumption. Atomic via tmp-write + direct rename so a
+    /// concurrent reader never observes a partial or missing file
+    /// during the swap. Falls back to remove+rename only when the
+    /// destination exists and direct rename refused (Foundation's
+    /// `moveItem` is not atomic-overwrite by default).
+    public func writeSnapshot(to path: String) {
+        let tools = detectInstalledTools()
+        let snapshot = Snapshot(writtenAt: Date(), tools: tools)
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        let tmpPath = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
+            do {
+                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+            } catch {
+                try? FileManager.default.removeItem(atPath: path)
+                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+            }
+            // World-readable so the user-side dashboard can pick it up.
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: path
+            )
+        } catch {
+            logger.warning("Failed to write integrations snapshot: \(error.localizedDescription, privacy: .public)")
+            try? FileManager.default.removeItem(atPath: tmpPath)
+        }
+    }
+
+    /// Read a snapshot the daemon wrote. Returns nil when the file is
+    /// missing, unreadable, or malformed — callers fall back to an
+    /// in-process scan in that case.
+    public static func readSnapshot(at path: String) -> Snapshot? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? JSONDecoder().decode(Snapshot.self, from: data)
     }
 
     public init() {}

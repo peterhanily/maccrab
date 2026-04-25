@@ -121,6 +121,22 @@ public actor ThreatIntelFeed {
         (maliciousHashes.count, maliciousIPs.count, maliciousDomains.count, maliciousURLs.count, lastUpdate)
     }
 
+    /// Read the on-disk cache file and return its IOC counts without
+    /// instantiating a full `ThreatIntelFeed` actor. Lets the user-side
+    /// dashboard surface up-to-date counts produced by the daemon's
+    /// background feed updater. Returns nil if the cache file is missing
+    /// or unreadable.
+    public static func cachedStats(
+        at cacheDir: String
+    ) -> (hashes: Int, ips: Int, domains: Int, urls: Int, lastUpdate: Date?)? {
+        let path = cacheDir + "/feed_cache.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let cache = try? JSONDecoder().decode(CacheData.self, from: data) else {
+            return nil
+        }
+        return (cache.hashes.count, cache.ips.count, cache.domains.count, cache.urls.count, cache.lastUpdate)
+    }
+
     /// Get all known-malicious IPs for bulk blocking.
     public func maliciousIPSet() -> Set<String> {
         maliciousIPs

@@ -185,12 +185,30 @@ final class DaemonState {
     // so EventLoop, dashboard pollers, and the MCP server can reach
     // them without touching the designated initialiser.
 
-    var alertClusterService: AlertClusterService = AlertClusterService()
-    var mcpBaselineService: MCPBaselineService = MCPBaselineService()
+    // Sysext-side AI Suite services. Only `AgentLineageService` is
+    // genuinely sysext-bound — it weaves live ES events into per-AI-
+    // tool session timelines and is consumed by `EventLoop`.
+    //
+    // The four orphans that previously lived here were removed in
+    // v1.6.15 after the audit found them declared but unconsumed:
+    //
+    //   `triageService`, `llmConsensusService`, `agenticInvestigator`
+    //     → moved to `AppState`. Outbound HTTPS with vendor API keys
+    //       does not belong at ES-entitlement root privilege when the
+    //       dashboard already owns the LLM config and is the natural
+    //       consumer of triage results.
+    //
+    //   `alertClusterService`
+    //     → ClusterSheet instantiates its own copy. Fingerprint state
+    //       is per-render, not durable; nothing benefits from a single
+    //       sysext-side instance.
+    //
+    //   `mcpBaselineService`
+    //     → service is implemented but the producer half (per-event
+    //       MCP-server-name attribution from process ancestry) is not
+    //       yet built. Reintroduce when the producer lands; today the
+    //       observation API has no caller.
     var agentLineageService: AgentLineageService = AgentLineageService()
-    var triageService: TriageService?
-    var llmConsensusService: LLMConsensusService?
-    var agenticInvestigator: AgenticInvestigator?
 
     init(
         isRoot: Bool,

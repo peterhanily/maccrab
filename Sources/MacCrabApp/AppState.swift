@@ -198,6 +198,176 @@ final class AppState: ObservableObject {
         )
     }
 
+    /// Path to the daemon-written security-tool integrations snapshot.
+    /// `IntegrationsView` reads this instead of re-running its own
+    /// scan, so the dashboard picks up the daemon's enriched results
+    /// (`isRunning` queries done at root privilege catch launchds the
+    /// user-side actor can't reliably enumerate).
+    func integrationsSnapshotPath() -> String {
+        dataDir + "/integrations_snapshot.json"
+    }
+
+    /// mtime of the lineage snapshot the last time we successfully
+    /// decoded it. Used by `refreshAgentLineage` to skip the JSON
+    /// decode when the daemon hasn't rewritten the file since last
+    /// poll. Dashboard polls every 10 s; daemon writes every 30 s, so
+    /// 2 of every 3 polls would otherwise re-decode an unchanged file.
+    /// Worst-case payload is ~38 MB at theoretical caps and we don't
+    /// want to burn UI thread time decoding it twice for nothing.
+    private var lastLineageMtime: Date?
+
+    /// Refresh the AI agent-lineage timeline from the daemon-written
+    /// snapshot at `<dataDir>/agent_lineage.json`. The daemon refreshes
+    /// every 30 s on the heartbeat tick. We `stat()` first and skip
+    /// the decode entirely when the mtime hasn't advanced — cheap
+    /// path for the common case.
+    func refreshAgentLineage() {
+        let path = dataDir + "/agent_lineage.json"
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let mtime, let last = lastLineageMtime, mtime <= last {
+            return
+        }
+        guard let snapshot = AgentLineageService.readSnapshot(at: path) else {
+            // Silently keep the previous list — flickering to "no
+            // sessions" between polls is worse than slightly-stale data.
+            return
+        }
+        aiSessions = snapshot.sessions
+        aiSessionsLastRefresh = snapshot.writtenAt
+        lastLineageMtime = mtime
+    }
+
+    /// Refresh threat-intelligence IOC counts from the daemon-written
+    /// cache file at `<dataDir>/threat_intel/feed_cache.json`. Surfaces
+    /// the counts (Malicious Hashes/IPs/Domains/URLs + last update) in
+    /// the ThreatIntelView. Read-only — the daemon's `ThreatIntelFeed`
+    /// is the producer; we just decode the cache it writes.
+    func refreshThreatIntelStats() {
+        let cacheDir = dataDir + "/threat_intel"
+        guard let stats = ThreatIntelFeed.cachedStats(at: cacheDir) else {
+            // Daemon not running, file not yet written, or cache empty —
+            // leave the previous values so the UI doesn't flicker to
+            // zero between polls.
+            return
+        }
+        threatIntelStats = ThreatIntelStats(
+            hashes: stats.hashes,
+            ips: stats.ips,
+            domains: stats.domains,
+            urls: stats.urls,
+            lastUpdate: stats.lastUpdate
+        )
+    }
+
+    /// Lazily construct (or rebuild on config drift) the user-side LLM
+    /// stack: `LLMService` + `TriageService`. The config lives in
+    /// `~/Library/Application Support/MacCrab/llm_config.json` and is
+    /// owned by `SettingsView.syncLLMConfig`. We re-check at most once
+    /// per `llmConfigCheckInterval` to avoid re-decoding the file on
+    /// every triage call.
+    ///
+    /// Returns nil when LLM is disabled, when the chosen provider has
+    /// no API key, or when the backend reports unavailable. Callers
+    /// should surface "LLM not configured" UI when nil.
+    private func ensureLLMService() async -> LLMService? {
+        if let svc = llmService,
+           Date().timeIntervalSince(lastLLMConfigCheckedAt) < llmConfigCheckInterval {
+            return svc
+        }
+        lastLLMConfigCheckedAt = Date()
+
+        let configPath = NSHomeDirectory() + "/Library/Application Support/MacCrab/llm_config.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            llmService = nil
+            triageService = nil
+            return nil
+        }
+
+        var cfg = LLMConfig()
+        if let v = json["enabled"] as? Bool { cfg.enabled = v }
+        if let v = json["provider"] as? String, let p = LLMProvider(rawValue: v) { cfg.provider = p }
+        if let v = json["ollama_url"] as? String { cfg.ollamaURL = v }
+        if let v = json["ollama_model"] as? String { cfg.ollamaModel = v }
+        if let v = json["ollama_api_key"] as? String { cfg.ollamaAPIKey = v }
+        if let v = json["claude_api_key"] as? String { cfg.claudeAPIKey = v }
+        if let v = json["claude_model"] as? String { cfg.claudeModel = v }
+        if let v = json["openai_url"] as? String { cfg.openaiURL = v }
+        if let v = json["openai_api_key"] as? String { cfg.openaiAPIKey = v }
+        if let v = json["openai_model"] as? String { cfg.openaiModel = v }
+        if let v = json["mistral_api_key"] as? String { cfg.mistralAPIKey = v }
+        if let v = json["mistral_model"] as? String { cfg.mistralModel = v }
+        if let v = json["gemini_api_key"] as? String { cfg.geminiAPIKey = v }
+        if let v = json["gemini_model"] as? String { cfg.geminiModel = v }
+
+        let svc = await LLMService.makeFromConfig(cfg)
+        llmService = svc
+        triageService = svc.map { TriageService(llm: $0) }
+        return svc
+    }
+
+    /// Ask the user-side TriageService for a disposition recommendation
+    /// on the alert under the cursor in `AlertDetailView`. Result lands
+    /// in `triageRecommendations[alertId]` so the view can re-render
+    /// with the verdict + rationale next to the alert.
+    ///
+    /// Marks the entry as `nil` (placeholder) before the LLM call
+    /// returns so the UI can show "Triage in progress" without races.
+    func triageAlert(_ alert: AlertViewModel) async {
+        // Mark "thinking"
+        triageRecommendations[alert.id] = .some(nil)
+
+        guard await ensureLLMService() != nil, let triage = triageService else {
+            triageRecommendations[alert.id] = .none
+            return
+        }
+
+        // Hydrate a minimal `Alert` from the view model — we only need
+        // the fields TriageService.buildPrompt reads. The app-side
+        // `Severity` mirror and the core enum share rawValue strings,
+        // so convert via that. Default to `.medium` if a future
+        // value lands in one but not the other.
+        let coreSeverity = MacCrabCore.Severity(rawValue: alert.severity.rawValue) ?? .medium
+        let coreAlert = Alert(
+            id: alert.id,
+            timestamp: alert.timestamp,
+            ruleId: alert.ruleId,
+            ruleTitle: alert.ruleTitle,
+            severity: coreSeverity,
+            eventId: alert.eventId,
+            processPath: alert.processPath.isEmpty ? nil : alert.processPath,
+            processName: alert.processName.isEmpty ? nil : alert.processName,
+            description: alert.description.isEmpty ? nil : alert.description,
+            mitreTactics: nil,
+            mitreTechniques: alert.mitreTechniques.isEmpty ? nil : alert.mitreTechniques,
+            suppressed: alert.suppressed
+        )
+
+        // Cluster size approximation: count alerts in `dashboardAlerts`
+        // that share rule + process. Cheap O(n) over the visible set.
+        let similarCount = dashboardAlerts.filter {
+            $0.ruleId == alert.ruleId && $0.processName == alert.processName
+        }.count
+
+        let recommendation = await triage.recommend(
+            for: coreAlert,
+            similarCount: similarCount,
+            dailyTotal: dashboardAlerts.count
+        )
+        triageRecommendations[alert.id] = .some(recommendation)
+    }
+
+    /// Drop any cached LLM stack so the next triage call rebuilds from
+    /// the latest `llm_config.json`. Called by SettingsView whenever
+    /// the user changes provider, model, or API key — guarantees the
+    /// next triage uses the new config without waiting for the 30 s
+    /// re-check window.
+    func invalidateLLMConfigCache() {
+        llmService = nil
+        triageService = nil
+        lastLLMConfigCheckedAt = .distantPast
+    }
+
     /// Full Disk Access state.
     ///
     /// macOS treats `com.maccrab.app` (this process) and `com.maccrab.agent`
@@ -259,6 +429,34 @@ final class AppState: ObservableObject {
 
     /// AI analysis alerts (investigation summaries + defense recommendations)
     @Published var aiAnalysisAlerts: [AlertViewModel] = []
+
+    /// Per-AI-tool session timelines, populated from the daemon-written
+    /// `agent_lineage.json` snapshot. Most-recently-active session first.
+    /// Empty until either the daemon is running and has detected an AI
+    /// tool, or a snapshot from a previous run is present on disk.
+    @Published var aiSessions: [AgentSessionSnapshot] = []
+    /// When the lineage snapshot was last refreshed from disk. Used by
+    /// the timeline view to render a "Updated <relative time>" caption.
+    @Published var aiSessionsLastRefresh: Date?
+
+    // MARK: - LLM-orchestration services (v1.6.10 "move out of sysext")
+    //
+    // Three services that previously lived as orphan vars in DaemonState
+    // (declared, never wired) — outbound HTTPS with vendor API keys does
+    // not belong at ES-entitlement root privilege. Now hosted on the
+    // user-side AppState alongside the LLM config that the dashboard
+    // already owns. Constructed lazily from `llm_config.json` on first
+    // use; reset whenever Settings rewrites the config.
+
+    private var llmService: LLMService?
+    private var triageService: TriageService?
+    private var lastLLMConfigCheckedAt: Date = .distantPast
+    private let llmConfigCheckInterval: TimeInterval = 30  // seconds
+
+    /// In-flight TriageRecommendation per alert, surfaced inline in
+    /// `AlertDetailView`. Keyed by alert ID. `nil` value = "still
+    /// thinking" placeholder; entry absent = "not yet requested".
+    @Published var triageRecommendations: [String: TriageRecommendation?] = [:]
 
     @Published var selectedTab: Tab = .overview
 
@@ -517,6 +715,8 @@ final class AppState: ObservableObject {
         refreshStorageHealth()
         refreshHeartbeat()
         refreshRuleTamper()
+        refreshThreatIntelStats()
+        refreshAgentLineage()
         maybeKickWatchdog()
 
         // Rules rarely change — only load once

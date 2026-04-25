@@ -1,8 +1,10 @@
 // LLMCache.swift
 // MacCrabCore
 //
-// In-memory LRU cache for LLM responses.
-// Uses a dictionary + doubly-linked list for O(1) get/set/evict.
+// In-memory LRU cache for LLM responses. Eviction uses a partial-min
+// sweep over the monotonic accessSeq counter — O(n) worst case for the
+// rare "delete N oldest from M total" path, with M small (default 100).
+// Avoids the previous O(n log n) full-dict sort on every overflow.
 
 import Foundation
 
@@ -55,11 +57,27 @@ public actor LLMCache {
         )
 
         // Evict least-recently-accessed entries if over capacity.
-        if entries.count > maxEntries {
-            let sorted = entries.sorted { $0.value.lastAccessedSeq < $1.value.lastAccessedSeq }
-            for (k, _) in sorted.prefix(entries.count - maxEntries) {
-                entries.removeValue(forKey: k)
-            }
+        // For the common case (overflow by 1 after a single set), we
+        // do a single O(n) min scan — cheaper than O(n log n) sort.
+        // For the rare bulk-overflow case (n > maxEntries by k > 1),
+        // we repeat the min scan k times: O(n × k) but k is typically
+        // 1 and bounded by 1 unless someone inserts in a loop without
+        // letting the cache drain.
+        let overflow = entries.count - maxEntries
+        if overflow > 0 {
+            evictOldest(count: overflow)
+        }
+    }
+
+    /// Remove the `count` entries with the smallest `lastAccessedSeq`.
+    /// O(n × count); for the typical count=1 path this is a single
+    /// O(n) scan.
+    private func evictOldest(count: Int) {
+        for _ in 0..<count {
+            guard let oldestKey = entries.min(
+                by: { $0.value.lastAccessedSeq < $1.value.lastAccessedSeq }
+            )?.key else { return }
+            entries.removeValue(forKey: oldestKey)
         }
     }
 
