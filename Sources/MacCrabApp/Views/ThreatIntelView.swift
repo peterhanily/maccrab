@@ -215,47 +215,7 @@ struct ThreatIntelView: View {
     // MARK: - Browse IOCs
 
     private var browseSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(String(localized: "threatintel.queryNote", defaultValue: "Loaded IOC data is stored in the detection engine's memory and threat intel cache. Use maccrabctl to query specific IOCs:"))
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            GroupBox("Quick Stats") {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(String(localized: "threatintel.hashesLabel", defaultValue: "SHA-256 Hashes:")).font(.caption).frame(width: 120, alignment: .leading)
-                        Text("\(appState.threatIntelStats.hashes)").font(.system(.caption, design: .monospaced))
-                        Spacer()
-                    }
-                    HStack {
-                        Text(String(localized: "threatintel.ipsLabel", defaultValue: "IP Addresses:")).font(.caption).frame(width: 120, alignment: .leading)
-                        Text("\(appState.threatIntelStats.ips)").font(.system(.caption, design: .monospaced))
-                        Spacer()
-                    }
-                    HStack {
-                        Text(String(localized: "threatintel.domainsLabel", defaultValue: "Domains:")).font(.caption).frame(width: 120, alignment: .leading)
-                        Text("\(appState.threatIntelStats.domains)").font(.system(.caption, design: .monospaced))
-                        Spacer()
-                    }
-                    HStack {
-                        Text(String(localized: "threatintel.urlsLabel", defaultValue: "URLs:")).font(.caption).frame(width: 120, alignment: .leading)
-                        Text("\(appState.threatIntelStats.urls)").font(.system(.caption, design: .monospaced))
-                        Spacer()
-                    }
-                }.padding(4)
-            }
-
-            GroupBox("CLI Access") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("maccrabctl hunt \"show threat intel matches\"")
-                        .font(.system(.caption, design: .monospaced))
-                    Text("maccrabctl hunt \"find network connections to malicious IPs\"")
-                        .font(.system(.caption, design: .monospaced))
-                    Text("maccrabctl hunt \"show DNS queries to malicious domains\"")
-                        .font(.system(.caption, design: .monospaced))
-                }.padding(4)
-            }
-        }
+        IOCBrowserSection(appState: appState)
     }
 
     // MARK: - Import
@@ -604,5 +564,234 @@ private struct FormatRow: View {
             Text(format).font(.caption).fontWeight(.medium)
             Text("— \(description)").font(.caption).foregroundColor(.secondary)
         }
+    }
+}
+
+// MARK: - IOC Browser
+//
+// Replaces the v1.6.14 Browse IOCs stub (counts + CLI hints) with a
+// real searchable browser. Users can:
+//   - Pick a category (Hashes / IPs / Domains / URLs)
+//   - Search by substring (case-insensitive)
+//   - See the source attribution for the selected category
+//   - See a "Recent Matches" panel listing alerts the IOC list has
+//     actually caught — answers the analyst question "what's being
+//     considered a match?" that wasn't surfaced before v1.6.16
+
+private struct IOCBrowserSection: View {
+    @ObservedObject var appState: AppState
+    @State private var category: IOCCategory = .hashes
+    @State private var query: String = ""
+
+    enum IOCCategory: String, CaseIterable, Identifiable {
+        case hashes = "Hashes"
+        case ips = "IPs"
+        case domains = "Domains"
+        case urls = "URLs"
+        var id: String { rawValue }
+    }
+
+    private var iocs: [String] {
+        let set = appState.threatIntelIOCs
+        switch category {
+        case .hashes:  return set?.hashes ?? []
+        case .ips:     return set?.ips ?? []
+        case .domains: return set?.domains ?? []
+        case .urls:    return set?.urls ?? []
+        }
+    }
+
+    private var filtered: [String] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return iocs }
+        return iocs.filter { $0.lowercased().contains(q) }
+    }
+
+    /// Renders the first N results to keep the SwiftUI list snappy on
+    /// 100K-hash sets. Search narrows the cap; users can pivot to the
+    /// CLI for deeper analysis.
+    private static let renderCap = 200
+
+    private var sourceCaption: String {
+        switch category {
+        case .hashes:  return "From abuse.ch MalwareBazaar (SHA-256 of known-malicious binaries) + custom imports."
+        case .ips:     return "From abuse.ch Feodo Tracker (active C2 infrastructure) + custom imports."
+        case .domains: return "From abuse.ch URLhaus (parent-domain matched) + custom imports."
+        case .urls:    return "From abuse.ch URLhaus (full URL substring matched, capped at 50 000) + custom imports."
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Empty-state callout when the daemon hasn't written a
+            // cache yet (fresh install, daemon paused, or feed update
+            // failed — all distinguishable from "loaded zero IOCs"
+            // because `threatIntelIOCs` stays nil rather than empty).
+            if appState.threatIntelIOCs == nil {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("No threat intel cache yet", systemImage: "clock.arrow.circlepath")
+                            .font(.subheadline)
+                        Text("The daemon refreshes feeds every 4 hours. Wait for the first sync, or trigger a manual update via the Feeds tab.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            // Category picker + search field
+            HStack {
+                Picker("Category", selection: $category) {
+                    ForEach(IOCCategory.allCases) { cat in
+                        Text(cat.rawValue).tag(cat)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 360)
+                .accessibilityLabel("IOC category")
+
+                Spacer()
+
+                TextField("Search…", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .accessibilityLabel("Search IOCs")
+            }
+
+            // Source attribution + visible-vs-total counter
+            HStack {
+                Text(sourceCaption)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("\(filtered.count.formatted()) of \(iocs.count.formatted())\(filtered.count > Self.renderCap ? " (showing first \(Self.renderCap))" : "")")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            // IOC list — bounded for render perf
+            GroupBox {
+                if filtered.isEmpty {
+                    Text(query.isEmpty ? "No IOCs in this category." : "No IOCs match \"\(query)\".")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filtered.prefix(Self.renderCap), id: \.self) { value in
+                            HStack {
+                                Text(value)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.secondary.opacity(0.04))
+                        }
+                    }
+                    .frame(maxHeight: 280)
+                }
+            }
+
+            // Recent matches — alerts whose ruleId indicates the IOC
+            // list actually fired on a real event. Surfaces what the
+            // analyst is most likely to want to know: not just "what's
+            // in the list" but "what's been caught by it."
+            recentMatchesSection
+        }
+    }
+
+    @ViewBuilder
+    private var recentMatchesSection: some View {
+        let matches = appState.threatIntelMatches
+        GroupBox("Recent Matches") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Events where threat-intel rules fired. Click an alert in the Alerts tab for full triage context.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if matches.isEmpty {
+                    HStack {
+                        Image(systemName: "checkmark.shield")
+                            .foregroundColor(.green.opacity(0.7))
+                            .accessibilityHidden(true)
+                        Text("No threat-intel matches in the current alert window. Either the IOC list isn't catching anything, or you're seeing a clean machine.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    ForEach(matches.prefix(20)) { match in
+                        ThreatIntelMatchRow(alert: match)
+                    }
+                    if matches.count > 20 {
+                        Text("Showing 20 of \(matches.count). Open the Alerts tab and filter by `maccrab.threat-intel` to see the rest.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding(4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct ThreatIntelMatchRow: View {
+    let alert: AlertViewModel
+
+    /// "hash" / "domain" / "ip" classification driven by the
+    /// triggering rule. Used to color the icon column.
+    private var kind: (label: String, icon: String, color: Color) {
+        if alert.ruleId.contains("hash-match") {
+            return ("hash", "number", .red)
+        }
+        if alert.ruleId.contains("threat-intel-match") {
+            return ("domain/ip", "globe.americas.fill", .orange)
+        }
+        return ("ioc", "shield.fill", .secondary)
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: kind.icon)
+                .font(.caption2)
+                .foregroundColor(kind.color)
+                .frame(width: 14)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(alert.ruleTitle)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                    Text(kind.label)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.1))
+                        .clipShape(Capsule())
+                    Spacer()
+                    Text(alert.dateTimeString)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                if !alert.processName.isEmpty {
+                    Text("\(alert.processName) — \(alert.description)")
+                        .font(.caption2)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .padding(.vertical, 3)
     }
 }

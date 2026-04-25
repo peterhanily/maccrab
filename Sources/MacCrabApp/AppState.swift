@@ -237,26 +237,51 @@ final class AppState: ObservableObject {
         lastLineageMtime = mtime
     }
 
-    /// Refresh threat-intelligence IOC counts from the daemon-written
-    /// cache file at `<dataDir>/threat_intel/feed_cache.json`. Surfaces
-    /// the counts (Malicious Hashes/IPs/Domains/URLs + last update) in
-    /// the ThreatIntelView. Read-only — the daemon's `ThreatIntelFeed`
-    /// is the producer; we just decode the cache it writes.
+    /// Refresh threat-intelligence IOC counts AND the full IOC set
+    /// from the daemon-written cache file at
+    /// `<dataDir>/threat_intel/feed_cache.json`. Surfaces both the
+    /// counts (in the metrics row) and the actual lists (in the
+    /// browser sections) of `ThreatIntelView`. Read-only — the
+    /// daemon's `ThreatIntelFeed` is the producer; we just decode
+    /// the cache it writes.
+    ///
+    /// Gated by mtime: the daemon-side feed updater runs on a 4-hour
+    /// cadence so the file rarely changes, and decoding a 100K-hash
+    /// set on every 10 s poll would burn UI thread time for nothing.
     func refreshThreatIntelStats() {
         let cacheDir = dataDir + "/threat_intel"
-        guard let stats = ThreatIntelFeed.cachedStats(at: cacheDir) else {
+        let cachePath = cacheDir + "/feed_cache.json"
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: cachePath)[.modificationDate]) as? Date
+        if let mtime, let last = lastThreatIntelMtime, mtime <= last {
+            return
+        }
+
+        guard let iocs = ThreatIntelFeed.cachedIOCs(at: cacheDir) else {
             // Daemon not running, file not yet written, or cache empty —
             // leave the previous values so the UI doesn't flicker to
             // zero between polls.
             return
         }
+        threatIntelIOCs = iocs
         threatIntelStats = ThreatIntelStats(
-            hashes: stats.hashes,
-            ips: stats.ips,
-            domains: stats.domains,
-            urls: stats.urls,
-            lastUpdate: stats.lastUpdate
+            hashes: iocs.hashes.count,
+            ips: iocs.ips.count,
+            domains: iocs.domains.count,
+            urls: iocs.urls.count,
+            lastUpdate: iocs.lastUpdate
         )
+        lastThreatIntelMtime = mtime
+    }
+
+    /// Alerts whose `ruleId` indicates an IOC match — the dashboard
+    /// renders these in the ThreatIntelView "Recent Matches" section
+    /// so the analyst can see what the IOC list is actually catching.
+    /// Pure derived state; no extra DB query needed.
+    var threatIntelMatches: [AlertViewModel] {
+        dashboardAlerts.filter { alert in
+            alert.ruleId == "maccrab.threat-intel.hash-match"
+                || alert.ruleId == "maccrab.dns.threat-intel-match"
+        }
     }
 
     /// Lazily construct (or rebuild on config drift) the user-side LLM
@@ -412,6 +437,13 @@ final class AppState: ObservableObject {
         var lastUpdate: Date?
     }
     @Published var threatIntelStats = ThreatIntelStats()
+
+    /// Full IOC set the daemon currently holds — surfaces the actual
+    /// hash / IP / domain / URL strings to the dashboard browser
+    /// rather than just the counts. Refreshed on the same path as
+    /// `threatIntelStats` (single decoder call) and gated by mtime.
+    @Published var threatIntelIOCs: ThreatIntelFeed.IOCSet?
+    private var lastThreatIntelMtime: Date?
 
     /// Fleet telemetry connection status
     struct FleetStatus {

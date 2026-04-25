@@ -3,6 +3,30 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.16] — 2026-04-25
+
+Makes the Threat Intelligence panel actually inspectable. v1.6.15
+wired `threatIntelStats` end-to-end, but the counts were the *only*
+thing visible — no way to see what the loaded IOCs actually were or
+what the IOC list had been catching.
+
+### New
+
+- **Browse IOCs tab** — category picker (Hashes / IPs / Domains /
+  URLs), substring search, source attribution per category, capped
+  virtualized list.
+- **Recent Matches panel** — alerts from `maccrab.threat-intel.hash-match`
+  and `maccrab.dns.threat-intel-match` rendered with kind chip,
+  process, matched-value description, timestamp.
+- **`ThreatIntelFeed.cachedIOCs(at:)`** static accessor exposes the
+  full on-disk IOC set for the dashboard.
+- Empty-state differentiates "no cache file yet" from "loaded zero
+  IOCs" — points to Feeds tab for manual refresh.
+
+### Tests
+
+**801 pass** (up from 799). Two new in `ThreatIntelFeedCachedStatsTests`.
+
 ## [1.6.15] — 2026-04-25
 
 A four-bundle audit-driven release. Closes the same "intent-vs-reality"

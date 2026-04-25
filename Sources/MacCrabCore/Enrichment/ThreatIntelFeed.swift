@@ -129,12 +129,44 @@ public actor ThreatIntelFeed {
     public static func cachedStats(
         at cacheDir: String
     ) -> (hashes: Int, ips: Int, domains: Int, urls: Int, lastUpdate: Date?)? {
+        guard let cache = readCache(at: cacheDir) else { return nil }
+        return (cache.hashes.count, cache.ips.count, cache.domains.count, cache.urls.count, cache.lastUpdate)
+    }
+
+    /// Public read-only view of the IOC cache. Exposes the full lists
+    /// so the dashboard can render searchable browsers per category
+    /// (hashes / IPs / domains / URLs). Memory cost at the URLhaus
+    /// 50_000-URL cap + a typical MalwareBazaar 100_000-hash set is
+    /// ≈ 8 MB peak, well within budget for the user-side process.
+    public struct IOCSet: Sendable {
+        public let hashes: [String]
+        public let ips: [String]
+        public let domains: [String]
+        public let urls: [String]
+        public let lastUpdate: Date?
+    }
+
+    /// Read the full IOC set from the daemon-written cache file.
+    /// Returns nil when the cache is absent. Same access pattern as
+    /// `cachedStats(at:)` — both call the private decoder once.
+    public static func cachedIOCs(at cacheDir: String) -> IOCSet? {
+        guard let cache = readCache(at: cacheDir) else { return nil }
+        return IOCSet(
+            hashes: cache.hashes,
+            ips: cache.ips,
+            domains: cache.domains,
+            urls: cache.urls,
+            lastUpdate: cache.lastUpdate
+        )
+    }
+
+    private static func readCache(at cacheDir: String) -> CacheData? {
         let path = cacheDir + "/feed_cache.json"
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let cache = try? JSONDecoder().decode(CacheData.self, from: data) else {
             return nil
         }
-        return (cache.hashes.count, cache.ips.count, cache.domains.count, cache.urls.count, cache.lastUpdate)
+        return cache
     }
 
     /// Get all known-malicious IPs for bulk blocking.

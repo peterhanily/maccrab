@@ -256,6 +256,38 @@ struct ThreatIntelFeedCachedStatsTests {
         try Data("not-json-at-all".utf8).write(to: URL(fileURLWithPath: dir + "/feed_cache.json"))
         #expect(ThreatIntelFeed.cachedStats(at: dir) == nil)
     }
+
+    @Test("cachedIOCs returns the full IOC set, not just counts")
+    func cachedIOCsReturnsFullSet() throws {
+        let dir = NSTemporaryDirectory() + "maccrab-ti-iocs-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let payload: [String: Any] = [
+            "hashes":  ["aabb", "ccdd"],
+            "ips":     ["1.1.1.1"],
+            "domains": ["evil.example", "phish.test"],
+            "urls":    ["http://evil.example/x"],
+            "lastUpdate": Date().timeIntervalSinceReferenceDate
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try data.write(to: URL(fileURLWithPath: dir + "/feed_cache.json"))
+
+        let iocs = ThreatIntelFeed.cachedIOCs(at: dir)
+        #expect(iocs != nil)
+        #expect(iocs?.hashes == ["aabb", "ccdd"])
+        #expect(iocs?.ips == ["1.1.1.1"])
+        #expect(iocs?.domains.count == 2)
+        #expect(iocs?.urls == ["http://evil.example/x"])
+    }
+
+    @Test("cachedIOCs returns nil when cache file is missing")
+    func cachedIOCsMissingReturnsNil() {
+        let dir = NSTemporaryDirectory() + "maccrab-ti-no-iocs-\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        #expect(ThreatIntelFeed.cachedIOCs(at: dir) == nil)
+    }
 }
 
 // MARK: - LLMService.makeFromConfig Tests
