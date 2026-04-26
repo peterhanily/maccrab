@@ -3,6 +3,100 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.19] — 2026-04-26
+
+A safety + architecture release. The bigger of the two threads.
+
+### Added — safety guards (4 paths the audit found could damage the user's machine)
+
+- `SafePIDValidator` refuses to kill PID ≤ 1, MacCrab itself, the
+  critical-system-process list (kernel_task / launchd / WindowServer /
+  loginwindow / securityd / opendirectoryd / cfprefsd / coreaudiod /
+  bluetoothd / mDNSResponder / ...), or anything running from
+  `/System/`, `/usr/libexec/`, `/sbin/`, `/usr/sbin/`. Wired into
+  `ResponseEngine.killProcess` and `SupplyChainGate.gate`.
+- `SupplyChainGate` now also requires the installer PID to descend from
+  a known package manager (npm / pnpm / yarn / pip / brew / cargo /
+  ...) within 5 hops, AND re-checks the path before the delayed
+  SIGKILL so a recycled PID can't hit a different process.
+- `DNSSinkhole` protected-domain allowlist refuses to sinkhole anything
+  matching `apple.com`, `*.icloud.com`, `ocsp.apple.com`, `github.com`,
+  `googleapis.com`, `microsoft.com`, `aws.amazon.com`, `stripe.com`,
+  `jetbrains.com`, `slack.com`, `digicert.com`, `sectigo.com`,
+  `letsencrypt.org`, `maccrab.com` itself, etc. (75+ patterns) plus
+  IP literals. A poisoned threat-intel feed can no longer brick
+  code-signing or strand the user.
+- `PanicButton.activate` takes `disableBluetoothInPanic: Bool = false`
+  so a wireless-only user with Magic Keyboard/Trackpad isn't stranded
+  mid-panic. Panic is opt-in for BT now. (`PanicButton` itself was
+  removed from `DaemonState` — `activate()` had zero callers.)
+
+### Added — `AlertSink` chokepoint (closes the v1.6.9 NoiseFilter-layering bug class)
+
+- New `AlertSink` actor: every alert reaches `AlertStore` through one
+  point that applies `AlertDeduplicator` first. 39 direct
+  `alertStore.insert` call sites in `EventLoop` / `MonitorTasks` /
+  `DaemonTimers` / `SignalHandlers` migrated to `alertSink.submit`.
+  Two audited exceptions in `DaemonSetup` (self-defense + ES-health)
+  carry inline justification.
+- `AlertDeduplicator.shouldSuppressAndRecord` is a new atomic actor
+  method. It closes a TOCTOU window between the previous
+  `shouldSuppress` + `recordAlert` pair: 50 concurrent submits with
+  the same key now insert exactly one (test pins the contract).
+
+### Added — institutional audit (`scripts/pre-release-audit.sh`)
+
+Three architectural invariants enforced at release time:
+
+- **Pass 1 — orphan audit.** Every Settings `@AppStorage` that affects
+  daemon behavior must declare a sync function. Catches the
+  wire-the-orphans pattern that produced four bugs in seven releases.
+- **Pass 2 — single-sink.** Zero direct `alertStore.insert` outside
+  `AlertSink` plus the two audited `DaemonSetup` exceptions.
+- **Pass 3 — duplicate-source.** Cross-file constants (default
+  support directory, sysext launchd label) must agree.
+
+Wired into `release.sh` as Step 0b, fails the release on regression.
+
+### Added — extended `prerelease-check.sh` manifest equality
+
+Cask version (`Casks/maccrab.rb` ↔ `homebrew/maccrab.rb`), Sparkle
+appcast URL (project.yml ↔ Info.plist), Sparkle EdDSA public key,
+app + sysext `CFBundleIdentifier`, Apple Team ID with cask references.
+Five new drift checks layered on the v1.6.18 short-version catch.
+
+### Added — webhook config wiring
+
+Pre-v1.6.19 the Settings → Slack/Teams/Discord/PagerDuty fields wrote
+to UserDefaults but no daemon code consumed them. Configured webhooks
+silently never fired. Now: SettingsView writes
+`~/Library/Application Support/MacCrab/notifications.json`,
+SIGHUP triggers `NotificationIntegrations.reloadConfig()`, alerts
+fire to the configured services. 500 ms debounce on `onChange` so
+typing the URL doesn't SIGHUP per keystroke.
+
+### Removed — `autoQuarantine` / `autoKill` / `autoBlock` toggles
+
+Same wire-the-orphans pattern: toggles wrote to UserDefaults, no daemon
+code consumed them. Per-rule auto-actions live in the Response Actions
+tab, which IS wired into `ResponseEngine`. 181 dead translation lines
+swept across 14 locale files at the same time.
+
+### Fixed (pre-push review)
+
+- Webhook URL secrets no longer leak via Unified Logging on HTTP 4xx
+  (added `privacy: .private` to `NotificationIntegrations` log lines).
+- `SupplyChainGate`'s 2-second-delayed SIGKILL closure no longer
+  captures the actor's logger (uses a fresh `Logger` inline) so it
+  can't dangle if the actor were deallocated.
+
+### Tests
+
+860 in 177 suites pass (was 807). +53 net: SafePIDValidator (9),
+SupplyChainGate safety (13), DNSSinkhole allowlist (22 — including
+the BLOCKER-fix protected-domain coverage), AlertSink contract (9 —
+including a 50-concurrent-submit TOCTOU pin).
+
 ## [1.6.18] — 2026-04-25
 
 Three-issue follow-up to v1.6.17.
