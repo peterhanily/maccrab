@@ -237,6 +237,11 @@ public actor ResponseEngine {
 
     /// Send SIGTERM first, wait up to 3 seconds, then SIGKILL if still alive.
     private nonisolated func killProcess(pid: Int32) async -> Bool {
+        // Refuse to kill PIDs whose termination would damage the system or
+        // trap the user (PID 1, WindowServer, opendirectoryd, /System/...,
+        // MacCrab itself, etc.). SafePIDValidator logs the rejection reason.
+        guard SafePIDValidator.isSafeToKill(pid: pid) else { return false }
+
         // First try graceful termination
         let termResult = kill(pid, SIGTERM)
         guard termResult == 0 else {

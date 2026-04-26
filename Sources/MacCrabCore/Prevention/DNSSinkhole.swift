@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import os.log
 
 /// Prevents C2 callbacks by sinkholing malicious domains to localhost.
@@ -20,16 +21,28 @@ public actor DNSSinkhole {
     public init() {}
 
     /// Enable the sinkhole with initial domains from threat intel.
+    /// Protected domains (apple.com, github.com, our own appcast, etc.) and
+    /// IP literals are silently dropped — sinkholing them would brick code
+    /// signing, auto-update, or strand the user.
     public func enable(domains: Set<String>) {
-        sinkholdDomains = domains
+        let filtered = Self.filterProtected(domains)
+        if !filtered.rejected.isEmpty {
+            logger.warning("Refused to sinkhole \(filtered.rejected.count) protected entries: \(Self.formatRejected(filtered.rejected), privacy: .public)")
+        }
+        sinkholdDomains = filtered.accepted
         isEnabled = true
         writeHostsFile()
-        logger.info("DNS sinkhole enabled: \(domains.count) domains redirected to 127.0.0.1")
+        logger.info("DNS sinkhole enabled: \(filtered.accepted.count) domains redirected to 127.0.0.1 (\(filtered.rejected.count) protected entries dropped)")
     }
 
     /// Add domains to the sinkhole.
+    /// Protected domains and IP literals are silently dropped; see `enable`.
     public func addDomains(_ domains: Set<String>) {
-        let newDomains = domains.subtracting(sinkholdDomains)
+        let filtered = Self.filterProtected(domains)
+        if !filtered.rejected.isEmpty {
+            logger.warning("Refused to sinkhole \(filtered.rejected.count) protected entries: \(Self.formatRejected(filtered.rejected), privacy: .public)")
+        }
+        let newDomains = filtered.accepted.subtracting(sinkholdDomains)
         guard !newDomains.isEmpty else { return }
         sinkholdDomains.formUnion(newDomains)
         if isEnabled { writeHostsFile() }
@@ -128,5 +141,159 @@ public actor DNSSinkhole {
                 logger.error("Failed to clean sinkhole entries from \(self.hostsPath): \(error.localizedDescription)")
             }
         }
+    }
+
+    // MARK: - Protected-domain allowlist
+    //
+    // Sinkholing certain domains brings the system to a halt in non-obvious
+    // ways: ocsp.apple.com → code signing fails on every launch; gateway.
+    // icloud.com → all iCloud sync stops; *.googleapis.com → Chrome stops
+    // working; maccrab.com → our own auto-update breaks. The list below is
+    // a hard refusal — even if a malicious threat-intel feed claims one of
+    // these is a C2 domain, we drop the entry.
+
+    /// Domains we will never sinkhole. `*.x` matches `x` and any subdomain.
+    public static let protectedDomainPatterns: [String] = [
+        // Apple — system function
+        "apple.com", "*.apple.com",
+        "icloud.com", "*.icloud.com",
+        "mzstatic.com", "*.mzstatic.com",
+        "apple-cloudkit.com", "*.apple-cloudkit.com",
+        "*.apple-mapkit.com",
+        "*.appstore.com",
+        // Critical Apple endpoints by exact name (defense in depth)
+        "ocsp.apple.com", "ocsp2.apple.com",
+        "crl.apple.com", "crl3.apple.com", "crl4.apple.com", "crl5.apple.com",
+        "time.apple.com",
+        "gateway.icloud.com",
+        "push.apple.com", "*.push.apple.com",
+        "gsa.apple.com", "gs.apple.com",
+        "albert.apple.com", "xp.apple.com",
+
+        // Source / dependency hosting — sinkholing GitHub bricks Homebrew
+        // installs and our own repo
+        "github.com", "*.github.com",
+        "githubusercontent.com", "*.githubusercontent.com",
+        "github.io", "*.github.io",
+
+        // Google APIs / Chrome safe browsing / sign-in
+        "google.com", "*.google.com",
+        "googleapis.com", "*.googleapis.com",
+        "gstatic.com", "*.gstatic.com",
+
+        // Cloudflare (DoH, NTP, public DNS infra)
+        "cloudflare.com", "*.cloudflare.com",
+        "cloudflare-dns.com", "*.cloudflare-dns.com",
+
+        // MacCrab itself — never sinkhole our own appcast or update path
+        "maccrab.com", "*.maccrab.com",
+
+        // Microsoft — Office 365 sign-in, Teams, OneDrive, Outlook
+        "microsoft.com", "*.microsoft.com",
+        "office.com", "*.office.com",
+        "office365.com", "*.office365.com",
+        "live.com", "*.live.com",
+        "outlook.com", "*.outlook.com",
+        "microsoftonline.com", "*.microsoftonline.com",
+
+        // AWS — sinkholing breaks any tool fetching from S3 / installing
+        // via curl|bash that pulls from cloudfront
+        "aws.amazon.com", "*.aws.amazon.com",
+        "amazonaws.com", "*.amazonaws.com",
+
+        // Stripe — payment infra; sinkholing breaks tools that charge cards
+        "stripe.com", "*.stripe.com",
+
+        // JetBrains — IDE auth and license server
+        "jetbrains.com", "*.jetbrains.com",
+
+        // Password managers — break credential sync
+        "1password.com", "*.1password.com",
+        "1password.eu", "*.1password.eu",
+        "bitwarden.com", "*.bitwarden.com",
+
+        // Mozilla — Firefox add-on update + telemetry
+        "mozilla.org", "*.mozilla.org",
+        "mozilla.net", "*.mozilla.net",
+
+        // Adobe — Creative Cloud auth + cert validation
+        "adobe.com", "*.adobe.com",
+        "adobe.io", "*.adobe.io",
+
+        // Slack — many users have it as their primary alert sink
+        "slack.com", "*.slack.com",
+
+        // Zoom
+        "zoom.us", "*.zoom.us",
+
+        // Linear — common dev workflow tool
+        "linear.app", "*.linear.app",
+
+        // Public CA OCSP / CRL infrastructure — sinkholing breaks code
+        // signing verification system-wide for non-Apple-issued certs
+        "digicert.com", "*.digicert.com",
+        "sectigo.com", "*.sectigo.com",
+        "letsencrypt.org", "*.letsencrypt.org",
+        "globalsign.com", "*.globalsign.com",
+        "verisign.com", "*.verisign.com",
+
+        // Local / loopback — IP literals are caught separately, but the
+        // hostname forms belong here too
+        "localhost", "*.localhost",
+        // Bonjour / mDNS — sinkholing breaks AirDrop, Continuity, etc.
+        "*.local",
+    ]
+
+    /// Returns (accepted: passes the allowlist, rejected: must not be sinkholed).
+    nonisolated static func filterProtected(_ input: Set<String>) -> (accepted: Set<String>, rejected: Set<String>) {
+        var accepted: Set<String> = []
+        var rejected: Set<String> = []
+        for domain in input {
+            if isProtected(domain) {
+                rejected.insert(domain)
+            } else {
+                accepted.insert(domain)
+            }
+        }
+        return (accepted, rejected)
+    }
+
+    /// True when `domain` either matches a protected pattern, is an IP
+    /// literal, or is otherwise unsuitable for /etc/hosts redirection.
+    nonisolated static func isProtected(_ domain: String) -> Bool {
+        let trimmed = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Empty / whitespace is unsuitable for /etc/hosts.
+        if trimmed.isEmpty { return true }
+        // IP literals don't belong in a /etc/hosts hostname column at all.
+        if isIPLiteral(trimmed) { return true }
+        // Pattern match.
+        for pattern in protectedDomainPatterns {
+            if pattern.hasPrefix("*.") {
+                let suffix = String(pattern.dropFirst(2))
+                if trimmed == suffix || trimmed.hasSuffix("." + suffix) {
+                    return true
+                }
+            } else if trimmed == pattern {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True when the input parses as a numeric IPv4 or IPv6 address.
+    nonisolated static func isIPLiteral(_ s: String) -> Bool {
+        var addr4 = in_addr()
+        if s.withCString({ inet_pton(AF_INET, $0, &addr4) }) == 1 { return true }
+        var addr6 = in6_addr()
+        if s.withCString({ inet_pton(AF_INET6, $0, &addr6) }) == 1 { return true }
+        return false
+    }
+
+    /// Renders a small set of rejected entries for logging. Caps at 10 to
+    /// avoid log spam if an entire feed turns out to be rejected.
+    nonisolated static func formatRejected(_ rejected: Set<String>) -> String {
+        let capped = rejected.sorted().prefix(10)
+        let suffix = rejected.count > 10 ? ", … (\(rejected.count - 10) more)" : ""
+        return capped.joined(separator: ", ") + suffix
     }
 }

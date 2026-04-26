@@ -104,6 +104,57 @@ public actor AlertDeduplicator {
         return false
     }
 
+    /// Atomic "should I suppress this, and if not, record it" combined check.
+    ///
+    /// Use this from any path that wants the historical "shouldSuppress then
+    /// recordAlert" sequence executed under a single actor isolation pass.
+    /// The split form is vulnerable to a TOCTOU race: two concurrent submits
+    /// with the same key can both observe `shouldSuppress == false` between
+    /// each other's recordAlert calls and both pass through. The combined
+    /// form forecloses that window because Swift actors serialize each method
+    /// invocation atomically.
+    ///
+    /// - Returns: `true` if the alert should be suppressed (caller drops it).
+    ///   `false` if the alert is fresh and was just recorded — caller must
+    ///   emit it.
+    public func shouldSuppressAndRecord(ruleId: String, processPath: String) -> Bool {
+        let key = makeKey(ruleId: ruleId, processPath: processPath)
+        let now = Date()
+
+        if let entry = entries[key] {
+            let elapsed = now.timeIntervalSince(entry.lastAlertTime)
+            if elapsed < suppressionWindow {
+                entries[key]?.suppressedCount += 1
+                ruleStats[ruleId, default: (emitted: 0, suppressed: 0)].suppressed += 1
+                return true
+            }
+            // Window expired — fall through and re-record.
+            ruleStats[ruleId, default: (emitted: 0, suppressed: 0)].emitted += 1
+            entries[key] = DeduplicationEntry(
+                lastAlertTime: now,
+                suppressedCount: 0,
+                firstSeen: entry.firstSeen
+            )
+            if entries.count > maxEntries {
+                sweep()
+                evictOldestIfNeeded()
+            }
+            return false
+        }
+
+        ruleStats[ruleId, default: (emitted: 0, suppressed: 0)].emitted += 1
+        entries[key] = DeduplicationEntry(
+            lastAlertTime: now,
+            suppressedCount: 0,
+            firstSeen: now
+        )
+        if entries.count > maxEntries {
+            sweep()
+            evictOldestIfNeeded()
+        }
+        return false
+    }
+
     /// Records that an alert was emitted, creating or resetting the entry for
     /// the given key.
     ///

@@ -17,6 +17,12 @@ final class DaemonState {
     // MARK: - Storage
     let eventStore: EventStore
     let alertStore: AlertStore
+    /// Single chokepoint for all alert insertion. Routes everything through
+    /// AlertDeduplicator before reaching AlertStore, closing the v1.6.9
+    /// NoiseFilter-layering bug class architecturally. All call sites that
+    /// previously called `state.alertStore.insert(...)` directly should now
+    /// call `state.alertSink.submit(...)` instead.
+    let alertSink: AlertSink
 
     // MARK: - Core Engines
     let enricher: EventEnricher
@@ -112,7 +118,11 @@ final class DaemonState {
     let securityScorer: SecurityScorer
     let appPrivacyAuditor: AppPrivacyAuditor
     let vulnScanner: VulnerabilityScanner
-    let panicButton: PanicButton
+    // PanicButton was removed from DaemonState in v1.6.19. The actor was
+    // instantiated and stored but `activate()` had zero callers in
+    // production code — the dashboard never exposed a Panic button surface.
+    // PanicButton.swift remains in MacCrabCore for reintroduction once
+    // the UI surface ships.
     let travelMode: TravelMode
     let securityDigest: SecurityDigest
     let alertExporter: AlertExporter
@@ -289,7 +299,6 @@ final class DaemonState {
         securityScorer: SecurityScorer,
         appPrivacyAuditor: AppPrivacyAuditor,
         vulnScanner: VulnerabilityScanner,
-        panicButton: PanicButton,
         travelMode: TravelMode,
         securityDigest: SecurityDigest,
         alertExporter: AlertExporter,
@@ -316,6 +325,10 @@ final class DaemonState {
         self.effectiveRulesDir = effectiveRulesDir
         self.eventStore = eventStore
         self.alertStore = alertStore
+        // Build AlertSink from the already-stored alertStore + deduplicator so
+        // we don't need a new initializer parameter. Construction is cheap
+        // (the actor is empty); first use is what triggers any work.
+        self.alertSink = AlertSink(alertStore: alertStore, deduplicator: deduplicator)
         self.enricher = enricher
         self.ruleEngine = ruleEngine
         self.sequenceEngine = sequenceEngine
@@ -385,7 +398,6 @@ final class DaemonState {
         self.securityScorer = securityScorer
         self.appPrivacyAuditor = appPrivacyAuditor
         self.vulnScanner = vulnScanner
-        self.panicButton = panicButton
         self.travelMode = travelMode
         self.securityDigest = securityDigest
         self.alertExporter = alertExporter

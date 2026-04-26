@@ -152,12 +152,6 @@
 "settings.launchAtLogin" = "Launch MacCrab at login";
 
 /* ── Settings: Auto-Response ── */
-"settings.autoResponse" = "Auto-Response";
-"settings.autoResponseDesc" = "Automatically respond to critical threats";
-"settings.autoQuarantine" = "Auto-quarantine malicious files";
-"settings.autoKill" = "Auto-kill malicious processes";
-"settings.autoBlock" = "Auto-block C2 destinations";
-"settings.autoResponseNote" = "These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab.";
 
 /* ── Settings: Notifications ── */
 "settings.macosNotifications" = "macOS Notifications";
@@ -403,14 +397,7 @@
 /* ── Settings — accessibility labels and tooltips ── */
 "settings.access.displayLanguage" = "Display language";
 "settings.access.launchAtLogin" = "Launch MacCrab at login";
-"settings.access.autoQuarantine" = "Auto-quarantine malicious files";
-"settings.access.criticalOnlyHint" = "Applies only to critical severity alerts";
-"settings.access.autoKill" = "Auto-kill malicious processes";
-"settings.access.autoBlock" = "Auto-block C2 destinations";
 "settings.access.notifications" = "Show notifications for detection alerts";
-"settings.help.autoQuarantine" = "Automatically move files flagged by critical-severity rules to quarantine";
-"settings.help.autoKill" = "Automatically terminate processes that trigger critical detection rules";
-"settings.help.autoBlock" = "Automatically add PF firewall rules to block command-and-control IPs";
 
 /* ── About ── */
 "about.madeWithLove" = "Made with love and tokens in Ireland";

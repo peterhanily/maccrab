@@ -34,7 +34,6 @@ enum DaemonTimers {
                 let exploits = await state.crashReportMiner.scan()
                 for exploit in exploits {
                     let ruleId = "maccrab.forensic.crash-exploit-\(exploit.indicator)"
-                    if await state.deduplicator.shouldSuppress(ruleId: ruleId, processPath: exploit.reportPath) { continue }
                     let alert = Alert(
                         ruleId: ruleId,
                         ruleTitle: "Exploitation Indicator in Crash Report: \(exploit.processName)",
@@ -45,8 +44,10 @@ enum DaemonTimers {
                         mitreTactics: "attack.execution", mitreTechniques: "attack.t1203",
                         suppressed: false
                     )
-                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.deduplicator.recordAlert(ruleId: ruleId, processPath: exploit.reportPath)
+                    let inserted: Bool
+                    do { inserted = try await state.alertSink.submit(alert: alert) }
+                    catch { await StorageErrorTracker.shared.recordAlertError(error); continue }
+                    guard inserted else { continue }
                     if exploit.severity >= .high { await state.notifier.notify(alert: alert) }
                     print("[CRASH] \(exploit.indicator) in \(exploit.processName)")
                 }
@@ -55,20 +56,21 @@ enum DaemonTimers {
                 let anomalies = await state.powerAnomalyDetector.scan()
                 for anomaly in anomalies {
                     let ruleId = "maccrab.forensic.power-\(anomaly.type.rawValue)"
-                    let key = anomaly.processName  // processPath is nil for power events
-                    if await state.deduplicator.shouldSuppress(ruleId: ruleId, processPath: key) { continue }
+                    // processPath is nil for power events; use processName as
+                    // the dedup-fallback key so AlertSink partitions by app.
                     let alert = Alert(
                         ruleId: ruleId,
                         ruleTitle: "Power Anomaly: \(anomaly.processName) \(anomaly.type.rawValue)",
                         severity: anomaly.severity,
                         eventId: UUID().uuidString,
-                        processPath: nil, processName: anomaly.processName,
+                        processPath: anomaly.processName,
+                        processName: anomaly.processName,
                         description: anomaly.detail,
                         mitreTactics: "attack.execution", mitreTechniques: "attack.t1496",
                         suppressed: false
                     )
-                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.deduplicator.recordAlert(ruleId: ruleId, processPath: key)
+                    do { _ = try await state.alertSink.submit(alert: alert) }
+                    catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
                 // Library inventory scan (every other cycle -- resource intensive).
@@ -78,7 +80,6 @@ enum DaemonTimers {
                 let injected = await state.libraryInventory.scanAllProcesses()
                 for lib in injected {
                     let ruleId = "maccrab.forensic.injected-library"
-                    if await state.deduplicator.shouldSuppress(ruleId: ruleId, processPath: lib.processPath) { continue }
                     let alert = Alert(
                         ruleId: ruleId,
                         ruleTitle: "Injected Library: \(lib.processName) loaded \((lib.libraryPath as NSString).lastPathComponent)",
@@ -89,8 +90,10 @@ enum DaemonTimers {
                         mitreTactics: "attack.defense_evasion", mitreTechniques: "attack.t1574.006",
                         suppressed: false
                     )
-                    do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.deduplicator.recordAlert(ruleId: ruleId, processPath: lib.processPath)
+                    let inserted: Bool
+                    do { inserted = try await state.alertSink.submit(alert: alert) }
+                    catch { await StorageErrorTracker.shared.recordAlertError(error); continue }
+                    guard inserted else { continue }
                     if lib.severity >= .high { await state.notifier.notify(alert: alert) }
                     print("[INJECT] \(lib.processName) <- \(lib.libraryPath)")
                 }
@@ -132,7 +135,7 @@ enum DaemonTimers {
                                 mitreTactics: nil, mitreTechniques: nil,
                                 suppressed: false
                             )
-                            do { try await state.alertStore.insert(alert: scoreAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                            do { _ = try await state.alertSink.submit(alert: scoreAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                             print("[LLM] Security score analysis: \(grade) (\(totalScore)/100)")
                         }
                     }
@@ -162,7 +165,7 @@ enum DaemonTimers {
                             mitreTechniques: nil,
                             suppressed: false
                         )
-                        do { try await state.alertStore.insert(alert: vulnAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                        do { _ = try await state.alertSink.submit(alert: vulnAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     }
                 }
 
@@ -186,7 +189,7 @@ enum DaemonTimers {
                         mitreTechniques: nil,
                         suppressed: false
                     )
-                    do { try await state.alertStore.insert(alert: privAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    do { _ = try await state.alertSink.submit(alert: privAlert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
                 // Purge old privacy audit data
@@ -231,7 +234,6 @@ enum DaemonTimers {
 
         // Keep references alive for on-demand use
         _ = state.cdhashExtractor
-        _ = state.panicButton
         _ = state.travelMode
         _ = state.securityDigest
         _ = state.vulnScanner

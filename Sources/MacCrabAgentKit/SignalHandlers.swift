@@ -36,12 +36,6 @@ enum SignalHandlers {
                         var matches = await state.ruleEngine.evaluate(event)
                         NoiseFilter.apply(&matches, event: event, isWarmingUp: state.isWarmingUp)
                         for match in matches {
-                            // Skip if already deduplicated
-                            if await state.deduplicator.shouldSuppress(ruleId: match.ruleId, processPath: event.process.executable) {
-                                continue
-                            }
-                            await state.deduplicator.recordAlert(ruleId: match.ruleId, processPath: event.process.executable)
-
                             let alert = Alert(
                                 ruleId: match.ruleId,
                                 ruleTitle: "[Retroactive] \(match.ruleName)",
@@ -54,8 +48,16 @@ enum SignalHandlers {
                                 mitreTechniques: match.tags.filter { $0.contains("t1") }.joined(separator: ","),
                                 suppressed: false
                             )
-                            do { try await state.alertStore.insert(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                            retroMatches += 1
+                            // AlertSink applies dedup + insert in one call; the
+                            // retroactive scan's earlier manual dedup folded in.
+                            let inserted: Bool
+                            do {
+                                inserted = try await state.alertSink.submit(alert: alert, event: event)
+                            } catch {
+                                await StorageErrorTracker.shared.recordAlertError(error)
+                                continue
+                            }
+                            if inserted { retroMatches += 1 }
                         }
                     }
                     if retroMatches > 0 {
@@ -88,6 +90,13 @@ enum SignalHandlers {
                     } else {
                         print("[SIGHUP] Storage config unchanged (cap=\(newCap) MB, retention=\(newRet)d)")
                     }
+
+                    // v1.6.19: pick up dashboard-written notifications.json
+                    // so Slack / Teams / Discord / PagerDuty webhooks edited
+                    // in Settings start firing without a daemon restart.
+                    await state.notificationIntegrations.reloadConfig()
+                    let services = await state.notificationIntegrations.configuredServices()
+                    print("[SIGHUP] Notification services: \(services.isEmpty ? "none" : services.joined(separator: ", "))")
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }

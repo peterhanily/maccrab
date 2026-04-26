@@ -122,12 +122,6 @@
 "settings.pollHelp" = "Как часто приложение проверяет базу данных демона на наличие новых событий и оповещений.";
 "settings.startup" = "Запуск";
 "settings.launchAtLogin" = "Запускать MacCrab при входе";
-"settings.autoResponse" = "Автоответ";
-"settings.autoResponseDesc" = "Автоматически реагировать на критические угрозы";
-"settings.autoQuarantine" = "Автоизоляция вредоносных файлов";
-"settings.autoKill" = "Автозавершение вредоносных процессов";
-"settings.autoBlock" = "Автоблокировка C2-назначений";
-"settings.autoResponseNote" = "Эти действия применяются только к оповещениям КРИТИЧЕСКОЙ степени. Настройте действия для отдельных правил на вкладке «Действия реагирования».";
 "settings.macosNotifications" = "Уведомления macOS";
 "settings.showNotifications" = "Показывать уведомления об обнаруженных угрозах";
 "settings.minimumSeverity" = "Минимальная критичность:";
@@ -389,21 +383,14 @@
 /* TODO: translate */
 "settings.access.launchAtLogin" = "Launch MacCrab at login";
 /* TODO: translate */
-"settings.access.autoQuarantine" = "Auto-quarantine malicious files";
 /* TODO: translate */
-"settings.access.criticalOnlyHint" = "Applies only to critical severity alerts";
 /* TODO: translate */
-"settings.access.autoKill" = "Auto-kill malicious processes";
 /* TODO: translate */
-"settings.access.autoBlock" = "Auto-block C2 destinations";
 /* TODO: translate */
 "settings.access.notifications" = "Show notifications for detection alerts";
 /* TODO: translate */
-"settings.help.autoQuarantine" = "Automatically move files flagged by critical-severity rules to quarantine";
 /* TODO: translate */
-"settings.help.autoKill" = "Automatically terminate processes that trigger critical detection rules";
 /* TODO: translate */
-"settings.help.autoBlock" = "Automatically add PF firewall rules to block command-and-control IPs";
 
 /* ── About ── */
 /* TODO: translate */

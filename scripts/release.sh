@@ -54,6 +54,16 @@ echo "Step 0/6: Pre-release check..."
     exit 1
 }
 
+# Step 0b: Architectural-invariants audit (v1.6.19). Catches the
+# wire-the-orphans bug class and AlertSink-bypass regressions BEFORE
+# they ship. Sister script to prerelease-check.sh: that one verifies
+# manifest sync, this one verifies code structure.
+echo "Step 0b/6: Architectural audit..."
+"$SCRIPT_DIR/pre-release-audit.sh" || {
+    echo "Architectural audit failed — fix the structural issues above before shipping"
+    exit 1
+}
+
 # Step 1: Tests
 echo "Step 1/6: Running tests..."
 swift test 2>&1 | grep "Test run with" || { echo "Tests failed!"; exit 1; }

@@ -24,9 +24,12 @@ struct SettingsView: View {
     // upgrading installs get auto-start. Users who don't want it can
     // untoggle; that removes the login item and we keep the preference.
     @AppStorage("launchAtLogin") var launchAtLogin: Bool = true
-    @AppStorage("autoQuarantine") private var autoQuarantine = false
-    @AppStorage("autoKill") private var autoKill = false
-    @AppStorage("autoBlock") private var autoBlock = false
+    // Note: legacy @AppStorage keys "autoQuarantine", "autoKill", and
+    // "autoBlock" were removed in v1.6.19. Their UI toggles wrote to user
+    // defaults but no daemon code consumed the values, so the toggles
+    // produced a false sense of security. The Response Actions tab already
+    // exposes per-rule action configuration that IS wired into
+    // ResponseEngine — that's the canonical surface.
     @AppStorage("maxDatabaseSizeMB") private var maxDatabaseSizeMB: Int = 500
     @AppStorage("retentionWindowDays") private var retentionWindowDays: Int = 30
     @State private var retentionConfirmShown: Bool = false
@@ -82,6 +85,12 @@ struct SettingsView: View {
     @AppStorage("webhookDiscordURL") private var webhookDiscordURL: String = ""
     @AppStorage("webhookPagerDutyKey") private var webhookPagerDutyKey: String = ""
     @AppStorage("webhookMinSeverity") private var webhookMinSeverity: String = "high"
+
+    // Pending debounced webhook sync. onChange fires once per keystroke;
+    // without this debounce, typing a 30-char webhook URL would write the
+    // config file + SIGHUP the daemon 30 times in quick succession (each
+    // SIGHUP triggers a /Users walk in NotificationIntegrations).
+    @State private var pendingWebhookSync: Task<Void, Never>?
 
     var body: some View {
         TabView {
@@ -288,28 +297,11 @@ struct SettingsView: View {
                     .padding(8)
                 }
 
-                // Auto-Response Configuration
-                GroupBox(String(localized: "settings.autoResponse", defaultValue: "Auto-Response")) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(String(localized: "settings.autoResponseDesc", defaultValue: "Automatically respond to critical threats"))
-                            .font(.callout)
-
-                        Toggle(String(localized: "settings.autoQuarantine", defaultValue: "Auto-quarantine malicious files"), isOn: $autoQuarantine)
-                            .accessibilityHint(String(localized: "settings.access.criticalOnlyHint", defaultValue: "Applies only to critical severity alerts"))
-                            .help(String(localized: "settings.help.autoQuarantine", defaultValue: "Automatically move files flagged by critical-severity rules to quarantine"))
-
-                        Toggle(String(localized: "settings.autoKill", defaultValue: "Auto-kill malicious processes"), isOn: $autoKill)
-                            .accessibilityHint(String(localized: "settings.access.criticalOnlyHint", defaultValue: "Applies only to critical severity alerts"))
-                            .help(String(localized: "settings.help.autoKill", defaultValue: "Automatically terminate processes that trigger critical detection rules"))
-
-                        Toggle(String(localized: "settings.autoBlock", defaultValue: "Auto-block C2 destinations"), isOn: $autoBlock)
-                            .accessibilityHint(String(localized: "settings.access.criticalOnlyHint", defaultValue: "Applies only to critical severity alerts"))
-                            .help(String(localized: "settings.help.autoBlock", defaultValue: "Automatically add PF firewall rules to block command-and-control IPs"))
-
-                        Text(String(localized: "settings.autoResponseNote", defaultValue: "These actions apply only to CRITICAL severity alerts. Configure per-rule actions in Response Actions tab."))
-                            .font(.caption).foregroundColor(.secondary)
-                    }.padding(8)
-                }
+                // The "Auto-Response" GroupBox (autoQuarantine/autoKill/
+                // autoBlock toggles) was removed in v1.6.19. Those toggles
+                // wrote to UserDefaults but no daemon code consumed them.
+                // Per-rule auto-actions live in the Response Actions tab,
+                // which IS wired into ResponseEngine.
 
                 Spacer()
             }
@@ -364,6 +356,7 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .frame(width: 160)
+                            .onChange(of: webhookMinSeverity) { _ in scheduleWebhookSync() }
                         }
 
                         Divider()
@@ -374,6 +367,7 @@ struct SettingsView: View {
                             TextField("https://hooks.slack.com/services/...", text: $webhookSlackURL)
                                 .textFieldStyle(.roundedBorder)
                                 .font(.caption)
+                                .onChange(of: webhookSlackURL) { _ in scheduleWebhookSync() }
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
@@ -382,6 +376,7 @@ struct SettingsView: View {
                             TextField("https://outlook.office.com/webhook/...", text: $webhookTeamsURL)
                                 .textFieldStyle(.roundedBorder)
                                 .font(.caption)
+                                .onChange(of: webhookTeamsURL) { _ in scheduleWebhookSync() }
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
@@ -390,6 +385,7 @@ struct SettingsView: View {
                             TextField("https://discord.com/api/webhooks/...", text: $webhookDiscordURL)
                                 .textFieldStyle(.roundedBorder)
                                 .font(.caption)
+                                .onChange(of: webhookDiscordURL) { _ in scheduleWebhookSync() }
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
@@ -398,6 +394,7 @@ struct SettingsView: View {
                             TextField("e93facc04764012d7bfb002500d5d1a6...", text: $webhookPagerDutyKey)
                                 .textFieldStyle(.roundedBorder)
                                 .font(.caption)
+                                .onChange(of: webhookPagerDutyKey) { _ in scheduleWebhookSync() }
                         }
 
                         webhookStatusView
@@ -934,6 +931,78 @@ struct SettingsView: View {
         // the daemon starts or on the next hourly tick (the size-
         // cap timer now reads `state.maxDatabaseSizeMB` live, but
         // only the SIGHUP path reloads it from disk).
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-HUP", "com.maccrab.agent"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        try? task.run()
+    }
+
+    /// Debounced wrapper for syncWebhookConfig. Cancels any pending sync
+    /// task and reschedules 500 ms in the future, so a user typing a 30-
+    /// character webhook URL produces ONE file write + SIGHUP, not 30.
+    /// Without this, every keystroke would trigger a /Users walk inside
+    /// NotificationIntegrations.reloadConfig — a real DoS vector against
+    /// the daemon's main loop.
+    private func scheduleWebhookSync() {
+        pendingWebhookSync?.cancel()
+        pendingWebhookSync = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self.syncWebhookConfig() }
+        }
+    }
+
+    /// v1.6.19: write the four webhook URLs + the minimum severity to
+    /// `~/Library/Application Support/MacCrab/notifications.json` in the
+    /// `NotificationIntegrations.Config` shape, then SIGHUP the daemon.
+    /// Closes a wire-the-orphans gap (Pass 1 audit): pre-v1.6.19 the
+    /// SettingsView TextFields wrote to @AppStorage but no daemon code
+    /// consumed the values, so configured Slack/Teams/Discord/PagerDuty
+    /// webhooks never fired.
+    private func syncWebhookConfig() {
+        let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let path = configDir + "/notifications.json"
+
+        var payload: [String: Any] = [
+            "minimumSeverity": webhookMinSeverity
+        ]
+        let slack = webhookSlackURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !slack.isEmpty {
+            payload["slack"] = ["webhookURL": slack]
+        }
+        let teams = webhookTeamsURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !teams.isEmpty {
+            payload["teams"] = ["webhookURL": teams]
+        }
+        let discord = webhookDiscordURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !discord.isEmpty {
+            payload["discord"] = ["webhookURL": discord]
+        }
+        let pd = webhookPagerDutyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pd.isEmpty {
+            payload["pagerduty"] = ["routingKey": pd, "severity": "error"]
+        }
+
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+
+        // Atomic write — same pattern as syncStorageOverrides.
+        let tmp = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp))
+            _ = try? FileManager.default.removeItem(atPath: path)
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
+        } catch {
+            return
+        }
+
+        // SIGHUP the sysext so NotificationIntegrations.reloadConfig
+        // picks up the new file. Best-effort.
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         task.arguments = ["-HUP", "com.maccrab.agent"]

@@ -22,7 +22,13 @@ public actor PanicButton {
     public init() {}
 
     /// Execute emergency containment.
-    public func activate() async -> PanicResult {
+    ///
+    /// - Parameter disableBluetoothInPanic: Whether to power off Bluetooth.
+    ///   Defaults to `false` because users who rely on a Magic Keyboard or
+    ///   Trackpad would lose all input mid-panic. Callers should expose this
+    ///   as an explicit checkbox in the UI confirmation dialog and only pass
+    ///   `true` when the user has wired peripherals available.
+    public func activate(disableBluetoothInPanic: Bool = false) async -> PanicResult {
         logger.critical("PANIC BUTTON ACTIVATED — emergency containment in progress")
         var actions: [String] = []
 
@@ -46,9 +52,17 @@ public actor PanicButton {
         clearClipboard()
         actions.append("Clipboard cleared")
 
-        // 6. Disable Bluetooth (prevent physical attacks)
-        let btDisabled = disableBluetooth()
-        actions.append(btDisabled ? "Bluetooth disabled" : "Bluetooth disable skipped")
+        // 6. Disable Bluetooth (prevent physical attacks). Off by default —
+        // a user with a Bluetooth keyboard/trackpad would otherwise lose all
+        // input mid-panic. Caller must explicitly opt in.
+        let btDisabled: Bool
+        if disableBluetoothInPanic {
+            btDisabled = disableBluetooth()
+            actions.append(btDisabled ? "Bluetooth disabled" : "Bluetooth disable skipped")
+        } else {
+            btDisabled = false
+            actions.append("Bluetooth left on (caller did not request disable)")
+        }
 
         logger.critical("Panic containment complete: \(killed) killed, network \(blocked ? "blocked" : "open"), screen \(locked ? "locked" : "unlocked")")
 

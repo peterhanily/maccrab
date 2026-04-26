@@ -270,6 +270,123 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# 7. Manifest equality (v1.6.19)
+# ---------------------------------------------------------------------
+# Three duplicated sources of truth that the release flow has burned us
+# on before. Each pair MUST match exactly; mismatches were the root
+# cause of the v1.6.13 stale-Casks incident, the v1.6.18 short-version
+# drift, and would brick auto-update if the SUPublicEDKey ever drifts
+# (no rollback path: Sparkle clients verify against the value baked
+# into the installed bundle).
+
+section "Manifest equality"
+
+# Cask version equality: both the homebrew/ doc copy and the Casks/
+# canonical (what `brew` actually reads) must equal $VERSION.
+CASKS_VER=$(grep -E '^[[:space:]]*version[[:space:]]+"' Casks/maccrab.rb 2>/dev/null \
+    | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+BREW_VER=$(grep -E '^[[:space:]]*version[[:space:]]+"' homebrew/maccrab.rb 2>/dev/null \
+    | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+if [[ -z "$CASKS_VER" ]]; then
+    err "Casks/maccrab.rb: couldn't parse version field"
+elif [[ "$CASKS_VER" != "$VERSION" ]]; then
+    err "Casks/maccrab.rb version=\"$CASKS_VER\" but expected \"$VERSION\""
+else
+    ok "Casks/maccrab.rb → $CASKS_VER"
+fi
+if [[ -z "$BREW_VER" ]]; then
+    err "homebrew/maccrab.rb: couldn't parse version field"
+elif [[ "$BREW_VER" != "$VERSION" ]]; then
+    err "homebrew/maccrab.rb version=\"$BREW_VER\" but expected \"$VERSION\" (Casks/ and homebrew/ drift caused 9 stale releases pre-v1.6.13)"
+else
+    ok "homebrew/maccrab.rb → $BREW_VER"
+fi
+
+# Appcast URL equality: project.yml and Info.plist must agree.
+# Anchor on the start of line so a YAML comment mentioning "SUFeedURL:"
+# can't match (project.yml's real line starts with leading spaces +
+# "SUFeedURL:"). For Info.plist anchor on the literal XML key form
+# `<key>SUFeedURL</key>` so a comment mentioning the name is ignored.
+APPCAST_YML=$(grep -E '^[[:space:]]*SUFeedURL:' Xcode/project.yml 2>/dev/null \
+    | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+APPCAST_PLIST=$(awk '/<key>SUFeedURL<\/key>/{getline; print}' Xcode/Resources/MacCrabApp-Info.plist 2>/dev/null \
+    | sed -E 's/.*<string>([^<]+)<.*/\1/' | tr -d '[:space:]')
+if [[ -z "$APPCAST_YML" || -z "$APPCAST_PLIST" ]]; then
+    err "SUFeedURL missing from project.yml ($APPCAST_YML) or Info.plist ($APPCAST_PLIST)"
+elif [[ "$APPCAST_YML" != "$APPCAST_PLIST" ]]; then
+    err "Sparkle appcast URL drift: project.yml=\"$APPCAST_YML\" vs Info.plist=\"$APPCAST_PLIST\""
+else
+    ok "Sparkle appcast URL → $APPCAST_YML (project.yml matches Info.plist)"
+fi
+
+# Sparkle EdDSA public key equality. Drift here would brick auto-update
+# for every existing user with no rollback path — bumping severity to
+# err over a warning even though it's not a per-version field.
+EDKEY_YML=$(grep -E '^[[:space:]]*SUPublicEDKey:' Xcode/project.yml 2>/dev/null \
+    | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+EDKEY_PLIST=$(awk '/<key>SUPublicEDKey<\/key>/{getline; print}' Xcode/Resources/MacCrabApp-Info.plist 2>/dev/null \
+    | sed -E 's/.*<string>([^<]+)<.*/\1/' | tr -d '[:space:]')
+if [[ -z "$EDKEY_YML" || -z "$EDKEY_PLIST" ]]; then
+    err "SUPublicEDKey missing from project.yml or Info.plist"
+elif [[ "$EDKEY_YML" != "$EDKEY_PLIST" ]]; then
+    err "Sparkle public key drift: project.yml=\"${EDKEY_YML:0:8}…\" vs Info.plist=\"${EDKEY_PLIST:0:8}…\" — auto-update would break for installed users"
+else
+    ok "Sparkle EdDSA public key → ${EDKEY_YML:0:8}… (project.yml matches Info.plist)"
+fi
+
+# Bundle identifiers: project.yml is canonical, Info.plists must match.
+# project.yml has app + sysext as separate target stanzas, so we extract
+# both occurrences in declaration order.
+BUNDLE_IDS_YML=$(grep -E '^[[:space:]]*CFBundleIdentifier:' Xcode/project.yml 2>/dev/null \
+    | sed -E 's/.*CFBundleIdentifier:[[:space:]]+(.+)/\1/' | tr -d '"\r')
+APP_BID_YML=$(echo "$BUNDLE_IDS_YML" | sed -n '1p' | tr -d ' \t')
+SYSEXT_BID_YML=$(echo "$BUNDLE_IDS_YML" | sed -n '2p' | tr -d ' \t')
+APP_BID_PLIST=$(awk '/<key>CFBundleIdentifier<\/key>/{getline; print}' Xcode/Resources/MacCrabApp-Info.plist 2>/dev/null \
+    | sed -E 's/.*<string>([^<]+)<.*/\1/' | tr -d '[:space:]')
+SYSEXT_BID_PLIST=$(awk '/<key>CFBundleIdentifier<\/key>/{getline; print}' Xcode/Resources/MacCrabAgent-Info.plist 2>/dev/null \
+    | sed -E 's/.*<string>([^<]+)<.*/\1/' | tr -d '[:space:]')
+if [[ -z "$APP_BID_YML" || -z "$APP_BID_PLIST" ]]; then
+    err "App CFBundleIdentifier missing from project.yml ($APP_BID_YML) or Info.plist ($APP_BID_PLIST)"
+elif [[ "$APP_BID_YML" != "$APP_BID_PLIST" ]]; then
+    err "App CFBundleIdentifier drift: project.yml=$APP_BID_YML vs Info.plist=$APP_BID_PLIST"
+else
+    ok "App CFBundleIdentifier → $APP_BID_YML (project.yml matches Info.plist)"
+fi
+if [[ -z "$SYSEXT_BID_YML" || -z "$SYSEXT_BID_PLIST" ]]; then
+    err "Sysext CFBundleIdentifier missing from project.yml ($SYSEXT_BID_YML) or Info.plist ($SYSEXT_BID_PLIST)"
+elif [[ "$SYSEXT_BID_YML" != "$SYSEXT_BID_PLIST" ]]; then
+    err "Sysext CFBundleIdentifier drift: project.yml=$SYSEXT_BID_YML vs Info.plist=$SYSEXT_BID_PLIST"
+else
+    ok "Sysext CFBundleIdentifier → $SYSEXT_BID_YML (project.yml matches Info.plist)"
+fi
+
+# Apple Developer Team ID. project.yml has the canonical value (twice —
+# once per target). Verify they agree, then verify the Casks/homebrew
+# uninstall stanzas reference the same ID. Drift would invalidate the
+# uninstall flow for users running an updated team's signed app.
+TEAM_IDS_YML=$(grep -E '^[[:space:]]*DEVELOPMENT_TEAM:' Xcode/project.yml 2>/dev/null \
+    | awk '{print $2}' | tr -d '"' | sort -u)
+TEAM_ID_COUNT=$(echo "$TEAM_IDS_YML" | grep -c '^' || echo 0)
+if [[ "$TEAM_ID_COUNT" -ne 1 ]]; then
+    err "Xcode/project.yml: DEVELOPMENT_TEAM disagrees across targets ($TEAM_ID_COUNT distinct values: $TEAM_IDS_YML)"
+else
+    TEAM_ID="$TEAM_IDS_YML"
+    ok "Apple Developer Team ID → $TEAM_ID (project.yml app + sysext agree)"
+    # Cask uninstall stanzas reference the team ID. If your team ID
+    # rotates and one of these is forgotten, brew uninstall fails for
+    # users still on the old build.
+    for cask in Casks/maccrab.rb homebrew/maccrab.rb; do
+        if [[ -f "$cask" ]]; then
+            if grep -q "$TEAM_ID" "$cask"; then
+                ok "$cask references $TEAM_ID"
+            else
+                err "$cask does not reference DEVELOPMENT_TEAM=$TEAM_ID"
+            fi
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

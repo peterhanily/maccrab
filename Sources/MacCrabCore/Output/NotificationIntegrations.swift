@@ -100,7 +100,58 @@ public actor NotificationIntegrations {
 
     public init(configPath: String) {
         self.configPath = configPath
-        self.config = Self.loadConfigFromDisk(path: configPath)
+        self.config = Self.loadEffectiveConfig(systemPath: configPath)
+    }
+
+    /// Resolve the config from `systemPath` first, falling back to the
+    /// console user's `~/Library/Application Support/MacCrab/notifications.json`
+    /// if the system path is missing or older. v1.6.19 wiring: SettingsView
+    /// writes to the user-home path because the sysext's
+    /// `/Library/Application Support/MacCrab/` is root-only. File ownership
+    /// is validated against `/Users/<u>` so a rogue process running as a
+    /// different user can't inject a webhook.
+    private static func loadEffectiveConfig(systemPath: String) -> Config? {
+        let systemConfig = loadConfigFromDisk(path: systemPath)
+        let userPath = findUserHomeConfigPath()
+        let userConfig = userPath.flatMap { loadConfigFromDisk(path: $0) }
+        // Prefer whichever was written most recently. Falls back to non-nil.
+        let fm = FileManager.default
+        let systemMtime = (try? fm.attributesOfItem(atPath: systemPath))?[.modificationDate] as? Date
+        let userMtime = userPath.flatMap {
+            (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+        }
+        switch (systemConfig, userConfig) {
+        case (nil, nil):              return nil
+        case (let sc?, nil):          return sc
+        case (nil, let uc?):          return uc
+        case (let sc?, let uc?):
+            let sm = systemMtime ?? .distantPast
+            let um = userMtime ?? .distantPast
+            return um > sm ? uc : sc
+        }
+    }
+
+    /// Walk `/Users/*` for a notifications.json owned by the home's uid.
+    /// Returns the most-recently-modified candidate's path, or nil.
+    private static func findUserHomeConfigPath() -> String? {
+        let fm = FileManager.default
+        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return nil }
+
+        struct Candidate { let path: String; let mtime: Date }
+        var candidates: [Candidate] = []
+        for user in users where user != "Shared" && !user.hasPrefix(".") {
+            let home = "/Users/\(user)"
+            let path = home + "/Library/Application Support/MacCrab/notifications.json"
+            guard fm.fileExists(atPath: path) else { continue }
+            guard let homeAttrs = try? fm.attributesOfItem(atPath: home),
+                  let fileAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
+            let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+            let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+            guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+            let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
+            candidates.append(Candidate(path: path, mtime: mtime))
+        }
+        return candidates.max(by: { $0.mtime < $1.mtime })?.path
     }
 
     private static func loadConfigFromDisk(path: String) -> Config? {
@@ -110,10 +161,7 @@ public actor NotificationIntegrations {
     }
 
     public func reloadConfig() {
-        // Not calling self method since we're in the actor; just inline it
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let decoded = try? JSONDecoder().decode(Config.self, from: data) else { return }
-        config = decoded
+        config = Self.loadEffectiveConfig(systemPath: configPath)
         logger.info("Notification integrations reloaded: \(self.configuredServices().joined(separator: ", "))")
     }
 
@@ -316,10 +364,14 @@ public actor NotificationIntegrations {
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                logger.warning("Notification webhook failed: \(url) returned \(http.statusCode)")
+                // Webhook URLs include secret tokens (Slack hooks.slack.com/
+                // services/T.../B.../<secret>; Discord similar) — `privacy:
+                // .private` keeps the full URL out of the Unified Log so an
+                // attacker with read access to logs can't exfiltrate it.
+                logger.warning("Notification webhook failed: \(url, privacy: .private) returned \(http.statusCode)")
             }
         } catch {
-            logger.warning("Notification webhook error: \(error.localizedDescription)")
+            logger.warning("Notification webhook error: \(error.localizedDescription, privacy: .private)")
         }
     }
 

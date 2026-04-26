@@ -122,12 +122,6 @@
 "settings.pollHelp" = "應用程式檢查常駐程式資料庫中新事件和警報的頻率。";
 "settings.startup" = "啟動";
 "settings.launchAtLogin" = "登入時啟動 MacCrab";
-"settings.autoResponse" = "自動回應";
-"settings.autoResponseDesc" = "自動回應嚴重威脅";
-"settings.autoQuarantine" = "自動隔離惡意檔案";
-"settings.autoKill" = "自動終止惡意程序";
-"settings.autoBlock" = "自動封鎖 C2 目標";
-"settings.autoResponseNote" = "這些動作僅適用於嚴重等級的警報。請在回應動作標籤頁中設定每條規則的動作。";
 "settings.macosNotifications" = "macOS 通知";
 "settings.showNotifications" = "顯示偵測警報通知";
 "settings.minimumSeverity" = "最低嚴重度：";
@@ -389,21 +383,14 @@
 /* TODO: translate */
 "settings.access.launchAtLogin" = "Launch MacCrab at login";
 /* TODO: translate */
-"settings.access.autoQuarantine" = "Auto-quarantine malicious files";
 /* TODO: translate */
-"settings.access.criticalOnlyHint" = "Applies only to critical severity alerts";
 /* TODO: translate */
-"settings.access.autoKill" = "Auto-kill malicious processes";
 /* TODO: translate */
-"settings.access.autoBlock" = "Auto-block C2 destinations";
 /* TODO: translate */
 "settings.access.notifications" = "Show notifications for detection alerts";
 /* TODO: translate */
-"settings.help.autoQuarantine" = "Automatically move files flagged by critical-severity rules to quarantine";
 /* TODO: translate */
-"settings.help.autoKill" = "Automatically terminate processes that trigger critical detection rules";
 /* TODO: translate */
-"settings.help.autoBlock" = "Automatically add PF firewall rules to block command-and-control IPs";
 
 /* ── About ── */
 /* TODO: translate */

@@ -220,6 +220,12 @@ enum DaemonSetup {
                 suppressed: false
             )
             Task {
+                // Audited AlertSink exception #1 of 2: SelfDefense alerts are
+                // already debounced upstream (sustainedTamperAlerted in
+                // SelfDefense.swift fires once per consecutive-tamper run) and
+                // this closure is captured before DaemonState/AlertSink exist
+                // in the setup order. Re-routing would force a major setup
+                // reshuffle for zero dedup benefit.
                 try? await alertStore.insert(alert: alert)
                 await notifier.notify(alert: alert)
             }
@@ -251,6 +257,11 @@ enum DaemonSetup {
                     mitreTechniques: "attack.t1562.001",
                     suppressed: false
                 )
+                // Audited AlertSink exception #2 of 2: ESClientMonitor only
+                // emits on state transitions (e.g. xprotectd died), so each
+                // alert is already a one-shot. Same setup-order constraint as
+                // exception #1 — closure captures alertStore before the
+                // AlertSink instance is built.
                 try? await alertStore.insert(alert: alert)
                 await notifier.notify(alert: alert)
                 print("[ES-HEALTH] \(healthEvent.type.rawValue): \(healthEvent.description)")
@@ -492,8 +503,9 @@ enum DaemonSetup {
         // Vulnerability scanner -- checks installed apps against CVE database
         let vulnScanner = VulnerabilityScanner()
 
-        // Panic button -- one-click emergency containment
-        let panicButton = PanicButton()
+        // PanicButton was instantiated here pre-v1.6.19 but had no production
+        // caller (no UI surface invokes activate()). Removed from
+        // DaemonState. Re-add when a Panic button ships in the dashboard.
 
         // Travel mode -- heightened security for untrusted networks
         let travelMode = TravelMode()
@@ -978,7 +990,6 @@ enum DaemonSetup {
             securityScorer: securityScorer,
             appPrivacyAuditor: appPrivacyAuditor,
             vulnScanner: vulnScanner,
-            panicButton: panicButton,
             travelMode: travelMode,
             securityDigest: securityDigest,
             alertExporter: alertExporter,

@@ -95,10 +95,45 @@ struct SupplyChainGateTests {
     }
 
     @Test("Gate blocks critical package when enabled")
-    func blocksWhenEnabled() async {
+    func blocksWhenEnabled() async throws {
+        // v1.6.19 hardening: gate() now requires the installer PID to
+        // descend from a known package manager. Spawn a copy of /bin/sleep
+        // renamed to "npm" so proc_pidpath reports a basename in the
+        // packageManagerNames list.
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let fakeNpm = tmpDir.appendingPathComponent("npm")
+        try FileManager.default.copyItem(
+            at: URL(fileURLWithPath: "/bin/sleep"),
+            to: fakeNpm
+        )
+        let proc = Process()
+        proc.executableURL = fakeNpm
+        proc.arguments = ["30"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+        defer {
+            if proc.isRunning { proc.terminate() }
+        }
+        let pid = proc.processIdentifier
+        // Wait for proc_pidpath to resolve before invoking gate().
+        for _ in 0..<40 {
+            if SupplyChainGate.processBasename(for: pid) == "npm" { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
         let gate = SupplyChainGate(maxAgeHours: 24)
         await gate.enable()
-        let result = await gate.gate(packageName: "evil-pkg", registry: "npm", ageInDays: 0.01, riskLevel: "critical", installerPid: 99999)
+        let result = await gate.gate(
+            packageName: "evil-pkg",
+            registry: "npm",
+            ageInDays: 0.01,
+            riskLevel: "critical",
+            installerPid: pid
+        )
         #expect(result != nil)
         #expect(result?.packageName == "evil-pkg")
         let stats = await gate.stats()
