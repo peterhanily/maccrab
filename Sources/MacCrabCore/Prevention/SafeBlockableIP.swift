@@ -39,12 +39,8 @@ public enum SafeBlockableIP {
         "127.0.0.1", "0.0.0.0", "::1", "::",
     ]
 
-    /// CIDR ranges that are off-limits. Stored as
-    /// `(networkAddressInHostByteOrder, prefixLength)` for IPv4 only —
-    /// IPv6 ranges are handled by exact-match in `protectedExactIPs`
-    /// (the rough cut works because Apple/loopback/link-local are the
-    /// only IPv4 ranges we care about; IPv6 protected addresses are
-    /// individually well-known).
+    /// IPv4 CIDR ranges that are off-limits. Stored as
+    /// `(networkAddressInHostByteOrder, prefixLength)`.
     public static let protectedIPv4CIDRs: [(network: UInt32, prefix: Int, label: String)] = [
         // Loopback — blocking 127.0.0.0/8 breaks everything
         (network: ipv4("127.0.0.0"), prefix: 8, label: "127.0.0.0/8 (loopback)"),
@@ -57,6 +53,30 @@ public enum SafeBlockableIP {
         (network: ipv4("224.0.0.0"), prefix: 4, label: "224.0.0.0/4 (multicast)"),
         // Carrier-grade NAT — used by ISPs; blocking can break legitimate traffic
         (network: ipv4("100.64.0.0"), prefix: 10, label: "100.64.0.0/10 (carrier-grade NAT)"),
+    ]
+
+    /// IPv6 CIDR ranges that are off-limits. v1.6.21 BLOCKER fix: pre-fix
+    /// only exact-match was supported, so `2001:4860:4860::8889` (one byte
+    /// off from Google DNS `2001:4860:4860::8888`) bypassed the check and
+    /// blocking it would silently break IPv6 DNS resolution.
+    /// Stored as `(networkBytes [16 bytes], prefixLength)`.
+    public static let protectedIPv6CIDRs: [(network: [UInt8], prefix: Int, label: String)] = [
+        // ::1/128 — IPv6 loopback (covered by exact-match too, kept for explicitness)
+        (network: ipv6("::1"), prefix: 128, label: "::1/128 (IPv6 loopback)"),
+        // ::/128 — IPv6 unspecified
+        (network: ipv6("::"), prefix: 128, label: "::/128 (IPv6 unspecified)"),
+        // fe80::/10 — IPv6 link-local
+        (network: ipv6("fe80::"), prefix: 10, label: "fe80::/10 (IPv6 link-local)"),
+        // ff00::/8 — IPv6 multicast (blocking breaks Bonjour over IPv6)
+        (network: ipv6("ff00::"), prefix: 8, label: "ff00::/8 (IPv6 multicast)"),
+        // 2606:4700:4700::/48 — Cloudflare DNS over IPv6
+        (network: ipv6("2606:4700:4700::"), prefix: 48, label: "2606:4700:4700::/48 (Cloudflare DNS)"),
+        // 2001:4860:4860::/48 — Google DNS over IPv6
+        (network: ipv6("2001:4860:4860::"), prefix: 48, label: "2001:4860:4860::/48 (Google DNS)"),
+        // 2620:fe::/48 — Quad9 DNS over IPv6
+        (network: ipv6("2620:fe::"), prefix: 48, label: "2620:fe::/48 (Quad9 DNS)"),
+        // 2620:119::/48 — OpenDNS over IPv6
+        (network: ipv6("2620:119::"), prefix: 48, label: "2620:119::/48 (OpenDNS)"),
     ]
 
     /// Returns nil if `ip` is safe to PF-block, or a human-readable
@@ -77,6 +97,20 @@ public enum SafeBlockableIP {
             for cidr in protectedIPv4CIDRs {
                 let mask = cidr.prefix == 0 ? UInt32(0) : (UInt32.max << UInt32(32 - cidr.prefix))
                 if (host & mask) == (cidr.network & mask) {
+                    return "\(trimmed) is in protected range \(cidr.label)"
+                }
+            }
+        }
+
+        // IPv6 CIDR membership check (v1.6.21 BLOCKER fix). Compare the
+        // first `prefix` bits of the address against the network bytes.
+        var addr6 = in6_addr()
+        if trimmed.withCString({ inet_pton(AF_INET6, $0, &addr6) }) == 1 {
+            let bytes: [UInt8] = withUnsafeBytes(of: &addr6) { buf in
+                Array(buf.bindMemory(to: UInt8.self))
+            }
+            for cidr in protectedIPv6CIDRs {
+                if ipv6PrefixMatches(addressBytes: bytes, networkBytes: cidr.network, prefix: cidr.prefix) {
                     return "\(trimmed) is in protected range \(cidr.label)"
                 }
             }
@@ -108,9 +142,72 @@ public enum SafeBlockableIP {
         return UInt32(bigEndian: addr.s_addr)
     }
 
+    /// Parse an IPv6 string into a 16-byte network-order array. Returns
+    /// 16 zero bytes on failure (which won't match any real address).
+    private static func ipv6(_ s: String) -> [UInt8] {
+        var addr = in6_addr()
+        guard s.withCString({ inet_pton(AF_INET6, $0, &addr) }) == 1 else {
+            return [UInt8](repeating: 0, count: 16)
+        }
+        return withUnsafeBytes(of: &addr) { buf in
+            Array(buf.bindMemory(to: UInt8.self))
+        }
+    }
+
+    /// Compare the first `prefix` bits of two 16-byte IPv6 addresses.
+    private static func ipv6PrefixMatches(addressBytes: [UInt8], networkBytes: [UInt8], prefix: Int) -> Bool {
+        guard addressBytes.count == 16, networkBytes.count == 16 else { return false }
+        let fullBytes = prefix / 8
+        let remainderBits = prefix % 8
+        // Compare full bytes
+        for i in 0..<fullBytes {
+            if addressBytes[i] != networkBytes[i] { return false }
+        }
+        // Compare partial byte
+        if remainderBits > 0 && fullBytes < 16 {
+            let mask: UInt8 = 0xFF << (8 - remainderBits)
+            if (addressBytes[fullBytes] & mask) != (networkBytes[fullBytes] & mask) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// 30-second TTL cache for the default gateway. Pre-v1.6.21 every
+    /// `isSafeToBlock` call shelled out to `route -n get default` (~5-10ms
+    /// per call); under a PF block storm at 100/sec that was 5% CPU just
+    /// on gateway discovery. Most machines have one default gateway per
+    /// session; refreshing every 30s captures network changes without
+    /// hammering route(8).
+    private static let gatewayCacheTTL: TimeInterval = 30
+    private static var cachedGateway: String?
+    private static var cachedGatewayAt: Date = .distantPast
+    private static let gatewayCacheLock = NSLock()
+
     /// Resolve the current IPv4 default gateway by parsing
     /// `route -n get default`. Returns nil on failure (no route, parse error).
+    /// Cached for 30s; first call after init or after the TTL expires reads
+    /// fresh.
     static func currentDefaultGateway() -> String? {
+        gatewayCacheLock.lock()
+        let now = Date()
+        if now.timeIntervalSince(cachedGatewayAt) < gatewayCacheTTL {
+            let cached = cachedGateway
+            gatewayCacheLock.unlock()
+            return cached
+        }
+        gatewayCacheLock.unlock()
+
+        let resolved = resolveDefaultGatewayUncached()
+
+        gatewayCacheLock.lock()
+        cachedGateway = resolved
+        cachedGatewayAt = Date()
+        gatewayCacheLock.unlock()
+        return resolved
+    }
+
+    private static func resolveDefaultGatewayUncached() -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/sbin/route")
         proc.arguments = ["-n", "get", "default"]

@@ -92,6 +92,17 @@ struct SettingsView: View {
     // SIGHUP triggers a /Users walk in NotificationIntegrations).
     @State private var pendingWebhookSync: Task<Void, Never>?
 
+    // v1.6.21 surface E: LLM "Test Connection" button state. nil =
+    // hasn't been tested in this session; .testing = in flight; .ok /
+    // .failure = result. Resets on provider/URL/key change.
+    @State private var llmTestStatus: LLMTestStatus = .untested
+    private enum LLMTestStatus: Equatable {
+        case untested
+        case testing
+        case ok(String)        // detail (e.g. "Connected to ollama")
+        case failure(String)   // reason
+    }
+
     var body: some View {
         TabView {
             generalTab
@@ -606,6 +617,58 @@ struct SettingsView: View {
                             case "gemini":  geminiSettings
                             default:        ollamaSettings
                             }
+                            // Invalidate the test result on any config edit
+                            // so a stale "OK" doesn't mislead after the user
+                            // changes the URL/key/model.
+                            Color.clear.frame(height: 0)
+                                .onChange(of: llmProvider) { _ in llmTestStatus = .untested }
+                                .onChange(of: llmAPIKey) { _ in llmTestStatus = .untested }
+                                .onChange(of: llmOllamaURL) { _ in llmTestStatus = .untested }
+                                .onChange(of: llmOllamaModel) { _ in llmTestStatus = .untested }
+                                .onChange(of: llmOpenAIURL) { _ in llmTestStatus = .untested }
+                                .onChange(of: llmModel) { _ in llmTestStatus = .untested }
+
+                            Divider()
+
+                            // v1.6.21 surface E: Test Connection. Calls
+                            // LLMService.makeFromConfig with the current
+                            // editor state and reports whether the backend
+                            // is reachable. Completes Tier 3 #15 from the
+                            // best-in-show roadmap.
+                            HStack(spacing: 8) {
+                                Button {
+                                    Task { await testLLMConnection() }
+                                } label: {
+                                    if case .testing = llmTestStatus {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .scaleEffect(0.7)
+                                    }
+                                    Text(String(localized: "settings.llm.testConnection", defaultValue: "Test Connection"))
+                                }
+                                .disabled(llmTestStatus == .testing)
+                                .controlSize(.small)
+                                .accessibilityLabel("Test LLM backend connection")
+
+                                switch llmTestStatus {
+                                case .untested:
+                                    EmptyView()
+                                case .testing:
+                                    Text(String(localized: "settings.llm.testing", defaultValue: "Connecting…"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                case .ok(let detail):
+                                    Label(detail, systemImage: "checkmark.circle.fill")
+                                        .labelStyle(.titleAndIcon)
+                                        .foregroundColor(.green)
+                                        .font(.caption)
+                                case .failure(let reason):
+                                    Label(reason, systemImage: "xmark.octagon.fill")
+                                        .labelStyle(.titleAndIcon)
+                                        .foregroundColor(.red)
+                                        .font(.caption)
+                                }
+                            }
                         }
                     }
                     .padding(8)
@@ -839,6 +902,60 @@ struct SettingsView: View {
     /// but until the sysext ships with a shared `keychain-access-groups`
     /// entitlement, it still reads the key from this JSON file. Writing
     /// both keeps the sysext working today and sets us up to drop the
+    /// v1.6.21 surface E: probe the LLM backend without firing a real
+    /// alert. Builds an LLMConfig from the editor state, calls
+    /// `LLMService.makeFromConfig` (which does an availability check),
+    /// and surfaces the bool result inline. nil = unreachable / wrong
+    /// key / disabled; non-nil = backend responded.
+    @MainActor
+    private func testLLMConnection() async {
+        llmTestStatus = .testing
+        // Build a transient LLMConfig from the editor state. Don't write
+        // to disk — Test should be side-effect-free and read-only.
+        var cfg = LLMConfig()
+        cfg.enabled = true // bypass the early-return in makeFromConfig
+        cfg.provider = LLMProvider(rawValue: llmProvider) ?? .ollama
+        cfg.ollamaURL = llmOllamaURL
+        cfg.ollamaModel = llmOllamaModel
+        cfg.openaiURL = llmOpenAIURL
+        switch cfg.provider {
+        case .ollama:
+            if !llmAPIKey.isEmpty { cfg.ollamaAPIKey = llmAPIKey }
+        case .openai:
+            cfg.openaiAPIKey = llmAPIKey
+            cfg.openaiModel = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
+        case .claude:
+            cfg.claudeAPIKey = llmAPIKey
+            cfg.claudeModel = llmModel.isEmpty ? "claude-sonnet-4-6" : llmModel
+        case .mistral:
+            cfg.mistralAPIKey = llmAPIKey
+            cfg.mistralModel = llmModel.isEmpty ? "mistral-small-latest" : llmModel
+        case .gemini:
+            cfg.geminiAPIKey = llmAPIKey
+            cfg.geminiModel = llmModel.isEmpty ? "gemini-2.0-flash" : llmModel
+        }
+        let svc = await LLMService.makeFromConfig(cfg)
+        if svc != nil {
+            llmTestStatus = .ok("Connected via \(llmProvider)")
+        } else {
+            // makeFromConfig returns nil for: disabled (we set enabled),
+            // missing API key (we set keys), or backend.isAvailable() false.
+            // Empty key is the most actionable failure for the user.
+            let reason: String
+            switch cfg.provider {
+            case .ollama:
+                reason = "Backend unreachable — check the Ollama URL"
+            default:
+                if llmAPIKey.isEmpty {
+                    reason = "Missing API key for \(llmProvider)"
+                } else {
+                    reason = "Backend unreachable — check provider/URL/key"
+                }
+            }
+            llmTestStatus = .failure(reason)
+        }
+    }
+
     /// JSON-side secret once the entitlement lands.
     private func syncLLMConfig() {
         saveAPIKeyToKeychain()
@@ -948,7 +1065,15 @@ struct SettingsView: View {
     private func scheduleWebhookSync() {
         pendingWebhookSync?.cancel()
         pendingWebhookSync = Task {
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            // v1.6.21 HIGH fix: don't swallow CancellationError with try?.
+            // Pre-fix, a cancelled sleep would fall through to the
+            // syncWebhookConfig() call and write a partial/stale config.
+            // Now: catch CancellationError explicitly and bail.
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return // Cancelled — a newer keystroke is pending
+            }
             guard !Task.isCancelled else { return }
             await MainActor.run { self.syncWebhookConfig() }
         }

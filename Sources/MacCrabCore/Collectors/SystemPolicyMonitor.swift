@@ -89,7 +89,13 @@ public actor SystemPolicyMonitor {
             // Immediate first scan
             await self.fullScan()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(self.pollInterval * 1_000_000_000))
+                // v1.6.21: gate poll interval through PowerGate so the 5-min
+                // SIP/XProtect/plugin scan throttles on battery / thermal
+                // pressure. Pre-fix the interval was static — every 5 min
+                // the daemon shelled out to csrutil/xprotect even in low-
+                // power mode.
+                let adjusted = PowerGate.adjustedInterval(base: self.pollInterval)
+                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self.fullScan()
             }

@@ -209,15 +209,27 @@ struct ResponseActionsView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
             return
         }
-        // SIGHUP the sysext so ResponseEngine.loadConfig picks up the
-        // new file. Best-effort.
+        // SIGHUP the sysext so ResponseEngine.loadConfig picks up the new
+        // file. v1.6.21 HIGH fix: tell the truth in the banner — pre-fix
+        // the message said "Daemon reloaded" regardless of whether pkill
+        // succeeded, which lied when the sysext wasn't running yet (first
+        // install).
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         task.arguments = ["-HUP", "com.maccrab.agent"]
         task.standardOutput = Pipe()
         task.standardError = Pipe()
-        try? task.run()
-        saveStatus = "Saved. Daemon reloaded."
+        var sighupDelivered = false
+        do {
+            try task.run()
+            task.waitUntilExit()
+            sighupDelivered = task.terminationStatus == 0
+        } catch {
+            sighupDelivered = false
+        }
+        saveStatus = sighupDelivered
+            ? "Saved. Daemon reloaded."
+            : "Saved. Daemon will reload on next start."
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
     }
 }

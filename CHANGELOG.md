@@ -3,6 +3,94 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.21] — 2026-04-28
+
+Surface completion + comprehensive multi-domain audit pass. Three small
+surface fixes complete v1.6.x threads (no new features); a five-axis
+review of v1.6.0–v1.6.20 found 6 BLOCKERs and 6 HIGHs, all fixed
+before push.
+
+### Audit fixes (BLOCKER)
+
+- **TOCTOU in EventLoop network-convergence path** — was using legacy
+  split `shouldSuppress()` + `recordAlert()` pair; under sustained
+  cross-process convergence two threads could both pass the check
+  and emit duplicate alerts. Now uses atomic
+  `shouldSuppressAndRecord` (`EventLoop.swift:455-460`).
+- **TOCTOU in EventLoop rule-engine match path** — same shape
+  (`EventLoop.swift:986-987`).
+- **Notify-after-suppress regression in 23 emission sites** — across
+  EventLoop + MonitorTasks, `notifier.notify(alert:)` was firing
+  unconditionally after `alertSink.submit` regardless of return
+  value. Operators received notification banners for duplicates
+  even though the alert was correctly suppressed from the store.
+  All 23 sites now gate `notify` on `inserted == true`.
+- **`SafeBlockableIP` IPv6 CIDR coverage** — pre-fix only exact-
+  match IPv6 was supported, so `2001:4860:4860::8889` (one byte off
+  Google DNS `::8888`) bypassed and blocking it would silently break
+  IPv6 DNS. Added IPv6 CIDR matching for Cloudflare, Google, Quad9,
+  OpenDNS DNS prefixes, plus loopback / link-local / multicast.
+- **`MISPClient.fetchCategorized` validator gap** — extracted IPs/
+  domains/hashes from MISP feeds without running them through the
+  v1.6.18 validators that custom imports use. A compromised MISP
+  server could push `127.0.0.1` as an IP and have it sinkholed.
+  Now every value passes `ThreatIntelFeed.validate*`.
+- **`SystemPolicyMonitor` PowerGate gap** — 5-min poll ignored
+  battery / thermal pressure. Now uses `PowerGate.adjustedInterval`
+  for the same throttling as other collectors.
+
+### Audit fixes (HIGH)
+
+- **`AlertDeduplicator.normalizePath` regex pre-compile** — was
+  re-compiling 4 NSRegularExpression patterns per call (~0.9 ms ×
+  100 alerts/sec ≈ 9 % CPU). Now pre-compiled once at class load.
+- **`SafeQuarantinePathValidator` regex → string slicing** — replaced
+  24 regex evals per call with O(1) `userHomeRemainder` + 12
+  `hasPrefix` checks. ~10× faster, identical semantics.
+- **`SafeBlockableIP.currentDefaultGateway` 30 s TTL cache** —
+  pre-fix every `isSafeToBlock` call shelled out to `route -n get
+  default` (~5–10 ms). Under PF block storms that was 5 % CPU. Now
+  cached with 30-second TTL.
+- **`ResponseEngine.executionLog` cap** — was unbounded; under
+  sustained action firing it grew memory indefinitely. Now capped
+  at 50 K entries with 5 K LRU evict on overflow.
+- **`SettingsView.scheduleWebhookSync` cancellation handling** —
+  `try? await Task.sleep(...)` swallowed CancellationError; partial
+  writes possible under rapid keystrokes. Now catches explicitly
+  and bails on cancel.
+- **`ResponseActionsView` "Daemon reloaded" banner truthfulness** —
+  banner said "Daemon reloaded." regardless of whether `pkill`
+  succeeded. Now checks `terminationStatus` and shows
+  "Saved. Daemon will reload on next start." when the sysext
+  isn't reachable.
+
+### Surface completion (no new features)
+
+- **Pending Actions surface (completes v1.6.20's `requireConfirmation`
+  thread).** When `ResponseEngine.execute` skips an action because
+  `requireConfirmation = true`, it now also emits a synthetic
+  `.informational` alert via AlertSink with rule ID
+  `maccrab.pending-action.<action>`. Existing AlertsView / AlertDetailView
+  manual-action buttons (kill / quarantine / blockNetwork via
+  ManualResponse) become the "Run now" surface; existing alert-
+  suppression UI becomes "Dismiss." No new SwiftUI view; reuses
+  every existing piece.
+- **LLM "Test Connection" button in Settings → AI Backend.** Calls
+  `LLMService.makeFromConfig` against the current editor state
+  (transient — does not write to disk). Inline status indicator:
+  green check with provider name on success, red X with reason on
+  failure (missing API key, unreachable backend, etc.). Resets to
+  untested on any config edit so a stale OK doesn't mislead.
+  Completes Tier 3 #15 from the v1.6.0 best-in-show roadmap.
+- **AI Guard timeline surface** — verified already shipped in
+  v1.6.15 (`AIActivityView.swift:130` already invokes
+  `AIActivityTimelineView`). Listed as planned but no-op.
+
+### Tests
+
+892 in 179 suites pass — same count as v1.6.20 (no new test files;
+all fixes are behavioral changes covered by existing suites).
+
 ## [1.6.20] — 2026-04-27
 
 Response-action surface follow-up to v1.6.19's safety-hardening pass.

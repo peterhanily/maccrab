@@ -69,8 +69,11 @@ enum MonitorTasks {
                     mitreTechniques: "attack.t1056.001",
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.notifier.notify(alert: alert)
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 await state.behaviorScoring.addIndicator(
                     named: "event_tap_keylogger",
                     detail: "PID \(tapInfo.tappingPID) taps keyboard",
@@ -96,8 +99,11 @@ enum MonitorTasks {
                     mitreTechniques: policyEvent.mitreTechnique,
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.notifier.notify(alert: alert)
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
 
                 // Behavioral scoring for relevant events
                 let indicatorName: String? = switch policyEvent.type {
@@ -141,8 +147,11 @@ enum MonitorTasks {
                     mitreTechniques: "attack.t1195.002",
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.notifier.notify(alert: alert)
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 if mcpEvent.eventType == .suspicious {
                     await state.behaviorScoring.addIndicator(
                         named: "mcp_server_suspicious",
@@ -257,8 +266,11 @@ enum MonitorTasks {
                     mitreTactics: "attack.persistence", mitreTechniques: "attack.t1176",
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                if extEvent.isSuspicious { await state.notifier.notify(alert: alert) }
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        if extEvent.isSuspicious { await state.notifier.notify(alert: alert) }
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[EXT] \(extEvent.browser): \(extEvent.extensionName)\(extEvent.isSuspicious ? " [SUSPICIOUS]" : "")")
             }
         }
@@ -276,8 +288,11 @@ enum MonitorTasks {
                     mitreTactics: "attack.initial_access", mitreTechniques: "attack.t1200",
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.notifier.notify(alert: alert)
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[ULTRASONIC] \(usEvent.attackType.rawValue) at \(String(format: "%.0f", usEvent.peakFrequencyHz)) Hz!")
             }
         }
@@ -295,8 +310,11 @@ enum MonitorTasks {
                     mitreTactics: "attack.defense_evasion", mitreTechniques: "attack.t1014",
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.notifier.notify(alert: alert)
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[ROOTKIT] Hidden process: PID \(hidden.pid) (\(hidden.source))")
             }
         }
@@ -316,8 +334,11 @@ enum MonitorTasks {
                     mitreTechniques: "attack.t1040",
                     suppressed: false
                 )
-                do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                await state.notifier.notify(alert: alert)
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[TEMPEST] \(tempestEvent.type.rawValue): \(tempestEvent.title)")
 
                 // LLM analysis for TEMPEST events (non-blocking)
@@ -448,8 +469,11 @@ enum MonitorTasks {
                         mitreTechniques: "attack.t1568.002",
                         suppressed: false
                     )
-                    do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.notifier.notify(alert: alert)
+                    do {
+                        if try await state.alertSink.submit(alert: alert) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
                 // Check for DNS tunneling
@@ -469,8 +493,11 @@ enum MonitorTasks {
                         mitreTechniques: "attack.t1071.004",
                         suppressed: false
                     )
-                    do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.notifier.notify(alert: alert)
+                    do {
+                        if try await state.alertSink.submit(alert: alert) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
                 // Check against threat intel
@@ -487,8 +514,11 @@ enum MonitorTasks {
                         mitreTechniques: "attack.t1071.004",
                         suppressed: false
                     )
-                    do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    await state.notifier.notify(alert: alert)
+                    do {
+                        if try await state.alertSink.submit(alert: alert) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
             }
         }

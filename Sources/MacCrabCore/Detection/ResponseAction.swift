@@ -81,6 +81,16 @@ public actor ResponseEngine {
     /// Currently active network blocks for expiration tracking.
     private var activeBlocks: [NetworkBlock] = []
 
+    /// Optional AlertSink for emitting "pending operator confirmation"
+    /// alerts when an action is gated by requireConfirmation. v1.6.21:
+    /// the gating mechanism (v1.6.20) skipped + logged silently, leaving
+    /// the operator no surface to act on. Now: a synthetic alert flows
+    /// to AlertStore + dashboard, where existing AlertDetailView manual-
+    /// action buttons (kill / quarantine / blockNetwork via
+    /// ManualResponse) become the "Run now" surface and the existing
+    /// suppression UI becomes "Dismiss".
+    private var alertSinkForPending: AlertSink?
+
     /// Tracks info about a temporary PF block rule.
     private struct NetworkBlock: Sendable {
         let ip: String
@@ -112,6 +122,12 @@ public actor ResponseEngine {
             atPath: self.quarantineDir,
             withIntermediateDirectories: true
         )
+    }
+
+    /// Wire an AlertSink for emitting pending-confirmation alerts.
+    /// Called by DaemonSetup after both ResponseEngine and AlertSink exist.
+    public func setAlertSinkForPending(_ sink: AlertSink) {
+        self.alertSinkForPending = sink
     }
 
     // MARK: - Configuration
@@ -198,11 +214,13 @@ public actor ResponseEngine {
             // Skip log action (handled elsewhere)
             if config.action == .log { continue }
 
-            // v1.6.19.1: respect requireConfirmation. Pre-fix the field was
-            // decoded but ignored — operators who set it expecting a "click
-            // to fire" gate got instant execution instead. Now: skip auto-
-            // execution and append a pending entry to the audit log so the
-            // dashboard can offer a "Run now" button (UI surface to follow).
+            // v1.6.20: respect requireConfirmation. Pre-v1.6.20 the field
+            // was decoded but ignored — operators who set it expecting a
+            // "click to fire" gate got instant execution instead.
+            // v1.6.21: also emit a synthetic informational alert so the
+            // pending action shows up in the operator's dashboard. The
+            // existing AlertDetailView manual-action buttons become the
+            // "Run now" surface; existing suppression UI becomes "Dismiss".
             if config.requireConfirmation {
                 logger.notice("Action \(config.action.rawValue) for rule \(alert.ruleId) PENDING operator confirmation")
                 executionLog.append((
@@ -212,6 +230,27 @@ public actor ResponseEngine {
                     target: "pending-confirmation",
                     success: false
                 ))
+                if let sink = alertSinkForPending {
+                    let pendingAlert = Alert(
+                        ruleId: "maccrab.pending-action.\(config.action.rawValue)",
+                        ruleTitle: "Pending: \(config.action.rawValue) for \(alert.ruleTitle)",
+                        severity: .informational,
+                        eventId: alert.eventId,
+                        processPath: alert.processPath,
+                        processName: alert.processName,
+                        description: "MacCrab gated this \(config.action.rawValue) action because \"Require operator confirmation\" is enabled for rule \(alert.ruleId). Original alert: \(alert.id). Use the Run buttons in the alert detail to fire it manually, or suppress this notification to dismiss.",
+                        mitreTactics: alert.mitreTactics,
+                        mitreTechniques: alert.mitreTechniques,
+                        suppressed: false
+                    )
+                    do {
+                        _ = try await sink.submit(alert: pendingAlert, event: event)
+                    } catch {
+                        // Logging error doesn't impact correctness; the
+                        // pending entry is already in executionLog.
+                        logger.warning("Failed to emit pending-action alert: \(error.localizedDescription)")
+                    }
+                }
                 continue
             }
 
@@ -283,6 +322,13 @@ public actor ResponseEngine {
                 target: target,
                 success: success
             ))
+            // v1.6.21 HIGH fix: cap executionLog at 50K entries to avoid
+            // unbounded memory growth under sustained action firing. LRU-
+            // evict oldest 5K when cap exceeded so we don't churn on every
+            // append.
+            if executionLog.count > 50_000 {
+                executionLog.removeFirst(5_000)
+            }
         }
     }
 

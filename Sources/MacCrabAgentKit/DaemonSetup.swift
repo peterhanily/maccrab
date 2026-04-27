@@ -1008,6 +1008,11 @@ enum DaemonSetup {
             llmService: llmService
         )
 
+        // v1.6.21: wire AlertSink into ResponseEngine so the
+        // requireConfirmation skip path emits a synthetic informational
+        // alert visible to the operator. Pre-fix the gate logged silently.
+        await state.responseEngine.setAlertSinkForPending(state.alertSink)
+
         // Apply configured retention so the daily prune timer uses the
         // operator's chosen window rather than the hardcoded default.
         state.retentionDays = config.retentionDays

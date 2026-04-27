@@ -72,20 +72,33 @@ public actor MISPClient {
     }
 
     /// Fetch IOCs and categorize them for MacCrab's threat intel.
+    /// v1.6.21 BLOCKER fix: every value now passes through the same
+    /// `ThreatIntelFeed.validate*` helpers that v1.6.18 added for
+    /// custom imports. Pre-fix a compromised MISP server could return
+    /// `"127.0.0.1"` or `"foo bar"` as an "IP" and MacCrab would blindly
+    /// sinkhole / block it. Now malformed entries are dropped + counted.
     public func fetchCategorized(lastDays: Int = 7) async -> (ips: [String], domains: [String], hashes: [String], urls: [String]) {
         let attrs = await fetchIOCs(lastDays: lastDays)
         var ips: [String] = [], domains: [String] = [], hashes: [String] = [], urls: [String] = []
+        var rejected = 0
 
         for attr in attrs {
             switch attr.type {
-            case "ip-dst", "ip-src": ips.append(attr.value)
-            case "domain", "hostname": domains.append(attr.value)
-            case "md5", "sha256", "sha1": hashes.append(attr.value)
-            case "url": urls.append(attr.value)
+            case "ip-dst", "ip-src":
+                if let v = ThreatIntelFeed.validateIP(attr.value) { ips.append(v) } else { rejected += 1 }
+            case "domain", "hostname":
+                if let v = ThreatIntelFeed.validateDomain(attr.value) { domains.append(v) } else { rejected += 1 }
+            case "md5", "sha256", "sha1":
+                if let v = ThreatIntelFeed.validateHash(attr.value) { hashes.append(v) } else { rejected += 1 }
+            case "url":
+                if let v = ThreatIntelFeed.validateURL(attr.value) { urls.append(v) } else { rejected += 1 }
             default: break
             }
         }
 
+        if rejected > 0 {
+            logger.warning("MISP import: rejected \(rejected) malformed IOC value(s) — possible compromised MISP server or schema drift")
+        }
         logger.info("MISP import: \(ips.count) IPs, \(domains.count) domains, \(hashes.count) hashes, \(urls.count) URLs")
         return (ips, domains, hashes, urls)
     }
