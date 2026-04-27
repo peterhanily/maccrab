@@ -197,8 +197,12 @@ struct ResponseEngineTests {
 
     @Test("Quarantine moves file to quarantine dir")
     func quarantineMovesFile() async throws {
-        let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("maccrab-test-\(UUID().uuidString)")
+        // Use /tmp/ rather than FileManager.temporaryDirectory (which on
+        // macOS returns /var/folders/...): the v1.6.19.1
+        // SafeQuarantinePathValidator correctly rejects /var/folders/ as a
+        // protected per-user runtime location, so the test fixture must
+        // live somewhere the validator allows.
+        let tmpDir = URL(fileURLWithPath: "/tmp/maccrab-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let quarantineDir = tmpDir.appendingPathComponent("quarantine").path
         defer { try? FileManager.default.removeItem(at: tmpDir) }

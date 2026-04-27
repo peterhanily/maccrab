@@ -50,6 +50,15 @@ public enum ManualResponse {
     /// to pkill -f against the full executable path.
     public static func killProcess(pid: Int32?, path: String) throws -> String {
         if let pid, pid > 1 {
+            // Defense-in-depth: same SafePIDValidator gate the auto-kill
+            // path uses. The user app runs unprivileged so kill() would
+            // EPERM on system PIDs anyway, but explicit refusal gives a
+            // better error message and protects against a future signed-
+            // installer flow that runs ManualResponse with elevated
+            // privilege.
+            if let reason = SafePIDValidator.reasonToReject(pid: pid) {
+                throw ActionError.permissionDenied("Refusing to kill — \(reason)")
+            }
             let rc = kill(pid, SIGTERM)
             if rc == 0 {
                 logger.notice("SIGTERM sent to PID \(pid, privacy: .public)")
@@ -102,6 +111,14 @@ public enum ManualResponse {
     ) throws -> String {
         guard !path.isEmpty else {
             throw ActionError.invalidInput("No file path on this alert")
+        }
+        // Refuse to move system / Apple-framework / user-data files even when
+        // the operator clicks the dashboard quarantine button — moving e.g.
+        // ~/Library/Mail/.../Envelope Index would corrupt the mailbox.
+        if let reason = SafeQuarantinePathValidator.reasonToReject(path: path) {
+            throw ActionError.invalidInput(
+                "Refusing to quarantine — \(reason). Use Terminal if you really need to move it."
+            )
         }
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else {
@@ -181,6 +198,12 @@ public enum ManualResponse {
         let trimmed = ip.trimmingCharacters(in: .whitespaces)
         guard isValidIP(trimmed) else {
             throw ActionError.invalidInput("Not a valid IP: \(ip)")
+        }
+        // Refuse to block protected IPs even when the operator clicks the
+        // dashboard block button. Blocking 1.1.1.1 / 8.8.8.8 / the gateway
+        // would brick DNS or LAN; that's never what the user intends.
+        if let reason = SafeBlockableIP.reasonToReject(ip: trimmed) {
+            throw ActionError.invalidInput("Refusing to block: \(reason)")
         }
 
         // Persist the blocked IP in a per-user list so subsequent invocations

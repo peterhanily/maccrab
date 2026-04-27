@@ -126,12 +126,60 @@ public actor ResponseEngine {
         defaultActions = actions
     }
 
-    /// Load action configuration from a JSON file.
+    /// Load action configuration. Probes the system path first, then walks
+    /// `/Users/*` for a user-home `actions.json` (user app writes there
+    /// because the system path is root-only). Prefers the most recently
+    /// modified copy. v1.6.19.1 fix for the wire-the-orphans pattern: pre-
+    /// fix, ResponseActionsView wrote to a path the daemon never read.
     public func loadConfig(from path: String) throws {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let systemData = try? Data(contentsOf: URL(fileURLWithPath: path))
+        let userPath = Self.findUserHomeActionsPath()
+        let userData = userPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
+
+        let fm = FileManager.default
+        let systemMtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        let userMtime = userPath.flatMap {
+            (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+        }
+
+        let chosen: Data? = {
+            switch (systemData, userData) {
+            case (nil, nil):              return nil
+            case (let s?, nil):           return s
+            case (nil, let u?):           return u
+            case (let s?, let u?):
+                let sm = systemMtime ?? .distantPast
+                let um = userMtime ?? .distantPast
+                return um > sm ? u : s
+            }
+        }()
+        guard let data = chosen else { return }
         let config = try JSONDecoder().decode(ActionConfigFile.self, from: data)
         defaultActions = config.defaults ?? []
         ruleActions = config.rules ?? [:]
+    }
+
+    /// Walk `/Users/*` for an `actions.json` owned by the home's uid.
+    /// Returns the most-recently-modified candidate's path, or nil. Same
+    /// shape as `NotificationIntegrations.findUserHomeConfigPath`.
+    nonisolated private static func findUserHomeActionsPath() -> String? {
+        let fm = FileManager.default
+        guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return nil }
+        struct Candidate { let path: String; let mtime: Date }
+        var candidates: [Candidate] = []
+        for user in users where user != "Shared" && !user.hasPrefix(".") {
+            let home = "/Users/\(user)"
+            let path = home + "/Library/Application Support/MacCrab/actions.json"
+            guard fm.fileExists(atPath: path) else { continue }
+            guard let homeAttrs = try? fm.attributesOfItem(atPath: home),
+                  let fileAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
+            let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+            let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+            guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+            let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
+            candidates.append(Candidate(path: path, mtime: mtime))
+        }
+        return candidates.max(by: { $0.mtime < $1.mtime })?.path
     }
 
     // MARK: - Execution
@@ -149,6 +197,23 @@ public actor ResponseEngine {
 
             // Skip log action (handled elsewhere)
             if config.action == .log { continue }
+
+            // v1.6.19.1: respect requireConfirmation. Pre-fix the field was
+            // decoded but ignored — operators who set it expecting a "click
+            // to fire" gate got instant execution instead. Now: skip auto-
+            // execution and append a pending entry to the audit log so the
+            // dashboard can offer a "Run now" button (UI surface to follow).
+            if config.requireConfirmation {
+                logger.notice("Action \(config.action.rawValue) for rule \(alert.ruleId) PENDING operator confirmation")
+                executionLog.append((
+                    timestamp: Date(),
+                    ruleId: alert.ruleId,
+                    action: config.action,
+                    target: "pending-confirmation",
+                    success: false
+                ))
+                continue
+            }
 
             let success: Bool
             let target: String
@@ -273,6 +338,12 @@ public actor ResponseEngine {
             logger.warning("Quarantine target does not exist: \(path)")
             return false
         }
+        // SAFETY: refuse to move files in protected system / Apple-framework /
+        // user-data locations. Quarantine is a destructive action; if a rule
+        // (or hallucinated alert) names /System/Library/CoreServices/Finder.app
+        // or ~/Library/Mail/V10/MailData/Envelope Index, moving it bricks the
+        // user's machine in ways that need Recovery Mode to fix.
+        guard SafeQuarantinePathValidator.isSafeToQuarantine(path: path) else { return false }
 
         let filename = (path as NSString).lastPathComponent
         let timestamp = ISO8601DateFormatter().string(from: Date())
@@ -341,6 +412,11 @@ public actor ResponseEngine {
             logger.error("blockNetwork: invalid IP address '\(ip)'")
             return false
         }
+        // SAFETY: refuse to block public DNS, Apple's range, loopback,
+        // link-local, multicast, and the user's default gateway. A
+        // poisoned threat-intel feed naming 1.1.1.1 / 8.8.8.8 / 17.0.0.0/8
+        // would otherwise silently take down DNS, OCSP, or LAN.
+        guard SafeBlockableIP.isSafeToBlock(ip: ip) else { return false }
 
         // Check if this IP is already blocked
         if activeBlocks.contains(where: { $0.ip == ip }) {

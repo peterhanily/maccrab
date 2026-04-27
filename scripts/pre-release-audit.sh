@@ -133,6 +133,90 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS 1b — Codable Config struct field consumer audit (v1.6.19.1)
+# ---------------------------------------------------------------------
+# Same pattern as Pass 1 but for *Config Codable structs that get
+# decoded from JSON files the dashboard writes. Pre-v1.6.19.1
+# `ResponseActionConfig.requireConfirmation` was decoded from
+# actions.json but no consumer read it at runtime — instance #7 of
+# the wire-the-orphans pattern. This pass enumerates fields on
+# selected config structs and warns when a field has no caller in the
+# daemon target.
+
+section "PASS 1b — Config struct fields → daemon consumer audit"
+
+# Pairs: "<file>:<struct-name>". Add new structs here when they're
+# decoded from a dashboard-written JSON file.
+declare -a CONFIG_STRUCTS=(
+    "Sources/MacCrabCore/Detection/ResponseAction.swift:ResponseActionConfig"
+    "Sources/MacCrabCore/Output/NotificationIntegrations.swift:Config"
+)
+
+# Field names that are decorative / Codable-required scaffolding and
+# don't need a runtime consumer. Format: "<StructName>.<fieldName>".
+declare -a DECORATIVE_FIELDS=(
+    "_placeholder._unused"
+)
+
+for entry in "${CONFIG_STRUCTS[@]}"; do
+    file="${entry%%:*}"
+    struct="${entry##*:}"
+    if [[ ! -f "$file" ]]; then
+        warn "PASS 1b: $file missing — config struct list out of date"
+        continue
+    fi
+
+    # Extract the struct body and pull `public var/let <field>` names.
+    fields=$(awk -v target="$struct" '
+        /public struct '"$struct"'/ { in_struct=1; depth=0; next }
+        in_struct && /\{/ { depth++ }
+        in_struct && /\}/ { depth--; if (depth == 0) { in_struct=0; next } }
+        in_struct && /^[[:space:]]*public[[:space:]]+(var|let)[[:space:]]/ {
+            match($0, /public[[:space:]]+(var|let)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*/)
+            if (RSTART > 0) {
+                token=substr($0, RSTART, RLENGTH)
+                gsub(/^public[[:space:]]+(var|let)[[:space:]]+/, "", token)
+                print token
+            }
+        }
+    ' "$file")
+
+    if [[ -z "$fields" ]]; then
+        warn "PASS 1b: no public fields parsed from $struct in $file (parser regression?)"
+        continue
+    fi
+
+    for field in $fields; do
+        # Skip decorative fields
+        skip=0
+        for d in "${DECORATIVE_FIELDS[@]}"; do
+            if [[ "$d" == "$struct.$field" ]]; then skip=1; break; fi
+        done
+        if [[ $skip -eq 1 ]]; then continue; fi
+
+        # Count `.fieldName` references across all of Sources/, then subtract
+        # the trivial init self-assignment (`self.fieldName = fieldName`)
+        # which doesn't count as "wired". A field is wired if anything else
+        # reads it via `config.fieldName`, `entry.fieldName`,
+        # `someInstance.fieldName`, etc.
+        total_refs=$(grep -rE "\.${field}\b" Sources \
+            --include='*.swift' 2>/dev/null \
+            | wc -l | tr -d ' ')
+        self_assigns=$(grep -rE "self\.${field}[[:space:]]*=" Sources \
+            --include='*.swift' 2>/dev/null \
+            | wc -l | tr -d ' ')
+        consumer_refs=$(( total_refs - self_assigns ))
+        if [[ "$consumer_refs" -lt 1 ]]; then
+            err "PASS 1b: $struct.$field is decoded but never read — orphan candidate (only self-assignments found)"
+        fi
+    done
+done
+
+if [[ $ERRORS -eq 0 ]]; then
+    ok "Config struct fields all have at least one daemon-target consumer"
+fi
+
+# ---------------------------------------------------------------------
 # PASS 2 — direct-insert audit (AlertSink single-sink invariant)
 # ---------------------------------------------------------------------
 

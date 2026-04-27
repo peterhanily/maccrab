@@ -97,6 +97,23 @@ enum SignalHandlers {
                     await state.notificationIntegrations.reloadConfig()
                     let services = await state.notificationIntegrations.configuredServices()
                     print("[SIGHUP] Notification services: \(services.isEmpty ? "none" : services.joined(separator: ", "))")
+
+                    // v1.6.19.1: pick up dashboard-written actions.json so
+                    // Response Actions tab edits (per-rule kill / quarantine
+                    // / blockNetwork / script / notify configs) take effect
+                    // without a daemon restart. Writes from the user app
+                    // land in ~/Library/.../actions.json; the loader probes
+                    // both that path and the system path and prefers the
+                    // most recent.
+                    let actionsPath = state.supportDir + "/actions.json"
+                    if FileManager.default.fileExists(atPath: actionsPath) {
+                        do {
+                            try await state.responseEngine.loadConfig(from: actionsPath)
+                            print("[SIGHUP] Response actions reloaded from \(actionsPath)")
+                        } catch {
+                            print("[SIGHUP] Response action reload failed: \(error)")
+                        }
+                    }
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }

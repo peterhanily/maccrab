@@ -15,23 +15,30 @@ struct ResponseActionsView: View {
     @State private var saveStatus: String?
     @State private var showAddSheet = false
 
-    private var configPath: String {
+    /// Read path: prefer the system-installed `actions.json` (most recent
+    /// daemon wins), fall back to user-home if system is missing.
+    private var readConfigPath: String {
         let fm = FileManager.default
         let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             .map { $0.appendingPathComponent("MacCrab").path }
             ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
-        let systemDir = "/Library/Application Support/MacCrab"
-
+        let systemConfig = "/Library/Application Support/MacCrab/actions.json"
         let userConfig = userDir + "/actions.json"
-        let systemConfig = systemDir + "/actions.json"
-
-        // Prefer system dir config if it exists and is readable (root daemon).
-        // Note: for writes, the app may not have permission to write to the
-        // system dir, but load() will still read from the correct location.
-        if fm.isReadableFile(atPath: systemConfig) {
-            return systemConfig
-        }
+        if fm.isReadableFile(atPath: systemConfig) { return systemConfig }
         return userConfig
+    }
+
+    /// Write path: ALWAYS user-home. Pre-v1.6.19.1 the view tried to write
+    /// to the system path which silently failed (try? swallowed the EPERM)
+    /// and the "Saved" banner lied. Daemon now overlays user-home on top
+    /// of system via `ResponseEngine.loadConfig`'s multi-user walk +
+    /// SIGHUP reload, so user writes activate without a restart.
+    private var writeConfigPath: String {
+        let fm = FileManager.default
+        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            .map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        return userDir + "/actions.json"
     }
 
     var body: some View {
@@ -84,7 +91,7 @@ struct ResponseActionsView: View {
                                 })
                             }
                             Button {
-                                config.defaults.append(ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil))
+                                config.defaults.append(ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil, requireConfirmation: nil))
                                 save()
                             } label: {
                                 Label(String(localized: "responseActions.addDefault", defaultValue: "Add Default Action"), systemImage: "plus.circle")
@@ -124,7 +131,7 @@ struct ResponseActionsView: View {
 
                                     ForEach((config.rules[ruleId] ?? []).indices, id: \.self) { i in
                                         ActionRow(action: Binding(
-                                            get: { config.rules[ruleId]?[i] ?? ActionEntry(action: "log", minimumSeverity: "high", scriptPath: nil) },
+                                            get: { config.rules[ruleId]?[i] ?? ActionEntry(action: "log", minimumSeverity: "high", scriptPath: nil, requireConfirmation: nil) },
                                             set: { config.rules[ruleId]?[i] = $0; save() }
                                         ), onDelete: {
                                             config.rules[ruleId]?.remove(at: i)
@@ -135,7 +142,7 @@ struct ResponseActionsView: View {
 
                                     Button {
                                         if config.rules[ruleId] == nil { config.rules[ruleId] = [] }
-                                        config.rules[ruleId]?.append(ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil))
+                                        config.rules[ruleId]?.append(ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil, requireConfirmation: nil))
                                         save()
                                     } label: {
                                         Label("Add Action", systemImage: "plus.circle")
@@ -174,7 +181,7 @@ struct ResponseActionsView: View {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: readConfigPath)),
               let decoded = try? JSONDecoder().decode(ActionConfig.self, from: data) else {
             // No config file — use built-in defaults (already set via default values)
             return
@@ -183,13 +190,35 @@ struct ResponseActionsView: View {
     }
 
     private func save() {
-        let dir = (configPath as NSString).deletingLastPathComponent
+        let path = writeConfigPath
+        let dir = (path as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(config) {
-            try? data.write(to: URL(fileURLWithPath: configPath))
-            saveStatus = "Saved. Restart detection engine to apply."
+        guard let data = try? JSONEncoder().encode(config) else {
+            saveStatus = "Save failed: could not encode config"
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
+            return
         }
+        do {
+            // Atomic write so the daemon's loader never sees a partial file.
+            let tmp = path + ".tmp"
+            try data.write(to: URL(fileURLWithPath: tmp))
+            _ = try? FileManager.default.removeItem(atPath: path)
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
+        } catch {
+            saveStatus = "Save failed: \(error.localizedDescription)"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
+            return
+        }
+        // SIGHUP the sysext so ResponseEngine.loadConfig picks up the
+        // new file. Best-effort.
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-HUP", "com.maccrab.agent"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        try? task.run()
+        saveStatus = "Saved. Daemon reloaded."
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { saveStatus = nil }
     }
 }
 
@@ -252,7 +281,19 @@ private struct ActionEntry: Codable {
     var action: String // "log", "notify", "kill", "quarantine", "script", "escalateNotification", "blockNetwork"
     var minimumSeverity: String // "low", "medium", "high", "critical"
     var scriptPath: String?
+    /// When true, ResponseEngine logs the action as pending and skips
+    /// auto-execution. v1.6.19.1 wired the flag through; pre-fix it was
+    /// decoded but ignored. Default `false` to preserve historical
+    /// behaviour for existing actions; new destructive actions added
+    /// from the editor default to `true` (set in `ActionRow` defaults
+    /// for kill / quarantine / blockNetwork — see DEFAULT_REQUIRE_CONFIRM).
+    var requireConfirmation: Bool? = nil
 }
+
+/// Action types that default to `requireConfirmation = true` when
+/// added from the editor. The flag stays editable; this just makes the
+/// safer default the one you opt out of, not the one you opt in to.
+private let DEFAULT_REQUIRE_CONFIRM: Set<String> = ["kill", "quarantine", "blockNetwork"]
 
 // MARK: - Action Row
 
@@ -329,6 +370,20 @@ private struct ActionRow: View {
                 .frame(width: 150)
             }
 
+            // requireConfirmation toggle. Surfaced for every action type
+            // so the operator can flip the gate even on benign actions.
+            // Defaults to true for kill / quarantine / blockNetwork via
+            // DEFAULT_REQUIRE_CONFIRM at row creation.
+            Toggle(isOn: Binding(
+                get: { action.requireConfirmation ?? false },
+                set: { action.requireConfirmation = $0 ? true : nil }
+            )) {
+                Text(String(localized: "responseAction.requireConfirm", defaultValue: "Confirm before"))
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .help("When checked, MacCrab logs this action as pending instead of auto-executing. Useful as a safety gate on kill / quarantine / blockNetwork.")
+
             Spacer()
 
             Button { onDelete() } label: {
@@ -347,7 +402,7 @@ private struct AddRuleActionSheet: View {
     let onAdd: (String, ActionEntry) -> Void
     @Environment(\.dismiss) var dismiss
     @State private var ruleId: String = ""
-    @State private var action = ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil)
+    @State private var action = ActionEntry(action: "notify", minimumSeverity: "high", scriptPath: nil, requireConfirmation: nil)
 
     var body: some View {
         VStack(spacing: 16) {
@@ -389,12 +444,45 @@ private struct AddRuleActionSheet: View {
                 .controlSize(.large)
             }
 
+            // Show + edit requireConfirmation. Defaults to true when the
+            // selected action is destructive (kill / quarantine / blockNetwork).
+            // The destructive picks display a red warning icon to remind
+            // operators what they're enabling.
+            HStack(spacing: 6) {
+                if DEFAULT_REQUIRE_CONFIRM.contains(action.action) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .accessibilityLabel("Destructive action")
+                }
+                Toggle(isOn: Binding(
+                    get: {
+                        // If user hasn't set the flag explicitly, infer
+                        // based on whether the action is destructive.
+                        action.requireConfirmation ?? DEFAULT_REQUIRE_CONFIRM.contains(action.action)
+                    },
+                    set: { action.requireConfirmation = $0 ? true : nil }
+                )) {
+                    Text(String(localized: "addRuleAction.requireConfirm", defaultValue: "Require operator confirmation before executing"))
+                        .font(.caption)
+                }
+                .toggleStyle(.checkbox)
+            }
+            .padding(.top, 4)
+
             HStack {
                 Button(String(localized: "addRuleAction.cancel", defaultValue: "Cancel")) { dismiss() }
                 Spacer()
                 Button(String(localized: "addRuleAction.add", defaultValue: "Add Action")) {
                     guard !ruleId.isEmpty else { return }
-                    onAdd(ruleId, action)
+                    // If the user opened the destructive action picker but
+                    // didn't toggle anything, persist the inferred default
+                    // explicitly so subsequent edits don't surprise them.
+                    var pendingAction = action
+                    if pendingAction.requireConfirmation == nil
+                       && DEFAULT_REQUIRE_CONFIRM.contains(pendingAction.action) {
+                        pendingAction.requireConfirmation = true
+                    }
+                    onAdd(ruleId, pendingAction)
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)

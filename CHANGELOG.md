@@ -3,6 +3,88 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.20] — 2026-04-27
+
+Response-action surface follow-up to v1.6.19's safety-hardening pass.
+Same audit pattern applied to the per-rule auto-actions; five issues
+found, all fixed.
+
+### Added — quarantine system-path safety guard
+
+`SafeQuarantinePathValidator` (new, `Sources/MacCrabCore/Prevention/`)
+refuses to quarantine files in:
+
+- System code: `/System/`, `/Library/Apple/`, `/Library/Frameworks/`,
+  `/Library/PrivilegedHelperTools/`, `/Library/SystemExtensions/`,
+  `/Library/LaunchDaemons/`, `/Library/LaunchAgents/`, `/usr/`,
+  `/sbin/`, `/bin/`
+- Runtime state: `/private/var/db/`, `/private/var/folders/`,
+  `/etc/`, `/Library/Application Support/MacCrab/`
+- Per-user data: Mail, Calendar, Contacts, Reminders, Keychain,
+  Safari, iCloud, Photos, Time Machine, MacCrab user-home support
+
+Symlink-safe (resolves via `resolvingSymlinksInPath` before prefix
+match). Wired into both `ResponseEngine.quarantineFile` and
+`ManualResponse.quarantineFile`. Quarantine remains opt-in by default
+(built-in defaults are `notify` + `log` only).
+
+### Added — `blockNetwork` protected-IP allowlist
+
+`SafeBlockableIP` (new) refuses to PF-block public DNS (1.1.1.1,
+8.8.8.8, 9.9.9.9, 208.67.222.222 + IPv6), Apple's 17.0.0.0/8 range,
+loopback, link-local, multicast, carrier-grade NAT, and the current
+default gateway (resolved at runtime via `route -n get default`).
+Wired into `ResponseEngine.blockNetworkDestination` and
+`ManualResponse.blockDestination`.
+
+### Fixed — `requireConfirmation` now actually checked
+
+Pre-v1.6.20 the `ResponseActionConfig.requireConfirmation: Bool`
+field was decoded from `actions.json` and ignored by `ResponseEngine.
+execute`. Operator who set it expecting a confirmation gate got
+instant execution. Now: actions with `requireConfirmation = true`
+are logged as pending and skipped. Surfaced as a per-action checkbox
+in the Response Actions tab; destructive actions (kill / quarantine
+/ blockNetwork) default to `true` when added from the editor with a
+warning-icon visual marker.
+
+### Fixed — `actions.json` user-home overlay + SIGHUP reload
+
+Pre-v1.6.20 the dashboard tried to write `actions.json` to the
+system path `/Library/Application Support/MacCrab/actions.json` —
+which the user app can't write without root. `try?` swallowed the
+EPERM and the "Saved." banner lied. Same pattern as the v1.6.19
+webhook fix.
+
+Now: dashboard always writes to user-home; `ResponseEngine.
+loadConfig` walks `/Users/*` (with file-ownership validation) and
+prefers the most-recent copy. SIGHUP triggers reload — no daemon
+restart required. Save banner correctly says "Saved. Daemon reloaded."
+
+### Fixed — `ManualResponse.killProcess` defense-in-depth
+
+User-initiated kill path now uses `SafePIDValidator` for parity with
+auto-kill. Practically safe before because the app runs unprivileged
+and `kill()` would EPERM on system PIDs anyway, but explicit refusal
+gives a better error message and protects against a future signed-
+installer flow.
+
+### Added — `pre-release-audit.sh` Pass 1b: Codable Config field consumer audit
+
+Catches the `requireConfirmation`-shaped bug class for the future.
+Walks public fields on `ResponseActionConfig` and
+`NotificationIntegrations.Config`, counts `.fieldName` references
+across `Sources/` minus trivial `self.fieldName = fieldName` init
+self-assignments, errors when count is zero (decoded but never
+read). Wired into `release.sh` Step 0b. Adding a new decoded-config
+field without a runtime consumer now fails the release pipeline
+before push.
+
+### Tests
+
+892 in 179 suites pass (was 860). +32 net:
+SafeQuarantinePathValidator (17), SafeBlockableIP (15).
+
 ## [1.6.19] — 2026-04-26
 
 A safety + architecture release. The bigger of the two threads.
