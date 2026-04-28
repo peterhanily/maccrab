@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-926%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-929%20passing-brightgreen)]()
 [![Version](https://img.shields.io/badge/version-1.7.6-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -511,6 +511,63 @@ Additional views: Settings > AI Backend (LLM provider configuration), Response A
 ## What's New
 
 <details>
+<summary><strong>v1.7 — operator self-service, observability, hot-fix discipline (2026-04)</strong></summary>
+
+The v1.7 line focused on closing the loop between "MacCrab thinks
+something is wrong" and "the operator can actually act on it",
+shipping multiple field-driven hot-fixes along the way.
+
+- **v1.7.6** — `SchemaMigrator` multi-store hot-fix. Co-resident
+  EventStore + AlertStore on shared `events.db` were silently
+  skipping each other's migrations after both hit schema v2,
+  causing AlertStore prepare to crash and the daemon to enter
+  a 10 s respawn loop. Fix re-applies a store's migrations
+  idempotently in version order; storage-init errors now log
+  with `.public` privacy (no more `<private>` redaction);
+  auto-recovery backs up corrupt sidecar files; new
+  `maccrabctl repair --fix-storage` operator escape hatch.
+  No data loss on existing installs.
+- **v1.7.5** — Heartbeat split into `heartbeat.json` (synchronous
+  liveness, can't deadlock) and `heartbeat_rich.json` (async rich
+  payload). Added `maccrabctl repair` self-diagnostic. Dashboard
+  shows zombie-sysext banner when prior versions queue uninstall.
+- **v1.7.4** — Hot-fix for a v1.7.3 silent-heartbeat regression
+  caused by an outer in-flight guard layered on top of per-writer
+  guards.
+- **v1.7.3** — Hot-fix for a memory regression (back to ~50 MB
+  steady from a transient 2.31 GB spike).
+- **v1.7.2** — 8-item deferred queue cleanup with pre-ship review.
+- **v1.7.1** — Dashboard panel-richness audit on 4 primary panels.
+- **v1.7.0** — MCP attribution: events tied back to the AI tool
+  session that triggered them via 3 new event columns
+  (`mcp_server_name`, `mcp_server_category`, `ai_tool_session_id`).
+
+The release pipeline now codifies its invariants in
+`scripts/pre-release-audit.sh` (8 architectural passes that gate
+every shipped DMG). Each shipped hot-fix added an audit pass for
+the bug class it fixed.
+
+</details>
+
+<details>
+<summary><strong>v1.4 – v1.6 — performance, prevention surface, fleet (2026-04)</strong></summary>
+
+- **v1.6.x** — Memory-cap regression fix (CampaignStore was
+  opening `events.db` instead of `campaigns.db` — caught by a new
+  events.db-handle-count audit pass). DaemonConfig decoder fix
+  for snake-case overrides silently being dropped to defaults.
+  Many feature additions: TEMPEST/SDR detection, EDR/RMM
+  discovery, Vitter Algorithm R reservoir sampling for snapshots.
+- **v1.5.x** — Prevention surface expansion (DNS sinkhole,
+  network blocker, persistence guard, kill/quarantine response
+  actions wired through the dashboard).
+- **v1.4.x** — Sparkle auto-update infrastructure, Homebrew cask
+  tap, fleet telemetry server (`fleet/server.py`), 14 dashboard
+  language localizations.
+
+</details>
+
+<details>
 <summary><strong>v1.3 — native Endpoint Security via SystemExtension (2026-04)</strong></summary>
 
 v1.3 is the biggest architectural change since v1.0. MacCrab now runs as a native Endpoint Security **System Extension** activated from inside `MacCrab.app` -- matching the architecture every commercial macOS EDR uses (CrowdStrike, SentinelOne, Jamf Protect, Microsoft Defender). On macOS Catalina+, AMFI grants `com.apple.developer.endpoint-security.client` only to binaries loaded via `OSSystemExtensionRequest` from an approved `.systemextension` bundle -- LaunchDaemons are categorically rejected regardless of profile validity.
@@ -886,7 +943,7 @@ On first launch, macOS may block the ad-hoc-signed `maccrabd` binary. Go to **Sy
 Release DMGs are produced by `scripts/build-release.sh` (gitignored -- contains local paths and identities). The pipeline:
 
 1. Compile rules to JSON with `Compiler/compile_rules.py`
-2. Build all 5 SPM targets (`MacCrabCore`, `maccrabd`, `maccrabctl`, `MacCrabApp`, `maccrab-mcp`, `MacCrabAgent`) with `swift build -c release`
+2. Build all 7 SPM targets (`MacCrabCore`, `MacCrabAgentKit`, `MacCrabAgent`, `maccrabd`, `maccrabctl`, `maccrab-mcp`, `MacCrabApp`) with `swift build -c release`
 3. Wrap `MacCrabAgent` into a `.systemextension` bundle with `Info.plist` carrying `CFBundlePackageType=SYSX` and `NSSystemExtensionPointIdentifier=com.apple.system_extension.endpoint_security`
 4. Sign the sysext with Developer ID Application + embedded provisioning profile carrying the ES entitlement
 5. Sign `MacCrab.app` with hardened runtime; notarize and staple the DMG
