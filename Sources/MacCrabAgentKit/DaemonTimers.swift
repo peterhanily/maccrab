@@ -406,6 +406,12 @@ enum DaemonTimers {
         let heartbeatTimer = DispatchSource.makeTimerSource(queue: .global())
         heartbeatTimer.schedule(deadline: .now() + 5, repeating: 30)
         heartbeatTimer.setEventHandler {
+            // v1.7.1: heartbeat body wrapped in Task to allow the
+            // EventStore query for per-category counts to await across
+            // actor isolation. The dispatch-timer event handler itself
+            // is synchronous; spawning a Task lets the body run async
+            // without blocking the timer queue.
+            Task {
             // Probe sysext Full Disk Access authoritatively. The sysext
             // runs as root but TCC still gates its access to the user and
             // system TCC databases. If we can open + query the system
@@ -422,6 +428,18 @@ enum DaemonTimers {
             let events = eventCount()
             let alerts = alertCount()
 
+            // v1.7.1: per-event-category counts over the last hour. Empty
+            // dict on a fresh DB; populated as soon as events accumulate.
+            // Best-effort — never blocks the heartbeat write.
+            let oneHourAgo = Date().addingTimeInterval(-3600)
+            var eventTypeCounts: [String: Int] = [:]
+            do {
+                eventTypeCounts = try await state.eventStore.eventCountsByCategory(since: oneHourAgo)
+            } catch {
+                // Heartbeat write must succeed even when the EventStore
+                // query fails (db locked under contention, etc.).
+            }
+
             let payload: [String: Any] = [
                 "written_at_unix": nowUnix,
                 "uptime_seconds": uptime,
@@ -429,7 +447,8 @@ enum DaemonTimers {
                 "alerts_emitted": alerts,
                 "sysext_has_fda": sysextHasFDA,
                 "fda_checked_at_unix": nowUnix,
-                "schema_version": 2,
+                "event_type_counts_1h": eventTypeCounts,
+                "schema_version": 3,
             ]
 
             // Metrics export — Prometheus-textfile-style JSON at a world-
@@ -498,6 +517,21 @@ enum DaemonTimers {
             Task {
                 await state.mcpBaseline.writeSnapshot(to: mcpBaselinePath)
             }
+
+            // v1.7.1: per-rule telemetry snapshot for the rebuilt RuleBrowser.
+            // 420 rules × ~80 bytes each ≈ 35 KB on disk. Cheap.
+            let ruleTelemetryPath = state.supportDir + "/rule_telemetry.json"
+            Task {
+                await state.ruleEngine.writeTelemetrySnapshot(to: ruleTelemetryPath)
+            }
+
+            // v1.7.1: TCC current-state snapshot for the rebuilt
+            // Permissions panel. ~150 entries × ~250 bytes ≈ 37 KB.
+            let tccSnapshotPath = state.supportDir + "/tcc_snapshot.json"
+            Task {
+                await state.tccMonitor.writeSnapshot(to: tccSnapshotPath)
+            }
+            } // end Task wrapper around heartbeat body (v1.7.1)
         }
         heartbeatTimer.resume()
 

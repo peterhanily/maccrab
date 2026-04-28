@@ -6,6 +6,7 @@
 // whether all key subsystems are active.
 
 import SwiftUI
+import Charts
 import MacCrabCore
 
 struct ESHealthView: View {
@@ -16,6 +17,11 @@ struct ESHealthView: View {
     @State private var esloggerAvailable = false
     @State private var fdaGranted = false
     @State private var lastRefresh: Date?
+    /// v1.7.1: rolling 60-point event-rate sparkline. Each entry is one
+    /// dashboard refresh tick (~10 s), so 60 points ≈ 10 minutes of
+    /// recent throughput.
+    @State private var eventRateHistory: [Double] = []
+    private static let sparklineCap = 60
 
     private let dataDir: String = {
         let fm = FileManager.default
@@ -138,6 +144,16 @@ struct ESHealthView: View {
                 }
                 .padding(.horizontal)
 
+                // v1.7.1: event-rate sparkline (rolling 10 min)
+                eventRateSparkline
+                    .padding(.horizontal)
+
+                // v1.7.1: per-event-category breakdown (last 1h)
+                if let counts = appState.heartbeat?.eventTypeCounts1h, !counts.isEmpty {
+                    eventTypeBreakdown(counts)
+                        .padding(.horizontal)
+                }
+
                 // Collector checklist
                 VStack(alignment: .leading, spacing: 10) {
                     Text(String(localized: "esHealth.collectors", defaultValue: "Active Collectors"))
@@ -196,6 +212,89 @@ struct ESHealthView: View {
         .task { await refresh() }
     }
 
+    // MARK: - v1.7.1 sparkline
+
+    @ViewBuilder
+    private var eventRateSparkline: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Event throughput · 10 min").font(.headline)
+                Spacer()
+                Text("\(appState.eventsPerSecond) ev/s now")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            if eventRateHistory.isEmpty {
+                Text("Collecting samples…")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(height: 60, alignment: .center)
+                    .frame(maxWidth: .infinity)
+            } else {
+                Chart {
+                    ForEach(Array(eventRateHistory.enumerated()), id: \.offset) { (idx, value) in
+                        LineMark(
+                            x: .value("Sample", idx),
+                            y: .value("ev/s", value)
+                        )
+                        .foregroundStyle(.green)
+                        .interpolationMethod(.monotone)
+                        AreaMark(
+                            x: .value("Sample", idx),
+                            y: .value("ev/s", value)
+                        )
+                        .foregroundStyle(.green.opacity(0.15))
+                        .interpolationMethod(.monotone)
+                    }
+                }
+                .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
+                .chartXAxis(.hidden)
+                .frame(height: 60)
+            }
+        }
+    }
+
+    // MARK: - v1.7.1 per-event-type breakdown
+
+    @ViewBuilder
+    private func eventTypeBreakdown(_ counts: [String: Int]) -> some View {
+        let total = counts.values.reduce(0, +)
+        let sorted = counts.sorted { $0.value > $1.value }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Event categories · last hour").font(.headline)
+                Spacer()
+                Text("\(total) total")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(sorted.prefix(8), id: \.key) { (cat, count) in
+                    HStack(spacing: 8) {
+                        Text(cat).font(.caption.monospaced())
+                            .frame(width: 100, alignment: .leading)
+                        GeometryReader { geo in
+                            let frac = total > 0 ? CGFloat(count) / CGFloat(total) : 0
+                            ZStack(alignment: .leading) {
+                                Rectangle()
+                                    .fill(Color.secondary.opacity(0.1))
+                                Rectangle()
+                                    .fill(Color.accentColor.opacity(0.6))
+                                    .frame(width: geo.size.width * frac)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                        .frame(height: 14)
+                        Text("\(count)")
+                            .font(.caption.monospaced())
+                            .frame(width: 60, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
     private func refresh() async {
         let fm = FileManager.default
         let dbPath = dataDir + "/events.db"
@@ -221,6 +320,12 @@ struct ESHealthView: View {
         }
 
         await appState.refresh()
+        // v1.7.1: push the current eps into the rolling sparkline window
+        // *after* appState.refresh has updated the value.
+        eventRateHistory.append(Double(appState.eventsPerSecond))
+        if eventRateHistory.count > Self.sparklineCap {
+            eventRateHistory.removeFirst(eventRateHistory.count - Self.sparklineCap)
+        }
         lastRefresh = Date()
     }
 }

@@ -1,10 +1,14 @@
 // TCCTimeline.swift
 // MacCrabApp
 //
-// TCC (Transparency, Consent, and Control) permission timeline view.
-// Shows grants and revocations of macOS protected resources over time.
+// TCC (Transparency, Consent, and Control) permission view. Three modes:
+//   - Timeline (legacy): grants/revocations chronologically
+//   - Services (v1.7.1): per-service → list of apps and their current status
+//   - Apps (v1.7.1): per-app → list of services and their current status
+// Services and Apps modes pull from the daemon's tcc_snapshot.json.
 
 import SwiftUI
+import MacCrabCore
 
 // MARK: - TCCTimeline
 
@@ -13,6 +17,14 @@ struct TCCTimeline: View {
     @State private var filterService: String? = nil
     @State private var filterAllowed: Bool? = nil
     @State private var searchText: String = ""
+    /// v1.7.1 view modes.
+    enum ViewMode: String, CaseIterable, Identifiable {
+        case timeline = "Timeline"
+        case services = "Services"
+        case apps = "Apps"
+        var id: String { rawValue }
+    }
+    @State private var viewMode: ViewMode = .timeline
 
     /// All unique service names from the loaded TCC events.
     private var serviceNames: [String] {
@@ -53,9 +65,17 @@ struct TCCTimeline: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack(spacing: 12) {
-                Text(String(localized: "tcc.title", defaultValue: "TCC Permission Timeline"))
+                Text(String(localized: "tcc.title", defaultValue: "Permissions"))
                     .font(.title2)
                     .fontWeight(.bold)
+
+                Picker("Mode", selection: $viewMode) {
+                    ForEach(ViewMode.allCases) { m in
+                        Text(m.rawValue).tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
 
                 Text("\(filteredEvents.count)")
                     .font(.caption)
@@ -92,7 +112,26 @@ struct TCCTimeline: View {
 
             Divider()
 
-            // TCC event list
+            // v1.7.1: route to the chosen view mode.
+            switch viewMode {
+            case .services:
+                tccMatrix(groupBy: .service)
+            case .apps:
+                tccMatrix(groupBy: .client)
+            case .timeline:
+                timelineBody
+            }
+        }
+        .task {
+            await appState.loadTCCEvents()
+        }
+    }
+
+    // MARK: - Timeline body (legacy mode)
+
+    @ViewBuilder
+    private var timelineBody: some View {
+        Group {
             if filteredEvents.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
@@ -153,9 +192,105 @@ struct TCCTimeline: View {
             .padding(.vertical, 6)
             .background(.bar)
         }
-        .task {
-            await appState.loadTCCEvents()
+    }
+
+    // MARK: - Matrix views (v1.7.1)
+
+    private enum GroupAxis { case service, client }
+
+    private func friendlyService(_ raw: String) -> String {
+        // Same simple mapping the timeline already uses, abbreviated.
+        let trimmed = raw.replacingOccurrences(of: "kTCCService", with: "")
+        return trimmed.isEmpty ? raw : trimmed
+    }
+
+    @ViewBuilder
+    private func tccMatrix(groupBy axis: GroupAxis) -> some View {
+        let entries = filteredSnapshotEntries
+        if entries.isEmpty {
+            VStack(spacing: 12) {
+                Spacer()
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 48))
+                    .foregroundColor(.secondary.opacity(0.5))
+                Text(appState.tccSnapshotEntries.isEmpty
+                     ? "Permission matrix not yet available — wait for the next daemon heartbeat tick."
+                     : "No entries match current filters.")
+                    .font(.headline).foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            let groups = Dictionary(grouping: entries) { entry -> String in
+                axis == .service ? friendlyService(entry.service) : entry.client
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(groups.keys.sorted(), id: \.self) { key in
+                        if let rows = groups[key] {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Image(systemName: axis == .service ? "lock.shield" : "app.badge")
+                                        .foregroundColor(.secondary)
+                                    Text(key).font(.headline)
+                                    Text("(\(rows.count))")
+                                        .font(.caption).foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                                ForEach(rows.sorted { lhs, rhs in
+                                    if lhs.authValue != rhs.authValue { return lhs.authValue > rhs.authValue }
+                                    return (axis == .service ? lhs.client : friendlyService(lhs.service))
+                                        < (axis == .service ? rhs.client : friendlyService(rhs.service))
+                                }, id: \.self) { row in
+                                    HStack {
+                                        Image(systemName: row.authValue == 2 ? "checkmark.circle.fill" :
+                                                            row.authValue == 0 ? "xmark.circle.fill" : "questionmark.circle.fill")
+                                            .foregroundColor(row.authValue == 2 ? .green :
+                                                              row.authValue == 0 ? .red : .secondary)
+                                        Text(axis == .service ? row.client : friendlyService(row.service))
+                                            .font(.subheadline)
+                                        Spacer()
+                                        Text(row.source)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        Text(Date(timeIntervalSince1970: row.lastModified)
+                                                .formatted(.relative(presentation: .named)))
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.secondary.opacity(0.05))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                                }
+                            }
+                            .padding(.horizontal)
+                        }
+                    }
+                }
+                .padding(.vertical, 12)
+            }
         }
+    }
+
+    private var filteredSnapshotEntries: [TCCMonitor.PublicEntry] {
+        var rows = appState.tccSnapshotEntries
+        if let allowed = filterAllowed {
+            rows = rows.filter { ($0.authValue == 2) == allowed }
+        }
+        if let svc = filterService {
+            rows = rows.filter { friendlyService($0.service) == svc }
+        }
+        if !searchText.isEmpty {
+            let q = searchText.lowercased()
+            rows = rows.filter {
+                $0.service.lowercased().contains(q)
+                    || $0.client.lowercased().contains(q)
+                    || friendlyService($0.service).lowercased().contains(q)
+            }
+        }
+        return rows
     }
 }
 

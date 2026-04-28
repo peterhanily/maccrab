@@ -3,6 +3,104 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] — 2026-04-28
+
+Track 2 panel-richness audit. The carry-over from v1.6.19 → v1.6.20 →
+v1.6.21 → v1.6.22 → v1.7.0. Four primary panels (Rules, Browser
+Extensions, Permissions, ES Health) gain the v1.6.17 Threat Intel
+rebuild template: search + per-row metadata + per-source health +
+multi-view modes for the panels where one list view didn't tell the
+whole story.
+
+### Added — RuleBrowser per-rule telemetry
+
+- `RuleEngine.RuleStats` Codable type tracks per-rule fire count,
+  total exec ns, last-fired Date. Updated on every `evaluate(_:)`
+  call (fired or not). `writeTelemetrySnapshot(to:)` +
+  `readTelemetrySnapshot(at:)` follow the same atomic temp+rename
+  pattern as `AgentLineageService.writeSnapshot`.
+- Daemon writes `<supportDir>/rule_telemetry.json` on the heartbeat
+  tick. ~35 KB at 420 rules.
+- Dashboard `AppState.refreshRuleTelemetry()` polls on the 10 s
+  refresh cycle with mtime-skip optimization.
+- `RuleRow` (in `Components.swift`) takes an optional `stats`
+  parameter and renders fire count + last-fired + mean exec ms below
+  the existing technique badges. `SLOW` row badge appears on rules
+  whose mean exec exceeds the daemon's 50 ms slow-rule threshold.
+- `RuleBrowser` adds a "Slow only" toggle and a "Most fires" sort
+  mode alongside the existing alphabetical sort.
+
+### Added — BrowserExtensionsView search + collapsible per-browser sections
+
+- Cross-browser search by name, extension ID, or permission token.
+- Per-browser collapsible sections via chevron click. Per-browser
+  "N flagged" badge surfaces suspicious-extension count without
+  expanding the section.
+
+### Added — TCCTimeline three view modes (Permissions panel)
+
+- New `TCCMonitor.PublicEntry` + `PermissionSnapshot` Codable types
+  expose the previously-private current-state matrix to the
+  dashboard.
+- `TCCMonitor.writeSnapshot(to:)` + `readSnapshot(at:)` — atomic
+  temp+rename to `<supportDir>/tcc_snapshot.json`.
+- `AppState.refreshTCCSnapshot()` polls on the 10 s refresh cycle.
+- `TCCTimeline.ViewMode` enum: `Timeline` (existing), `Services`
+  (new, per-service group → list of apps with status), `Apps` (new,
+  per-app group → list of services with status). Segmented picker
+  in the header.
+
+### Added — ESHealthView event-rate sparkline + per-category breakdown
+
+- Rolling 60-point event-rate window (10 s × 60 = 10 min) rendered
+  with `Charts.LineMark` + `AreaMark`.
+- Per-event-category breakdown horizontal bar chart from the new
+  heartbeat field.
+- New `EventStore.eventCountsByCategory(since:)` indexed query over
+  `idx_events_ts_category` returning `[String: Int]`.
+- Heartbeat schema bumped v2 → v3: new `event_type_counts_1h` field.
+  Backward-compatible: older readers ignore the new field.
+- `heartbeatTimer.setEventHandler` body wrapped in a `Task` so the
+  EventStore query can await across actor isolation. Failure is
+  swallowed — heartbeat write must succeed even if the EventStore
+  query times out under contention.
+
+### Added — `pre-release-audit.sh` Pass 7
+
+Primary panel view richness invariant. Every panel in
+`Sources/MacCrabApp/Views/` listed in `PRIMARY_PANELS` must declare:
+
+- A search-state (`@State` named `searchText` / `query` /
+  `filterText` / `searchQuery`)
+- A drill-down hook (`.sheet` / `.popover` / `NavigationLink` /
+  `HSplitView` / multi-view `Picker` bound to a `viewMode` /
+  `selectedSection` / `selectedTab` / `selectedMode` state)
+
+`ESHealthView` is exempt on the strength of its sparkline + breakdown
++ collector list. Codifies the v1.6.17 Threat Intel rebuild template
+as an architectural invariant. Add a new entry to `PRIMARY_PANELS`
+when shipping a new primary panel.
+
+### Tests
+
+905 in 182 suites pass (was 898). +7 net (`Panel171SnapshotTests.swift`):
+- `RuleEngine.TelemetrySnapshot` JSON round-trip
+- `RuleStats.meanExecNs` zero-divisor guard
+- Live `RuleEngine` write produces a readable empty snapshot
+- `TCCMonitor.PermissionSnapshot` lossless encode/decode
+- Missing-path returns nil (both telemetry + TCC readers)
+- Malformed-JSON returns nil
+- `EventStore.eventCountsByCategory` empty-store coverage
+
+### Deferred to v1.7.2
+
+- Drop-count + collector health registry on the heartbeat
+- Rule engine P50/P95/P99 exec percentiles (mean is enough for the
+  slow-rule filter)
+- Aider / Codex MCP spawn-shape matchers (carry from v1.7.0)
+- AI Analysis / Prevention / Package Freshness / Integrations panel
+  rebuilds (P1/P2)
+
 ## [1.7.0] — 2026-04-28
 
 First feature minor since v1.6.0. Closes the longest-standing

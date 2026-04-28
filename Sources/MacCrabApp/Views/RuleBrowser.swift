@@ -5,6 +5,7 @@
 // categories and a detail list of rules that can be searched and toggled.
 
 import SwiftUI
+import MacCrabCore
 
 // MARK: - RuleBrowser
 
@@ -14,6 +15,16 @@ struct RuleBrowser: View {
     @State private var selectedTactic: String? = nil
     @State private var showRuleWizard: Bool = false
     @State private var selectedRule: RuleViewModel? = nil
+    /// v1.7.1: filter to rules with mean exec >50 ms (the same threshold
+    /// the daemon logs as "slow" in production).
+    @State private var slowRulesOnly: Bool = false
+    /// v1.7.1: sort modes — alphabetical (default) or descending fire count.
+    enum SortMode: String, CaseIterable, Identifiable {
+        case alphabetical = "A-Z"
+        case mostFires = "Most fires"
+        var id: String { rawValue }
+    }
+    @State private var sortMode: SortMode = .alphabetical
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     /// Unique tactic groups derived from the loaded rules.
@@ -45,6 +56,29 @@ struct RuleBrowser: View {
                     || rule.description.lowercased().contains(query)
                     || rule.id.lowercased().contains(query)
                     || rule.tags.joined(separator: " ").lowercased().contains(query)
+            }
+        }
+
+        // v1.7.1: slow-rules filter — keep only rules whose mean exec is
+        // above the daemon's slow-rule threshold (50 ms).
+        if slowRulesOnly {
+            results = results.filter { rule in
+                guard let stats = appState.ruleTelemetry[rule.id] else { return false }
+                return stats.meanExecNs > 50_000_000
+            }
+        }
+
+        // v1.7.1: sort. Default alphabetical (existing); "Most fires"
+        // descending by fire count uses telemetry. Rules with no
+        // telemetry record sort as zero — they tail the list.
+        switch sortMode {
+        case .alphabetical:
+            results.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .mostFires:
+            results.sort {
+                let a = appState.ruleTelemetry[$0.id]?.fireCount ?? 0
+                let b = appState.ruleTelemetry[$1.id]?.fireCount ?? 0
+                return a > b
             }
         }
 
@@ -134,6 +168,22 @@ struct RuleBrowser: View {
 
                     Spacer()
 
+                    Toggle(isOn: $slowRulesOnly) {
+                        Label("Slow only", systemImage: "speedometer")
+                    }
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .help("Show only rules whose mean execution time exceeds the 50 ms slow-rule threshold")
+
+                    Picker("Sort", selection: $sortMode) {
+                        ForEach(SortMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .frame(width: 130)
+
                     Button {
                         showRuleWizard = true
                     } label: {
@@ -170,7 +220,7 @@ struct RuleBrowser: View {
                 } else {
                     HStack(spacing: 0) {
                         List(displayedRules, selection: $selectedRule) { rule in
-                            RuleRow(rule: rule)
+                            RuleRow(rule: rule, stats: appState.ruleTelemetry[rule.id])
                                 .tag(rule)
                                 .contentShape(Rectangle())
                                 .onTapGesture { selectedRule = rule }

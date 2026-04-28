@@ -18,9 +18,22 @@ struct BrowserExtensionsView: View {
     @State private var lastScanned: Date?
     @State private var showSuspiciousOnly = false
     @State private var selected: ExtensionRow?
+    /// v1.7.1: cross-browser search by name / extension ID / permission.
+    @State private var searchText: String = ""
+    /// v1.7.1: per-browser collapsed state. Default: all expanded.
+    @State private var collapsedBrowsers: Set<String> = []
 
     var filtered: [ExtensionRow] {
-        showSuspiciousOnly ? extensions.filter { $0.isSuspicious } : extensions
+        var result = showSuspiciousOnly ? extensions.filter { $0.isSuspicious } : extensions
+        if !searchText.isEmpty {
+            let q = searchText.lowercased()
+            result = result.filter { row in
+                row.name.lowercased().contains(q)
+                    || row.extensionId.lowercased().contains(q)
+                    || row.permissions.contains(where: { $0.lowercased().contains(q) })
+            }
+        }
+        return result
     }
 
     var suspiciousCount: Int { extensions.filter { $0.isSuspicious }.count }
@@ -58,31 +71,56 @@ struct BrowserExtensionsView: View {
                     let grouped = Dictionary(grouping: filtered) { $0.browser }
                     ForEach(grouped.keys.sorted(), id: \.self) { browser in
                         if let rows = grouped[browser] {
+                            let isCollapsed = collapsedBrowsers.contains(browser)
+                            let suspiciousInBrowser = rows.filter(\.isSuspicious).count
                             VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Image(systemName: "globe")
-                                        .font(.caption).foregroundColor(.secondary)
-                                        .accessibilityHidden(true)
-                                    Text(browser.capitalized).font(.headline)
-                                    Text("(\(rows.count))")
-                                        .font(.caption).foregroundColor(.secondary)
+                                Button {
+                                    if isCollapsed { collapsedBrowsers.remove(browser) }
+                                    else { collapsedBrowsers.insert(browser) }
+                                } label: {
+                                    HStack {
+                                        Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                            .frame(width: 12)
+                                        Image(systemName: "globe")
+                                            .font(.caption).foregroundColor(.secondary)
+                                            .accessibilityHidden(true)
+                                        Text(browser.capitalized).font(.headline)
+                                        Text("(\(rows.count))")
+                                            .font(.caption).foregroundColor(.secondary)
+                                        if suspiciousInBrowser > 0 {
+                                            Text("\(suspiciousInBrowser) flagged")
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.orange.opacity(0.15))
+                                                .foregroundStyle(.orange)
+                                                .clipShape(Capsule())
+                                        }
+                                        Spacer()
+                                    }
+                                    .contentShape(Rectangle())
                                 }
+                                .buttonStyle(.plain)
                                 .padding(.horizontal)
 
-                                VStack(spacing: 6) {
-                                    ForEach(rows.sorted { lhs, rhs in
-                                        if lhs.isSuspicious != rhs.isSuspicious { return lhs.isSuspicious }
-                                        return lhs.riskScore > rhs.riskScore
-                                    }) { row in
-                                        Button {
-                                            selected = row
-                                        } label: {
-                                            ExtensionRowView(row: row)
+                                if !isCollapsed {
+                                    VStack(spacing: 6) {
+                                        ForEach(rows.sorted { lhs, rhs in
+                                            if lhs.isSuspicious != rhs.isSuspicious { return lhs.isSuspicious }
+                                            return lhs.riskScore > rhs.riskScore
+                                        }) { row in
+                                            Button {
+                                                selected = row
+                                            } label: {
+                                                ExtensionRowView(row: row)
+                                            }
+                                            .buttonStyle(.plain)
                                         }
-                                        .buttonStyle(.plain)
                                     }
+                                    .padding(.horizontal)
                                 }
-                                .padding(.horizontal)
                             }
                         }
                     }
@@ -113,6 +151,18 @@ struct BrowserExtensionsView: View {
                 Label("\(suspiciousCount) suspicious",
                     systemImage: "exclamationmark.shield.fill")
                     .font(.subheadline).foregroundColor(.red)
+            }
+            // v1.7.1: cross-browser search by name / extension ID / permission.
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+                TextField(String(localized: "extensions.searchPlaceholder",
+                                 defaultValue: "Search extensions"),
+                          text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(minWidth: 140, idealWidth: 180, maxWidth: 240)
             }
             Toggle(String(localized: "extensions.suspiciousOnly",
                 defaultValue: "Suspicious only"), isOn: $showSuspiciousOnly)

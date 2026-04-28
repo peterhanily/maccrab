@@ -424,6 +424,70 @@ if [[ $ERRORS -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------
+# PASS 7 — primary panel view richness invariants (v1.7.1)
+# ---------------------------------------------------------------------
+# Every primary panel view must declare:
+#  - a `searchText` (or equivalent `@State` String) for searching, AND
+#  - at least one nav-destination (sheet/popover/HSplitView detail/
+#    NavigationLink) for drill-down.
+# Codifies the v1.6.17 Threat Intel rebuild template as an architectural
+# invariant so future panel additions don't ship as bare lists.
+
+section "PASS 7 — primary panel view richness audit"
+
+declare -a PRIMARY_PANELS=(
+    "Sources/MacCrabApp/Views/RuleBrowser.swift"
+    "Sources/MacCrabApp/Views/BrowserExtensionsView.swift"
+    "Sources/MacCrabApp/Views/TCCTimeline.swift"
+    "Sources/MacCrabApp/Views/ESHealthView.swift"
+    "Sources/MacCrabApp/Views/ThreatIntelView.swift"
+    "Sources/MacCrabApp/Views/MCPActivityView.swift"
+    "Sources/MacCrabApp/Views/AlertDashboard.swift"
+)
+
+for panel in "${PRIMARY_PANELS[@]}"; do
+    if [[ ! -f "$panel" ]]; then
+        warn "PASS 7: $panel missing — panel list out of date"
+        continue
+    fi
+    base=$(basename "$panel" .swift)
+    has_search=0
+    # Accept any plausible search-state name — `searchText`, `query`,
+    # `filterText`, `searchQuery`, etc.
+    if grep -qE '@State[^;]*\b(searchText|query|filterText|searchQuery)\b' "$panel"; then
+        has_search=1
+    fi
+    has_drill=0
+    # Drill-down hooks: .sheet, .popover, NavigationLink, HSplitView,
+    # OR a tabbed/segmented multi-view (Picker bound to a `viewMode` /
+    # selectedSection state acts as a richness alternative for status
+    # panels that don't have row-level detail).
+    if grep -qE '\.sheet\(|\.popover\(|NavigationLink|HSplitView|detail:' "$panel"; then
+        has_drill=1
+    fi
+    if grep -qE '@State.*\b(viewMode|selectedSection|selectedTab|selectedMode)\b' "$panel"; then
+        has_drill=1
+    fi
+    # ES Health is permitted to skip both — it's a status grid; the
+    # sparkline + matrix + collector list are ITS richness.
+    if [[ "$base" == "ESHealthView" ]]; then
+        has_search=1
+        has_drill=1
+    fi
+
+    if [[ $has_search -eq 0 ]]; then
+        err "PASS 7: $base has no search state (@State searchText/query/filterText/searchQuery) — primary panel must support search"
+    fi
+    if [[ $has_drill -eq 0 ]]; then
+        err "PASS 7: $base has no drill-down hook (sheet/popover/NavigationLink/HSplitView/multi-view picker)"
+    fi
+done
+
+if [[ $ERRORS -eq 0 ]]; then
+    ok "All primary panels expose search + drill-down"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

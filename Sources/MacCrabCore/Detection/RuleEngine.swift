@@ -245,6 +245,89 @@ public actor RuleEngine {
 
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "RuleEngine")
 
+    // MARK: - v1.7.1 per-rule telemetry
+
+    /// Per-rule runtime telemetry. Counts every evaluation (fired or not),
+    /// accumulates total exec time, and records the most-recent fire so the
+    /// dashboard can show "last fired 3 min ago / never fired."
+    public struct RuleStats: Codable, Sendable, Hashable {
+        public let ruleId: String
+        public var evaluationCount: UInt64
+        public var fireCount: UInt64
+        public var totalExecNs: UInt64
+        public var lastFiredAt: Date?
+
+        public var meanExecNs: Double {
+            evaluationCount > 0 ? Double(totalExecNs) / Double(evaluationCount) : 0
+        }
+
+        public init(ruleId: String,
+                    evaluationCount: UInt64 = 0,
+                    fireCount: UInt64 = 0,
+                    totalExecNs: UInt64 = 0,
+                    lastFiredAt: Date? = nil) {
+            self.ruleId = ruleId
+            self.evaluationCount = evaluationCount
+            self.fireCount = fireCount
+            self.totalExecNs = totalExecNs
+            self.lastFiredAt = lastFiredAt
+        }
+    }
+
+    private var ruleStats: [String: RuleStats] = [:]
+
+    private func recordEvaluation(ruleId: String, elapsedNs: UInt64, fired: Bool, eventTimestamp: Date) {
+        var entry = ruleStats[ruleId] ?? RuleStats(ruleId: ruleId)
+        entry.evaluationCount &+= 1
+        entry.totalExecNs &+= elapsedNs
+        if fired {
+            entry.fireCount &+= 1
+            entry.lastFiredAt = eventTimestamp
+        }
+        ruleStats[ruleId] = entry
+    }
+
+    /// On-disk snapshot for the dashboard's RuleBrowser drill-down.
+    /// Daemon writes `<supportDir>/rule_telemetry.json` on the heartbeat
+    /// tick; the app reads via `RuleEngine.readTelemetrySnapshot(at:)`.
+    public struct TelemetrySnapshot: Codable, Sendable {
+        public let writtenAt: Date
+        public let stats: [RuleStats]
+        public init(writtenAt: Date, stats: [RuleStats]) {
+            self.writtenAt = writtenAt
+            self.stats = stats
+        }
+    }
+
+    public func writeTelemetrySnapshot(to path: String) {
+        let snapshot = TelemetrySnapshot(
+            writtenAt: Date(),
+            stats: Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount }
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        let tmp = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp), options: .atomic)
+            do {
+                try FileManager.default.moveItem(atPath: tmp, toPath: path)
+            } catch {
+                try? FileManager.default.removeItem(atPath: path)
+                try FileManager.default.moveItem(atPath: tmp, toPath: path)
+            }
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: path
+            )
+        } catch {
+            logger.warning("Failed to write rule telemetry snapshot: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    public nonisolated static func readTelemetrySnapshot(at path: String) -> TelemetrySnapshot? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? JSONDecoder().decode(TelemetrySnapshot.self, from: data)
+    }
+
     // MARK: Initialization
 
     public init() {}
@@ -414,6 +497,12 @@ public actor RuleEngine {
             let start = DispatchTime.now()
             let fired = evaluateRule(rule, against: event)
             let elapsed = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+
+            // v1.7.1: per-rule telemetry — fire count, total exec ns, last
+            // fire timestamp. Updated even on non-firing evaluations so the
+            // dashboard can show "rule never matched but executed N times"
+            // (the typical state for low-fire detection rules).
+            recordEvaluation(ruleId: rule.id, elapsedNs: elapsed, fired: fired, eventTimestamp: event.timestamp)
 
             if elapsed > Self.slowRuleThresholdNs {
                 let ms = Double(elapsed) / 1_000_000

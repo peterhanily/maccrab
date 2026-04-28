@@ -55,6 +55,12 @@ final class AppState: ObservableObject {
         /// Unix perms + TCC both apply to a user-process probe.
         var sysextHasFDA: Bool?
 
+        /// v1.7.1 schema v3: per-event-category counts over the last
+        /// hour, queried by the daemon from the events table on each
+        /// heartbeat tick. Nil for v1 / v2 heartbeats. Used by the
+        /// rebuilt ES Health panel for the event-type breakdown matrix.
+        var eventTypeCounts1h: [String: Int]?
+
         /// Ages past this are considered stale → detection engine is
         /// either hung, crashed, or replaced by a silent no-op. 120s
         /// is ~4× the 30s write cadence: tolerates one missed tick and
@@ -194,8 +200,27 @@ final class AppState: ObservableObject {
                 ?? UInt64(json["events_processed"] as? Int ?? 0),
             alertsEmitted: (json["alerts_emitted"] as? UInt64)
                 ?? UInt64(json["alerts_emitted"] as? Int ?? 0),
-            sysextHasFDA: json["sysext_has_fda"] as? Bool
+            sysextHasFDA: json["sysext_has_fda"] as? Bool,
+            eventTypeCounts1h: json["event_type_counts_1h"] as? [String: Int]
         )
+    }
+
+    /// mtime of the TCC snapshot the last time we decoded it (v1.7.1).
+    private var lastTCCSnapshotMtime: Date?
+
+    /// Refresh TCC current-state matrix from the daemon's
+    /// `<dataDir>/tcc_snapshot.json`. The rebuilt Permissions panel
+    /// uses this for the app × service matrix views.
+    func refreshTCCSnapshot() {
+        let path = dataDir + "/tcc_snapshot.json"
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let mtime, let last = lastTCCSnapshotMtime, mtime <= last {
+            return
+        }
+        guard let snapshot = TCCMonitor.readSnapshot(at: path) else { return }
+        tccSnapshotEntries = snapshot.entries
+        tccSnapshotLastRefresh = snapshot.writtenAt
+        lastTCCSnapshotMtime = mtime
     }
 
     /// Path to the daemon-written security-tool integrations snapshot.
@@ -219,6 +244,28 @@ final class AppState: ObservableObject {
     /// mtime of the MCP-baseline snapshot the last time we decoded it.
     /// Same skip-on-unchanged optimization as `lastLineageMtime`.
     private var lastMCPBaselineMtime: Date?
+
+    /// mtime of the rule-telemetry snapshot. v1.7.1.
+    private var lastRuleTelemetryMtime: Date?
+
+    /// Refresh per-rule fire counts + exec time stats from the daemon
+    /// snapshot at `<dataDir>/rule_telemetry.json`. The rebuilt
+    /// `RuleBrowser` reads these to show fire-count, last-fired, and
+    /// mean-exec-ms columns on each rule row.
+    func refreshRuleTelemetry() {
+        let path = dataDir + "/rule_telemetry.json"
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let mtime, let last = lastRuleTelemetryMtime, mtime <= last {
+            return
+        }
+        guard let snapshot = RuleEngine.readTelemetrySnapshot(at: path) else { return }
+        var dict: [String: RuleEngine.RuleStats] = [:]
+        dict.reserveCapacity(snapshot.stats.count)
+        for s in snapshot.stats { dict[s.ruleId] = s }
+        ruleTelemetry = dict
+        ruleTelemetryLastRefresh = snapshot.writtenAt
+        lastRuleTelemetryMtime = mtime
+    }
 
     /// Refresh the MCP baseline snapshot. Daemon writes
     /// `<dataDir>/mcp_baselines.json` every 30 s on the heartbeat
@@ -545,6 +592,15 @@ final class AppState: ObservableObject {
     @Published var mcpBaselines: [MCPServerBaseline] = []
     @Published var mcpBaselinesLastRefresh: Date?
 
+    /// Per-rule runtime telemetry, populated from `rule_telemetry.json`
+    /// (v1.7.1). Keyed by ruleId for O(1) lookup when rendering rows.
+    @Published var ruleTelemetry: [String: RuleEngine.RuleStats] = [:]
+    @Published var ruleTelemetryLastRefresh: Date?
+
+    /// Current TCC permission matrix entries (v1.7.1).
+    @Published var tccSnapshotEntries: [TCCMonitor.PublicEntry] = []
+    @Published var tccSnapshotLastRefresh: Date?
+
     // MARK: - LLM-orchestration services (v1.6.10 "move out of sysext")
     //
     // Three services that previously lived as orphan vars in DaemonState
@@ -824,6 +880,8 @@ final class AppState: ObservableObject {
         refreshThreatIntelStats()
         refreshAgentLineage()
         refreshMCPBaselines()
+        refreshRuleTelemetry()
+        refreshTCCSnapshot()
         maybeKickWatchdog()
 
         // Rules rarely change — only load once

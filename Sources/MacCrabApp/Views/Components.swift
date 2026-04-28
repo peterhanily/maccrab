@@ -5,6 +5,7 @@
 // SeverityChip, AlertRow, AlertMenuItem, SignerBadge, RuleRow.
 
 import SwiftUI
+import MacCrabCore
 
 // MARK: - SeverityChip
 
@@ -209,6 +210,9 @@ struct SignerBadge: View {
 /// A single row in the rule browser list.
 struct RuleRow: View {
     let rule: RuleViewModel
+    /// v1.7.1: per-rule runtime telemetry. Nil when no snapshot has been
+    /// loaded yet (cold start) or when the rule hasn't been evaluated.
+    var stats: RuleEngine.RuleStats? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -226,6 +230,15 @@ struct RuleRow: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.2))
+                        .clipShape(Capsule())
+                }
+                if let stats, stats.meanExecNs > 50_000_000 {
+                    Text("SLOW")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.2))
+                        .foregroundStyle(.orange)
                         .clipShape(Capsule())
                 }
                 Text(rule.level.capitalized)
@@ -258,6 +271,23 @@ struct RuleRow: View {
                         .foregroundColor(.purple)
                         .clipShape(Capsule())
                 }
+            }
+
+            if let stats {
+                HStack(spacing: 12) {
+                    Label("\(stats.fireCount) " + (stats.fireCount == 1 ? "fire" : "fires"),
+                          systemImage: "flame")
+                    if let last = stats.lastFiredAt {
+                        Label(last.formatted(.relative(presentation: .named)), systemImage: "clock")
+                    } else {
+                        Text("never fired")
+                            .foregroundStyle(.tertiary)
+                    }
+                    Label(String(format: "%.2f ms", stats.meanExecNs / 1_000_000),
+                          systemImage: "speedometer")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)

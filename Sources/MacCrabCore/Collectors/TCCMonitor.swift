@@ -40,7 +40,7 @@ public enum TCCMonitorError: Error, CustomStringConvertible {
 
 /// A single row from the TCC `access` table, representing a permission
 /// decision for one (service, client) pair.
-struct TCCEntry: Hashable, Sendable {
+struct TCCEntry: Hashable, Sendable, Codable {
     /// The TCC service identifier (e.g. `"kTCCServiceAccessibility"`).
     let service: String
     /// The client bundle identifier or executable path.
@@ -182,6 +182,90 @@ public actor TCCMonitor {
         // Install file watchers
         installWatcher(path: Self.systemDBPath, label: "system")
         installWatcher(path: Self.userDBPath, label: "user")
+    }
+
+    // MARK: - Cross-process snapshot (sysext → app, v1.7.1)
+
+    /// Public, copy-by-value snapshot of one TCC entry. Same fields as the
+    /// internal `TCCEntry` but exposed as `public` so MacCrabApp can decode
+    /// it.
+    public struct PublicEntry: Codable, Sendable, Hashable {
+        public let service: String
+        public let client: String
+        public let clientType: Int
+        public let authValue: Int
+        public let authReason: Int
+        public let indirectObjectIdentifier: String
+        public let flags: Int
+        public let lastModified: Double
+        public let source: String
+        public init(service: String, client: String, clientType: Int,
+                    authValue: Int, authReason: Int,
+                    indirectObjectIdentifier: String, flags: Int,
+                    lastModified: Double, source: String) {
+            self.service = service
+            self.client = client
+            self.clientType = clientType
+            self.authValue = authValue
+            self.authReason = authReason
+            self.indirectObjectIdentifier = indirectObjectIdentifier
+            self.flags = flags
+            self.lastModified = lastModified
+            self.source = source
+        }
+    }
+
+    /// On-disk snapshot wrapper. The dashboard's rebuilt Permissions
+    /// panel reads `<supportDir>/tcc_snapshot.json` for the current
+    /// app × service permission matrix.
+    public struct PermissionSnapshot: Codable, Sendable {
+        public let writtenAt: Date
+        public let entries: [PublicEntry]
+        public init(writtenAt: Date, entries: [PublicEntry]) {
+            self.writtenAt = writtenAt
+            self.entries = entries
+        }
+    }
+
+    /// Atomic JSON snapshot of every TCC entry the daemon has read.
+    /// Same temp+rename pattern used by `AgentLineageService`.
+    public func writeSnapshot(to path: String) {
+        let pubEntries = snapshot.values.map {
+            PublicEntry(
+                service: $0.service,
+                client: $0.client,
+                clientType: $0.clientType,
+                authValue: $0.authValue,
+                authReason: $0.authReason,
+                indirectObjectIdentifier: $0.indirectObjectIdentifier,
+                flags: $0.flags,
+                lastModified: $0.lastModified,
+                source: $0.source
+            )
+        }
+        let snap = PermissionSnapshot(writtenAt: Date(), entries: pubEntries)
+        guard let data = try? JSONEncoder().encode(snap) else { return }
+        let tmp = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp), options: .atomic)
+            do {
+                try FileManager.default.moveItem(atPath: tmp, toPath: path)
+            } catch {
+                try? FileManager.default.removeItem(atPath: path)
+                try FileManager.default.moveItem(atPath: tmp, toPath: path)
+            }
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: path
+            )
+        } catch {
+            logger.warning("Failed to write TCC snapshot: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    public nonisolated static func readSnapshot(at path: String) -> PermissionSnapshot? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? JSONDecoder().decode(PermissionSnapshot.self, from: data)
     }
 
     /// Stops monitoring and finishes the event stream.

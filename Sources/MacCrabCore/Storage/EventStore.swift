@@ -489,6 +489,25 @@ public actor EventStore {
         return results.first
     }
 
+    /// Returns event counts grouped by `event_category`, restricted to
+    /// rows newer than `since`. Used by the heartbeat writer to feed the
+    /// rebuilt ES Health panel's per-event-type breakdown. Cheap because
+    /// it walks the existing `idx_events_ts_category` composite index.
+    public func eventCountsByCategory(since: Date) throws -> [String: Int] {
+        let sql = "SELECT event_category, COUNT(*) FROM events WHERE timestamp >= ?1 GROUP BY event_category"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, since.timeIntervalSince1970)
+        var out: [String: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let cstr = sqlite3_column_text(stmt, 0) else { continue }
+            let category = String(cString: cstr)
+            let n = Int(sqlite3_column_int64(stmt, 1))
+            if n > 0 { out[category] = n }
+        }
+        return out
+    }
+
     /// Returns the total number of events in the store.
     public func count() throws -> Int {
         let sql = "SELECT COUNT(*) FROM events"
