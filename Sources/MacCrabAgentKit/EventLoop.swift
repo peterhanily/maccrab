@@ -184,7 +184,6 @@ enum EventLoop {
                                 detail: "\(credType.rawValue): \(filePath)",
                                 forProcess: aiProc.pid, path: aiProc.executable
                             )
-                            print("[CRIT] AI credential access: \(aiType?.displayName ?? "AI") -> \(credType.rawValue)")
                         }
 
                         // === Project Boundary: check writes outside project dir ===
@@ -218,7 +217,6 @@ enum EventLoop {
                                     detail: "Wrote to \(filePath) outside \(session.projectDir)",
                                     forProcess: aiProc.pid, path: aiProc.executable
                                 )
-                                print("[HIGH] AI boundary violation: \(filePath) outside \(session.projectDir)")
                             }
                             break
                         }
@@ -249,7 +247,6 @@ enum EventLoop {
                                     named: indicator, detail: detail,
                                     forProcess: aiProc.pid, path: aiProc.executable
                                 )
-                                print("[CRIT] Prompt injection in AI context: \(detail.prefix(100))")
                             }
                         }
                     }
@@ -286,9 +283,6 @@ enum EventLoop {
                             forProcess: enrichedEvent.process.pid,
                             path: enrichedEvent.process.executable
                         )
-                        let riskIcon = result.riskLevel == .critical ? "[CRIT]" : result.riskLevel == .high ? "[HIGH]" : "[MED] "
-                        print("\(riskIcon) Fresh package: \(result.name) (\(result.registry.rawValue)) -- \(result.description)")
-
                         // === Supply Chain Gate: block critical-risk packages ===
                         if state.preventionEnabled && result.riskLevel >= .high {
                             if let blocked = await state.supplyChainGate.gate(
@@ -315,7 +309,6 @@ enum EventLoop {
                                         await state.notifier.notify(alert: blockAlert)
                                     }
                                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                print("[BLOCKED] Supply chain gate killed PID \(blocked.installerPid): \(blocked.packageName)")
                             }
                         }
                     }
@@ -360,7 +353,6 @@ enum EventLoop {
                                             await state.notifier.notify(alert: alert)
                                         }
                                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                    print("[SANDBOX] Suspicious: \(execPath) -- \(analysis.blockedOperations.count) blocked ops")
                                 }
                             }
                         }
@@ -433,7 +425,6 @@ enum EventLoop {
                             await state.notifier.notify(alert: alert)
                         }
                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    print("[XPROC] \(chain.description)")
                 }
             }
             if let net = enrichedEvent.network {
@@ -659,7 +650,6 @@ enum EventLoop {
                     forProcess: enrichedEvent.process.pid,
                     path: enrichedEvent.process.executable
                 )
-                print("[CRIT] Threat intel hash match: \(enrichedEvent.process.name) CDHash=\(cdhash)")
             }
 
             // === DYLD injection via environment variables (from eslogger) ===
@@ -772,7 +762,6 @@ enum EventLoop {
                             await state.notifier.notify(alert: alert)
                         }
                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                    print("[FILE-INJECT] \(filePath): \(scanResult.threats.first ?? "injection detected")")
                 }
             }
 
@@ -846,7 +835,6 @@ enum EventLoop {
                                 suppressed: false
                             )
                             do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                            print("[LLM] Sequence analysis generated for: \(matchCopy.ruleName)")
                         }
                     }
                 }
@@ -887,7 +875,6 @@ enum EventLoop {
                                 suppressed: false
                             )
                             do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                            print("[LLM] Baseline anomaly analysis: \(parentName) → \(childName)")
                         }
                     }
                 }
@@ -942,7 +929,6 @@ enum EventLoop {
                                     suppressed: false
                                 )
                                 do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                print("[LLM] Behavioral analysis generated for: \(procName) (score: \(String(format: "%.1f", score)))")
                             }
                         }
                     }
@@ -1117,26 +1103,23 @@ enum EventLoop {
                         }
 
                         await state.notifier.notify(alert: campaignAlert)
-                        print("[CAMPAIGN] \(campaign.type.rawValue): \(campaign.title)")
 
-                        // Auto-generate a Sigma rule from the campaign
+                        // Auto-generate a Sigma rule from the campaign. RuleGenerator
+                        // writes the rule file and logs internally; the returned value
+                        // is informational only.
                         let campaignAlerts = campaign.alerts.map { a in
                             (ruleId: a.ruleId, ruleTitle: a.ruleTitle, processPath: a.processPath, tactics: a.tactics, timestamp: a.timestamp)
                         }
-                        let rule: RuleGenerator.GeneratedRule?
                         if state.llmService != nil {
-                            rule = await state.ruleGenerator.generateFromCampaignEnhanced(
+                            _ = await state.ruleGenerator.generateFromCampaignEnhanced(
                                 campaignType: campaign.type.rawValue,
                                 alerts: campaignAlerts
                             )
                         } else {
-                            rule = await state.ruleGenerator.generateFromCampaign(
+                            _ = await state.ruleGenerator.generateFromCampaign(
                                 campaignType: campaign.type.rawValue,
                                 alerts: campaignAlerts
                             )
-                        }
-                        if let rule {
-                            print("[RULE-GEN] Auto-generated: \(rule.filename)")
                         }
 
                         // LLM investigation summary + defense recommendation (non-blocking)
@@ -1191,7 +1174,6 @@ enum EventLoop {
                                         suppressed: false
                                     )
                                     do { _ = try await state.alertSink.submit(alert: summaryAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                    print("[LLM] \(label) generated for: \(campaignTitle)")
                                 }
 
                                 // Active defense recommendation (high/critical only)
@@ -1215,24 +1197,11 @@ enum EventLoop {
                                             suppressed: false
                                         )
                                         do { _ = try await state.alertSink.submit(alert: recAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                                        print("[LLM] Defense recommendation generated for: \(campaignTitle)")
                                     }
                                 }
                             }
                         }
                     }
-
-                    // Log alert to stdout
-                    let severityIcon: String
-                    switch match.severity {
-                    case .critical: severityIcon = "[CRIT]"
-                    case .high: severityIcon = "[HIGH]"
-                    case .medium: severityIcon = "[MED] "
-                    case .low: severityIcon = "[LOW] "
-                    case .informational: severityIcon = "[INFO]"
-                    }
-
-                    print("\(severityIcon) \(match.ruleName) | \(enrichedEvent.process.name) (\(enrichedEvent.process.pid)) | \(enrichedEvent.process.executable)")
 
                     // Write JSON alert to log file (with rotation at 50MB)
                     if let jsonData = try? JSONEncoder().encode(alert),
@@ -1351,7 +1320,6 @@ enum EventLoop {
                                 suppressed: false
                             )
                             do { _ = try await state.alertSink.submit(alert: analysisAlert, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
-                            print("[LLM] Alert analysis generated for: \(alertCopy.ruleTitle)")
                         }
                     }
                 }

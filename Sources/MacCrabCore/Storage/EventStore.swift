@@ -114,11 +114,11 @@ public actor EventStore {
         }
 
         if !isReadOnly {
-            Self.exec(handle, "PRAGMA journal_mode = WAL")
-            Self.exec(handle, "PRAGMA synchronous = NORMAL")
-            Self.exec(handle, "PRAGMA wal_autocheckpoint = 10000")  // Checkpoint every 10K pages (~40MB) instead of default 1K
-            Self.exec(handle, "PRAGMA cache_size = -64000")  // 64MB cache (negative = KB)
-            Self.exec(handle, "PRAGMA mmap_size = 268435456")  // 256MB memory-mapped I/O
+            // v1.6.22: pragmas centralized in StoragePragmas.applyEventStorePragmas.
+            // Cut from 64 MB cache + 256 MB mmap (v1.6.21) to 16 MB + 64 MB after
+            // 2.76 GB resident observation on a test host with 2 long-lived
+            // connections to events.db (EventStore + AlertStore).
+            StoragePragmas.applyEventStorePragmas(to: handle)
         }
         // v1.4.4: `busy_timeout = 5000` tells SQLite to retry a busy-lock
         // for up to 5 seconds instead of failing immediately with

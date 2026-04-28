@@ -79,8 +79,14 @@ public actor NetworkCollector {
     /// Creates a new `NetworkCollector`.
     ///
     /// - Parameter pollInterval: Seconds between socket enumeration sweeps.
-    ///   Defaults to 2 seconds for better visibility of short-lived connections.
-    public init(pollInterval: TimeInterval = 2.0) {
+    ///   v1.6.22 default is 10s (was 2s through v1.6.21). Each sweep walks every
+    ///   PID with `proc_pidinfo(PROC_PIDLISTFDS)` + `proc_pidfdinfo` per FD —
+    ///   ~4K syscalls for ~200 PIDs × 20 sockets each. At 2s that compounded to
+    ///   ~2M syscalls/hour from this collector alone. 10s gives 5× reduction
+    ///   while still catching short-lived C2 connections (most beaconing
+    ///   intervals are >30s anyway, and ES gives us real-time exec context for
+    ///   the spawning process).
+    public init(pollInterval: TimeInterval = 10.0) {
         self.pollInterval = pollInterval
 
         var capturedContinuation: AsyncStream<Event>.Continuation!

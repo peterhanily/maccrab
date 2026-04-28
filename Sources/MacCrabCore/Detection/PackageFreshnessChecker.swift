@@ -480,7 +480,7 @@ public actor PackageFreshnessChecker {
 
         let request = makeRequest(url: url)
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await SecureURLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { return nil }
             guard httpResponse.statusCode == 200 else {
                 logger.debug("HTTP \(httpResponse.statusCode) for \(url.absoluteString)")

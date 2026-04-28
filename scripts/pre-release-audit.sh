@@ -304,6 +304,80 @@ SYSEXT_LABEL_SD=$(grep -oE 'com\.maccrab\.agent[^"'\'' ]*' \
 check_pair "Sysext launchd label" "$SYSEXT_LABEL_CASK" "$SYSEXT_LABEL_SD"
 
 # ---------------------------------------------------------------------
+# PASS 4 — URLSession.shared in Sources/ (v1.6.22)
+# ---------------------------------------------------------------------
+# `URLSession.shared` uses URLSessionConfiguration.default, which writes
+# a disk cache (`Cache.db` + WAL/SHM) and an HSTS / cookie store
+# (`httpstorages.sqlite`) under `<container>/Library/Caches/<bundle>/`.
+# When the daemon runs as root those files land in
+# `/private/var/root/Library/Caches/com.maccrab.agent/` and stay there
+# forever — observed on a v1.6.21 test host alongside a 2.76 GB resident
+# spike. v1.6.22 routes every outbound HTTP/HTTPS through
+# `SecureURLSession.shared` (ephemeral, no disk cache, TLS 1.2+).
+#
+# The dashboard target (MacCrabApp) is allowed to use URLSession.shared
+# because Sparkle and AppKit internals depend on it; the daemon /
+# detection / enrichment / output / collector code is not.
+
+section "PASS 4 — URLSession.shared discipline (daemon target)"
+
+# Allowed dirs: dashboard target. Forbidden dirs: everything daemon-bound.
+# Filename allowlist: SecureURLSession.swift contains the comment
+# explaining what was replaced. The negative lookbehind for
+# `SecureURLSession.shared` is done via `grep -v` rather than regex
+# because BSD grep on macOS doesn't support `(?<!...)`.
+forbidden_shared=$(grep -rnE '\bURLSession\.shared\b' Sources/MacCrabCore Sources/MacCrabAgentKit Sources/MacCrabAgent Sources/maccrabd \
+    --include='*.swift' 2>/dev/null \
+    | grep -v 'SecureURLSession\.shared' \
+    | grep -v 'SecureURLSession\.swift' \
+    | grep -v -E '^[^:]+:[0-9]+:[[:space:]]*//' || true)
+
+if [[ -n "$forbidden_shared" ]]; then
+    err "URLSession.shared used in daemon-target source — replace with SecureURLSession.shared (no disk cache, TLS 1.2+):"
+    echo "$forbidden_shared" | sed 's/^/    /' >&2
+else
+    ok "No URLSession.shared usage in daemon-target source"
+fi
+
+# ---------------------------------------------------------------------
+# PASS 5 — duplicate SQLite handles to events.db (v1.6.22)
+# ---------------------------------------------------------------------
+# Each open `events.db` connection carries its own page cache (set via
+# StoragePragmas.eventCacheSizeKB) and mmap region (eventMmapSizeBytes).
+# Two long-lived connections (EventStore + AlertStore) is the audited
+# steady state; a third actor opening the same file would re-double the
+# per-connection memory cost. ThreatHunter open/close per query is OK
+# (transient, not long-lived).
+#
+# This pass counts long-lived `OpaquePointer?` declarations in actor
+# bodies that point at events.db. When the count rises above 2, the
+# release should consolidate before shipping.
+
+section "PASS 5 — events.db long-lived connection count"
+
+# Find every actor that BOTH (a) opens events.db specifically (matches
+# `appendingPathComponent("events.db")`) AND (b) declares a long-lived
+# `private var db: OpaquePointer?`. CampaignStore opens campaigns.db so
+# it is excluded by the precise path match. ThreatHunter uses a local
+# var inside `executeSQL` so it doesn't match the long-lived field
+# pattern — that's the desired pattern for a transient read.
+events_db_actors=$(grep -rln 'appendingPathComponent("events.db")' Sources/MacCrabCore/Storage Sources/MacCrabAgentKit \
+    --include='*.swift' 2>/dev/null \
+    | xargs -I {} grep -l 'private var db: OpaquePointer?' {} 2>/dev/null \
+    | sort -u || true)
+
+events_db_actor_count=$(echo "$events_db_actors" | grep -cE '\S' || true)
+
+if [[ "$events_db_actor_count" -gt 2 ]]; then
+    err "More than 2 actors hold a long-lived events.db handle — each costs cache_size + mmap_size. Consolidate (current: $events_db_actor_count):"
+    echo "$events_db_actors" | sed 's/^/    /' >&2
+elif [[ "$events_db_actor_count" -lt 2 ]]; then
+    warn "Fewer than 2 actors hold a long-lived events.db handle — has the schema changed? (count: $events_db_actor_count)"
+else
+    ok "events.db long-lived connection count is at audited target (2: EventStore + AlertStore)"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

@@ -114,10 +114,13 @@ public actor AgentLineageService {
     private let logger = Logger(subsystem: "com.maccrab.aiguard", category: "lineage")
 
     /// Maximum events stored per session. Ring buffer: once full, the
-    /// oldest event is dropped to make room. 10_000 is roughly an hour
-    /// of heavy agent activity; more than enough for interactive
-    /// investigation, and caps memory at ~1MB / session worst case.
-    public static let defaultMaxEventsPerSession = 10_000
+    /// oldest event is dropped to make room. v1.6.22 cut from 10_000 →
+    /// 2_000 — at 32 sessions × 10K events × ~300 B/event the worst-case
+    /// resident hit was ~96 MB. 2_000 covers ~12 min of heavy agent
+    /// activity per session (still enough for the timeline view to show
+    /// a meaningful window) and caps the worst case at ~19 MB across
+    /// all 32 sessions.
+    public static let defaultMaxEventsPerSession = 2_000
 
     /// Maximum number of sessions retained after they become inactive.
     /// Older sessions are evicted LRU when the limit is reached.

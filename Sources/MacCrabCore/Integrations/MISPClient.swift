@@ -209,7 +209,7 @@ public actor MISPClient {
         request.httpBody = httpBody
         request.timeoutInterval = 30
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await SecureURLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse,
               http.statusCode == 200 else { return nil }
         return data

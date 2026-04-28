@@ -22,6 +22,12 @@ enum DaemonTimers {
         // Periodic forensic scans (crash reports, power anomalies, library inventory)
         let forensicTimer = DispatchSource.makeTimerSource(queue: .global())
         forensicTimer.schedule(deadline: .now() + 120, repeating: 300) // First at 2min, then every 5min
+        // v1.6.22: counter so the library-inventory scan runs only every
+        // other forensic tick (10 min cadence) instead of every tick (5 min).
+        // The pre-v1.6.22 inline comment claimed "every other cycle" but no
+        // skip logic existed, so it ran on every fire. Tally is bumped on
+        // every fire and the scan only runs on odd values.
+        let libraryInventoryTickCounter = LockedCounter()
         forensicTimer.setEventHandler {
             Task {
                 // Crash report mining.
@@ -73,10 +79,14 @@ enum DaemonTimers {
                     catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
-                // Library inventory scan (every other cycle -- resource intensive).
-                // LibraryInventory also does its own (pid, libraryPath) dedup
-                // internally so the same loaded dylib doesn't re-alert across
-                // scans even if the surrounding AlertDeduplicator window expires.
+                // Library inventory scan (every other cycle — resource intensive).
+                // v1.6.22 made the every-other-cycle skip real (it had been a
+                // promise without an implementation). LibraryInventory also
+                // does its own (pid, libraryPath) dedup internally so the same
+                // loaded dylib doesn't re-alert across scans even if the
+                // surrounding AlertDeduplicator window expires.
+                let tick = libraryInventoryTickCounter.increment()
+                guard tick.isMultiple(of: 2) else { return }
                 let injected = await state.libraryInventory.scanAllProcesses()
                 for lib in injected {
                     let ruleId = "maccrab.forensic.injected-library"

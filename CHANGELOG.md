@@ -3,6 +3,134 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.22] — 2026-04-28
+
+Endpoint footprint reduction. Production observation on a v1.6.21
+test host showed the sysext at 2.76 GB Real / 2.65 GB Private /
+416 GB Virtual / 27 M Unix syscalls / 15 M Mach syscalls / 128 ports
+over a 7-min CPU window. v1.6.22 retargets to ~800 MB resident,
+~5 M syscalls per equivalent window through six structural cuts and
+one bug fix the audit surfaced. Zero feature, detection-rule, or
+dashboard changes.
+
+### Fixed — `CampaignStore` opened `events.db` (third long-lived handle)
+
+Pre-v1.6.22 `CampaignStore.init` called
+`dir.appendingPathComponent("events.db")` and created its `campaigns`
+table inside the shared events database — the third long-lived
+SQLite connection on one file (EventStore + AlertStore + this).
+Each handle carries its own page cache plus busy-timeout buffer; the
+extra connection contributed unnecessarily to the daemon's resident
+memory. CampaignStore now opens `campaigns.db`. The previous
+`campaigns` table inside `events.db` is left in place; the next
+size-cap-driven VACUUM reclaims the (small) space. Campaign history
+persisted before v1.6.22 will reappear as the detector re-derives
+campaigns from current alerts.
+
+### Changed — SQLite per-connection memory pragmas
+
+Centralized in `Sources/MacCrabCore/Storage/StoragePragmas.swift`.
+
+- `EventStore` — `mmap_size` 256 MB → 64 MB; `cache_size` 64 MB →
+  16 MB. Saves ~190 MB virtual + ~48 MB heap.
+- `AlertStore` — `mmap_size` 256 MB → 16 MB; `cache_size` 64 MB →
+  4 MB. Alerts table is 2–3 orders of magnitude smaller than events;
+  the previous mmap was ~99 % wasted. Saves ~240 MB virtual +
+  ~60 MB heap.
+- `wal_autocheckpoint` 10 000 pages → 1 000 pages on both stores —
+  drains the `.db-wal` file at ~4 MB instead of ~40 MB, reducing
+  transient memory and the per-checkpoint stall length.
+
+### Changed — outbound HTTP routes through `SecureURLSession.shared`
+
+Pre-v1.6.22 the daemon-target callers (`ThreatIntelFeed`,
+`MISPClient`, `FleetClient`, `CertTransparency`,
+`NotificationIntegrations`, `PackageFreshnessChecker`) used
+`URLSession.shared`. That session uses
+`URLSessionConfiguration.default`, which writes a disk cache to
+`~/Library/Caches/<bundle>/Cache.db` (+ WAL + SHM) and an HSTS /
+cookie store to `httpstorages.sqlite`. When the daemon runs as root
+those files land under `/private/var/root/Library/Caches/com.maccrab.agent/`
+and accumulate forever — observed on a v1.6.21 test host alongside
+the 2.76 GB resident spike.
+
+`SecureURLSession.shared` (new module-shared singleton) uses
+`URLSessionConfiguration.ephemeral`: no disk cache, no cookies,
+no credential storage, TLS 1.2+ enforced. Same connection-pool
+semantics as `URLSession.shared`, none of the side effects.
+
+### Changed — heap caps tightened
+
+- `AgentLineageService` per-session ring 10 000 → 2 000 events.
+  At 32 sessions × 10 000 × ~300 B/event the worst case was
+  ~96 MB resident; new worst case is ~19 MB.
+- `CampaignDetector.recentAlerts` cap 50 000 → 5 000. Kill-chain
+  detection runs on the recent campaign window (`campaignWindow`,
+  default 600 s); beyond that, alerts are time-evicted anyway. The
+  larger cap was ~100 MB heap with no detection benefit.
+- `ProcessLineage.maxProcessCount` cap 50 000 → 10 000. LRU
+  eviction prefers exited processes; a busy machine has ~200–800
+  live PIDs, so 10 000 covers the live set plus a 1-hour retention
+  window of recently-exited ones. ~30 MB heap.
+- `ThreatIntelFeed` per-IOC-type defaults: hashes 200 K → 100 K;
+  IPs 25 K → 10 K; domains 100 K → 50 K; URLs 75 K → 25 K. ~55 MB
+  heap. Age-based eviction (30-day TTL) keeps coverage current.
+
+### Changed — syscall volume per equivalent CPU window
+
+- `LibraryInventory.getLoadedLibraries` per-process region cap
+  10 000 → 2 000. Empirically every common process has fewer than
+  800 distinct memory regions; 2 000 covers Xcode and Electron
+  outliers with margin. The 10 000 cap dominated the 27 M
+  Unix-syscall total at ~200 PIDs × up to 10 K `proc_pidinfo` calls
+  per scan, every 5 minutes.
+- `LibraryInventory` scan now actually runs every-other forensic-
+  timer cycle (10 min cadence) instead of every cycle (5 min). The
+  v1.6.21 inline comment promised "every other cycle" but no skip
+  logic existed.
+- `NetworkCollector` default poll 2 s → 10 s. Each sweep walks every
+  PID with `proc_pidinfo(PROC_PIDLISTFDS)` + `proc_pidfdinfo` per
+  FD. 5× interval = 5× syscall reduction. ES gives us real-time
+  spawn context for the spawning process; the per-PID FD scan
+  doesn't need 2 s resolution.
+- `RootkitDetector` base interval 60 s → 120 s + PowerGate-gated.
+  The dual-API discrepancy detection is not latency-sensitive — a
+  true rootkit hides processes for the full daemon lifetime, not
+  for sub-minute windows.
+
+### Changed — hot-path stdout removed
+
+18 `print()` calls on the alert hot path in
+`Sources/MacCrabAgentKit/EventLoop.swift` removed. They were stdout
+duplicates of work already going through the proper
+`notifier.notify(alert:)` + `alertSink.submit(...)` paths. Net win
+is small (~10–50 µs per call × 100 alerts/s ≈ 1–5 ms/s) but real,
+and the orphan removal cleaned up unused severity-icon and
+rule-result locals along the way.
+
+### Added — `pre-release-audit.sh` Pass 4 + Pass 5
+
+Two new architectural invariants enforced at release time:
+
+- **Pass 4 — URLSession discipline.** Every outbound HTTP call in
+  `Sources/MacCrabCore`, `Sources/MacCrabAgentKit`,
+  `Sources/MacCrabAgent`, `Sources/maccrabd` must use
+  `SecureURLSession.shared`. `URLSession.shared` fails the release.
+  `MacCrabApp` is exempt because Sparkle and AppKit internals
+  depend on it.
+- **Pass 5 — `events.db` long-lived handle count.** Counts actors
+  that BOTH open `events.db` (via `appendingPathComponent("events.db")`)
+  AND declare a long-lived `private var db: OpaquePointer?`. The
+  audited target is 2 (EventStore + AlertStore); 3+ fails the
+  release. This is the pass that caught the CampaignStore bug
+  fixed in this release.
+
+### Tests
+
+892 in 179 suites pass — same count as v1.6.21. No new test files;
+all changes are behavioral / structural and covered by existing
+storage, threat-intel, and HTTP suites.
+
 ## [1.6.21] — 2026-04-28
 
 Surface completion + comprehensive multi-domain audit pass. Three small

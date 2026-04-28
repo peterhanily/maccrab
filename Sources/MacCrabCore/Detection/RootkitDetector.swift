@@ -27,7 +27,12 @@ public actor RootkitDetector {
     private var pollTask: Task<Void, Never>?
     private let pollInterval: TimeInterval
 
-    public init(pollInterval: TimeInterval = 60) {
+    public init(pollInterval: TimeInterval = 120) {
+        // v1.6.22: bumped 60s → 120s. Each scan calls proc_listallpids +
+        // sysctl(KERN_PROC_ALL) twice (once + 300ms verify) ≈ 12K syscalls.
+        // 120s halves the per-hour cost without measurably weakening detection
+        // — a true userland rootkit hides processes for the full daemon
+        // lifetime, not for sub-minute windows.
         self.pollInterval = pollInterval
         var cap: AsyncStream<HiddenProcess>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { cap = $0 }
@@ -36,11 +41,15 @@ public actor RootkitDetector {
 
     public func start() {
         guard pollTask == nil else { return }
-        let interval = pollInterval
+        let base = pollInterval
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.scan()
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                // v1.6.22: PowerGate-gated. On battery / thermal pressure the
+                // interval lengthens; the dual-API discrepancy is not latency-
+                // sensitive.
+                let adjusted = PowerGate.adjustedInterval(base: base)
+                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
             }
         }
     }

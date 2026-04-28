@@ -77,7 +77,11 @@ public actor ProcessLineage {
     ///     Defaults to 3600 (1 hour).
     ///   - maxAncestorDepth: Maximum number of ancestors to return when walking
     ///     the parent chain. Defaults to 20.
-    public init(retentionWindow: TimeInterval = 3600, maxAncestorDepth: Int = 20, maxProcessCount: Int = 50_000) {
+    // v1.6.22: maxProcessCount default cut from 50_000 → 10_000. LRU eviction
+    // prefers exited processes, and a busy machine has ~200–800 live PIDs;
+    // 10_000 covers all live PIDs plus a 1-hour retention window of recently-
+    // exited ones with comfortable headroom. ~30 MB private heap reclaimed.
+    public init(retentionWindow: TimeInterval = 3600, maxAncestorDepth: Int = 20, maxProcessCount: Int = 10_000) {
         self.retentionWindow = retentionWindow
         self.maxAncestorDepth = maxAncestorDepth
         self.maxProcessCount = maxProcessCount

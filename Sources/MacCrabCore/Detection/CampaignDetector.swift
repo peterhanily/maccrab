@@ -144,7 +144,12 @@ public actor CampaignDetector {
         // attacks, which typically go discovery → credential_access →
         // persistence → exfiltration (four tactics, by design).
         minTacticsForKillChain: Int = 4,
-        maxRecentAlerts: Int = 50_000,
+        // v1.6.22: 50_000 → 5_000. Each AlertSummary ~2 KB (paths, tactic
+        // sets, timestamps); the old cap allowed ~100 MB resident. Kill-chain
+        // detection operates on the recent window (`campaignWindow`, default
+        // 10 min) — beyond that the alerts are evicted by time anyway. The
+        // larger cap was buying nothing for detection and a lot for memory.
+        maxRecentAlerts: Int = 5_000,
         campaignDedupWindow: TimeInterval = 600
     ) {
         self.campaignWindow = campaignWindow

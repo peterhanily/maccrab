@@ -301,8 +301,12 @@ public actor LibraryInventory {
         var libraries: Set<String> = []
         var address: UInt64 = 0
 
-        // Iterate memory regions — safety limit to prevent runaway loops
-        for _ in 0..<10_000 {
+        // v1.6.22: cap dropped from 10_000 → 2_000. Empirically every common
+        // process has fewer than 800 distinct memory regions; 2_000 covers
+        // outliers (Xcode, Electron browsers) with margin. The 10_000 cap was
+        // dominating syscall volume — ~200 PIDs × up to 10K proc_pidinfo calls
+        // per forensic-timer cycle = up to 2M syscalls per scan, every 5 min.
+        for _ in 0..<2_000 {
             var regionInfo = proc_regionwithpathinfo()
             let size = proc_pidinfo(
                 pid, PROC_PIDREGIONPATHINFO, address,

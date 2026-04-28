@@ -235,12 +235,20 @@ public actor CampaignStore {
     }
 
     /// Open a CampaignStore at the default MacCrab data directory.
+    ///
+    /// v1.6.22: this used to open `events.db` and create the `campaigns`
+    /// table inside that shared file — the third long-lived SQLite
+    /// connection on the same file, accidentally inflating the per-handle
+    /// memory cost (cache_size, busy_timeout buffer) by 50 %. Now opens its
+    /// own `campaigns.db`. The previous `campaigns` table inside events.db
+    /// is left in place; SQLite ignores it and the next size-cap-driven
+    /// VACUUM reclaims the (small) space.
     public init(directory: String = "/Library/Application Support/MacCrab") throws {
         let dir = URL(fileURLWithPath: directory)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
 
-        self.databasePath = dir.appendingPathComponent("events.db").path
+        self.databasePath = dir.appendingPathComponent("campaigns.db").path
         // See EventStore.init for rationale behind 0o027/0o640.
         let oldUmask = umask(0o027)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)

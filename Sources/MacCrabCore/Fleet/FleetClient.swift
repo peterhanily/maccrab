@@ -152,7 +152,7 @@ public actor FleetClient {
             encoder.dateEncodingStrategy = .iso8601
             request.httpBody = try encoder.encode(telemetry)
 
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await SecureURLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
                 let alertCount = pendingAlerts.count
                 let iocCount = pendingIOCs.count
@@ -193,7 +193,7 @@ public actor FleetClient {
         request.timeoutInterval = 15
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await SecureURLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
 
             let decoder = JSONDecoder()
@@ -222,7 +222,7 @@ public actor FleetClient {
         request.timeoutInterval = 15
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await SecureURLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
             let result = try JSONDecoder().decode(FleetCampaignResponse.self, from: data)
             return result.campaigns

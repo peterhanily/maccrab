@@ -172,7 +172,7 @@ public actor CertTransparency {
         request.timeoutInterval = 10
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await SecureURLSession.shared.data(for: request)
 
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 return CTResult(domain: domain, certificateCount: 0, oldestCertAge: nil, newestCertAge: nil, issuers: [], isSuspicious: false, reason: nil, checkedAt: Date())

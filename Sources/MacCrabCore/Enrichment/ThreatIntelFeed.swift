@@ -92,10 +92,16 @@ public actor ThreatIntelFeed {
     /// disk growth. Beyond the cap the oldest-by-`lastSeenInFeed`
     /// records are evicted — this preserves the freshest IOCs which
     /// are the ones most likely to match recent attacks.
-    public static let defaultMaxHashes = 200_000
-    public static let defaultMaxIPs = 25_000
-    public static let defaultMaxDomains = 100_000
-    public static let defaultMaxURLs = 75_000
+    // v1.6.22: caps cut by 50–66 % across all four IOC types after 2.76 GB
+    // resident observation. Each `IOCRecord` averages ~280 B (value + source
+    // + dates + family + tags + fileType). The combined cap drop reclaims
+    // ~55 MB private heap. Age-based eviction (30-day TTL) plus the new
+    // tighter caps keep the feed coverage current without retaining a year
+    // of stale IOCs.
+    public static let defaultMaxHashes = 100_000   // was 200_000
+    public static let defaultMaxIPs = 10_000       // was 25_000
+    public static let defaultMaxDomains = 50_000   // was 100_000
+    public static let defaultMaxURLs = 25_000      // was 75_000
 
     /// Eviction threshold by age. Records that haven't appeared in
     /// any feed refresh for this long are dropped — feeds advertise
@@ -670,7 +676,7 @@ public actor ThreatIntelFeed {
         guard let url = URL(string: urlString) else { return nil }
 
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await SecureURLSession.shared.data(from: url)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 if let feedName {
                     await self.recordFeedError(feedName, reason: "HTTP \(http.statusCode)")

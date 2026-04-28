@@ -170,6 +170,31 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
         return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }
 
+    /// Process-wide shared ephemeral session for outbound HTTP that isn't bound
+    /// to a known `APIProvider` (threat-intel feeds, MISP, fleet telemetry,
+    /// webhooks, package-vuln lookups, CT logs).
+    ///
+    /// Replaces `URLSession.shared`, which uses `URLSessionConfiguration.default`
+    /// — that config writes a disk cache to `~/Library/Caches/<bundle>/Cache.db`
+    /// and an HTTP cookie/HSTS store to `httpstorages.sqlite`. Both files were
+    /// observed on a v1.6.21 test host running as root; the daemon never asked
+    /// for caching and never used the cookies. v1.6.22 routes every outbound
+    /// `Sources/` caller through this shared ephemeral session instead, which
+    /// has no on-disk backing.
+    ///
+    /// One session means one shared connection pool — matches the
+    /// `URLSession.shared` semantics that callers were already getting.
+    public static let shared: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.tlsMinimumSupportedProtocolVersion = .TLSv12
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 120
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        config.urlCache = nil
+        return URLSession(configuration: config)
+    }()
+
     /// Create a hardened URLSession for user-supplied URLs (webhooks, arbitrary
     /// outbound HTTP) where SPKI pinning can't apply because the endpoint isn't
     /// known in advance.

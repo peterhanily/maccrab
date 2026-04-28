@@ -362,7 +362,7 @@ public actor NotificationIntegrations {
         request.timeoutInterval = 10
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await SecureURLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
                 // Webhook URLs include secret tokens (Slack hooks.slack.com/
                 // services/T.../B.../<secret>; Discord similar) — `privacy:
