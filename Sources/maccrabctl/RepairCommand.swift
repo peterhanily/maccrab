@@ -119,8 +119,8 @@ func runRepair(args: [String]) async {
         .filter { $0.contains("maccrab") }
     let activated = maccrabLines.filter { $0.contains("[activated enabled]") }
     let zombies = maccrabLines.filter { $0.contains("[terminated waiting to uninstall on reboot]") }
-    if activated.count == 1 {
-        ok("Active sysext: \(activated.first!.trimmingCharacters(in: .whitespaces))")
+    if let active = activated.first, activated.count == 1 {
+        ok("Active sysext: \(active.trimmingCharacters(in: .whitespaces))")
     } else if activated.isEmpty {
         bad("No activated sysext found — open MacCrab.app and approve the extension in System Settings → General → Login Items & Extensions → Endpoint Security Extensions")
     } else {
