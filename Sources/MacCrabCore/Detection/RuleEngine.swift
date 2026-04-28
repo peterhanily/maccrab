@@ -257,22 +257,50 @@ public actor RuleEngine {
         public var totalExecNs: UInt64
         public var lastFiredAt: Date?
 
+        /// v1.7.2: bounded reservoir of recent execution times (ns).
+        /// Capped so memory stays predictable — when full, new samples
+        /// replace random older ones (Vitter Algorithm R) so percentiles
+        /// converge to the true distribution.
+        public var execSamplesNs: [UInt64]
+
         public var meanExecNs: Double {
             evaluationCount > 0 ? Double(totalExecNs) / Double(evaluationCount) : 0
         }
+
+        /// v1.7.2: percentiles computed from `execSamplesNs`. Returns nil
+        /// when the sample reservoir is empty.
+        public func percentile(_ p: Double) -> Double? {
+            guard !execSamplesNs.isEmpty else { return nil }
+            let sorted = execSamplesNs.sorted()
+            let idx = min(sorted.count - 1, max(0, Int(Double(sorted.count) * p)))
+            return Double(sorted[idx])
+        }
+        public var p50ExecNs: Double? { percentile(0.50) }
+        public var p95ExecNs: Double? { percentile(0.95) }
+        public var p99ExecNs: Double? { percentile(0.99) }
 
         public init(ruleId: String,
                     evaluationCount: UInt64 = 0,
                     fireCount: UInt64 = 0,
                     totalExecNs: UInt64 = 0,
-                    lastFiredAt: Date? = nil) {
+                    lastFiredAt: Date? = nil,
+                    execSamplesNs: [UInt64] = []) {
             self.ruleId = ruleId
             self.evaluationCount = evaluationCount
             self.fireCount = fireCount
             self.totalExecNs = totalExecNs
             self.lastFiredAt = lastFiredAt
+            self.execSamplesNs = execSamplesNs
         }
     }
+
+    /// Reservoir size per rule. 256 samples × 8 B × 420 rules ≈ 860 KB
+    /// worst case — small enough not to register against the v1.6.22
+    /// memory caps. Larger reservoirs would tighten percentile accuracy
+    /// at the tail but rule exec times are tightly distributed; 256 is
+    /// the empirical sweet spot for p50/p95/p99 to converge in <1s of
+    /// busy-machine traffic.
+    private static let reservoirSize = 256
 
     private var ruleStats: [String: RuleStats] = [:]
 
@@ -283,6 +311,19 @@ public actor RuleEngine {
         if fired {
             entry.fireCount &+= 1
             entry.lastFiredAt = eventTimestamp
+        }
+        // v1.7.2: reservoir sample for percentile computation.
+        // Vitter Algorithm R: under reservoirSize, just append; once
+        // full, replace at index `random < n` with probability
+        // reservoirSize / n.
+        if entry.execSamplesNs.count < Self.reservoirSize {
+            entry.execSamplesNs.append(elapsedNs)
+        } else {
+            let n = Int(entry.evaluationCount)
+            let r = Int.random(in: 0..<n)
+            if r < Self.reservoirSize {
+                entry.execSamplesNs[r] = elapsedNs
+            }
         }
         ruleStats[ruleId] = entry
     }

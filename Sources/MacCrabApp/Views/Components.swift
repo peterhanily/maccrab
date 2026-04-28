@@ -283,8 +283,17 @@ struct RuleRow: View {
                         Text("never fired")
                             .foregroundStyle(.tertiary)
                     }
-                    Label(String(format: "%.2f ms", stats.meanExecNs / 1_000_000),
+                    Label(String(format: "μ %.2f ms", stats.meanExecNs / 1_000_000),
                           systemImage: "speedometer")
+                    // v1.7.2 percentiles — only show when the reservoir
+                    // has enough samples to be meaningful. Pre-ship
+                    // review bumped the threshold from 20 → 50 so a
+                    // p95 from a noisy 20-sample window doesn't read
+                    // as confidently as one from 256.
+                    if stats.execSamplesNs.count >= 50,
+                       let p95 = stats.p95ExecNs {
+                        Text(String(format: "p95 %.2f ms", p95 / 1_000_000))
+                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)

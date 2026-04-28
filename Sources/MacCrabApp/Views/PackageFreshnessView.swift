@@ -34,6 +34,19 @@ struct PackageFreshnessView: View {
         var id: String { "\(info.registry.rawValue):\(info.name)" }
     }
     @State private var selectedPackage: PackageSelection?
+    /// v1.7.2: search across the local scan results by name, registry,
+    /// or risk-level keyword.
+    @State private var searchText: String = ""
+
+    private var filteredScanResults: [PackageFreshnessChecker.PackageInfo] {
+        guard !searchText.isEmpty else { return scanResults }
+        let q = searchText.lowercased()
+        return scanResults.filter {
+            $0.name.lowercased().contains(q)
+                || $0.registry.rawValue.lowercased().contains(q)
+                || $0.riskLevel.rawValue.lowercased().contains(q)
+        }
+    }
 
     private var supplyChainAlerts: [AlertViewModel] {
         appState.dashboardAlerts.filter {
@@ -56,6 +69,15 @@ struct PackageFreshnessView: View {
                         defaultValue: "Package Freshness"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Search scan results", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .frame(minWidth: 160, idealWidth: 200, maxWidth: 280)
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.top)
@@ -164,9 +186,11 @@ struct PackageFreshnessView: View {
                         if !scanResults.isEmpty {
                             Divider()
 
-                            // Show risky packages first, then safe ones collapsed
-                            let risky = scanResults.filter { $0.riskLevel >= .medium }
-                            let safe = scanResults.filter { $0.riskLevel < .medium }
+                            // v1.7.2: search filter applies before the
+                            // risky/safe split.
+                            let visible = filteredScanResults
+                            let risky = visible.filter { $0.riskLevel >= .medium }
+                            let safe = visible.filter { $0.riskLevel < .medium }
 
                             if !risky.isEmpty {
                                 Text("Flagged Packages (\(risky.count))")

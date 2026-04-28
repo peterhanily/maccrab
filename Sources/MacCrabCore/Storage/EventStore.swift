@@ -69,6 +69,21 @@ public actor EventStore {
             name: "baseline",
             sql: []
         ),
+        // v1.7.2: promote MCP attribution from raw_json to indexed
+        // columns. v1.7.0 carried these in `event.enrichments` only;
+        // the dashboard's MCPActivityView pre-v1.7.2 had to
+        // json_extract over raw_json to filter by server. Now they're
+        // top-level indexed columns with their own composite index.
+        Migration(
+            version: 2,
+            name: "add_mcp_attribution_columns",
+            sql: [
+                "ALTER TABLE events ADD COLUMN mcp_server_name TEXT",
+                "ALTER TABLE events ADD COLUMN mcp_server_category TEXT",
+                "ALTER TABLE events ADD COLUMN ai_tool_session_id TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_events_mcp_server ON events(timestamp, mcp_server_name)",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -177,15 +192,20 @@ public actor EventStore {
             try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
         }
 
-        // Prepare insert statement
+        // Prepare insert statement.
+        // v1.7.2 schema v2: 3 new indexed MCP attribution columns
+        // (mcp_server_name, mcp_server_category, ai_tool_session_id).
+        // Pulled from `event.enrichments` at insert time. Nullable —
+        // events without MCP attribution leave them nil.
         let insertSQL = """
             INSERT OR REPLACE INTO events (
                 id, timestamp, event_category, event_type, event_action, severity,
                 process_pid, process_name, process_path, process_commandline,
                 process_ppid, process_signer, process_team_id, process_signing_id,
                 file_path, file_action, network_dest_ip, network_dest_port,
-                tcc_service, tcc_client, raw_json
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+                tcc_service, tcc_client, raw_json,
+                mcp_server_name, mcp_server_category, ai_tool_session_id
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -383,6 +403,13 @@ public actor EventStore {
         bindTextOrNull(stmt, index: 20, value: event.tcc?.client)
         // 21: raw_json (sanitized)
         bindText(stmt, index: 21, value: jsonString)
+        // v1.7.2 schema v2: indexed MCP attribution columns.
+        // 22: mcp_server_name
+        bindTextOrNull(stmt, index: 22, value: event.enrichments["mcp_server_name"])
+        // 23: mcp_server_category
+        bindTextOrNull(stmt, index: 23, value: event.enrichments["mcp_server_category"])
+        // 24: ai_tool_session_id
+        bindTextOrNull(stmt, index: 24, value: event.enrichments["ai_tool_session_id"])
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {

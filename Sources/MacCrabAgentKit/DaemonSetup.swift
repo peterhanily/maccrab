@@ -344,6 +344,30 @@ enum DaemonSetup {
         let mcpBaseline = MCPBaselineService()
         print("MCP attributor + behavioral baseline active")
 
+        // v1.7.2: collector liveness registry. Pre-register the 16
+        // known collectors so the dashboard sees the full set even
+        // before any of them emits an event. `eventDriven: true` for
+        // collectors that can be quiet for hours during normal idle
+        // (USB hotplug, browser extension install, etc.).
+        let collectorRegistry = CollectorRegistry()
+        await collectorRegistry.register(name: "ESCollector", expectedIntervalSeconds: 5, eventDriven: false)
+        await collectorRegistry.register(name: "UnifiedLogCollector", expectedIntervalSeconds: 30, eventDriven: false)
+        await collectorRegistry.register(name: "NetworkCollector", expectedIntervalSeconds: 10, eventDriven: false)
+        await collectorRegistry.register(name: "DNSCollector", expectedIntervalSeconds: 30, eventDriven: false)
+        await collectorRegistry.register(name: "FSEventsCollector", expectedIntervalSeconds: 30, eventDriven: false)
+        await collectorRegistry.register(name: "TCCMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.register(name: "EDRMonitor", expectedIntervalSeconds: 120, eventDriven: true)
+        await collectorRegistry.register(name: "USBMonitor", expectedIntervalSeconds: 10, eventDriven: true)
+        await collectorRegistry.register(name: "ClipboardMonitor", expectedIntervalSeconds: 3, eventDriven: true)
+        await collectorRegistry.register(name: "UltrasonicMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.register(name: "RootkitDetector", expectedIntervalSeconds: 120, eventDriven: true)
+        await collectorRegistry.register(name: "EventTapMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: 300, eventDriven: false)
+        await collectorRegistry.register(name: "BrowserExtensionMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.register(name: "MCPMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        await collectorRegistry.register(name: "TEMPESTMonitor", expectedIntervalSeconds: 60, eventDriven: true)
+        print("Collector registry initialized — 16 collectors tracked")
+
         // USB device monitor -- detects mass storage, HID keyboard emulation
         let usbMonitor = USBMonitor(pollInterval: config.usbPollInterval)
         await usbMonitor.start()
@@ -962,6 +986,7 @@ enum DaemonSetup {
             fileInjectionScanner: fileInjectionScanner,
             mcpAttributor: mcpAttributor,
             mcpBaseline: mcpBaseline,
+            collectorRegistry: collectorRegistry,
             mcpMonitor: mcpMonitor,
             usbMonitor: usbMonitor,
             clipboardMonitor: clipboardMonitor,

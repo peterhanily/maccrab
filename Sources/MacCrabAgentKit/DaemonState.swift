@@ -69,6 +69,9 @@ final class DaemonState {
     let mcpAttributor: MCPAttributor
     let mcpBaseline: MCPBaselineService
 
+    // MARK: - Collector registry (v1.7.2)
+    let collectorRegistry: CollectorRegistry
+
     // MARK: - Monitors
     let mcpMonitor: MCPMonitor
     let usbMonitor: USBMonitor
@@ -265,6 +268,7 @@ final class DaemonState {
         fileInjectionScanner: FileInjectionScanner,
         mcpAttributor: MCPAttributor,
         mcpBaseline: MCPBaselineService,
+        collectorRegistry: CollectorRegistry,
         mcpMonitor: MCPMonitor,
         usbMonitor: USBMonitor,
         clipboardMonitor: ClipboardMonitor,
@@ -366,6 +370,7 @@ final class DaemonState {
         self.fileInjectionScanner = fileInjectionScanner
         self.mcpAttributor = mcpAttributor
         self.mcpBaseline = mcpBaseline
+        self.collectorRegistry = collectorRegistry
         self.mcpMonitor = mcpMonitor
         self.usbMonitor = usbMonitor
         self.clipboardMonitor = clipboardMonitor

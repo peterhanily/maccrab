@@ -4,6 +4,40 @@ struct PreventionView: View {
     @ObservedObject var appState: AppState
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
+    /// v1.7.2: search across recent prevention activity by ruleTitle,
+    /// description, processName, processPath.
+    @State private var searchText: String = ""
+    /// v1.7.2: when set, the prevention card detail sheet opens for
+    /// this mechanism (showing only its recent activity).
+    @State private var inspectMechanism: PreventionMechanism?
+
+    enum PreventionMechanism: String, Identifiable {
+        case dnsSinkhole = "DNS Sinkhole"
+        case networkBlocker = "Network Blocker"
+        case persistenceGuard = "Persistence Guard"
+        case sandboxAnalysis = "Sandbox Analysis"
+        case aiContainment = "AI Tool Containment"
+        case supplyChainGate = "Supply Chain Gate"
+        case tccRevocation = "TCC Revocation"
+        /// v1.7.2 review fix: explicit "Other" bucket for alerts whose
+        /// rule title doesn't match any known mechanism. Previously
+        /// fell through to `.aiContainment` which mis-labeled the drill.
+        case other = "Other Prevention"
+        var id: String { rawValue }
+        var titleFilterTokens: [String] {
+            switch self {
+            case .dnsSinkhole:      return ["sinkhole", "dns"]
+            case .networkBlocker:   return ["network", "BLOCKED"]
+            case .persistenceGuard: return ["LaunchAgent", "Persistence", "Restored"]
+            case .sandboxAnalysis:  return ["Sandbox"]
+            case .aiContainment:    return ["AI Guard", "credential", "fence"]
+            case .supplyChainGate:  return ["supply-chain", "Package Install"]
+            case .tccRevocation:    return ["Revoked", "TCC"]
+            case .other:            return [] // matches nothing; sheet shows the explanatory copy
+            }
+        }
+    }
+
     // Prevention toggle states (persisted via @AppStorage)
     @AppStorage("prevention.dnsSinkhole") private var dnsSinkholeEnabled = false
     @AppStorage("prevention.networkBlocker") private var networkBlockerEnabled = false
@@ -55,6 +89,15 @@ struct PreventionView: View {
                     Text(String(localized: "prevention.title", defaultValue: "Prevention"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Search prevention activity", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .frame(minWidth: 160, idealWidth: 200, maxWidth: 280)
+                    }
                     // Master toggle
                     Toggle(String(localized: "prevention.enableAll", defaultValue: "Enable All"), isOn: Binding(
                         get: { allEnabled },
@@ -87,26 +130,38 @@ struct PreventionView: View {
                     GroupBox(String(localized: "prevention.recentActivity", defaultValue: "Recent Prevention Activity")) {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(recentBlocks.prefix(5), id: \.id) { alert in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "xmark.shield.fill")
-                                        .foregroundColor(.red)
-                                        .font(.caption)
-                                        .accessibilityHidden(true)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(alert.ruleTitle)
+                                Button {
+                                    // v1.7.2: tap a recent block → open
+                                    // the per-mechanism drill sheet for
+                                    // the inferred mechanism.
+                                    inspectMechanism = inferMechanism(from: alert)
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "xmark.shield.fill")
+                                            .foregroundColor(.red)
                                             .font(.caption)
-                                            .fontWeight(.medium)
-                                            .lineLimit(1)
-                                        Text(alert.description)
+                                            .accessibilityHidden(true)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(alert.ruleTitle)
+                                                .font(.caption)
+                                                .fontWeight(.medium)
+                                                .lineLimit(1)
+                                            Text(alert.description)
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer()
+                                        Text(alert.timeAgoString)
                                             .font(.caption2)
                                             .foregroundColor(.secondary)
-                                            .lineLimit(1)
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
                                     }
-                                    Spacer()
-                                    Text(alert.timeAgoString)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
+                                    .contentShape(Rectangle())
                                 }
+                                .buttonStyle(.plain)
                             }
                         }
                         .padding(4)
@@ -199,6 +254,56 @@ struct PreventionView: View {
         }
         .onChange(of: toggleHash) { _ in syncPreventionConfig() }
         .onAppear { syncPreventionConfig() }
+        .sheet(item: $inspectMechanism) { mechanism in
+            mechanismDetailSheet(mechanism)
+        }
+    }
+
+    @ViewBuilder
+    private func mechanismDetailSheet(_ mechanism: PreventionMechanism) -> some View {
+        let alerts = alertsForMechanism(mechanism)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(mechanism.rawValue).font(.title2.weight(.bold))
+                Spacer()
+                Button("Close") { inspectMechanism = nil }
+                    .keyboardShortcut(.cancelAction)
+            }
+            Text("\(alerts.count) recent alert(s) attributed to this mechanism")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Divider()
+            if alerts.isEmpty {
+                Spacer()
+                Text("No activity for this mechanism yet.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(alerts.prefix(50), id: \.id) { alert in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "xmark.shield.fill")
+                                    .foregroundColor(.red)
+                                    .font(.caption)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(alert.ruleTitle).font(.subheadline.weight(.medium))
+                                    Text(alert.description).font(.caption).foregroundStyle(.secondary)
+                                    Text(alert.timeAgoString).font(.caption2).foregroundStyle(.tertiary)
+                                }
+                                Spacer()
+                            }
+                            .padding(8)
+                            .background(Color.secondary.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                    }
+                }
+            }
+        }
+        .padding()
+        .frame(minWidth: 540, minHeight: 420)
     }
 
     // === Metrics computed from alert database ===
@@ -220,11 +325,57 @@ struct PreventionView: View {
     }
 
     private var recentBlocks: [AlertViewModel] {
-        appState.dashboardAlerts.filter {
+        let base = appState.dashboardAlerts.filter {
             $0.ruleTitle.contains("BLOCKED") || $0.ruleTitle.contains("Prevention") ||
             $0.ruleTitle.contains("Sandbox") || $0.ruleTitle.contains("sinkhole") ||
             $0.ruleTitle.contains("Revoked") || $0.ruleTitle.contains("supply-chain")
-        }.prefix(5).map { $0 }
+        }
+        let filtered: [AlertViewModel]
+        if searchText.isEmpty {
+            filtered = base
+        } else {
+            let q = searchText.lowercased()
+            filtered = base.filter {
+                $0.ruleTitle.lowercased().contains(q)
+                    || $0.description.lowercased().contains(q)
+                    || ($0.processName ?? "").lowercased().contains(q)
+                    || ($0.processPath ?? "").lowercased().contains(q)
+            }
+        }
+        return Array(filtered.prefix(5))
+    }
+
+    /// v1.7.2: alerts produced by a specific prevention mechanism, for
+    /// the per-mechanism drill sheet.
+    private func alertsForMechanism(_ m: PreventionMechanism) -> [AlertViewModel] {
+        let tokens = m.titleFilterTokens.map { $0.lowercased() }
+        return appState.dashboardAlerts.filter { alert in
+            let title = alert.ruleTitle.lowercased()
+            return tokens.contains(where: { title.contains($0) })
+        }
+    }
+
+    /// v1.7.2: best-guess mapping from an alert to the prevention
+    /// mechanism that fired it, used to drill from a Recent Activity
+    /// row into the per-mechanism sheet.
+    private func inferMechanism(from alert: AlertViewModel) -> PreventionMechanism {
+        let title = alert.ruleTitle.lowercased()
+        if title.contains("sinkhole") || title.contains("dns") {
+            return .dnsSinkhole
+        } else if title.contains("supply-chain") || title.contains("package") {
+            return .supplyChainGate
+        } else if title.contains("network") && title.contains("blocked") {
+            return .networkBlocker
+        } else if title.contains("sandbox") {
+            return .sandboxAnalysis
+        } else if title.contains("revoked") || title.contains("tcc") {
+            return .tccRevocation
+        } else if title.contains("launchagent") || title.contains("persistence") {
+            return .persistenceGuard
+        } else if title.contains("ai guard") || title.contains("credential") || title.contains("fence") {
+            return .aiContainment
+        }
+        return .other
     }
 
     private var allEnabled: Bool {

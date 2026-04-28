@@ -16,6 +16,7 @@ enum MonitorTasks {
         if !state.isRoot {
             await supervisor.start("fsevents") {
                 for await event in state.fsEventsCollector.events {
+                    await state.collectorRegistry.recordTick(name: "FSEventsCollector")
                     // Route FSEvents through the enrichment + detection pipeline
                     let enriched = await state.enricher.enrich(event)
                     try? await state.eventStore.insert(event: enriched)
@@ -57,6 +58,7 @@ enum MonitorTasks {
         // Event tap monitoring task (keylogger detection)
         await supervisor.start("event-tap") {
             for await tapInfo in state.eventTapMonitor.events {
+                await state.collectorRegistry.recordTick(name: "EventTapMonitor")
                 let alert = Alert(
                     ruleId: "maccrab.deep.event-tap-keylogger",
                     ruleTitle: "Suspicious Event Tap: \(tapInfo.processName) Monitoring Keyboard",
@@ -87,6 +89,7 @@ enum MonitorTasks {
         // System policy monitoring task
         await supervisor.start("system-policy") {
             for await policyEvent in state.systemPolicyMonitor.events {
+                await state.collectorRegistry.recordTick(name: "SystemPolicyMonitor")
                 let alert = Alert(
                     ruleId: "maccrab.deep.\(policyEvent.type.rawValue)",
                     ruleTitle: "System Policy: \(policyEvent.type.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
@@ -134,6 +137,7 @@ enum MonitorTasks {
         // MCP server monitoring task
         await supervisor.start("mcp") {
             for await mcpEvent in state.mcpMonitor.events {
+                await state.collectorRegistry.recordTick(name: "MCPMonitor")
                 let severity: Severity = mcpEvent.eventType == .suspicious ? .critical : .high
                 let alert = Alert(
                     ruleId: "maccrab.ai-guard.mcp-\(mcpEvent.eventType.rawValue)",
@@ -210,6 +214,7 @@ enum MonitorTasks {
         let usbRateLimiter = USBRateLimiter()
         await supervisor.start("usb") {
             for await usbEvent in state.usbMonitor.events {
+                await state.collectorRegistry.recordTick(name: "USBMonitor")
                 let severity: Severity
                 if usbEvent.isMassStorage {
                     severity = .high
@@ -266,6 +271,7 @@ enum MonitorTasks {
         _ = state.clipboardInjectionDetector  // Available for dashboard/CLI on-demand scanning
         await supervisor.start("clipboard") {
             for await clipEvent in state.clipboardMonitor.events {
+                await state.collectorRegistry.recordTick(name: "ClipboardMonitor")
                 if clipEvent.containsSensitiveData {
                     let alert = Alert(
                         ruleId: "maccrab.clipboard.sensitive-data",
@@ -286,6 +292,7 @@ enum MonitorTasks {
         // Browser extension monitoring task
         await supervisor.start("browser-extensions") {
             for await extEvent in state.browserExtMonitor.events {
+                await state.collectorRegistry.recordTick(name: "BrowserExtensionMonitor")
                 // Browser extension monitor fires an initial inventory scan
                 // on startup — those aren't installs we just watched happen.
                 // During the warm-up window, only surface genuinely suspicious
@@ -314,6 +321,7 @@ enum MonitorTasks {
         // Ultrasonic attack monitoring task
         await supervisor.start("ultrasonic") {
             for await usEvent in state.ultrasonicMonitor.events {
+                await state.collectorRegistry.recordTick(name: "UltrasonicMonitor")
                 let alert = Alert(
                     ruleId: "maccrab.ultrasonic.\(usEvent.attackType.rawValue)",
                     ruleTitle: "Ultrasonic Attack Detected: \(usEvent.attackType.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)",
@@ -336,6 +344,7 @@ enum MonitorTasks {
         // Rootkit detection task
         await supervisor.start("rootkit") {
             for await hidden in state.rootkitDetector.events {
+                await state.collectorRegistry.recordTick(name: "RootkitDetector")
                 let alert = Alert(
                     ruleId: "maccrab.forensic.hidden-process",
                     ruleTitle: "Hidden Process Detected (Possible Rootkit)",
@@ -358,6 +367,7 @@ enum MonitorTasks {
         // TEMPEST / Van Eck phreaking monitoring task
         await supervisor.start("tempest") {
             for await tempestEvent in state.tempestMonitor.events {
+                await state.collectorRegistry.recordTick(name: "TEMPESTMonitor")
                 let alert = Alert(
                     ruleId: "maccrab.tempest.\(tempestEvent.type.rawValue)",
                     ruleTitle: tempestEvent.title,
@@ -416,6 +426,7 @@ enum MonitorTasks {
         // EDR/RMM tool monitoring task
         await supervisor.start("edr-rmm") {
             for await discovery in state.edrMonitor.events {
+                await state.collectorRegistry.recordTick(name: "EDRMonitor")
                 let capList = discovery.capabilities.prefix(4).joined(separator: ", ")
                 let processInfo = discovery.processName.map { " (process: \($0), PID: \(discovery.pid ?? 0))" } ?? ""
                 let installedInfo = discovery.installedPath.map { " (installed: \($0))" } ?? ""
@@ -485,6 +496,7 @@ enum MonitorTasks {
         // DNS event processing task
         await supervisor.start("dns") {
             for await dnsQuery in state.dnsCollector.events {
+                await state.collectorRegistry.recordTick(name: "DNSCollector")
                 // Record resolution for IP-to-domain correlation
                 if dnsQuery.isResponse && !dnsQuery.resolvedIPs.isEmpty {
                     await state.dnsCollector.recordResolution(domain: dnsQuery.queryName, ips: dnsQuery.resolvedIPs)

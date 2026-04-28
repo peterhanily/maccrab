@@ -440,6 +440,24 @@ enum DaemonTimers {
                 // query fails (db locked under contention, etc.).
             }
 
+            // v1.7.2: collector liveness + drop counter.
+            let collectorStatuses = await state.collectorRegistry.snapshot()
+            let droppedTotal = await state.collectorRegistry.droppedEventsTotal()
+            // Encode collectors as plain dicts for JSONSerialization
+            // compatibility (it can't take a [Codable] directly).
+            let collectorDicts: [[String: Any]] = collectorStatuses.map { s in
+                var d: [String: Any] = [
+                    "name": s.name,
+                    "event_count": s.eventCount,
+                    "error_count": s.errorCount,
+                    "expected_interval_seconds": s.expectedIntervalSeconds,
+                    "healthy": s.healthy,
+                ]
+                if let lt = s.lastTick { d["last_tick_unix"] = lt.timeIntervalSince1970 }
+                if let le = s.lastError { d["last_error"] = le }
+                return d
+            }
+
             let payload: [String: Any] = [
                 "written_at_unix": nowUnix,
                 "uptime_seconds": uptime,
@@ -448,7 +466,9 @@ enum DaemonTimers {
                 "sysext_has_fda": sysextHasFDA,
                 "fda_checked_at_unix": nowUnix,
                 "event_type_counts_1h": eventTypeCounts,
-                "schema_version": 3,
+                "collector_health": collectorDicts,
+                "events_dropped": droppedTotal,
+                "schema_version": 4,
             ]
 
             // Metrics export — Prometheus-textfile-style JSON at a world-

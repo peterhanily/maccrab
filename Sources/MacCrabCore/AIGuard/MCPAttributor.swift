@@ -251,6 +251,13 @@ public actor MCPAttributor {
         if s.hasPrefix("@modelcontextprotocol/") { return true }
         if s.hasPrefix("mcp-server-") { return true }
         if s.hasSuffix("-mcp") && s.count >= 8 { return true }
+        // v1.7.2 — additional tokens for Aider + Codex MCP shapes:
+        // - aider plugins ship as `aider_mcp_*` Python modules
+        // - OpenAI Codex CLI uses `@openai/codex-cli` and
+        //   `openai-codex-mcp-*` Node packages
+        if s.hasPrefix("aider_mcp_") { return true }
+        if s.hasPrefix("@openai/codex") { return true }
+        if s.hasPrefix("openai-codex-mcp") { return true }
         return false
     }
 
@@ -266,6 +273,13 @@ public actor MCPAttributor {
             }
             if arg.hasSuffix("-mcp") {
                 return String(arg.dropLast("-mcp".count))
+            }
+            // v1.7.2 — additional category extractors:
+            if arg.hasPrefix("aider_mcp_") {
+                return String(arg.dropFirst("aider_mcp_".count))
+            }
+            if arg.hasPrefix("openai-codex-mcp-") {
+                return String(arg.dropFirst("openai-codex-mcp-".count))
             }
         }
         // Fall back to the configured server name.

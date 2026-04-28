@@ -13,15 +13,30 @@ struct AIAnalysisView: View {
     @State private var huntResult: String = ""
     @State private var isHunting: Bool = false
     @State private var selectedAnalysis: AlertViewModel? = nil
+    /// v1.7.2: search across both investigations and recommendations.
+    /// Filters by ruleTitle, description, processName, or processPath.
+    @State private var searchText: String = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private func matchesSearch(_ alert: AlertViewModel) -> Bool {
+        guard !searchText.isEmpty else { return true }
+        let q = searchText.lowercased()
+        return alert.ruleTitle.lowercased().contains(q)
+            || alert.description.lowercased().contains(q)
+            || (alert.processName ?? "").lowercased().contains(q)
+            || (alert.processPath ?? "").lowercased().contains(q)
+    }
 
     private var investigations: [AlertViewModel] {
-        appState.aiAnalysisAlerts.filter { $0.ruleTitle.hasPrefix("Investigation Summary:") }
+        appState.aiAnalysisAlerts
+            .filter { $0.ruleTitle.hasPrefix("Investigation Summary:") }
+            .filter(matchesSearch)
     }
 
     private var recommendations: [AlertViewModel] {
-        appState.aiAnalysisAlerts.filter { $0.ruleTitle.hasPrefix("Defense Recommendation:") }
+        appState.aiAnalysisAlerts
+            .filter { $0.ruleTitle.hasPrefix("Defense Recommendation:") }
+            .filter(matchesSearch)
     }
 
     var body: some View {
@@ -32,6 +47,15 @@ struct AIAnalysisView: View {
                     Text(String(localized: "aiAnalysis.title", defaultValue: "AI Analysis"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Search investigations & recommendations", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .frame(minWidth: 180, idealWidth: 240, maxWidth: 320)
+                    }
                     llmStatusBadge
                 }
                 .padding(.horizontal)

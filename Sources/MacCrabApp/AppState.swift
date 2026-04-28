@@ -61,12 +61,34 @@ final class AppState: ObservableObject {
         /// rebuilt ES Health panel for the event-type breakdown matrix.
         var eventTypeCounts1h: [String: Int]?
 
+        /// v1.7.2 schema v4: per-collector liveness snapshot. Replaces
+        /// the hardcoded collector list in ESHealthView with daemon-
+        /// driven status. Each entry carries name, last-tick, event
+        /// count, error count, healthy bool, and the expected polling
+        /// interval. Nil for v1–v3 heartbeats.
+        var collectorHealth: [CollectorHealthEntry]?
+
+        /// v1.7.2 schema v4: aggregate count of events the daemon has
+        /// dropped (queue full, AsyncStream backpressure, parse error).
+        /// Nil for v1–v3 heartbeats.
+        var eventsDropped: UInt64?
+
         /// Ages past this are considered stale → detection engine is
         /// either hung, crashed, or replaced by a silent no-op. 120s
         /// is ~4× the 30s write cadence: tolerates one missed tick and
         /// common IO hiccups without false-positive banner.
         static let staleThreshold: TimeInterval = 120
         var isStale: Bool { Date().timeIntervalSince(writtenAt) > Self.staleThreshold }
+    }
+
+    public struct CollectorHealthEntry: Hashable, Codable {
+        public let name: String
+        public let lastTickUnix: TimeInterval?
+        public let eventCount: UInt64
+        public let errorCount: UInt64
+        public let lastError: String?
+        public let expectedIntervalSeconds: Int
+        public let healthy: Bool
     }
     @Published var heartbeat: HeartbeatSnapshot?
 
@@ -193,6 +215,43 @@ final class AppState: ObservableObject {
             }
             return
         }
+        // v1.7.2 schema v4 — collector_health array of dicts.
+        // Pre-ship review fix: don't silently drop malformed entries —
+        // log a warning so operators see "the daemon sent garbage in
+        // its heartbeat" instead of just "fewer collectors than
+        // expected." Bug-shaped daemons surface; truncated dashboards
+        // don't.
+        var collectorHealth: [CollectorHealthEntry]? = nil
+        if let arr = json["collector_health"] as? [[String: Any]] {
+            var decoded: [CollectorHealthEntry] = []
+            decoded.reserveCapacity(arr.count)
+            var droppedCount = 0
+            for d in arr {
+                guard let name = d["name"] as? String,
+                      let healthy = d["healthy"] as? Bool,
+                      let interval = d["expected_interval_seconds"] as? Int else {
+                    droppedCount += 1
+                    continue
+                }
+                decoded.append(CollectorHealthEntry(
+                    name: name,
+                    lastTickUnix: d["last_tick_unix"] as? TimeInterval,
+                    eventCount: (d["event_count"] as? UInt64)
+                        ?? UInt64(d["event_count"] as? Int ?? 0),
+                    errorCount: (d["error_count"] as? UInt64)
+                        ?? UInt64(d["error_count"] as? Int ?? 0),
+                    lastError: d["last_error"] as? String,
+                    expectedIntervalSeconds: interval,
+                    healthy: healthy
+                ))
+            }
+            if droppedCount > 0 {
+                Logger(subsystem: "com.maccrab.app", category: "heartbeat")
+                    .warning("Dropped \(droppedCount, privacy: .public) malformed collector_health entries from heartbeat — daemon may be writing inconsistent payload")
+            }
+            collectorHealth = decoded
+        }
+
         heartbeat = HeartbeatSnapshot(
             writtenAt: Date(timeIntervalSince1970: writtenAtUnix),
             uptimeSeconds: json["uptime_seconds"] as? Int ?? 0,
@@ -201,7 +260,10 @@ final class AppState: ObservableObject {
             alertsEmitted: (json["alerts_emitted"] as? UInt64)
                 ?? UInt64(json["alerts_emitted"] as? Int ?? 0),
             sysextHasFDA: json["sysext_has_fda"] as? Bool,
-            eventTypeCounts1h: json["event_type_counts_1h"] as? [String: Int]
+            eventTypeCounts1h: json["event_type_counts_1h"] as? [String: Int],
+            collectorHealth: collectorHealth,
+            eventsDropped: (json["events_dropped"] as? UInt64)
+                ?? UInt64(json["events_dropped"] as? Int ?? 0)
         )
     }
 

@@ -119,6 +119,60 @@ struct MCPAttributorPackageTokenTests {
         #expect(second == nil)
     }
 
+    @Test("Aider aider_mcp_* package token attributes correctly (v1.7.2)")
+    func aiderShapeAttribution() async throws {
+        let aider = MCPMonitor.ConfiguredServer(
+            name: "filesystem",
+            command: "python3",
+            args: ["-m", "aider_mcp_filesystem", "/tmp"],
+            tool: "claude"
+        )
+        let monitor = MCPMonitor()
+        await monitor._testInjectServer(aider)
+        let lineage = ProcessLineage()
+        await lineage.recordProcess(
+            pid: 5001, ppid: 0,
+            path: "/usr/bin/python3", name: "python3",
+            startTime: Date(),
+            commandLine: "python3 -m aider_mcp_filesystem /tmp"
+        )
+        let attributor = MCPAttributor(mcpMonitor: monitor, lineage: lineage)
+        let ancestors = await lineage.ancestors(of: 5001)
+        let attribution = await attributor.attribute(
+            pid: 5001, ancestors: ancestors, aiTool: .claudeCode
+        )
+        #expect(attribution != nil)
+        #expect(attribution?.confidence == .high)
+        #expect(attribution?.serverCategory == "filesystem")
+    }
+
+    @Test("Codex @openai/codex-cli package token attributes correctly (v1.7.2)")
+    func codexShapeAttribution() async throws {
+        let codex = MCPMonitor.ConfiguredServer(
+            name: "github",
+            command: "npx",
+            args: ["-y", "openai-codex-mcp-github"],
+            tool: "claude"
+        )
+        let monitor = MCPMonitor()
+        await monitor._testInjectServer(codex)
+        let lineage = ProcessLineage()
+        await lineage.recordProcess(
+            pid: 5101, ppid: 0,
+            path: "/usr/local/bin/node", name: "node",
+            startTime: Date(),
+            commandLine: "node /opt/openai-codex-mcp-github/dist/index.js"
+        )
+        let attributor = MCPAttributor(mcpMonitor: monitor, lineage: lineage)
+        let ancestors = await lineage.ancestors(of: 5101)
+        let attribution = await attributor.attribute(
+            pid: 5101, ancestors: ancestors, aiTool: .claudeCode
+        )
+        #expect(attribution != nil)
+        #expect(attribution?.confidence == .high)
+        #expect(attribution?.serverCategory == "github")
+    }
+
     @Test("Server category derived from package token")
     func categoryFromPackageToken() async throws {
         let github = MCPMonitor.ConfiguredServer(

@@ -154,49 +154,11 @@ struct ESHealthView: View {
                         .padding(.horizontal)
                 }
 
-                // Collector checklist
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(String(localized: "esHealth.collectors", defaultValue: "Active Collectors"))
-                        .font(.headline)
-                        .padding(.horizontal)
-
-                    let collectors: [(name: String, icon: String, note: String)] = [
-                        ("Endpoint Security", "shield.fill", "Kernel events (requires root + entitlement or eslogger)"),
-                        ("Unified Log", "doc.text.fill", "12 subsystems: TCC, AMFI, SandboxD, OpenDirectory, more"),
-                        ("Clipboard Monitor", "doc.on.clipboard", "Sensitive data + injection detection (3s poll)"),
-                        ("Browser Extension Monitor", "puzzlepiece.extension", "Chrome, Firefox, Brave, Edge, Arc (60s poll)"),
-                        ("Ultrasonic Monitor", "waveform", "DolphinAttack, NUIT, SurfingAttack (30s poll, mic required)"),
-                        ("USB Monitor", "cable.connector", "Device connect/disconnect (10s poll)"),
-                        ("Rootkit Detector", "eye.slash", "Hidden process cross-reference (120s poll)"),
-                        ("Network + DNS", "network", "Connection tracking, DoH detection, TLS fingerprinting"),
-                        ("MCP Monitor", "brain", "AI tool MCP server config drift detection"),
-                        ("Git Security Monitor", "arrow.triangle.branch", "Credential theft and hook injection detection"),
-                    ]
-
-                    VStack(spacing: 4) {
-                        ForEach(collectors, id: \.name) { collector in
-                            HStack(spacing: 10) {
-                                Image(systemName: appState.isConnected ? "checkmark.circle.fill" : "circle.dashed")
-                                    .foregroundColor(appState.isConnected ? .green : .secondary)
-                                    .frame(width: 16)
-                                    .accessibilityLabel(appState.isConnected ? "Active" : "Inactive")
-                                Image(systemName: collector.icon)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 16)
-                                    .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(collector.name).font(.subheadline)
-                                    Text(collector.note)
-                                        .font(.caption).foregroundColor(.secondary)
-                                }
-                                Spacer()
-                            }
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 4)
-                        }
-                    }
-                }
+                // v1.7.2: collector liveness from heartbeat (replaces
+                // the hardcoded collector list — daemon now reports
+                // last-tick + healthy + event count per collector).
+                collectorLiveness
+                    .padding(.horizontal)
 
                 if let refreshed = lastRefresh {
                     Text(String(localized: "esHealth.refreshed",
@@ -210,6 +172,82 @@ struct ESHealthView: View {
         }
         .navigationTitle("ES Health")
         .task { await refresh() }
+    }
+
+    // MARK: - v1.7.2 collector liveness
+
+    @ViewBuilder
+    private var collectorLiveness: some View {
+        let entries = appState.heartbeat?.collectorHealth ?? []
+        let dropped = appState.heartbeat?.eventsDropped ?? 0
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Collector liveness").font(.headline)
+                Spacer()
+                if dropped > 0 {
+                    Label("\(dropped) drops", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+                Text("\(entries.filter(\.healthy).count)/\(entries.count) healthy")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            if entries.isEmpty {
+                // v1.7.2 review fix: bumped from .tertiary → .secondary
+                // so the message stays readable on dark mode (tertiary
+                // gray-on-gray fails WCAG AA contrast).
+                Text("Awaiting first heartbeat…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 4) {
+                    ForEach(entries, id: \.name) { entry in
+                        HStack(spacing: 10) {
+                            Image(systemName: entry.healthy ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                                .foregroundColor(entry.healthy ? .green : .orange)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(spacing: 6) {
+                                    Text(entry.name).font(.subheadline)
+                                    Text("·")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                    Text("\(entry.eventCount) events")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    if entry.errorCount > 0 {
+                                        Text("\(entry.errorCount) errors")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.red)
+                                    }
+                                }
+                                if let last = entry.lastTickUnix {
+                                    Text("Last tick \(Date(timeIntervalSince1970: last).formatted(.relative(presentation: .named)))")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                } else {
+                                    Text("No events yet · expects every \(entry.expectedIntervalSeconds)s")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                if let err = entry.lastError {
+                                    Text(err)
+                                        .font(.caption2)
+                                        .foregroundStyle(.red)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - v1.7.1 sparkline

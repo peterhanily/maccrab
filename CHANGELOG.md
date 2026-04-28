@@ -3,6 +3,126 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] — 2026-04-28
+
+The 8-item carry-over queue from v1.7.0 + v1.7.1, all in one release.
+Pre-ship deep-dive review found 2 HIGH + 3 MEDIUM issues (and
+correctly rejected 1 falsely-reported BLOCKER and 1 falsely-reported
+HIGH after verification) — all real findings fixed before push.
+
+### Added — `CollectorRegistry` + heartbeat schema v4
+
+New `Sources/MacCrabAgentKit/CollectorRegistry.swift` actor. Tracks
+per-collector last-tick timestamps, event counts, error counts,
+last-error strings, derived health. 16 collectors pre-registered at
+daemon startup with characteristic intervals + event-driven flags.
+Heartbeat schema bumped v3 → v4 with `collector_health` array +
+aggregate `events_dropped` counter. Backward-compatible: older
+dashboards see legacy fields unchanged.
+
+`MonitorTasks` event-stream consumers call `recordTick(name:)` once
+per emitted event — 12 single-line insertions across the existing
+`for await event in state.<collector>.events` loops. Lazy-
+registration default after pre-ship review fix:
+`eventDriven: false, expected: 300s` + warning log so a forgotten
+explicit `register()` surfaces.
+
+### Added — `ESHealthView` daemon-driven collector list
+
+Replaces the previous hardcoded 10-entry list with the
+`heartbeat.collectorHealth` array. Per-row: name, healthy badge,
+event count, error count, last-tick relative time, last-error inline.
+Drop counter surfaces as a top banner when non-zero.
+
+### Added — Search across 4 panels (AI Analysis, Prevention, Package Freshness, Integrations)
+
+All four newly added `searchText` `@State`. Filtering applies before
+the existing categorization splits (Investigations / Recommendations,
+risky / safe, suspicious / non-suspicious, etc.).
+
+### Added — Prevention per-mechanism drill sheet
+
+Tap any "Recent Prevention Activity" row → sheet showing every
+alert attributed to the inferred mechanism (DNS sinkhole, supply
+chain gate, persistence guard, sandbox analysis, AI containment,
+network blocker, TCC revocation, Other). Mechanism inference uses
+rule-title token matching; pre-ship review added an explicit
+`.other` enum case so unknown alert titles no longer mis-bucket
+into AI Containment.
+
+### Added — Integrations per-tool drill sheet
+
+Tap any installed tool card → sheet showing path, log path, version,
+running status, and full capabilities list. New
+`ToolSelection: Identifiable` wrapper over the core
+`InstalledTool` type so `.sheet(item:)` accepts it without
+retroactive `Identifiable` conformance.
+
+### Added — Aider / Codex MCP spawn-shape matchers
+
+`MCPAttributor.looksLikePackageToken` recognizes `aider_mcp_*`
+(Python module flag form), `@openai/codex` (NPM scope), and
+`openai-codex-mcp-*` (Codex CLI MCP server form). Category
+extraction supports the new prefixes. Two new tests cover each
+shape. Carry from v1.7.0's deferred matcher list.
+
+### Added — Rule engine P50 / P95 / P99 execution percentiles
+
+`RuleEngine.RuleStats` gains an `execSamplesNs: [UInt64]` reservoir
+(256 samples × 8 B × 420 rules ≈ 860 KB worst case). Sampling uses
+Vitter Algorithm R: under reservoirSize append; once full replace
+at a uniform-random index in `[0, reservoirSize)` with probability
+`reservoirSize / evaluationCount`. Computed properties
+`p50ExecNs` / `p95ExecNs` / `p99ExecNs` derive from the reservoir.
+`RuleRow` shows p95 inline when ≥50 samples exist (threshold raised
+from 20 → 50 in pre-ship review).
+
+### Added — EventStore schema migration v2
+
+Migration v2 promotes MCP attribution from `raw_json` only (v1.7.0)
+to top-level indexed columns: `mcp_server_name`,
+`mcp_server_category`, `ai_tool_session_id`. Composite index
+`idx_events_mcp_server` on `(timestamp, mcp_server_name)`.
+Insert SQL bumped from 21 → 24 bind columns; missing attributions
+bind NULL. Migration runs inside `SchemaMigrator`'s existing
+BEGIN/COMMIT wrapper with idempotent ADD COLUMN re-run support.
+
+### Pre-ship deep-dive review
+
+Five-axis review (perf / security / stability / functionality /
+UX-accessibility) ran against v1.7.2 changes before push. 11
+candidate findings; 2 falsely-reported (Vitter R correctness was
+mathematically valid; SchemaMigrator already wrapped each migration
+in a transaction with rollback). Real fixes applied:
+
+- **HIGH**: CollectorRegistry lazy-register default
+  (`eventDriven: false`, log warning).
+- **HIGH**: AppState heartbeat decoder logs malformed
+  `collector_health` entry drops via `os.log` warning.
+- **MEDIUM**: PreventionView `.other` mechanism enum case
+  (eliminates `.aiContainment` mis-bucketing of unknown titles).
+- **MEDIUM**: RuleRow p95 threshold 20 → 50 samples.
+- **MEDIUM**: ESHealthView empty state `.tertiary` → `.secondary`
+  (WCAG AA on dark mode).
+
+### Tests
+
+918 in 185 suites pass (was 905 in v1.7.1). +13 net
+(`V172Tests.swift` + extended `MCPAttributorTests`):
+- CollectorRegistry: initial state, tick, lazy register, health
+  decay, error tracking, drop counter (6)
+- RuleEngine percentile: empty / single sample / sorted (3)
+- EventStore schema v2: fresh insert with attribution / without (2)
+- MCPAttributor: Aider + Codex shape (2)
+
+### Deferred (not blocking ship)
+
+Pre-ship review MEDIUMs not fixed: button styling consistency in
+PreventionView, IntegrationsView Scan button visibility under
+search, hardcoded collector name strings (refactor not regression).
+Future scope: per-call LLM telemetry, daemon CPU/memory in
+heartbeat, more MCP spawn shapes (await field reports).
+
 ## [1.7.1] — 2026-04-28
 
 Track 2 panel-richness audit. The carry-over from v1.6.19 → v1.6.20 →

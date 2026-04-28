@@ -14,7 +14,27 @@ struct IntegrationsView: View {
     @ObservedObject var appState: AppState
     @State private var installedTools: [SecurityToolIntegrations.InstalledTool] = []
     @State private var isScanning = false
+    /// v1.7.2: search by tool name, vendor, or category.
+    @State private var searchText: String = ""
+    /// v1.7.2: drill-in detail sheet for a clicked tool.
+    /// Wrap in an Identifiable selection so `.sheet(item:)` accepts it
+    /// without retroactive Identifiable conformance on the core type.
+    private struct ToolSelection: Identifiable {
+        let tool: SecurityToolIntegrations.InstalledTool
+        var id: String { tool.name }
+    }
+    @State private var inspectTool: ToolSelection?
     @Environment(\.accessibilityShowButtonShapes) var showButtonShapes
+
+    private var filteredTools: [SecurityToolIntegrations.InstalledTool] {
+        guard !searchText.isEmpty else { return installedTools }
+        let q = searchText.lowercased()
+        return installedTools.filter {
+            $0.name.lowercased().contains(q)
+                || ($0.version ?? "").lowercased().contains(q)
+                || $0.capabilities.contains(where: { $0.lowercased().contains(q) })
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -23,6 +43,15 @@ struct IntegrationsView: View {
                     Text(String(localized: "integrations.title", defaultValue: "Integrations"))
                         .font(.title2).fontWeight(.bold)
                     Spacer()
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Search integrations", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .frame(minWidth: 140, idealWidth: 180, maxWidth: 240)
+                    }
                     Button {
                         Task { await scanTools() }
                     } label: {
@@ -57,9 +86,14 @@ struct IntegrationsView: View {
                     }
                     .frame(maxWidth: .infinity)
                 } else {
-                    // Installed tools
-                    ForEach(installedTools, id: \.name) { tool in
-                        ToolCard(tool: tool)
+                    // Installed tools (filtered by search)
+                    ForEach(filteredTools, id: \.name) { tool in
+                        Button {
+                            inspectTool = ToolSelection(tool: tool)
+                        } label: {
+                            ToolCard(tool: tool)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal)
 
@@ -159,6 +193,59 @@ struct IntegrationsView: View {
             }
         }
         .task { await scanTools() }
+        .sheet(item: $inspectTool) { selection in
+            toolDetailSheet(selection.tool)
+        }
+    }
+
+    @ViewBuilder
+    private func toolDetailSheet(_ tool: SecurityToolIntegrations.InstalledTool) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(tool.name).font(.title2.weight(.bold))
+                Spacer()
+                Button("Close") { inspectTool = nil }.keyboardShortcut(.cancelAction)
+            }
+            HStack(spacing: 12) {
+                if let v = tool.version {
+                    Label(v, systemImage: "tag")
+                }
+                if tool.isRunning {
+                    Label("Running", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Label("Not running", systemImage: "pause.circle")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Text(tool.path).font(.caption2.monospaced()).foregroundStyle(.secondary)
+            if let log = tool.logPath {
+                Text("Log: \(log)").font(.caption2.monospaced()).foregroundStyle(.tertiary)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Capabilities").font(.headline)
+                if tool.capabilities.isEmpty {
+                    Text("(none reported)").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], alignment: .leading, spacing: 4) {
+                        ForEach(tool.capabilities, id: \.self) { cap in
+                            Text(cap)
+                                .font(.caption.monospaced())
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                    }
+                }
+            }
+            Spacer()
+        }
+        .padding()
+        .frame(minWidth: 480, minHeight: 320)
     }
 
     /// Prefer the daemon-written snapshot so the dashboard sees
