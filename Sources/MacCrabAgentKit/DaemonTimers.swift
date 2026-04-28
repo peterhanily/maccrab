@@ -3,6 +3,32 @@ import MacCrabCore
 import SQLite3
 import os.log
 
+/// v1.7.3 hotfix: thread-safe "heartbeat tick is in flight" gate.
+/// `tryAcquire` returns true only if no tick is currently running and
+/// flips the flag; `release` clears it. Used to drop new heartbeat
+/// ticks when the prior is still running, capping outstanding
+/// heartbeat Tasks at 1. Without this, slow snapshot writes caused
+/// detached Tasks to pile up holding strong DaemonState captures —
+/// observed 2.31 GB resident regression in v1.7.2.
+private final class HeartbeatInFlight: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inFlight = false
+
+    func tryAcquire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if inFlight { return false }
+        inFlight = true
+        return true
+    }
+
+    func release() {
+        lock.lock()
+        defer { lock.unlock() }
+        inFlight = false
+    }
+}
+
 /// Creates and starts all periodic timers (forensic scans, hourly tasks,
 /// stats logging, retention pruning, maintenance sweeps).
 /// Returns the timer sources so they stay alive.
@@ -403,6 +429,18 @@ enum DaemonTimers {
         // and raises a DetectionHealthBanner. The snapshot includes
         // event/alert counters + uptime so the dashboard can also
         // show rich debugging info on the ES Health page.
+        //
+        // v1.7.3 memory-regression fix: the heartbeat-in-flight guard.
+        // Pre-v1.7.3 each tick spawned 5 Tasks (1 outer for the
+        // payload write + 4 nested fire-and-forget for snapshot
+        // writers). When any snapshot write stalled (slow disk,
+        // contention), the next 30 s tick spawned 5 more — Tasks
+        // accumulated holding strong DaemonState captures. Observed
+        // 2.31 GB resident on a test host. Fix: one outer Task per
+        // tick, snapshot writes serialised via `await`, and a
+        // class-wrapped bool guard that drops new ticks if the prior
+        // is still running.
+        let heartbeatInFlight = HeartbeatInFlight()
         let heartbeatTimer = DispatchSource.makeTimerSource(queue: .global())
         heartbeatTimer.schedule(deadline: .now() + 5, repeating: 30)
         heartbeatTimer.setEventHandler {
@@ -411,7 +449,15 @@ enum DaemonTimers {
             // actor isolation. The dispatch-timer event handler itself
             // is synchronous; spawning a Task lets the body run async
             // without blocking the timer queue.
+            //
+            // v1.7.3: drop this tick if a previous one is still running.
+            // Hard cap on outstanding heartbeat Tasks = 1.
+            guard heartbeatInFlight.tryAcquire() else {
+                logger.warning("Skipping heartbeat tick — previous tick still in flight")
+                return
+            }
             Task {
+            defer { heartbeatInFlight.release() }
             // Probe sysext Full Disk Access authoritatively. The sysext
             // runs as root but TCC still gates its access to the user and
             // system TCC databases. If we can open + query the system
@@ -518,40 +564,24 @@ enum DaemonTimers {
                 try? FileManager.default.moveItem(atPath: tmp, toPath: path)
             }
 
-            // v1.6.15: write the AI lineage snapshot on the same 30 s
-            // cadence as the heartbeat. The dashboard's
-            // AIActivityTimelineView reads this file on each refresh,
-            // so a 30 s delay is the worst-case staleness an analyst
-            // sees. Cheap: O(N) over total events, capped by
-            // EventRing capacity, ~1 ms even at full caps.
+            // v1.7.3: snapshots awaited in sequence inside the same
+            // outer Task. Pre-v1.7.3 each was a separate fire-and-
+            // forget Task that captured `state` strongly. If any
+            // stalled (slow disk), they piled up. Now: one Task per
+            // tick, snapshots serialised. Total cost ~1–10 ms per
+            // tick on a healthy machine; well under the 30 s cadence.
             let lineagePath = state.supportDir + "/agent_lineage.json"
-            Task {
-                await state.agentLineageService.writeSnapshot(to: lineagePath)
-            }
+            await state.agentLineageService.writeSnapshot(to: lineagePath)
 
-            // v1.7.0: write the MCP baseline snapshot for the dashboard's
-            // MCPActivityView. Bounded by maxBaselines (256) × ~3 sets
-            // × maxSetSize (512) ≈ 393K strings worst case, but real
-            // installs see <30 baselines × <100 strings each = a few KB.
             let mcpBaselinePath = state.supportDir + "/mcp_baselines.json"
-            Task {
-                await state.mcpBaseline.writeSnapshot(to: mcpBaselinePath)
-            }
+            await state.mcpBaseline.writeSnapshot(to: mcpBaselinePath)
 
-            // v1.7.1: per-rule telemetry snapshot for the rebuilt RuleBrowser.
-            // 420 rules × ~80 bytes each ≈ 35 KB on disk. Cheap.
             let ruleTelemetryPath = state.supportDir + "/rule_telemetry.json"
-            Task {
-                await state.ruleEngine.writeTelemetrySnapshot(to: ruleTelemetryPath)
-            }
+            await state.ruleEngine.writeTelemetrySnapshot(to: ruleTelemetryPath)
 
-            // v1.7.1: TCC current-state snapshot for the rebuilt
-            // Permissions panel. ~150 entries × ~250 bytes ≈ 37 KB.
             let tccSnapshotPath = state.supportDir + "/tcc_snapshot.json"
-            Task {
-                await state.tccMonitor.writeSnapshot(to: tccSnapshotPath)
-            }
-            } // end Task wrapper around heartbeat body (v1.7.1)
+            await state.tccMonitor.writeSnapshot(to: tccSnapshotPath)
+            } // end outer Task wrapper around heartbeat body
         }
         heartbeatTimer.resume()
 

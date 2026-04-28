@@ -73,6 +73,14 @@ public actor CollectorRegistry {
     }
 
     private var entries: [String: InternalEntry] = [:]
+    /// v1.7.3 hotfix: cap on `entries`. The 16 known collectors plus
+    /// generous headroom for lazy-registers from misconfigured paths.
+    /// Without this cap, any code path that calls `recordTick` with a
+    /// novel name string (e.g. a name that includes a PID, timestamp,
+    /// or path component) would grow the dictionary unbounded — one
+    /// of the three causes of the v1.7.2 → v1.7.3 memory regression
+    /// observed at 2.31 GB resident.
+    private let maxEntries: Int
     /// Aggregate count of events the daemon dropped (queue full,
     /// AsyncStream backpressure, parse error). Bumped from anywhere
     /// via `recordDrop(reason:)`.
@@ -80,7 +88,9 @@ public actor CollectorRegistry {
 
     private let logger = Logger(subsystem: "com.maccrab.agentkit", category: "collector-registry")
 
-    public init() {}
+    public init(maxEntries: Int = 64) {
+        self.maxEntries = max(16, maxEntries)
+    }
 
     // MARK: - Registration
 
@@ -104,28 +114,50 @@ public actor CollectorRegistry {
     /// Record one event tick from a collector. Increments the event
     /// counter and refreshes `lastTick`.
     public func recordTick(name: String) {
-        guard var entry = entries[name] else {
-            // Lazy-register on first tick — collectors that started
-            // without explicit registration still appear in the panel.
-            // v1.7.2 review fix: default `eventDriven: false` and a
-            // generous 300 s expected interval. If a future polling
-            // collector forgets explicit `register()` in DaemonSetup,
-            // it now appears as a polling-class entry that goes
-            // unhealthy after a stall (instead of silently passing
-            // health checks as event-driven). The warning logs
-            // surface the missing registration to operators.
-            logger.warning("CollectorRegistry: lazy-registering unknown collector '\(name, privacy: .public)' — add an explicit register() call in DaemonSetup")
-            entries[name] = InternalEntry(
-                lastTick: Date(), eventCount: 1,
-                errorCount: 0, lastError: nil,
-                expectedIntervalSeconds: 300,
-                eventDriven: false
-            )
+        if var entry = entries[name] {
+            entry.lastTick = Date()
+            entry.eventCount &+= 1
+            entries[name] = entry
             return
         }
-        entry.lastTick = Date()
-        entry.eventCount &+= 1
-        entries[name] = entry
+        // v1.7.3: enforce the cap before lazy-registering. If full,
+        // evict the least-recently-active entry (tiebreak: never-
+        // ticked entries first, then oldest lastTick). This keeps
+        // memory bounded under name-string variance — a buggy
+        // collector that emits with PID-suffixed names can no
+        // longer grow the dictionary unbounded.
+        if entries.count >= maxEntries {
+            let victimKey: String? = {
+                // Prefer evicting an entry that has never ticked.
+                if let neverTicked = entries.first(where: { $0.value.lastTick == nil })?.key {
+                    return neverTicked
+                }
+                // Otherwise oldest-lastTick.
+                return entries.min(by: { (a, b) in
+                    (a.value.lastTick ?? .distantPast) < (b.value.lastTick ?? .distantPast)
+                })?.key
+            }()
+            if let key = victimKey {
+                entries.removeValue(forKey: key)
+                logger.warning("CollectorRegistry: cap (\(self.maxEntries, privacy: .public)) reached — evicted '\(key, privacy: .public)' to make room for '\(name, privacy: .public)'")
+            }
+        }
+        // Lazy-register on first tick — collectors that started
+        // without explicit registration still appear in the panel.
+        // v1.7.2 review fix: default `eventDriven: false` and a
+        // generous 300 s expected interval. If a future polling
+        // collector forgets explicit `register()` in DaemonSetup,
+        // it now appears as a polling-class entry that goes
+        // unhealthy after a stall (instead of silently passing
+        // health checks as event-driven). The warning logs
+        // surface the missing registration to operators.
+        logger.warning("CollectorRegistry: lazy-registering unknown collector '\(name, privacy: .public)' — add an explicit register() call in DaemonSetup")
+        entries[name] = InternalEntry(
+            lastTick: Date(), eventCount: 1,
+            errorCount: 0, lastError: nil,
+            expectedIntervalSeconds: 300,
+            eventDriven: false
+        )
     }
 
     public func recordError(name: String, message: String) {

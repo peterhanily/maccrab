@@ -83,6 +83,14 @@ public actor MCPAttributor {
     /// caching the negative result keeps the hot path O(1) on the
     /// many AI-child events that aren't actually under an MCP server.
     private var cache: [pid_t: Attribution?] = [:]
+    /// v1.7.3 LRU: parallel access-sequence map. Bumped on every
+    /// hit (lookup) and miss (insert). Eviction removes the entry
+    /// with the lowest access seq. Pre-v1.7.3 used `cache.keys.first`
+    /// which is non-deterministic on Swift Dictionary — could evict
+    /// a frequently-used entry while leaving stale ones, causing
+    /// repeat ancestor walks and elevated CPU.
+    private var accessSeq: [pid_t: UInt64] = [:]
+    private var accessCounter: UInt64 = 0
     private let cacheCap: Int
 
     private let logger = Logger(subsystem: "com.maccrab.aiguard", category: "mcp-attributor")
@@ -120,7 +128,13 @@ public actor MCPAttributor {
         ancestors: [ProcessAncestor],
         aiTool: AIToolType
     ) async -> Attribution? {
-        if let cached = cache[pid] { return cached }
+        if let cached = cache[pid] {
+            // v1.7.3: bump access seq so frequently-used entries stay
+            // in cache when eviction kicks in.
+            accessCounter &+= 1
+            accessSeq[pid] = accessCounter
+            return cached
+        }
 
         let toolKey = Self.mcpToolKey(for: aiTool)
         let configured = await mcpMonitor.serversForTool(toolKey)
@@ -182,10 +196,11 @@ public actor MCPAttributor {
     }
 
     /// Evict cached entry for an exited PID. Optional — the cache
-    /// also caps itself at `cacheCap` with LRU-by-insertion eviction —
+    /// also caps itself at `cacheCap` with LRU eviction (v1.7.3) —
     /// but calling this on every ES exit event keeps the cache lean.
     public func processExited(pid: Int32) {
         cache.removeValue(forKey: pid)
+        accessSeq.removeValue(forKey: pid)
     }
 
     // MARK: - Internals
@@ -197,17 +212,29 @@ public actor MCPAttributor {
     }
 
     private func recordHit(pid: pid_t, attribution: Attribution) {
-        if cache.count >= cacheCap, let evict = cache.keys.first {
-            cache.removeValue(forKey: evict)
-        }
+        evictIfFull()
         cache[pid] = attribution
+        accessCounter &+= 1
+        accessSeq[pid] = accessCounter
     }
 
     private func recordMiss(pid: pid_t) {
-        if cache.count >= cacheCap, let evict = cache.keys.first {
-            cache.removeValue(forKey: evict)
-        }
+        evictIfFull()
         cache[pid] = .some(nil)
+        accessCounter &+= 1
+        accessSeq[pid] = accessCounter
+    }
+
+    /// v1.7.3 LRU eviction — replaces the v1.7.0 `cache.keys.first`
+    /// which is non-deterministic on Dictionary. Walks `accessSeq`
+    /// once for the lowest-seq entry and removes it. O(n) per
+    /// eviction at the cap; called only when inserting at cap, so
+    /// amortised cost is bounded by the eviction rate.
+    private func evictIfFull() {
+        guard cache.count >= cacheCap else { return }
+        guard let victim = accessSeq.min(by: { $0.value < $1.value })?.key else { return }
+        cache.removeValue(forKey: victim)
+        accessSeq.removeValue(forKey: victim)
     }
 
     /// Score how strongly a process matches a configured server.

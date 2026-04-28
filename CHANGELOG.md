@@ -3,6 +3,97 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.3] — 2026-04-28
+
+Memory regression hotfix. The v1.6.22 perf reduction (2.76 GB →
+50 MB resident) had regressed back to 2.31 GB on a v1.7.2 test
+host. This release restores the cap.
+
+### Fixed — Heartbeat detached-Task accumulation (v1.7.1 cause)
+
+The heartbeat-every-30s body in `DaemonTimers.swift` was wrapped in
+`Task { ... }` to allow `await` across actor isolation, then
+spawned 4 nested fire-and-forget `Task { ... }` calls for snapshot
+writers (lineage, MCP baseline, rule telemetry, TCC). When any
+snapshot write stalled (slow disk, contention, busy actor), the
+next tick spawned 4 more — Tasks accumulated holding strong
+`state: DaemonState` captures.
+
+Fix: new `HeartbeatInFlight` class (NSLock + Bool) wraps the entire
+heartbeat body. `tryAcquire()` returns false if a previous tick is
+still running, dropping the new tick with one `WARN` log line. The
+4 snapshot writes are now serialised via plain `await` inside the
+outer Task. Hard cap: 1 outstanding heartbeat Task at any time.
+
+### Fixed — `CollectorRegistry.entries` uncapped (v1.7.2 cause)
+
+`recordTick(name:)` lazy-registered unknown names without an upper
+bound. Any variance in collector name strings (PIDs, paths,
+timestamps embedded in names) grew the dictionary indefinitely.
+
+Fix: `init(maxEntries: Int = 64)` parameter floored at 16. When
+`recordTick` lazy-registers and the cap is reached, evict
+oldest-by-lastTick — preferring never-ticked entries first. One
+`WARN` log per eviction surfaces missing `register()` calls.
+
+### Fixed — `MCPAttributor.cache` non-deterministic eviction (v1.7.0 cause)
+
+`cache.keys.first` removes an arbitrary entry from a Swift
+Dictionary on overflow — not LRU. Frequently-accessed entries got
+evicted; stale negative-cache entries persisted; re-walk pressure
+grew.
+
+Fix: new `accessSeq: [pid_t: UInt64]` parallel map bumped on every
+cache hit and miss. Eviction picks the entry with the lowest seq.
+Same pattern as v1.6.21 `RuleEngine.regexAccessSeq`.
+
+### Added — `pre-release-audit.sh` Pass 8
+
+Every `private var <field>: [...]` or `private var <field>: Set<...>`
+declaration in actor source files (`MacCrabCore` +
+`MacCrabAgentKit`) must show evidence of bounding:
+
+- explicit cap-and-evict logic in the same file
+  (`removeValue(forKey:)`, `removeFirst`, `removeAll`, `count >=`),
+- an inline `// bounded:` comment, or
+- an entry in the audit's `BOUNDED_FIELD_ALLOWLIST` with rationale.
+
+A v1.7.3 baseline allowlist documents 22 pre-existing fields
+(`MCPMonitor.knownServers`, `USBMonitor.knownDevices`,
+`SystemPolicyMonitor.knownPlugins`, ...) where the bound is
+external. New unbounded actor maps fail the audit and the release
+pipeline. Catches the v1.7.2 regression class going forward.
+
+### Tests
+
+922 in 187 suites pass (was 918). +4 net (`V173HotfixTests.swift`):
+CollectorRegistry cap eviction (oldest-tick), never-ticked-first
+eviction, cap floor, MCPAttributor LRU eviction.
+
+### Updated cadence
+
+→ **1.7.3** (memory regression hotfix + Pass 8 codification —
+[[v173-memory-hotfix]])
+
+### Updated key design lessons
+
+- **Detached `Task { ... }` calls inside a periodic timer
+  accumulate.** Each tick that spawns a fire-and-forget Task creates
+  a new captured-state graph. If the work doesn't complete before
+  the next tick, the captures pile up. Pre-v1.7.3 the v1.7.1
+  heartbeat spawned 5 Tasks per tick (1 outer + 4 nested). Fix:
+  one Task per tick + serialise inner writes + overlap guard.
+- **Every actor map needs a cap.** v1.7.2 added two unbounded
+  collections (`CollectorRegistry.entries`,
+  `MCPAttributor.accessSeq`) that grew with name-variance and
+  eviction-skew respectively. Pass 8 codifies the cap-or-leak
+  invariant — every `[K: V]` field on an actor needs bounding,
+  documented or explicit.
+- **Audit-then-fix beats reactive triage.** The 2 GB regression was
+  caught from real Activity Monitor data, then localised by an
+  Explore-agent audit before the fix bundle started. Same shape as
+  v1.6.22.
+
 ## [1.7.2] — 2026-04-28
 
 The 8-item carry-over queue from v1.7.0 + v1.7.1, all in one release.

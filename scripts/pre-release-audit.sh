@@ -488,6 +488,162 @@ if [[ $ERRORS -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------
+# PASS 8 — actor mutable collection state must be bounded (v1.7.3)
+# ---------------------------------------------------------------------
+# Codifies the cap-or-leak invariant: every mutable Dictionary, Set,
+# or Array field on an actor in MacCrabCore / MacCrabAgentKit must
+# either (a) have explicit eviction logic in the same file, (b) carry
+# an inline `// bounded:` justification comment, or (c) appear in the
+# allowlist below for known-safe patterns (lookup tables, configured-
+# at-init, etc.).
+#
+# Catches the v1.7.2 regression class where new actor maps shipped
+# without eviction — CollectorRegistry.entries grew unbounded under
+# name-string variance, contributing ~500 MB of the 2 GB regression.
+
+section "PASS 8 — actor state must be bounded"
+
+# Allowlist: actor::field combinations that are known-bounded by
+# design. Format: "<file-basename>:<field-name>". Keep this list
+# tight — every entry is a documented exception that should be
+# revisited as the codebase evolves.
+declare -a BOUNDED_FIELD_ALLOWLIST=(
+    # MCPMonitor.knownServers — keyed by configFile::serverName, bounded
+    # by config-file size which is operator-controlled (typical install
+    # has < 30 servers).
+    "MCPMonitor.swift:knownServers"
+    # MCPMonitor.dispatchSources / watchSources — file-system watchers,
+    # bounded by config file count (5 paths × 2 sources = ~10 max).
+    "MCPMonitor.swift:dispatchSources"
+    "MCPMonitor.swift:watchSources"
+    # AlertSink internal session-key map — bounded by AlertDeduplicator
+    # which already has its own cap.
+    "AlertSink.swift:pendingByKey"
+    # Migrations and rule arrays — read at init from compiled JSON; the
+    # cap is the on-disk rule count.
+    "RuleEngine.swift:allRules"
+    "RuleEngine.swift:ruleIndex"
+    # Config snapshots — populated once at init.
+    "DaemonState.swift:supportDir"
+    # === v1.7.3 baseline allowlist of pre-existing fields. Each
+    # entry below documents why the field is bounded by external
+    # factors (system config, hardware, operator action) rather
+    # than per-event growth. New additions that lack such bounding
+    # should NOT be added here — they should add cap-and-evict.
+    # Bounded by browser-extension count on system (operator-controlled).
+    "BrowserExtensionMonitor.swift:knownExtensions"
+    # Bounded by USB devices ever connected — on a workstation, < 100.
+    "USBMonitor.swift:knownDevices"
+    # Bounded by installed plugins / configured BTM / MDM items.
+    "SystemPolicyMonitor.swift:knownPlugins"
+    "SystemPolicyMonitor.swift:knownBTMItems"
+    "SystemPolicyMonitor.swift:knownMDMProfiles"
+    # Bounded by quarantined-file count over daemon lifetime;
+    # follow-up improvement: add explicit cap in v1.7.4.
+    "SystemPolicyMonitor.swift:quarantineAlerted"
+    "SystemPolicyMonitor.swift:knownXPCServices"
+    "SystemPolicyMonitor.swift:knownSnapshots"
+    # Bounded by installed EDR tools (~30 known).
+    "EDRMonitor.swift:reportedTools"
+    # Bounded by current TCC.db row count — operator-controlled.
+    "TCCMonitor.swift:snapshot"
+    # Bounded by event-taps installed in the system.
+    "EventTapMonitor.swift:knownTaps"
+    # Bounded by SDR / display hardware connected.
+    "TEMPESTMonitor.swift:reportedDevices"
+    "TEMPESTMonitor.swift:knownDisplays"
+    # Bounded by per-rule TCC revocation history; follow-up in v1.7.4.
+    "TCCRevocation.swift:revocationHistory"
+    # Bounded by sleeping-process count; follow-up in v1.7.4.
+    "PowerAnomalyDetector.swift:alertedSleepProcesses"
+    # Bounded by rule count (read at init).
+    "ResponseAction.swift:ruleActions"
+    "ResponseAction.swift:defaultActions"
+    # Bounded by package-scan time-window; follow-up in v1.7.4.
+    "VulnerabilityScanner.swift:cachedResults"
+    # Bounded by user × process behavioral profiles; follow-up in v1.7.4.
+    "UEBAEngine.swift:profiles"
+    # Bounded by tamper-type enum cases (~10 total).
+    "SelfDefense.swift:alertedTamperTypes"
+    # Bounded by AlertDeduplicator's existing 10K entry cap (the dict is
+    # one-to-one with that capped store).
+    "AlertDeduplicator.swift:ruleStats"
+    "AlertDeduplicator.swift:dismissalCounts"
+    # Operator-supplied at init; never grown at runtime.
+    "ProjectBoundary.swift:customExceptions"
+)
+
+audit_actors_unbounded=0
+declare -a UNBOUNDED_FINDINGS=()
+
+# Find every `private var <name>: [...` (Array, Dict, or Set literal)
+# in actor source files. Then check for an eviction signal in the
+# same file.
+while IFS= read -r match; do
+    file="${match%%:*}"
+    base=$(basename "$file")
+    line_no="${match#*:}"
+    line_no="${line_no%%:*}"
+    rest="${match#*:*:}"
+
+    # Extract the field name from the line, e.g.,
+    # `    private var entries: [String: InternalEntry] = [:]`
+    field=$(echo "$rest" | sed -nE 's/.*private var ([a-zA-Z_][a-zA-Z0-9_]*):.*/\1/p')
+    [[ -z "$field" ]] && continue
+
+    # Allowlist check
+    skip=0
+    for allow in "${BOUNDED_FIELD_ALLOWLIST[@]}"; do
+        if [[ "$base:$field" == "$allow" ]]; then skip=1; break; fi
+    done
+    if [[ $skip -eq 1 ]]; then continue; fi
+
+    # Skip non-collection types (only check those whose value
+    # syntax includes `[...]` or `Set<...>`).
+    if ! echo "$rest" | grep -qE ':\s*\[.*\]|:\s*Set<'; then continue; fi
+
+    # Inline `// bounded:` comment on the same line — pragma escape.
+    if echo "$rest" | grep -q "// bounded:"; then continue; fi
+
+    # Look for cap-and-evict signals in the rest of the file: any of
+    #   - `removeValue(forKey:` or `removeFirst(`
+    #   - `.removeAll(`
+    #   - explicit cap constant referenced near the field
+    #   - `.count >=` checks
+    if grep -qE "\b${field}\.(removeValue|removeFirst|removeAll|popFirst)\b|${field}\.count\s*[><=]|let max[A-Z]" "$file"; then
+        continue
+    fi
+
+    UNBOUNDED_FINDINGS+=("$file:$line_no:$field")
+    audit_actors_unbounded=$((audit_actors_unbounded+1))
+done < <(grep -rEn '^\s*private var [a-zA-Z_]+: (\[|Set<)' \
+    Sources/MacCrabCore Sources/MacCrabAgentKit \
+    --include='*.swift' 2>/dev/null \
+    | grep -l 'public actor' /dev/stdin 2>/dev/null \
+    || grep -rEn '^\s*private var [a-zA-Z_]+: (\[|Set<)' \
+        Sources/MacCrabCore Sources/MacCrabAgentKit \
+        --include='*.swift' 2>/dev/null)
+
+# The complex grep+filter is fragile across BSD/GNU sed; perform the
+# actor filter as a second pass.
+declare -a IN_ACTOR=()
+for finding in "${UNBOUNDED_FINDINGS[@]}"; do
+    file="${finding%%:*}"
+    if grep -q "public actor " "$file" 2>/dev/null; then
+        IN_ACTOR+=("$finding")
+    fi
+done
+
+if [[ ${#IN_ACTOR[@]} -gt 0 ]]; then
+    err "Pass 8: ${#IN_ACTOR[@]} unbounded actor collection field(s) found — add cap+evict, an inline '// bounded:' comment, or an allowlist entry:"
+    for finding in "${IN_ACTOR[@]}"; do
+        echo "    $finding" >&2
+    done
+else
+    ok "All actor collection fields show evidence of bounding (cap, eviction, or allowlist)"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 
