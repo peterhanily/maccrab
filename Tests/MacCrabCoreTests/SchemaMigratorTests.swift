@@ -174,4 +174,49 @@ struct SchemaMigratorTests {
         #expect(messages.contains(where: { $0.contains("v1") && $0.contains("first") }))
         #expect(messages.contains(where: { $0.contains("v2") && $0.contains("second") }))
     }
+
+    /// v1.7.6 regression test: when two co-resident stores share a DB file,
+    /// the second store's migrations must still run even after the first
+    /// store has bumped `user_version` to its own latest. Field-reproduced as
+    /// `prepareFailed("table alerts has no column named llm_investigation_json")`
+    /// — AlertStore opened after EventStore had pushed the counter to 2, its
+    /// `> current` filter found nothing pending, and the v2 ADD COLUMN was
+    /// silently skipped on every boot.
+    @Test("Co-resident store: second store's migrations apply when counter is at-or-ahead")
+    func coResidentSecondStoreMigrations() throws {
+        let db = openTempDB()
+        defer { db.close() }
+
+        // Phase 1: store A (analogue of EventStore) creates its table,
+        // runs its migrations, bumps user_version to 2.
+        sqlite3_exec(db.handle, "CREATE TABLE store_a (id TEXT PRIMARY KEY, val TEXT)", nil, nil, nil)
+        let storeA = [
+            Migration(version: 1, name: "a_baseline", sql: []),
+            Migration(version: 2, name: "a_add_col", sql: ["ALTER TABLE store_a ADD COLUMN extra_a TEXT"]),
+        ]
+        try SchemaMigrator.run(on: db.handle, migrations: storeA)
+        #expect(try SchemaMigrator.readVersion(db: db.handle) == 2)
+        #expect(hasColumn(db.handle, table: "store_a", column: "extra_a"))
+
+        // Phase 2: store B (analogue of AlertStore) creates ITS table — also
+        // declares migrations up to v2. counter is already at 2; pre-fix
+        // SchemaMigrator skipped the ADD COLUMN here.
+        sqlite3_exec(db.handle, "CREATE TABLE store_b (id TEXT PRIMARY KEY, val TEXT)", nil, nil, nil)
+        let storeB = [
+            Migration(version: 1, name: "b_baseline", sql: []),
+            Migration(version: 2, name: "b_add_col", sql: ["ALTER TABLE store_b ADD COLUMN extra_b TEXT"]),
+        ]
+        try SchemaMigrator.run(on: db.handle, migrations: storeB)
+
+        // Post-fix: store B's column must exist; counter must still be 2
+        // (we don't lower it, and no forward step happened).
+        #expect(hasColumn(db.handle, table: "store_b", column: "extra_b"),
+                "Co-resident second store's ADD COLUMN must run even when user_version is at-or-ahead")
+        #expect(try SchemaMigrator.readVersion(db: db.handle) == 2)
+
+        // Re-running store B is a no-op (idempotent ADD COLUMN, no counter change).
+        try SchemaMigrator.run(on: db.handle, migrations: storeB)
+        #expect(try SchemaMigrator.readVersion(db: db.handle) == 2)
+        #expect(hasColumn(db.handle, table: "store_b", column: "extra_b"))
+    }
 }

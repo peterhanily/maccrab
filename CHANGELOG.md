@@ -3,6 +3,89 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.6] — 2026-04-28
+
+Hot-fix for a v1.7.5 daemon-init crash-loop reproduced in the field.
+Root cause: a long-standing `SchemaMigrator` bug where co-resident
+stores sharing a single SQLite file silently skipped each other's
+migrations. Surfaced now because both EventStore and AlertStore hit
+version 2 in this release. Field DB had `events` table fully migrated
+but no `alerts.llm_investigation_json` column → AlertStore prepare
+crashed on every boot, daemon exited in 127 ms, launchd respawned
+every 10 s, dashboard showed "Detection engine appears silent".
+
+### Fixed — SchemaMigrator multi-store user_version skip (the actual bug)
+
+`PRAGMA user_version` is a single per-database counter, but EventStore
+and AlertStore both run their own migration chains against `events.db`.
+Pre-fix logic (`pending = migrations.filter { $0.version > current }`)
+meant whichever store opened first set the counter, and the second
+store's `pending` was empty even though its `ADD COLUMN` migration had
+never run.
+
+Fix in `Sources/MacCrabCore/Storage/SchemaMigrator.swift`: always
+re-apply this store's migrations idempotently, in version order.
+Bump `user_version` only on a forward step (`m.version > current`);
+never lower the counter. Broadened `apply()`'s already-applied
+detector from `duplicate column name` only to also include
+`already exists` for `CREATE TABLE` / `CREATE INDEX` re-runs.
+
+Cost: a few cheap fail-fast SQLite calls per store init. Benefit:
+the second store's schema actually gets applied on existing DBs
+that pre-date the new migration, with **no data loss** — events
+and alerts history is preserved (probe-verified: 448 events + 182
+alerts retained on the field-broken DB).
+
+New regression test `Co-resident store: second store's migrations
+apply when counter is at-or-ahead` in `SchemaMigratorTests.swift`
+reproduces the exact two-store sequence that was failing in prod.
+
+### Added — visible storage-init errors (defense in depth)
+
+`DaemonSetup.swift` logs storage-init failures with `.public` privacy
+so console diagnostics surface the actual SQLite error instead of
+`<private>`. Pre-v1.7.6 logs read `Failed to initialize storage: <private>`,
+leaving operators no way to diagnose without entitled `private_data:on`
+log profile (which SIP-protected machines reject).
+
+### Added — auto-recovery on storage-init failure
+
+`DaemonSetup.recoverEventStore` / `recoverAlertStore`: on init
+exception, back up `events.db{,-wal,-shm}` to a timestamped sibling
+(`events.db.corrupt-<unix-ts>`) and retry init from scratch. On
+retry-failure, writes `last_crash.json` with the original error
+and exits, halting the launchd respawn loop after the second
+consecutive failure. Used as a defense-in-depth fallback; for the
+v1.7.5 issue specifically, the SchemaMigrator fix above means
+recovery never triggers and history is preserved.
+
+### Added — startup marker before storage init
+
+`DaemonBootstrap.runForever` now writes
+`/Library/Application Support/MacCrab/sysext_started.json` as its
+very first action — synchronous, no actors, no storage. Mtime
+distinguishes "launched but crashed in init" (banner: storage
+recovery hint) from "never launched" (banner: reactivate extension).
+
+### Added — `maccrabctl repair --fix-storage`
+
+Operator escape hatch: backs up corrupt `events.db` files and lets
+the daemon recreate them on next launch. Includes `PRAGMA integrity_check`
+probe to skip the destructive backup if the DB is healthy.
+`--force-fix-storage` overrides the integrity gate. For users hit
+by the v1.7.5 SchemaMigrator bug specifically, this command is **not**
+needed — installing v1.7.6 is sufficient and preserves history.
+
+### Compatibility
+
+No data migration required. Existing v1.7.5 installs: launching
+v1.7.6 applies the missing `ADD COLUMN llm_investigation_json` to
+the existing alerts table on first boot. No events or alerts lost.
+
+No reboot or system extension re-approval required. sysextd swaps
+the binary in-place when MacCrab.app reactivates the extension
+(via Sparkle auto-update or `brew upgrade --cask maccrab`).
+
 ## [1.7.5] — 2026-04-28
 
 Architectural improvements driven by a real v1.7.3 silent-heartbeat

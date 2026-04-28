@@ -21,4 +21,10 @@ import MacCrabAgentKit
 // Shared bootstrap lives in the MacCrabAgentKit library target so the
 // standalone `maccrabd` and this system extension compile identical
 // logic from one copy; only the outermost entry point differs.
+//
+// v1.7.6: DaemonBootstrap.runForever writes a startup marker
+// `<supportDir>/sysext_started.json` as its very first action — so
+// even if storage init fails, the dashboard can distinguish "launched
+// but crashed in init" (banner: "Detection database failed — click
+// Recover") from "never launched" (banner: "Reactivate Extension").
 await DaemonBootstrap.runForever(printBanner: false)

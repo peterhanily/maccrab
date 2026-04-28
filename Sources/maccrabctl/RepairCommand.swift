@@ -74,11 +74,62 @@ private func runShell(_ command: String, args: [String]) -> (status: Int32, stdo
 
 func runRepair(args: [String]) async {
     let dryRun = args.contains("--dry-run") || args.contains("-n")
+    let fixStorage = args.contains("--fix-storage")
     let supportDir = "/Library/Application Support/MacCrab"
 
     print("\(AnsiColor.bold)MacCrab repair\(AnsiColor.reset)")
     if dryRun {
         info("dry-run mode: diagnostics only, no auto-fix actions")
+    }
+    if fixStorage {
+        info("--fix-storage: will back up corrupt events.db files and let the daemon recreate them on next launch")
+    }
+
+    // v1.7.6: --fix-storage path is the escape hatch for the case where
+    // launchd has hit its respawn-throttle ceiling and the daemon
+    // stopped trying. Mirrors what v1.7.6+ daemons do automatically on
+    // init failure (DaemonSetup.recoverEventStore).
+    if fixStorage {
+        sectionHeader("Storage recovery (--fix-storage)")
+        let dbPath = supportDir + "/events.db"
+        if !FileManager.default.fileExists(atPath: dbPath) {
+            ok("No events.db found at \(dbPath) — nothing to recover")
+        } else {
+            // Best-effort integrity check before backing up: if the DB
+            // is healthy, recovery would lose data unnecessarily.
+            let probe = runShell("/usr/bin/sqlite3", args: [dbPath, "PRAGMA integrity_check;"])
+            let result = probe.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if result == "ok" {
+                warn("integrity_check returned 'ok' — events.db doesn't appear corrupt.")
+                info("If the daemon still crashes on init, the issue is something else (permissions, schema, locking). Skipping backup. Re-run with --force-fix-storage to back up anyway.")
+                if !args.contains("--force-fix-storage") {
+                    return
+                }
+                info("--force-fix-storage set — proceeding with backup despite integrity_check ok")
+            } else {
+                warn("integrity_check failed: \(result.prefix(200)) — backing up corrupt files")
+            }
+            if !dryRun {
+                let ts = Int(Date().timeIntervalSince1970)
+                for suffix in ["", "-wal", "-shm", "-journal"] {
+                    let src = "\(supportDir)/events.db\(suffix)"
+                    let dst = "\(supportDir)/events.db\(suffix).corrupt-\(ts)"
+                    if FileManager.default.fileExists(atPath: src) {
+                        let mv = runShell("/bin/mv", args: [src, dst])
+                        if mv.status == 0 {
+                            info("moved \(src) → \(dst)")
+                        } else {
+                            warn("mv failed (status \(mv.status)): \(mv.stderr.prefix(200)) — may need sudo")
+                        }
+                    }
+                }
+                ok("Files backed up. Daemon will recreate events.db on next launch (within ~10 s via launchd respawn)")
+            } else {
+                info("dry-run: would back up events.db / -wal / -shm / -journal to .corrupt-<ts> sibling files")
+            }
+        }
+        // Continue with the standard diagnose phases below so the
+        // operator sees the post-recovery state.
     }
 
     // ─── 1. Process liveness ───────────────────────────────────────

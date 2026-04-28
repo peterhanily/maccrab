@@ -24,7 +24,7 @@ struct DaemonConfigOverridesTests {
         try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
-        let cfg = DaemonConfig.load(from: tmp)
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.maxDatabaseSizeMB == 500)
         #expect(cfg.retentionDays == 30)
     }
@@ -55,7 +55,7 @@ struct DaemonConfigOverridesTests {
             encoding: .utf8
         )
 
-        let cfg = DaemonConfig.load(from: tmp)
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.maxDatabaseSizeMB == 250)
         #expect(cfg.retentionDays == 7)
         #expect(cfg.behaviorAlertThreshold == 15.0)
@@ -82,7 +82,7 @@ struct DaemonConfigOverridesTests {
             encoding: .utf8
         )
 
-        let cfg = DaemonConfig.load(from: tmp)
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.maxDatabaseSizeMB == 300)
         #expect(cfg.retentionDays == 14)
     }
@@ -106,7 +106,7 @@ struct DaemonConfigOverridesTests {
             encoding: .utf8
         )
 
-        let cfg = DaemonConfig.load(from: tmp)
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.maxDatabaseSizeMB == 200)
         #expect(cfg.retentionDays == 30)  // default
         #expect(cfg.behaviorAlertThreshold == 10.0)  // default

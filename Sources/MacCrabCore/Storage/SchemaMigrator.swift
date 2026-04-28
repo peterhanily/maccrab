@@ -82,31 +82,41 @@ public enum SchemaMigrator {
         let current = try readVersion(db: db)
         let latest = migrations.map(\.version).max() ?? 0
 
-        // `PRAGMA user_version` is a single per-database counter. When
-        // multiple stores (EventStore, AlertStore, CampaignStore) share
-        // the same .db file, each runs its own migration chain against
-        // the same counter. A store whose max version is behind the
-        // counter must tolerate it — the counter simply records that
-        // SOME store bumped the schema. SQLite's ALTER TABLE ADD COLUMN
-        // is forward-compatible for readers, so our own tables keep
-        // working even when another store has added columns to its.
-        if current > latest {
-            logger?("DB user_version=\(current) exceeds this store's latest known v\(latest) — another co-resident store bumped it; skipping")
-            return
+        // v1.7.6: `PRAGMA user_version` is a SINGLE per-database counter,
+        // but EventStore + AlertStore (and CampaignStore in the campaigns DB)
+        // share their respective files. The previous logic
+        //
+        //     pending = migrations.filter { $0.version > current }
+        //
+        // silently dropped a store's pending migrations whenever a co-resident
+        // store had already bumped the counter. Reproduced in the field on
+        // a v1.7.5 install: EventStore opened first, ran its v1..v2, counter=2;
+        // AlertStore opened second, current==latest==2, pending=[], v2
+        // ADD COLUMN llm_investigation_json was never applied → AlertStore's
+        // INSERT prepare crashed at every boot, daemon crash-loop, "Detection
+        // engine appears silent" banner.
+        //
+        // Fix: always run all of THIS store's migrations, in version order.
+        // - apply() is idempotent for ADD COLUMN (duplicate-column-name handler).
+        // - Callers use CREATE [TABLE|INDEX] IF NOT EXISTS for table/index ops.
+        // - Bump user_version only on a forward step (m.version > current).
+        //   Lowering the counter would mis-fire the leader store's filter
+        //   on the next boot.
+        //
+        // Cost: a handful of cheap fail-fast SQLite calls per store init.
+        // Non-idempotent ops (DROP, INSERT, UPDATE in a migration body) would
+        // need per-store version tracking — none of our migrations use them.
+        let sorted = migrations.sorted(by: { $0.version < $1.version })
+        let alreadyAtOrAhead = current >= latest
+        if alreadyAtOrAhead {
+            logger?("DB user_version=\(current) at-or-ahead of v\(latest); re-applying \(sorted.count) migration(s) idempotently (no counter change)")
+        } else {
+            logger?("Migrating schema from v\(current) to v\(latest)")
         }
-
-        let pending = migrations
-            .filter { $0.version > current }
-            .sorted { $0.version < $1.version }
-
-        if pending.isEmpty {
-            logger?("Schema up to date at v\(current)")
-            return
-        }
-
-        logger?("Migrating schema from v\(current) to v\(latest) (\(pending.count) step(s))")
-        for m in pending {
-            try apply(m, db: db, logger: logger)
+        for m in sorted {
+            // Only bump on forward progress; otherwise leave the counter alone.
+            let bump = m.version > current
+            try apply(m, db: db, bumpVersion: bump, logger: logger)
         }
     }
 
@@ -130,9 +140,10 @@ public enum SchemaMigrator {
     private static func apply(
         _ m: Migration,
         db: OpaquePointer,
+        bumpVersion: Bool = true,
         logger: ((String) -> Void)?
     ) throws {
-        logger?("  Applying v\(m.version): \(m.name)")
+        logger?("  Applying v\(m.version): \(m.name)\(bumpVersion ? "" : " (idempotent re-run, no version bump)")")
 
         guard sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil) == SQLITE_OK else {
             let msg = String(cString: sqlite3_errmsg(db))
@@ -149,9 +160,15 @@ public enum SchemaMigrator {
                 let msg = errmsg.flatMap { String(cString: $0) } ?? "unknown error"
                 sqlite3_free(errmsg)
 
-                // Treat "duplicate column name" as already-applied — lets ADD COLUMN
-                // be idempotent across partial-failure retries.
-                if msg.lowercased().contains("duplicate column name") {
+                // Treat "already-exists" failures as idempotent re-runs — lets the
+                // co-resident-store branch in run() safely re-apply CREATE / ALTER
+                // statements that previously succeeded. v1.7.6 broadened this from
+                // ADD-COLUMN-only to also cover bare CREATE TABLE / CREATE INDEX
+                // (callers should use IF NOT EXISTS, but this is defense in depth
+                // for migrations that pre-date the convention).
+                let lower = msg.lowercased()
+                if lower.contains("duplicate column name")
+                    || lower.contains("already exists") {
                     logger?("    skip (already applied): \(sql.prefix(80))")
                     continue
                 }
@@ -165,11 +182,16 @@ public enum SchemaMigrator {
         }
 
         // PRAGMA user_version supports parameterized values poorly; use literal.
-        let bumpSQL = "PRAGMA user_version = \(m.version)"
-        if sqlite3_exec(db, bumpSQL, nil, nil, nil) != SQLITE_OK {
-            let msg = String(cString: sqlite3_errmsg(db))
-            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            throw SchemaMigrationError.versionWriteFailed(msg)
+        // Skip the bump on idempotent re-runs (v1.7.6) — the counter is already
+        // ahead of m.version, set by another co-resident store. Lowering it
+        // would make EventStore's pending-migration filter mis-fire next boot.
+        if bumpVersion {
+            let bumpSQL = "PRAGMA user_version = \(m.version)"
+            if sqlite3_exec(db, bumpSQL, nil, nil, nil) != SQLITE_OK {
+                let msg = String(cString: sqlite3_errmsg(db))
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                throw SchemaMigrationError.versionWriteFailed(msg)
+            }
         }
 
         if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {

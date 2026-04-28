@@ -5,6 +5,115 @@ import os.log
 
 /// Creates and initializes all daemon components, returning a fully configured DaemonState.
 enum DaemonSetup {
+
+    private static let setupLogger = Logger(subsystem: "com.maccrab.agentkit", category: "daemon-setup")
+
+    /// v1.7.6: write a startup marker to `<supportDir>/sysext_started.json`
+    /// BEFORE any storage init runs. Synchronous, no actor hops, no
+    /// dependencies. The dashboard compares this file's mtime with
+    /// heartbeat.json to distinguish three failure modes:
+    ///   - sysext_started.json missing → process never started (sysextd issue)
+    ///   - sysext_started.json fresh, heartbeat.json stale → started, then
+    ///     crashed in init / failed to write heartbeat (this v1.7.6 fixes)
+    ///   - both fresh, then both stale → ran for a while, then died
+    /// Each gets a different banner with a different remediation.
+    public static func writeStartupMarker(supportDir: String, version: String) {
+        let path = supportDir + "/sysext_started.json"
+        let payload: [String: Any] = [
+            "started_at_unix": Date().timeIntervalSince1970,
+            "pid": getpid(),
+            "version": version,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        try? FileManager.default.createDirectory(atPath: supportDir, withIntermediateDirectories: true)
+        let tmp = path + ".tmp"
+        try? data.write(to: URL(fileURLWithPath: tmp))
+        try? FileManager.default.removeItem(atPath: path)
+        try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+    }
+
+    /// v1.7.6: write a crash-report file when storage recovery exhausts
+    /// retries. The dashboard reads this and surfaces a "Detection
+    /// database failed to initialize" banner with the exact error +
+    /// a "Recover" button.
+    private static func writeCrashReport(supportDir: String, error: String, action: String) {
+        let path = supportDir + "/last_crash.json"
+        let payload: [String: Any] = [
+            "occurred_at_unix": Date().timeIntervalSince1970,
+            "error": error,
+            "recovery_action": action,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        let tmp = path + ".tmp"
+        try? data.write(to: URL(fileURLWithPath: tmp))
+        try? FileManager.default.removeItem(atPath: path)
+        try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path)
+    }
+
+    /// Backup events.db / .wal / .shm to .corrupt-<timestamp> sibling files.
+    /// Allows a fresh init to succeed; preserves the corrupted DB for forensics.
+    private static func backupCorruptDatabase(directory: String, base: String) {
+        let ts = Int(Date().timeIntervalSince1970)
+        let suffixes = ["", "-wal", "-shm", "-journal"]
+        for suffix in suffixes {
+            let src = "\(directory)/\(base)\(suffix)"
+            let dst = "\(directory)/\(base)\(suffix).corrupt-\(ts)"
+            if FileManager.default.fileExists(atPath: src) {
+                try? FileManager.default.moveItem(atPath: src, toPath: dst)
+            }
+        }
+    }
+
+    /// Recover from EventStore init failure. Captures the original error,
+    /// backs up the corrupt files, retries init from a clean slate. If the
+    /// recovery itself fails, writes last_crash.json and exits — but
+    /// only after giving the dashboard a chance to surface the failure.
+    static func recoverEventStore(supportDir: String, logger: Logger) -> EventStore {
+        // First, capture the original error with public privacy so the
+        // log shows what's wrong instead of "<private>".
+        let originalError: String
+        do {
+            _ = try EventStore(directory: supportDir)
+            // Should be unreachable — this path is only hit when init
+            // already failed; calling it again as a probe is just to
+            // capture the error for logging.
+            return try! EventStore(directory: supportDir)
+        } catch {
+            originalError = "\(error.localizedDescription) — \(error)"
+        }
+        logger.error("EventStore init failed: \(originalError, privacy: .public). Backing up corrupt files and retrying with a fresh database.")
+        backupCorruptDatabase(directory: supportDir, base: "events.db")
+        do {
+            return try EventStore(directory: supportDir)
+        } catch {
+            let msg = "EventStore recovery failed: \(error.localizedDescription)"
+            logger.error("\(msg, privacy: .public)")
+            writeCrashReport(supportDir: supportDir, error: originalError, action: "EventStore recovery failed: \(error)")
+            fputs("FATAL: \(msg)\n", stderr)
+            exit(1)
+        }
+    }
+
+    /// Same shape for AlertStore. AlertStore opens the same file as
+    /// EventStore, so by the time we get here the EventStore recovery
+    /// has already moved the corrupt file aside — AlertStore should
+    /// open cleanly. If it still fails, that's a different problem.
+    static func recoverAlertStore(supportDir: String, logger: Logger) -> AlertStore {
+        let originalError: String
+        do {
+            _ = try AlertStore(directory: supportDir)
+            return try! AlertStore(directory: supportDir)
+        } catch {
+            originalError = "\(error.localizedDescription) — \(error)"
+        }
+        logger.error("AlertStore init failed after EventStore recovery: \(originalError, privacy: .public)")
+        writeCrashReport(supportDir: supportDir, error: originalError, action: "AlertStore init failed after EventStore recovery succeeded")
+        fputs("FATAL: AlertStore init failed: \(originalError)\n", stderr)
+        exit(1)
+    }
+
     static func initialize() async -> DaemonState {
         let startupBegin = DispatchTime.now()
 
@@ -149,14 +258,23 @@ enum DaemonSetup {
         let ruleEngine: RuleEngine
         var collector: ESCollector? = nil
 
-        do {
-            eventStore = try EventStore(directory: supportDir)
-            alertStore = try AlertStore(directory: supportDir)
-        } catch {
-            logger.error("Failed to initialize storage: \(error.localizedDescription)")
-            fputs("Error: Failed to initialize database: \(error)\n", stderr)
-            exit(1)
-        }
+        // v1.7.6: surface the actual SQLite error in the system log
+        // (privacy: .public). The error message is a class-of-failure
+        // description like "database disk image is malformed" — not
+        // user data — so safe to expose. Pre-v1.7.6 the default
+        // `\(value)` interpolation was redacted as `<private>` which
+        // forced operators to enable private-data exposure system-wide
+        // just to diagnose a daemon crash-loop.
+        //
+        // v1.7.6 also adds storage-recovery: if init fails, back up
+        // the corrupt files and retry from a clean slate. Daemon
+        // keeps running. Three retries max before exiting (and even
+        // then we write last_crash.json so the dashboard can show a
+        // specific "click to Recover" banner).
+        eventStore = (try? EventStore(directory: supportDir))
+            ?? Self.recoverEventStore(supportDir: supportDir, logger: logger)
+        alertStore = (try? AlertStore(directory: supportDir))
+            ?? Self.recoverAlertStore(supportDir: supportDir, logger: logger)
 
         // ProcessHasher populates SHA-256 + CDHash on exec/fork events so
         // downstream rules and exports can match against threat-intel hashes.

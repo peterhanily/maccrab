@@ -88,6 +88,15 @@ public enum DaemonBootstrap {
     /// version (prepare + runEventLoop) exists for the sysext target,
     /// which starts an XPC listener between the two steps (Phase 3).
     public static func runForever(printBanner: Bool = true) async {
+        // v1.7.6: write the startup marker as the first action — before
+        // storage init, before any actor wiring. Pure synchronous file
+        // write. The dashboard reads `sysext_started.json` mtime to
+        // confirm the binary actually launched (vs. sysextd-stuck "I
+        // think I activated it but the process never started").
+        DaemonSetup.writeStartupMarker(
+            supportDir: "/Library/Application Support/MacCrab",
+            version: "1.7.6"
+        )
         let handles = await prepare(printBanner: printBanner)
         // Keep the handles alive for the lifetime of the event loop.
         // Swift ARC otherwise reclaims the dispatch sources.

@@ -101,7 +101,7 @@ struct DaemonConfig: Codable {
     /// system config here. Overrides are clamped by the same floors
     /// (50 MB / 1 d) the daemon already applies, so a hostile local
     /// config can't evict telemetry.
-    static func load(from directory: String) -> DaemonConfig {
+    static func load(from directory: String, applyOverrides: Bool = true) -> DaemonConfig {
         let path = directory + "/daemon_config.json"
         var config: DaemonConfig
         if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
@@ -110,7 +110,13 @@ struct DaemonConfig: Codable {
             config = DaemonConfig()
         }
 
-        applyUserOverrides(into: &config)
+        // v1.7.6: applyUserOverrides scans /Users/*/Library/Application Support/MacCrab/
+        // unconditionally — independent of `directory`. That path is real production
+        // behavior on a single-user box, but it leaked the dev's actual overrides into
+        // tests that pass a temp `directory`. Tests opt out by passing applyOverrides:false.
+        if applyOverrides {
+            applyUserOverrides(into: &config)
+        }
         return config
     }
 
