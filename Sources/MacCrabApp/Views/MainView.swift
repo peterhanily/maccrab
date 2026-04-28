@@ -235,6 +235,38 @@ struct MainView: View {
             }
         }
         .frame(minWidth: 950, minHeight: 600)
+        // v1.7.5: zombie-sysext banner. When the daemon reports many
+        // prior versions queued for uninstall on reboot, the most
+        // common cause of "engine silent" is that sysextd is in a
+        // weird state and the new sysext can't reliably start until
+        // the user reboots. This banner specifically tells them to
+        // reboot — much more actionable than the generic "engine
+        // offline" message below.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if appState.zombieSysextCount >= 3 {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundColor(.orange)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "status.zombieSysexts",
+                                    defaultValue: "\(appState.zombieSysextCount) prior MacCrab versions queued for uninstall"))
+                            .font(.subheadline.weight(.semibold))
+                        Text(String(localized: "status.zombieSysextsHint",
+                                    defaultValue: "Reboot to clear them and ensure the active version starts cleanly. After reboot, the dashboard's heartbeat banner will clear within 30 s."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.orange.opacity(0.12))
+                .overlay(alignment: .bottom) {
+                    Divider()
+                }
+            }
+        }
         // Daemon-disconnect banner — shown when connection is lost after initial
         // data load. The overview tab has its own connecting spinner for the
         // "never connected" case, so this targets the subsequent-disconnect case.

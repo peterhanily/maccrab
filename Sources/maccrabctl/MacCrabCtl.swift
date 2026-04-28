@@ -186,6 +186,8 @@ struct MacCrabCtl {
             await runAllow(args: args)
         case "why":
             await runWhy(args: args)
+        case "repair":
+            await runRepair(args: args)
         case "version":
             printVersion()
         case "help", "-h", "--help":

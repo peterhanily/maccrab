@@ -3,6 +3,90 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.5] — 2026-04-28
+
+Architectural improvements driven by a real v1.7.3 silent-heartbeat
+incident. Three additions: split heartbeat (liveness vs rich
+payload), `maccrabctl repair` self-diagnostic command, dashboard
+zombie-sysext banner.
+
+### Added — heartbeat split (`heartbeat.json` + `heartbeat_rich.json`)
+
+New `livenessTimer` in `DaemonTimers.swift` runs **synchronously**
+on the dispatch queue every 30 s and writes a minimal
+`heartbeat.json` with only `written_at_unix`, `uptime_seconds`,
+`sysext_has_fda`, `events_processed`, `alerts_emitted`. No actor
+hops, no queries, no async work — cannot deadlock. The dashboard's
+"engine silent" banner is gated on this file.
+
+The rich payload (per-event-category counts, collector health,
+drop counter) now lives in `heartbeat_rich.json` written by the
+existing async heartbeat Task. Decoupling means a future stall
+in EventStore queries or snapshot writes can never cause the
+dashboard to show "engine silent" when the engine is actually
+alive.
+
+`AppState.refreshHeartbeat` reads `heartbeat.json` for liveness
+and merges in fields from `heartbeat_rich.json` if present.
+Backward-compatible: pre-v1.7.5 daemons wrote everything inline,
+those fields still decode from `heartbeat.json` directly.
+
+### Added — `maccrabctl repair`
+
+New `Sources/maccrabctl/RepairCommand.swift`. Diagnose + auto-fix
+common install issues. Six phases:
+
+1. Daemon process liveness (`pgrep`)
+2. Heartbeat staleness (mtime check)
+3. System-extension state (`systemextensionsctl list`)
+4. Orphaned writeSnapshot `.tmp` files (cleaned up)
+5. SIGHUP daemon to reload config + rules
+6. Operator-action recommendations for issues needing reboot /
+   re-approval / FDA grant
+
+`--dry-run` shows what would be done without taking action.
+
+### Added — zombie-sysext banner
+
+`AppState.refreshZombieSysextCount()` runs `systemextensionsctl
+list` each poll tick and counts MacCrab entries in `[terminated
+waiting to uninstall on reboot]` state. When ≥3, MainView shows a
+top banner: "N prior MacCrab versions queued for uninstall —
+reboot to clear them." Distinguishes the "needs reboot" case from
+the generic "engine offline" case so operators see the right fix
+immediately.
+
+### Tests
+
+926 in 188 suites pass (same as v1.7.4). v1.7.5 changes are
+file-format split + new CLI + AppState property — covered by
+existing snapshot-writer tests + manual `maccrabctl repair`
+verification.
+
+### Updated cadence
+
+→ **1.7.5** (heartbeat split + repair tooling — defense against
+the v1.7.x silent-heartbeat class)
+
+### Updated key design lessons
+
+- **Liveness signals must be on the simplest path possible.** The
+  v1.7.0–v1.7.4 history shows that any async work in the heartbeat
+  body is a future deadlock waiting to happen. v1.7.5 puts the
+  liveness write on the dispatch thread itself — no Tasks, no
+  actors, no queries. The richer signals live separately and can
+  fail without affecting "is the daemon alive."
+- **Operator self-service tooling reduces support load.** Without
+  `maccrabctl repair`, every "engine silent" report required the
+  user to run pgrep / stat / systemextensionsctl manually and
+  paste output. With it, one command produces the full picture +
+  attempts safe auto-repair + tells the operator exactly what's
+  required.
+- **The dashboard should distinguish reboot-needed from engine-
+  hung.** Same symptom (no fresh heartbeat) but different fixes.
+  The zombie-sysext banner surfaces a specific, actionable
+  message instead of a generic warning.
+
 ## [1.7.4] — 2026-04-28
 
 Follow-up hotfix to v1.7.3. The v1.7.3 memory fix combined two

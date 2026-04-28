@@ -31,6 +31,10 @@ enum DaemonTimers {
         let maintenanceTimer: DispatchSourceTimer
         let feedbackTimer: DispatchSourceTimer
         let heartbeatTimer: DispatchSourceTimer
+        /// v1.7.5: minimal liveness heartbeat decoupled from the rich
+        /// payload. Synchronous dispatch-thread file write of
+        /// `heartbeat.json`. Cannot deadlock on actor work.
+        let livenessTimer: DispatchSourceTimer
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
@@ -411,6 +415,62 @@ enum DaemonTimers {
         }
         feedbackTimer.resume()
 
+        // v1.7.5 design split: TWO heartbeat-related timers.
+        //
+        // 1. **Liveness heartbeat** — synchronous dispatch-thread
+        //    write of a minimal `heartbeat.json`. NO actor hops, NO
+        //    EventStore queries, NO snapshot writes. Just a fast
+        //    file write of {written_at_unix, uptime_seconds,
+        //    sysext_has_fda, schema_version}. The dashboard's
+        //    "Detection engine appears silent" banner is gated on
+        //    THIS file. Cannot deadlock because there's nothing
+        //    async to deadlock on.
+        // 2. **Rich heartbeat** — the v1.7.0–v1.7.4 payload, now
+        //    written to `heartbeat_rich.json` and consumed by the
+        //    ES Health panel for the per-event-category breakdown,
+        //    collector liveness array, drop count. Can stall
+        //    indefinitely without affecting liveness detection.
+        //
+        // This separation cures the v1.7.3 silent-heartbeat class
+        // architecturally — liveness is decoupled from any heavyweight
+        // work. Future regressions in the rich payload (slow query,
+        // stuck actor, full disk for snapshot writes) can NEVER cause
+        // the dashboard to think the daemon is dead when it isn't.
+        let livenessTimer = DispatchSource.makeTimerSource(queue: .global())
+        livenessTimer.schedule(deadline: .now() + 5, repeating: 30)
+        livenessTimer.setEventHandler {
+            // Synchronous on the dispatch queue. No Task wrapper, no
+            // actor hops. The probeSysextFDA call is itself sync —
+            // it opens TCC.db directly via sqlite3_open_v2 + close.
+            let sysextHasFDA = probeSysextFDA()
+            let nowUnix = Date().timeIntervalSince1970
+            let uptime = Int(Date().timeIntervalSince(startTime))
+            let payload: [String: Any] = [
+                "written_at_unix": nowUnix,
+                "uptime_seconds": uptime,
+                "sysext_has_fda": sysextHasFDA,
+                "fda_checked_at_unix": nowUnix,
+                "events_processed": eventCount(),
+                "alerts_emitted": alertCount(),
+                "schema_version": 4,
+                "liveness": true,
+            ]
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: payload,
+                options: [.sortedKeys]
+            ) else { return }
+            let path = "/Library/Application Support/MacCrab/heartbeat.json"
+            let tmp = path + ".tmp"
+            do {
+                try data.write(to: URL(fileURLWithPath: tmp))
+                try FileManager.default.moveItem(atPath: tmp, toPath: path)
+            } catch {
+                try? FileManager.default.removeItem(atPath: path)
+                try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+            }
+        }
+        livenessTimer.resume()
+
         // v1.4.3 fail-loud: write a heartbeat snapshot every 30s so
         // the dashboard can detect a silently-replaced or hung sysext.
         // If an attacker drops in a no-op sysext binary, the dashboard
@@ -529,7 +589,13 @@ enum DaemonTimers {
                 withJSONObject: payload,
                 options: [.prettyPrinted, .sortedKeys]
             ) else { return }
-            let path = "/Library/Application Support/MacCrab/heartbeat.json"
+            // v1.7.5: rich heartbeat goes to a SEPARATE file. Liveness
+            // detection (heartbeat.json) is the synchronous fast path
+            // above. This file carries the rich payload (per-event-
+            // category counts, collector health, drop counter) for the
+            // ES Health panel. If the rich payload stalls, the
+            // dashboard's "engine alive" check still works.
+            let path = "/Library/Application Support/MacCrab/heartbeat_rich.json"
             // Write via temp + rename so the dashboard never catches a
             // half-written file. Silent on failure — the next 30s tick
             // will try again.
@@ -571,7 +637,8 @@ enum DaemonTimers {
             sizeCapTimer: sizeCapTimer,
             maintenanceTimer: maintenanceTimer,
             feedbackTimer: feedbackTimer,
-            heartbeatTimer: heartbeatTimer
+            heartbeatTimer: heartbeatTimer,
+            livenessTimer: livenessTimer
         )
     }
 }

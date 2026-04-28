@@ -195,6 +195,16 @@ final class AppState: ObservableObject {
     /// absent file (first run) or a stale timestamp (>120s) both
     /// indicate the detection engine is silent — the dashboard
     /// surfaces a banner and the statusbar icon flips.
+    ///
+    /// v1.7.5: heartbeat is split into TWO files. `heartbeat.json` is
+    /// the minimal liveness file written synchronously by the daemon's
+    /// dispatch-thread livenessTimer (cannot deadlock). `heartbeat_rich.
+    /// json` carries the per-event-category counts, collector health,
+    /// and drop counter — written async by the heartbeat Task.
+    /// Liveness gating reads only the first file; the rich fields are
+    /// merged in if the second file exists. Pre-v1.7.5 daemons wrote
+    /// everything to heartbeat.json — those fields still decode if
+    /// present (backward-compatible).
     func refreshHeartbeat() {
         let path = "/Library/Application Support/MacCrab/heartbeat.json"
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -252,6 +262,49 @@ final class AppState: ObservableObject {
             collectorHealth = decoded
         }
 
+        // v1.7.5: rich fields may live in a separate file if the
+        // daemon is v1.7.5+. Pre-v1.7.5 daemons wrote them inline to
+        // heartbeat.json; we still decode them from there as a
+        // fallback. This makes the dashboard backward-compatible
+        // with any v1.7.0–v1.7.4 sysext.
+        var richEventTypeCounts: [String: Int]? = json["event_type_counts_1h"] as? [String: Int]
+        var richCollectorHealth: [CollectorHealthEntry]? = collectorHealth
+        var richDropped: UInt64? = (json["events_dropped"] as? UInt64)
+            ?? UInt64(json["events_dropped"] as? Int ?? 0)
+        let richPath = "/Library/Application Support/MacCrab/heartbeat_rich.json"
+        if let richData = try? Data(contentsOf: URL(fileURLWithPath: richPath)),
+           let richJSON = try? JSONSerialization.jsonObject(with: richData) as? [String: Any] {
+            if let counts = richJSON["event_type_counts_1h"] as? [String: Int] {
+                richEventTypeCounts = counts
+            }
+            if let arr = richJSON["collector_health"] as? [[String: Any]] {
+                var decoded: [CollectorHealthEntry] = []
+                decoded.reserveCapacity(arr.count)
+                for d in arr {
+                    guard let name = d["name"] as? String,
+                          let healthy = d["healthy"] as? Bool,
+                          let interval = d["expected_interval_seconds"] as? Int else { continue }
+                    decoded.append(CollectorHealthEntry(
+                        name: name,
+                        lastTickUnix: d["last_tick_unix"] as? TimeInterval,
+                        eventCount: (d["event_count"] as? UInt64)
+                            ?? UInt64(d["event_count"] as? Int ?? 0),
+                        errorCount: (d["error_count"] as? UInt64)
+                            ?? UInt64(d["error_count"] as? Int ?? 0),
+                        lastError: d["last_error"] as? String,
+                        expectedIntervalSeconds: interval,
+                        healthy: healthy
+                    ))
+                }
+                richCollectorHealth = decoded
+            }
+            if let dropped = richJSON["events_dropped"] as? UInt64 {
+                richDropped = dropped
+            } else if let dropped = richJSON["events_dropped"] as? Int {
+                richDropped = UInt64(dropped)
+            }
+        }
+
         heartbeat = HeartbeatSnapshot(
             writtenAt: Date(timeIntervalSince1970: writtenAtUnix),
             uptimeSeconds: json["uptime_seconds"] as? Int ?? 0,
@@ -260,10 +313,9 @@ final class AppState: ObservableObject {
             alertsEmitted: (json["alerts_emitted"] as? UInt64)
                 ?? UInt64(json["alerts_emitted"] as? Int ?? 0),
             sysextHasFDA: json["sysext_has_fda"] as? Bool,
-            eventTypeCounts1h: json["event_type_counts_1h"] as? [String: Int],
-            collectorHealth: collectorHealth,
-            eventsDropped: (json["events_dropped"] as? UInt64)
-                ?? UInt64(json["events_dropped"] as? Int ?? 0)
+            eventTypeCounts1h: richEventTypeCounts,
+            collectorHealth: richCollectorHealth,
+            eventsDropped: richDropped
         )
     }
 
@@ -646,6 +698,46 @@ final class AppState: ObservableObject {
     /// the timeline view to render a "Updated <relative time>" caption.
     @Published var aiSessionsLastRefresh: Date?
 
+    /// v1.7.5: number of prior MacCrab system extensions in the
+    /// "[terminated waiting to uninstall on reboot]" state. Surfaced
+    /// in MainView via a banner when ≥3 — strong signal that a reboot
+    /// is needed for sysextd to cleanly start the active version.
+    /// Refreshed on the same poll cycle as heartbeat via
+    /// `refreshZombieSysextCount()`.
+    @Published var zombieSysextCount: Int = 0
+
+    /// Refresh the count of prior sysexts pending uninstall. Runs
+    /// `systemextensionsctl list` (no sudo needed) and parses output
+    /// for our bundle identifier in the terminated-waiting state.
+    /// Returns 0 on parse failure — better to underreport than to
+    /// surface a false alarm.
+    func refreshZombieSysextCount() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/systemextensionsctl")
+        proc.arguments = ["list"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            zombieSysextCount = 0
+            return
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else {
+            zombieSysextCount = 0
+            return
+        }
+        let count = text.split(separator: "\n").reduce(0) { acc, line in
+            (line.contains("com.maccrab.agent")
+             && line.contains("[terminated waiting to uninstall on reboot]"))
+                ? acc + 1 : acc
+        }
+        zombieSysextCount = count
+    }
+
     /// MCP behavioral baselines, populated from `mcp_baselines.json`
     /// (v1.7.0). Most-recently-active baseline first. Each entry is a
     /// per-(tool, server) fingerprint with file basenames, domains, and
@@ -944,6 +1036,7 @@ final class AppState: ObservableObject {
         refreshMCPBaselines()
         refreshRuleTelemetry()
         refreshTCCSnapshot()
+        refreshZombieSysextCount()
         maybeKickWatchdog()
 
         // Rules rarely change — only load once
