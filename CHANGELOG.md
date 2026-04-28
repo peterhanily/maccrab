@@ -3,6 +3,73 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] — 2026-04-28
+
+Follow-up hotfix to v1.7.3. The v1.7.3 memory fix combined two
+changes that produced a new failure mode: any blocked snapshot
+writer held the outer heartbeat-overlap-guard lock indefinitely,
+every subsequent 30 s tick was dropped, and the dashboard showed
+"Detection engine appears silent" after 120 s.
+
+### Fixed — heartbeat-silent regression
+
+Per-resource guards, not per-caller guards. Each snapshot writer
+that lacked one (`MCPBaselineService.writeSnapshot`,
+`RuleEngine.writeTelemetrySnapshot`, `TCCMonitor.writeSnapshot`)
+now has a `snapshotWriteInFlight: Bool` matching the v1.6.6
+`AgentLineageService` pattern. Concurrent writeSnapshot calls
+no-op gracefully instead of queueing on the actor.
+
+### Changed — `DaemonTimers.swift` heartbeat back to fire-and-forget
+
+Removed the `HeartbeatInFlight` class and the outer overlap guard
+introduced in v1.7.3. The four snapshot writes are once again
+`Task { await ... }` fire-and-forget. The heartbeat write itself
+is back on the critical fast path — no longer gated on snapshot
+completion.
+
+### Why this works
+
+The v1.7.0–v1.7.2 leak was actor-queue buildup at the *writer*
+level (concurrent writeSnapshot calls queueing on a busy actor's
+mailbox). v1.7.3 cured it by serialising at the *caller* level
+(one heartbeat Task at a time). v1.7.4 cures it at the right
+level: the writer's own guard. Now the queue can't form because
+the second call returns early before reaching the work.
+
+### Tests
+
+926 in 188 suites pass (was 922). +4 net (`V174GuardTests.swift`):
+each writer round-trips a real snapshot file; 50 concurrent
+`writeSnapshot` calls don't crash and at least one succeeds.
+
+### Updated cadence
+
+→ **1.7.4** (heartbeat-silent regression hotfix —
+[[v174-heartbeat-fix]])
+
+### Updated key design lessons
+
+- **Don't add overlap guards at multiple layers.** v1.7.3 added a
+  layer at the heartbeat scope on top of the existing per-writer
+  guard at AgentLineageService. If even one inner writer lacks
+  its own guard and blocks, the outer guard becomes a deadlock.
+  Per-resource guards are the right level — each writer protects
+  its own work, each caller doesn't need to know about the
+  protection.
+- **The heartbeat write is the critical path.** It's what the
+  dashboard reads to determine "is the daemon alive." If the
+  heartbeat write blocks on anything else (slow query, slow
+  snapshot, slow lock), the operator sees "engine silent." The
+  heartbeat must NEVER block on auxiliary work.
+- **Fix at the right scope.** v1.7.3 was a real fix for a real
+  leak, but applied at the wrong scope. The fix-the-fix in v1.7.4
+  preserves the leak cure (no actor-queue buildup) while
+  restoring the heartbeat fast path (writers can no-op if busy
+  without blocking the heartbeat). Same shape as the v1.6.22
+  audit chain — the real bug was 1 layer deeper than the first
+  fix attempt.
+
 ## [1.7.3] — 2026-04-28
 
 Memory regression hotfix. The v1.6.22 perf reduction (2.76 GB →

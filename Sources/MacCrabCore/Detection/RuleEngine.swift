@@ -340,7 +340,16 @@ public actor RuleEngine {
         }
     }
 
+    /// v1.7.4: see MCPBaselineService.snapshotWriteInFlight for rationale.
+    private var snapshotWriteInFlight = false
+
     public func writeTelemetrySnapshot(to path: String) {
+        guard !snapshotWriteInFlight else {
+            logger.info("Skipping rule telemetry snapshot — previous write still in flight")
+            return
+        }
+        snapshotWriteInFlight = true
+        defer { snapshotWriteInFlight = false }
         let snapshot = TelemetrySnapshot(
             writtenAt: Date(),
             stats: Array(ruleStats.values).sorted { $0.fireCount > $1.fireCount }

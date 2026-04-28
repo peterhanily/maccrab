@@ -3,31 +3,20 @@ import MacCrabCore
 import SQLite3
 import os.log
 
-/// v1.7.3 hotfix: thread-safe "heartbeat tick is in flight" gate.
-/// `tryAcquire` returns true only if no tick is currently running and
-/// flips the flag; `release` clears it. Used to drop new heartbeat
-/// ticks when the prior is still running, capping outstanding
-/// heartbeat Tasks at 1. Without this, slow snapshot writes caused
-/// detached Tasks to pile up holding strong DaemonState captures —
-/// observed 2.31 GB resident regression in v1.7.2.
-private final class HeartbeatInFlight: @unchecked Sendable {
-    private let lock = NSLock()
-    private var inFlight = false
-
-    func tryAcquire() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if inFlight { return false }
-        inFlight = true
-        return true
-    }
-
-    func release() {
-        lock.lock()
-        defer { lock.unlock() }
-        inFlight = false
-    }
-}
+// v1.7.3 added a HeartbeatInFlight class that wrapped the heartbeat
+// body in an outer overlap guard. Combined with serial `await` of
+// the snapshot writers it created a deadlock: any single guard-less
+// snapshot writer (MCPBaseline / RuleEngine / TCCMonitor in v1.7.3)
+// could block the heartbeat indefinitely, holding the lock,
+// preventing any further heartbeat ticks. Dashboard would then show
+// "Detection engine appears silent" after 120 s.
+//
+// v1.7.4 reverts the outer guard. Each snapshot writer now has its
+// own per-writer `snapshotWriteInFlight` guard (matching
+// AgentLineageService.swift), so fire-and-forget Tasks at the
+// heartbeat level are safe — concurrent writeSnapshot calls no-op
+// instead of queueing on the actor. The heartbeat write itself
+// stays on the critical fast path.
 
 /// Creates and starts all periodic timers (forensic scans, hourly tasks,
 /// stats logging, retention pruning, maintenance sweeps).
@@ -430,17 +419,15 @@ enum DaemonTimers {
         // event/alert counters + uptime so the dashboard can also
         // show rich debugging info on the ES Health page.
         //
-        // v1.7.3 memory-regression fix: the heartbeat-in-flight guard.
-        // Pre-v1.7.3 each tick spawned 5 Tasks (1 outer for the
-        // payload write + 4 nested fire-and-forget for snapshot
-        // writers). When any snapshot write stalled (slow disk,
-        // contention), the next 30 s tick spawned 5 more — Tasks
-        // accumulated holding strong DaemonState captures. Observed
-        // 2.31 GB resident on a test host. Fix: one outer Task per
-        // tick, snapshot writes serialised via `await`, and a
-        // class-wrapped bool guard that drops new ticks if the prior
-        // is still running.
-        let heartbeatInFlight = HeartbeatInFlight()
+        // v1.7.4 design: heartbeat write is the critical fast path.
+        // Snapshot writers live behind their own per-writer
+        // snapshotWriteInFlight guards, so fire-and-forget Tasks at
+        // this level are safe — concurrent calls no-op instead of
+        // queueing on the actor (which is what caused the v1.7.0–
+        // v1.7.3 leak class). No outer overlap guard: if a tick takes
+        // longer than 30 s the next tick simply runs in parallel, and
+        // since each writeSnapshot guards itself, no actor backlog
+        // forms.
         let heartbeatTimer = DispatchSource.makeTimerSource(queue: .global())
         heartbeatTimer.schedule(deadline: .now() + 5, repeating: 30)
         heartbeatTimer.setEventHandler {
@@ -449,15 +436,7 @@ enum DaemonTimers {
             // actor isolation. The dispatch-timer event handler itself
             // is synchronous; spawning a Task lets the body run async
             // without blocking the timer queue.
-            //
-            // v1.7.3: drop this tick if a previous one is still running.
-            // Hard cap on outstanding heartbeat Tasks = 1.
-            guard heartbeatInFlight.tryAcquire() else {
-                logger.warning("Skipping heartbeat tick — previous tick still in flight")
-                return
-            }
             Task {
-            defer { heartbeatInFlight.release() }
             // Probe sysext Full Disk Access authoritatively. The sysext
             // runs as root but TCC still gates its access to the user and
             // system TCC databases. If we can open + query the system
@@ -564,23 +543,22 @@ enum DaemonTimers {
                 try? FileManager.default.moveItem(atPath: tmp, toPath: path)
             }
 
-            // v1.7.3: snapshots awaited in sequence inside the same
-            // outer Task. Pre-v1.7.3 each was a separate fire-and-
-            // forget Task that captured `state` strongly. If any
-            // stalled (slow disk), they piled up. Now: one Task per
-            // tick, snapshots serialised. Total cost ~1–10 ms per
-            // tick on a healthy machine; well under the 30 s cadence.
+            // v1.7.4: snapshot writes back to fire-and-forget Tasks.
+            // Each writer's per-instance `snapshotWriteInFlight`
+            // guard drops concurrent calls to that writer specifically
+            // — the v1.7.0 actor-queue leak is closed at the writer,
+            // not at the heartbeat. The heartbeat itself stays fast.
             let lineagePath = state.supportDir + "/agent_lineage.json"
-            await state.agentLineageService.writeSnapshot(to: lineagePath)
+            Task { await state.agentLineageService.writeSnapshot(to: lineagePath) }
 
             let mcpBaselinePath = state.supportDir + "/mcp_baselines.json"
-            await state.mcpBaseline.writeSnapshot(to: mcpBaselinePath)
+            Task { await state.mcpBaseline.writeSnapshot(to: mcpBaselinePath) }
 
             let ruleTelemetryPath = state.supportDir + "/rule_telemetry.json"
-            await state.ruleEngine.writeTelemetrySnapshot(to: ruleTelemetryPath)
+            Task { await state.ruleEngine.writeTelemetrySnapshot(to: ruleTelemetryPath) }
 
             let tccSnapshotPath = state.supportDir + "/tcc_snapshot.json"
-            await state.tccMonitor.writeSnapshot(to: tccSnapshotPath)
+            Task { await state.tccMonitor.writeSnapshot(to: tccSnapshotPath) }
             } // end outer Task wrapper around heartbeat body
         }
         heartbeatTimer.resume()

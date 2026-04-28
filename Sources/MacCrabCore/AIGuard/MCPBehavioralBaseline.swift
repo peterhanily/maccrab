@@ -278,10 +278,23 @@ public actor MCPBaselineService {
         }
     }
 
+    /// v1.7.4: in-flight guard — drop concurrent writeSnapshot calls
+    /// instead of queueing on the actor. Mirrors the v1.6.6 pattern
+    /// in `AgentLineageService.snapshotWriteInFlight`. Without this,
+    /// fire-and-forget heartbeat Tasks accumulate when disk is slow,
+    /// which is the v1.7.0–v1.7.3 leak class.
+    private var snapshotWriteInFlight = false
+
     /// Atomic JSON snapshot of every learned/enforcing baseline. Same
     /// temp+rename pattern as `AgentLineageService.writeSnapshot` so the
     /// dashboard never observes a partial write.
     public func writeSnapshot(to path: String) {
+        guard !snapshotWriteInFlight else {
+            logger.info("Skipping MCP baseline snapshot — previous write still in flight")
+            return
+        }
+        snapshotWriteInFlight = true
+        defer { snapshotWriteInFlight = false }
         let snapshot = BaselineSnapshot(writtenAt: Date(), baselines: allBaselines())
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         let tmpPath = path + ".tmp"

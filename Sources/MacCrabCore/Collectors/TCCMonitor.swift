@@ -227,9 +227,18 @@ public actor TCCMonitor {
         }
     }
 
+    /// v1.7.4: see MCPBaselineService.snapshotWriteInFlight for rationale.
+    private var snapshotWriteInFlight = false
+
     /// Atomic JSON snapshot of every TCC entry the daemon has read.
     /// Same temp+rename pattern used by `AgentLineageService`.
     public func writeSnapshot(to path: String) {
+        guard !snapshotWriteInFlight else {
+            logger.info("Skipping TCC snapshot — previous write still in flight")
+            return
+        }
+        snapshotWriteInFlight = true
+        defer { snapshotWriteInFlight = false }
         let pubEntries = snapshot.values.map {
             PublicEntry(
                 service: $0.service,
