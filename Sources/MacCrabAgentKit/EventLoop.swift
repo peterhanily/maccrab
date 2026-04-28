@@ -53,6 +53,35 @@ enum EventLoop {
                     enrichedEvent.enrichments["ai_tool_child"] = "true"
                     if let dir = projectDir { enrichedEvent.enrichments["ai_project_dir"] = dir }
 
+                    // v1.7.0: MCP attribution. Walk ancestry to identify
+                    // whether one of them is a configured MCP server for
+                    // this AI tool; tag the event and feed the baseline.
+                    if let aiType {
+                        if let attr = await state.mcpAttributor.attribute(
+                            pid: aiProc.pid,
+                            ancestors: aiProc.ancestors,
+                            aiTool: aiType
+                        ) {
+                            enrichedEvent.enrichments["mcp_server_name"] = attr.serverName
+                            enrichedEvent.enrichments["mcp_server_category"] = attr.serverCategory
+                            enrichedEvent.enrichments["mcp_attribution_confidence"] = attr.confidence.rawValue
+                            // Only feed high/medium-confidence attributions
+                            // into the baseline; low-confidence noise
+                            // would dilute the fingerprint.
+                            if attr.confidence != .low {
+                                let observation = MCPBaselineObservation(
+                                    tool: attr.tool,
+                                    serverName: attr.serverName,
+                                    filePath: enrichedEvent.file?.path,
+                                    domain: enrichedEvent.network?.destinationHostname,
+                                    childProcessBasename: aiProc.name,
+                                    timestamp: enrichedEvent.timestamp
+                                )
+                                await state.mcpBaseline.observe(observation)
+                            }
+                        }
+                    }
+
                     // v1.6.7: record lineage events for this AI child.
                     // The session's root PID is the nearest AI-tool
                     // ancestor; walk the provided ancestry list to

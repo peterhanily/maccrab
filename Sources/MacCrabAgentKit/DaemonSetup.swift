@@ -334,6 +334,16 @@ enum DaemonSetup {
         await mcpMonitor.start()
         print("MCP server monitor active (watching Claude, Cursor, Continue, VS Code, Windsurf configs)")
 
+        // v1.7.0: MCP attribution + behavioral baseline.
+        // MCPAttributor walks each AI-child event's ancestry to identify
+        // the running MCP server (filesystem/github/fetch/...). Tags the
+        // event so MCPBaselineService can build per-(tool,server)
+        // fingerprints and emit deviation alerts when a server's
+        // runtime behavior drifts from its learned baseline.
+        let mcpAttributor = MCPAttributor(mcpMonitor: mcpMonitor, lineage: lineageRef)
+        let mcpBaseline = MCPBaselineService()
+        print("MCP attributor + behavioral baseline active")
+
         // USB device monitor -- detects mass storage, HID keyboard emulation
         let usbMonitor = USBMonitor(pollInterval: config.usbPollInterval)
         await usbMonitor.start()
@@ -950,6 +960,8 @@ enum DaemonSetup {
             injectionScanner: injectionScanner,
             aiNetworkSandbox: aiNetworkSandbox,
             fileInjectionScanner: fileInjectionScanner,
+            mcpAttributor: mcpAttributor,
+            mcpBaseline: mcpBaseline,
             mcpMonitor: mcpMonitor,
             usbMonitor: usbMonitor,
             clipboardMonitor: clipboardMonitor,

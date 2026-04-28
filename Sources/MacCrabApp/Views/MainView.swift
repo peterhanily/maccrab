@@ -42,6 +42,7 @@ struct MainView: View {
         case threatIntel = "Threat Intel"
         case packageFreshness = "Package Freshness"
         case aiAnalysis = "AI Analysis"
+        case mcpServers = "MCP Servers"
         case integrations = "Integrations"
         // System
         case permissions = "Permissions"
@@ -62,7 +63,7 @@ struct MainView: View {
                 }
             case .standard:
                 switch self {
-                case .rules, .threatIntel, .packageFreshness, .aiAnalysis, .esHealth:
+                case .rules, .threatIntel, .packageFreshness, .aiAnalysis, .mcpServers, .esHealth:
                     return false
                 default:
                     return true
@@ -165,6 +166,10 @@ struct MainView: View {
                                 .badge(appState.aiAnalysisAlerts.count)
                                 .tag(SidebarSection.aiAnalysis)
                         }
+                        if SidebarSection.mcpServers.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.mcpServers", defaultValue: "MCP Servers"), systemImage: "puzzlepiece.extension")
+                                .tag(SidebarSection.mcpServers)
+                        }
                         if SidebarSection.integrations.visible(in: uiMode) {
                             Label(String(localized: "sidebar.integrations", defaultValue: "Integrations"), systemImage: "puzzlepiece.extension")
                                 .tag(SidebarSection.integrations)
@@ -215,6 +220,8 @@ struct MainView: View {
                 PackageFreshnessView(appState: appState)
             case .aiAnalysis:
                 AIAnalysisView(appState: appState)
+            case .mcpServers:
+                MCPActivityView(appState: appState)
             case .integrations:
                 IntegrationsView(appState: appState)
             case .permissions:

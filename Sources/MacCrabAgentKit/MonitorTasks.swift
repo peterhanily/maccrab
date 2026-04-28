@@ -163,6 +163,42 @@ enum MonitorTasks {
             }
         }
 
+        // v1.7.0: MCP behavioral baseline deviation listener.
+        // MCPBaselineService.observe() is called from EventLoop on each
+        // attributed event; the service learns per-(tool, server)
+        // fingerprints (file basenames, domains, child process names)
+        // for `defaultLearningObservations` (20) events, then enforces.
+        // Deviations stream here and become alerts via AlertSink so
+        // they participate in the same dedup + notification pipeline as
+        // any other rule.
+        await supervisor.start("mcp-baseline") {
+            for await dev in state.mcpBaseline.deviations {
+                let detailKind: String
+                switch dev.kind {
+                case .newFileBasename:  detailKind = "file basename"
+                case .newDomain:        detailKind = "domain"
+                case .newChildBasename: detailKind = "child process"
+                }
+                let alert = Alert(
+                    ruleId: "maccrab.mcp.baseline-anomaly.\(dev.tool).\(dev.serverName).\(dev.kind.rawValue)",
+                    ruleTitle: "MCP Baseline Drift: \(dev.serverName) (\(dev.tool)) — new \(detailKind)",
+                    severity: .medium,
+                    eventId: UUID().uuidString,
+                    processPath: dev.serverKey,
+                    processName: dev.serverName,
+                    description: "MCP server '\(dev.serverName)' under \(dev.tool) observed a previously-unseen \(detailKind): \(dev.observedValue). Baseline learned over \(MCPBaselineService.defaultLearningObservations) prior observations.",
+                    mitreTactics: "attack.initial_access,attack.command_and_control",
+                    mitreTechniques: "attack.t1195.002,attack.t1059",
+                    suppressed: false
+                )
+                do {
+                    if try await state.alertSink.submit(alert: alert) {
+                        await state.notifier.notify(alert: alert)
+                    }
+                } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+            }
+        }
+
         // USB device monitoring task. v1.4.5: per-device rate limiting.
         // Before, every hub replug produced an informational alert. A
         // user with a dock, YubiKey, and a USB-C hub hit 10+ USB alerts

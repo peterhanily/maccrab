@@ -489,6 +489,15 @@ enum DaemonTimers {
             Task {
                 await state.agentLineageService.writeSnapshot(to: lineagePath)
             }
+
+            // v1.7.0: write the MCP baseline snapshot for the dashboard's
+            // MCPActivityView. Bounded by maxBaselines (256) × ~3 sets
+            // × maxSetSize (512) ≈ 393K strings worst case, but real
+            // installs see <30 baselines × <100 strings each = a few KB.
+            let mcpBaselinePath = state.supportDir + "/mcp_baselines.json"
+            Task {
+                await state.mcpBaseline.writeSnapshot(to: mcpBaselinePath)
+            }
         }
         heartbeatTimer.resume()
 

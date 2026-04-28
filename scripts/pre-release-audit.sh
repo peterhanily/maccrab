@@ -378,6 +378,52 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS 6 — daemon-written snapshot files ↔ MacCrabApp consumer (v1.7.0)
+# ---------------------------------------------------------------------
+# Every public Codable struct exposed by a daemon-side snapshot writer
+# (e.g. `AgentLineageService.LineageSnapshot`,
+# `MCPBaselineService.BaselineSnapshot`) must have at least one
+# `MacCrabApp` consumer that calls `readSnapshot(at:)` or accesses the
+# struct via AppState. Catches the v1.6.15 / v1.6.18 wire-the-orphans
+# pattern at the snapshot layer specifically: producer ships data the
+# UI never consumes.
+#
+# Maintained list — add a new pair when a daemon-side snapshot type
+# ships. Format: "<file>:<TypeName>:<consumer-grep-token>".
+
+section "PASS 6 — daemon snapshot ↔ panel consumer audit"
+
+declare -a SNAPSHOT_PAIRS=(
+    "Sources/MacCrabCore/AIGuard/AgentLineageService.swift:LineageSnapshot:AgentLineageService.readSnapshot"
+    "Sources/MacCrabCore/AIGuard/MCPBehavioralBaseline.swift:BaselineSnapshot:MCPBaselineService.readSnapshot"
+)
+
+for entry in "${SNAPSHOT_PAIRS[@]}"; do
+    file="${entry%%:*}"
+    rest="${entry#*:}"
+    typename="${rest%%:*}"
+    token="${rest##*:}"
+    if [[ ! -f "$file" ]]; then
+        warn "PASS 6: $file missing — snapshot list out of date"
+        continue
+    fi
+    if ! grep -q "public struct $typename" "$file"; then
+        warn "PASS 6: $typename not found in $file (renamed?)"
+        continue
+    fi
+    consumer_count=$(grep -rE "$token\b" Sources/MacCrabApp \
+        --include='*.swift' 2>/dev/null \
+        | grep -cE '\S' || true)
+    if [[ "$consumer_count" -lt 1 ]]; then
+        err "PASS 6: $typename has a daemon-side writer but no MacCrabApp consumer — wire-the-orphans pattern"
+    fi
+done
+
+if [[ $ERRORS -eq 0 ]]; then
+    ok "Daemon snapshot types all have at least one MacCrabApp consumer"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

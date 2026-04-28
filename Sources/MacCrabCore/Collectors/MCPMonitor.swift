@@ -62,6 +62,54 @@ public actor MCPMonitor {
         let tool: String
     }
 
+    // MARK: - Public snapshot for MCPAttributor (v1.7.0)
+
+    /// Public, copy-by-value snapshot of one configured MCP server. Used
+    /// by `MCPAttributor` (and any other consumer that needs to match a
+    /// running process against the configured-server set) without having
+    /// to re-parse the JSON config files itself.
+    public struct ConfiguredServer: Sendable, Hashable {
+        public let name: String
+        public let command: String
+        public let args: [String]
+        public let tool: String
+    }
+
+    /// Returns every currently-known MCP server configured for the given
+    /// AI-tool key (`"claude"`, `"cursor"`, `"vscode"`, `"continue"`,
+    /// `"windsurf"`). Empty when no config has been parsed yet (the
+    /// monitor performs its first scan inside `start()`).
+    public func serversForTool(_ tool: String) -> [ConfiguredServer] {
+        knownServers.values
+            .filter { $0.tool == tool }
+            .map { ConfiguredServer(name: $0.name, command: $0.command, args: $0.args, tool: $0.tool) }
+    }
+
+    /// Returns every currently-known MCP server across all tools.
+    /// Useful for the dashboard's MCP Server Activity panel.
+    public func allConfiguredServers() -> [ConfiguredServer] {
+        knownServers.values.map {
+            ConfiguredServer(name: $0.name, command: $0.command, args: $0.args, tool: $0.tool)
+        }
+    }
+
+    /// Test-only helper: inject a configured server without going
+    /// through the file-watcher path. Used by `MCPAttributorTests`.
+    /// Underscore prefix marks the SPI nature; we don't strip it
+    /// from production builds because the file-write side effect
+    /// would require a real config file otherwise — and the seed
+    /// itself is harmless (it's just a dictionary insert).
+    public func _testInjectServer(_ server: ConfiguredServer) {
+        let key = "\(server.tool)::\(server.name)"
+        knownServers[key] = MCPServerEntry(
+            name: server.name,
+            command: server.command,
+            args: server.args,
+            configFile: "(test-injected)",
+            tool: server.tool
+        )
+    }
+
     // MARK: - Config Paths
 
     private static let configPaths: [(tool: String, path: String)] = [

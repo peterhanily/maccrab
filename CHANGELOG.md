@@ -3,6 +3,124 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-04-28
+
+First feature minor since v1.6.0. Closes the longest-standing
+"wire-the-orphans" gap: `MCPBaselineService` (`Sources/MacCrabCore/
+AIGuard/MCPBehavioralBaseline.swift`) has carried a complete
+learning/enforcing API and `BaselineDeviation` AsyncStream since
+v1.6.6, but the **producer half** that feeds it observations from
+real events was never built. v1.7.0 builds it.
+
+### Added — `MCPAttributor` actor
+
+New `Sources/MacCrabCore/AIGuard/MCPAttributor.swift`. Walks each
+AI-child event's process ancestry and matches each ancestor's
+commandline against the AI tool's configured MCP servers (parsed by
+`MCPMonitor` from the user's claude/cursor/etc. config files). On
+match, returns an `Attribution` with server name, category,
+boundary PID, and confidence (`high` / `medium` / `low`).
+
+Cached by PID with a 5000-entry LRU. Negative results are also
+cached — events from non-MCP processes pay one walk and zero
+re-walks. Hot-path lookup is O(1) on cached PIDs;
+O(ancestors × configured-servers) on first encounter (typically
+< 50 work units).
+
+### Added — per-event MCP attribution wiring
+
+`EventLoop.swift` calls `MCPAttributor.attribute(...)` inside the
+existing AI-child detection branch (only paying the cost on events
+under an AI tool). On a positive match, three new keys are added to
+`Event.enrichments`:
+
+- `mcp_server_name`
+- `mcp_server_category`
+- `mcp_attribution_confidence`
+
+These flow through the standard event pipeline and persist in
+`raw_json` — no schema migration. (Indexed columns deferred to
+v1.7.1 if/when the panel needs faster queries.)
+
+### Added — MCP behavioral baseline observation feed
+
+For each high/medium-confidence attributed event, EventLoop now
+calls `MCPBaselineService.observe(...)` with a populated
+`MCPBaselineObservation`. The dormant baseline service is now
+fully wired into `DaemonState`: the dispatch loop in
+`MonitorTasks.swift` consumes the `deviations` AsyncStream and
+submits `Alert`s through the existing `AlertSink` chokepoint with
+ruleId pattern `maccrab.mcp.baseline-anomaly.<tool>.<server>.
+<kind>`, severity `medium`, MITRE-mapped to `attack.initial_access`
+and `attack.command_and_control`.
+
+Baselines need both 20 observations AND 5 minutes of wall-clock
+before promoting from learning → enforcing.
+
+### Added — `MCPBaselineService.writeSnapshot/readSnapshot`
+
+The dormant baseline now also writes
+`<supportDir>/mcp_baselines.json` on the 30 s heartbeat tick (same
+cadence and atomic temp+rename pattern as
+`AgentLineageService.writeSnapshot`). New `BaselineSnapshot`
+Codable type wraps the snapshot for cross-process consumption.
+
+### Added — `MCPActivityView` dashboard panel
+
+New `Sources/MacCrabApp/Views/MCPActivityView.swift`. Lives in the
+Intelligence sidebar group between AI Analysis and Integrations.
+Per-server rows with name, AI tool, observation count, and
+learning/enforcing badge. Click a row to see the full fingerprint
+— every file basename, domain, and child process basename the
+baseline has learned. Recent Baseline Drift alerts surface as a
+banner above the list.
+
+`AppState.refreshMCPBaselines()` polls
+`<dataDir>/mcp_baselines.json` on the same 10 s dashboard refresh
+cycle as the lineage snapshot, with mtime-skip optimization.
+
+### Added — `MCPMonitor.serversForTool(_:)` + `allConfiguredServers()`
+
+Public accessors over the previously-private `knownServers` map.
+Used by `MCPAttributor` to look up the configured-server list for
+an AI tool without re-parsing config files. New
+`MCPMonitor.ConfiguredServer` struct is the public copy-by-value
+shape.
+
+### Added — `pre-release-audit.sh` Pass 6
+
+Every public Codable snapshot type exposed by a daemon-side writer
+(`AgentLineageService.LineageSnapshot`,
+`MCPBaselineService.BaselineSnapshot`) must have at least one
+`MacCrabApp` consumer. Fails release on regression. Catches the
+snapshot variant of the wire-the-orphans pattern. Add a new pair
+to `SNAPSHOT_PAIRS` when shipping a new daemon snapshot writer.
+
+### Tests
+
+898 in 181 suites pass (was 892). +6 net:
+- `MCPAttributor` package-token match (high confidence)
+- Negative-cache reuse on non-MCP processes
+- Server-category derivation from `@modelcontextprotocol/server-X`
+  and `mcp-server-X` package tokens
+- No-match returns nil
+- `MCPBaselineService` snapshot round-trip (with and without
+  baselines)
+
+### Updated cadence
+
+→ **1.7.0** (MCP attribution producer half + behavioral baseline
+deviation alerts + MCP Server Activity panel + Pass 6 audit
+codification)
+
+### Deferred
+
+- v1.7.1 panel-richness audit (Rules / Browser Extensions /
+  Permissions / ES Health) — carry-over from v1.6.19 → v1.6.20 →
+  v1.6.21.
+- AI tool spawn-shape matchers for Aider, Codex (Phase 1 covers
+  Node-via-npx and Python-via-`-m`).
+
 ## [1.6.22] — 2026-04-28
 
 Endpoint footprint reduction. Production observation on a v1.6.21

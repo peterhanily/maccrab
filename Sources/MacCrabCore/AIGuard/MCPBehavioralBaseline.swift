@@ -28,7 +28,7 @@ import os.log
 
 // MARK: - MCPServerBaseline
 
-public struct MCPServerBaseline: Sendable, Hashable {
+public struct MCPServerBaseline: Sendable, Hashable, Codable {
     public let serverKey: String           // "<tool>::<serverName>"
     public let tool: String                // claude | cursor | vscode | …
     public let serverName: String
@@ -261,6 +261,52 @@ public actor MCPBaselineService {
     /// recently-active first.
     public func allBaselines() -> [MCPServerBaseline] {
         baselines.values.sorted { $0.lastSeen > $1.lastSeen }
+    }
+
+    // MARK: - Cross-process snapshot (sysext → app, v1.7.0)
+
+    /// On-disk snapshot wrapper. The dashboard's `MCPActivityView`
+    /// reads this file from `<supportDir>/mcp_baselines.json` to render
+    /// the per-server activity panel. Daemon writes through
+    /// `writeSnapshot(to:)`; app reads through `readSnapshot(at:)`.
+    public struct BaselineSnapshot: Sendable, Codable {
+        public let writtenAt: Date
+        public let baselines: [MCPServerBaseline]
+        public init(writtenAt: Date, baselines: [MCPServerBaseline]) {
+            self.writtenAt = writtenAt
+            self.baselines = baselines
+        }
+    }
+
+    /// Atomic JSON snapshot of every learned/enforcing baseline. Same
+    /// temp+rename pattern as `AgentLineageService.writeSnapshot` so the
+    /// dashboard never observes a partial write.
+    public func writeSnapshot(to path: String) {
+        let snapshot = BaselineSnapshot(writtenAt: Date(), baselines: allBaselines())
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        let tmpPath = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
+            do {
+                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+            } catch {
+                try? FileManager.default.removeItem(atPath: path)
+                try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+            }
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: path
+            )
+        } catch {
+            logger.warning("Failed to write MCP baseline snapshot: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Read a snapshot from disk. Used by the dashboard to populate
+    /// `AppState.mcpBaselines` without crossing the privilege boundary.
+    public nonisolated static func readSnapshot(at path: String) -> BaselineSnapshot? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? JSONDecoder().decode(BaselineSnapshot.self, from: data)
     }
 
     /// Reset a single server's baseline back to learning. Used when

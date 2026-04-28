@@ -65,6 +65,10 @@ final class DaemonState {
     let aiNetworkSandbox: AINetworkSandbox
     let fileInjectionScanner: FileInjectionScanner
 
+    // MARK: - MCP attribution + baseline (v1.7.0)
+    let mcpAttributor: MCPAttributor
+    let mcpBaseline: MCPBaselineService
+
     // MARK: - Monitors
     let mcpMonitor: MCPMonitor
     let usbMonitor: USBMonitor
@@ -259,6 +263,8 @@ final class DaemonState {
         injectionScanner: PromptInjectionScanner,
         aiNetworkSandbox: AINetworkSandbox,
         fileInjectionScanner: FileInjectionScanner,
+        mcpAttributor: MCPAttributor,
+        mcpBaseline: MCPBaselineService,
         mcpMonitor: MCPMonitor,
         usbMonitor: USBMonitor,
         clipboardMonitor: ClipboardMonitor,
@@ -358,6 +364,8 @@ final class DaemonState {
         self.injectionScanner = injectionScanner
         self.aiNetworkSandbox = aiNetworkSandbox
         self.fileInjectionScanner = fileInjectionScanner
+        self.mcpAttributor = mcpAttributor
+        self.mcpBaseline = mcpBaseline
         self.mcpMonitor = mcpMonitor
         self.usbMonitor = usbMonitor
         self.clipboardMonitor = clipboardMonitor

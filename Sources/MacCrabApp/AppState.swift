@@ -216,6 +216,27 @@ final class AppState: ObservableObject {
     /// want to burn UI thread time decoding it twice for nothing.
     private var lastLineageMtime: Date?
 
+    /// mtime of the MCP-baseline snapshot the last time we decoded it.
+    /// Same skip-on-unchanged optimization as `lastLineageMtime`.
+    private var lastMCPBaselineMtime: Date?
+
+    /// Refresh the MCP baseline snapshot. Daemon writes
+    /// `<dataDir>/mcp_baselines.json` every 30 s on the heartbeat
+    /// tick; the dashboard's `MCPActivityView` consumes this.
+    func refreshMCPBaselines() {
+        let path = dataDir + "/mcp_baselines.json"
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let mtime, let last = lastMCPBaselineMtime, mtime <= last {
+            return
+        }
+        guard let snapshot = MCPBaselineService.readSnapshot(at: path) else {
+            return
+        }
+        mcpBaselines = snapshot.baselines
+        mcpBaselinesLastRefresh = snapshot.writtenAt
+        lastMCPBaselineMtime = mtime
+    }
+
     /// Refresh the AI agent-lineage timeline from the daemon-written
     /// snapshot at `<dataDir>/agent_lineage.json`. The daemon refreshes
     /// every 30 s on the heartbeat tick. We `stat()` first and skip
@@ -516,6 +537,14 @@ final class AppState: ObservableObject {
     /// the timeline view to render a "Updated <relative time>" caption.
     @Published var aiSessionsLastRefresh: Date?
 
+    /// MCP behavioral baselines, populated from `mcp_baselines.json`
+    /// (v1.7.0). Most-recently-active baseline first. Each entry is a
+    /// per-(tool, server) fingerprint with file basenames, domains, and
+    /// child process names that the daemon's `MCPBaselineService` has
+    /// observed during the learning window or after promotion.
+    @Published var mcpBaselines: [MCPServerBaseline] = []
+    @Published var mcpBaselinesLastRefresh: Date?
+
     // MARK: - LLM-orchestration services (v1.6.10 "move out of sysext")
     //
     // Three services that previously lived as orphan vars in DaemonState
@@ -794,6 +823,7 @@ final class AppState: ObservableObject {
         refreshRuleTamper()
         refreshThreatIntelStats()
         refreshAgentLineage()
+        refreshMCPBaselines()
         maybeKickWatchdog()
 
         // Rules rarely change — only load once
