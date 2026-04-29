@@ -194,11 +194,21 @@ public final class ESCollector: @unchecked Sendable {
             // SAFETY: message memory is owned by the kernel and valid only during
             // this callback. normalise() is synchronous and copies all needed data
             // (via esStringToSwift) before the callback returns.
-            let event = Self.normalise(message: message)
-            if let event = event {
-                continuation.yield(event)
-            } else {
-                logger.debug("Dropped unhandled ES event type: \(message.pointee.event_type.rawValue)")
+            //
+            // v1.7.9 defensive autoreleasepool: this callback fires per ES event
+            // on a kernel-managed dispatch queue. Pass 9 doesn't flag it (no
+            // `while let`/`for await` shape) but the same Foundation autorelease
+            // accumulation that bit Eslogger/UnifiedLog could happen here too —
+            // esStringToSwift creates Strings (CFString-backed under the hood)
+            // and any future enrichment that touches Foundation APIs would
+            // accumulate. Wrap defensively so the discipline holds.
+            autoreleasepool {
+                let event = Self.normalise(message: message)
+                if let event = event {
+                    continuation.yield(event)
+                } else {
+                    logger.debug("Dropped unhandled ES event type: \(message.pointee.event_type.rawValue)")
+                }
             }
         }
 

@@ -9,6 +9,43 @@ enum EventLoop {
         for await event in eventStream {
             eventCount += 1
 
+            // v1.7.9: per-collector counter increment.
+            //
+            // Pre-fix, only secondary collectors with their own MonitorTask
+            // for-await loop (TCC, USB, Clipboard, BrowserExt, etc.) called
+            // recordTick — primary collectors (ESCollector, NetworkCollector,
+            // DNSCollector, UnifiedLogCollector, EsloggerCollector) feed the
+            // merged stream consumed here, but the merged stream lacks source
+            // attribution. Result: heartbeat showed event_count=0 for every
+            // primary collector while the global events_processed climbed
+            // into the millions — operators couldn't trust the per-collector
+            // health flag. Field reproduction during v1.7.6 memory diagnosis.
+            //
+            // Pragmatic attribution by event category. Imperfect (a file event
+            // could come from ESCollector OR FSEventsCollector fallback) but
+            // gives operators non-zero, semantically meaningful counts. The
+            // exact source mapping isn't critical — what matters is "we know
+            // events are flowing through these subsystems".
+            let attributedCollector: String
+            switch event.eventCategory {
+            case .process, .file:
+                // ES is primary; FSEvents only fires on non-root dev builds.
+                // The dashboard's collector_health row labelled ESCollector
+                // is the right place to surface volume.
+                attributedCollector = "ESCollector"
+            case .network:
+                attributedCollector = "NetworkCollector"
+            case .authentication, .registry:
+                attributedCollector = "UnifiedLogCollector"
+            case .tcc:
+                // TCCMonitor has its own MonitorTasks loop that already
+                // records ticks — skip to avoid double-counting.
+                attributedCollector = ""
+            }
+            if !attributedCollector.isEmpty {
+                await state.collectorRegistry.recordTick(name: attributedCollector)
+            }
+
             // Enrich the event (lineage, code signing)
             var enrichedEvent = await state.enricher.enrich(event)
 

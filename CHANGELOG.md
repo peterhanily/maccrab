@@ -3,20 +3,131 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.9] — 2026-04-29
 
-Holding for the next substantial-feature release rather than shipping
-as a separate point version. Code is on `main`, not yet tagged.
+Memory hot-fix (round 2) + 3 new detection rules + observability +
+audit codification + UX cleanup. Bigger than a typical patch but
+targeted: every change is patch-scope (no new architecture, no new
+training data, no design redesign).
+
+### Fixed — autorelease pool drain extended to OUTER collector loops
+
+v1.7.7 wrapped the inner per-LINE body of `EsloggerCollector` and
+`UnifiedLogCollector` in `autoreleasepool`, draining JSON-parser
+temporaries. v1.7.8 field reproduction on a different machine
+showed 2.07 GB private heap dominated by **135,689 × 16 KB
+NSConcreteData buffers** — the per-CHUNK `fileHandle.availableData`
+return value was still autoreleased and accumulating in the OUTER
+loop's pool. v1.7.7's fix was incomplete.
+
+v1.7.9 wraps the OUTER `while true` body so the chunk Data drains
+every iteration. Inner pool retained as belt-and-suspenders for
+peak memory on chunks containing many lines. Same pattern applied
+to `KdebugCollector` (caught by the new Pass 9 audit) and
+`FileHasher.computeSHA256` (file-hash chunked reads via
+`handle.read(upToCount:)` — likely the dominant leak source on
+the field machine, called from per-file-event IOC matching).
+
+### Added — Pass 9 + Pass 10 audits
+
+`scripts/pre-release-audit.sh`:
+- **Pass 9**: autoreleasing Foundation calls (`JSONSerialization`,
+  `NSRegularExpression`, `DateFormatter`, `ISO8601DateFormatter`,
+  `fileHandle.availableData`, `fileHandle.readDataOfLength`,
+  `handle.read(upToCount:)`, `Data(contentsOf:)`) inside `while
+  true`/`while let`/`for await` bodies without a surrounding
+  `autoreleasepool` block fail the audit. Found 2 sites the v1.7.7
+  fix had missed (`KdebugCollector.swift`, `FileHasher.swift`).
+- **Pass 10**: when ≥ 2 stores share a `.db` file, each store's
+  migrations must be runnable independent of the global
+  `user_version` counter — verified via `SchemaMigrator.run()` call
+  + no direct `PRAGMA user_version` manipulation. Codifies the
+  v1.7.6 SchemaMigrator multi-store fix.
+
+### Fixed — heartbeat per-collector counters
+
+`event_count: 0` for every primary collector while
+`events_processed: 1M+` was a broken telemetry signal: pre-fix,
+only secondary collectors with their own MonitorTask `for await`
+loop (TCC, USB, Clipboard, etc.) called `recordTick`. Primary
+collectors (ESCollector, NetworkCollector, DNSCollector,
+UnifiedLogCollector) feed the merged stream consumed by EventLoop
+which lacked source attribution. Now EventLoop attributes each
+event to a representative primary collector by `event_category`
+and increments its tick. Operators can finally trust the
+per-collector health flag.
+
+### Added — three new detection rules
+
+- `Rules/persistence/xpc_service_replacement.yml` — writes to
+  `/Library/LaunchDaemons/*.plist` or `/Library/LaunchAgents/*.plist`
+  by unsigned/ad-hoc-signed processes. Severity: **high**. T1543.004.
+- `Rules/defense_evasion/network_extension_unsigned.yml` — unsigned
+  `NEPacketTunnelProvider` / `NEDNSProxyProvider` /
+  `NEAppProxyProvider` / `NEFilterDataProvider` installs. These
+  providers can intercept every packet leaving the device.
+  Severity: **critical**. T1556.
+- `Rules/credential_access/crypto_wallet_data_access.yml` — reads
+  of native cryptocurrency wallet directories (Electrum, Exodus,
+  Atomic, Coinomi, Daedalus, Trezor Suite, Ledger Live) AND
+  browser-extension wallet storage (MetaMask, Phantom, Coinbase,
+  Trust Wallet, Binance Chain) by anything other than the wallet
+  app or browser itself. Targets Atomic Stealer (AMOS), Banshee,
+  similar macOS infostealers. Severity: **critical**. T1555.
+
+The `c2_beacon_pattern.yml` timing-variance rewrite was descoped —
+Sigma sequence engine doesn't support "step A repeated N times in
+a window" (only "step A then step B"). Substituted with the
+crypto-wallet rule which fills a real coverage gap.
+
+### Added — `maccrabctl repair --fix-storage` schema check
+
+`PRAGMA integrity_check` passes for the v1.7.5 → v1.7.6 bug shape
+(alerts table missing `llm_investigation_json` column from a
+silently-skipped migration) — the file is valid SQLite, just
+schema-stale. v1.7.9 adds a `PRAGMA table_info(alerts)` column-
+presence sanity check that fingerprints the v1.7.5 bug shape and
+recommends installing v1.7.6+ instead of a destructive backup.
+
+### Added — `ESCollector` defensive autoreleasepool
+
+The per-event ES kernel callback isn't a `while let`/`for await`
+shape so Pass 9 doesn't flag it, but the same Foundation autorelease
+accumulation that bit Eslogger/UnifiedLog could happen here too.
+Wrapped defensively to keep the discipline holding across collectors.
+
+### Added — brew ↔ Sparkle drift detection
+
+`MacCrabApp.isBrewInstalled` checks `Bundle.main.bundleURL.path` for
+`/Caskroom/`. When true:
+- `SPUStandardUpdaterController` initialised with `startingUpdater:
+  false` and `automaticallyChecksForUpdates = false`
+- Settings → AI Backend (next to "Check for Updates") shows a
+  caption: "Installed via Homebrew. Background auto-update is off;
+  upgrade with `brew upgrade --cask maccrab`. Manual checks above
+  still work."
+
+Stops the v1.6.13 → v1.7.5 channel-drift incident from recurring:
+without this, Sparkle silently bumps the .app to v1.7.x while brew
+still thinks it owns v1.6.x, then `brew upgrade` overwrites the
+newer Sparkle binary with the older brew-formula one.
+
+### Changed — metrics export format (schema 2)
+
+`/var/tmp/maccrab.metrics.json`:
+- Added `resident_memory_mb` (via `mach_task_basic_info`, no sudo
+  required) — continuous RSS visibility so the next leak shape is
+  caught at 100 MB rather than 1+ GB
+- Added `events_dropped_total` and `events_per_sec_lifetime`
+- Schema bumped 1 → 2
 
 ### Removed — zombie-sysext banner
 
-The reboot-recommendation banner (introduced v1.7.5, restyled v1.7.8)
-is gone. Showed every dashboard launch on installs with leftover sysexts
-queued for uninstall, with no productive action available from the
-dashboard itself. The diagnostic + recommendation already lives in
-`maccrabctl repair`, which is the right surface — it can both diagnose
-and walk the operator through next steps. Dashboard banner was
-confusing and visually noisy.
+The reboot-recommendation banner (introduced v1.7.5, restyled
+v1.7.8) is gone. Showed every dashboard launch on installs with
+leftover sysexts queued for uninstall, with no productive action
+available from the dashboard. The diagnostic + recommendation
+already lives in `maccrabctl repair`, which is the right surface.
 
 Removed: the `.safeAreaInset(.top)` banner block in `MainView.swift`,
 the `@AppStorage("dismissedZombieSysextCount")` declaration, the
@@ -24,20 +135,29 @@ the `@AppStorage("dismissedZombieSysextCount")` declaration, the
 `refreshZombieSysextCount()` method, and the per-poll-cycle call.
 Net deletion: ~50 lines.
 
-### Changed — sidebar layout (different approach)
+### Changed — sidebar layout (Mail.app pattern)
 
-v1.7.8's column-width-constraint + `.balanced` style approach still
-showed the sidebar visibly narrowing on resize before snapping. The
+v1.7.8's column-width-constraint + `.balanced` style still showed
+the sidebar visibly narrowing on resize before snapping. The
 cleaner UX, matching Mail.app and Calendar.app: enforce a generous
-window minimum width so the user simply can't drag the window narrow
-enough to trigger any awkward sidebar behaviour.
+window minimum so the user simply can't drag the window into the
+awkward state.
 
 `MainView.swift`:
 - `.navigationSplitViewStyle(.prominentDetail)` (replaces `.balanced`)
 - `.frame(minWidth: 1100, minHeight: 600)` (up from 950)
-- Removed `.navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)`
-  — let the system pick the sidebar default at the now-guaranteed
-  comfortable window width
+- Removed `.navigationSplitViewColumnWidth(min: 200, ideal: 220,
+  max: 280)` — let the system pick the sidebar default at the
+  now-guaranteed comfortable window width
+
+### Compatibility
+
+No data migration. Existing v1.7.8 installs upgrade in place via
+manual download, `brew upgrade --cask maccrab`, or Sparkle when
+that channel is published. No reboot or extension re-approval
+required.
+
+Tests: 929/929 passing. Pre-release audit: 10/10 passes green.
 
 ## [1.7.8] — 2026-04-29
 

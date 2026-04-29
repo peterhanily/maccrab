@@ -99,13 +99,35 @@ func runRepair(args: [String]) async {
             // is healthy, recovery would lose data unnecessarily.
             let probe = runShell("/usr/bin/sqlite3", args: [dbPath, "PRAGMA integrity_check;"])
             let result = probe.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-            if result == "ok" {
-                warn("integrity_check returned 'ok' — events.db doesn't appear corrupt.")
-                info("If the daemon still crashes on init, the issue is something else (permissions, schema, locking). Skipping backup. Re-run with --force-fix-storage to back up anyway.")
+
+            // v1.7.9: schema-version sanity check on the alerts table.
+            // PRAGMA integrity_check passes for the v1.7.5 → v1.7.6 bug
+            // (alerts table missing llm_investigation_json column from
+            // a silently-skipped migration) because the file IS valid
+            // SQLite — it's just stale. Probe the columns we expect
+            // alerts to carry; if any are missing, the DB is "logically
+            // broken" even though physically intact.
+            let alertsSchema = runShell("/usr/bin/sqlite3",
+                                         args: [dbPath, "PRAGMA table_info(alerts);"])
+            let expectedAlertColumns = ["llm_investigation_json"]
+            let alertsCols = alertsSchema.stdout
+            let missingAlertCols = expectedAlertColumns.filter { !alertsCols.contains($0) }
+            let logicallyBroken = !missingAlertCols.isEmpty
+
+            if result == "ok" && !logicallyBroken {
+                warn("integrity_check returned 'ok' AND alerts schema looks current — events.db doesn't appear corrupt.")
+                info("If the daemon still crashes on init, the issue is something else (permissions, locking). Skipping backup. Re-run with --force-fix-storage to back up anyway.")
                 if !args.contains("--force-fix-storage") {
                     return
                 }
-                info("--force-fix-storage set — proceeding with backup despite integrity_check ok")
+                info("--force-fix-storage set — proceeding with backup despite both checks passing")
+            } else if logicallyBroken {
+                warn("alerts table missing expected column(s): \(missingAlertCols.joined(separator: ", "))")
+                info("This is the v1.7.5 → v1.7.6 SchemaMigrator bug shape. Installing v1.7.6+ alone repairs the schema in-place — back up only if the daemon still can't recover.")
+                if !args.contains("--force-fix-storage") {
+                    return
+                }
+                info("--force-fix-storage set — backing up despite repairable schema state")
             } else {
                 warn("integrity_check failed: \(result.prefix(200)) — backing up corrupt files")
             }

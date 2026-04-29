@@ -561,12 +561,31 @@ enum DaemonTimers {
             // rates from deltas. Using /var/tmp (survives reboots, no
             // privilege boundary to cross) so external collectors can
             // read without special entitlements.
+            // v1.7.9: include resident memory in MB so scrapers + the
+            // dashboard's diagnostic surface can plot daemon RSS over
+            // time. Field-driven addition after v1.7.6→v1.7.7→v1.7.9
+            // memory leak iterations: we want continuous RSS visibility
+            // so the next leak shape is caught before user reports
+            // climb to 1+ GB. mach_task_basic_info reads our own RSS
+            // without sudo or external tools.
+            var taskInfo = mach_task_basic_info()
+            var taskInfoCount = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let kr = withUnsafeMutablePointer(to: &taskInfo) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(taskInfoCount)) {
+                    task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &taskInfoCount)
+                }
+            }
+            let residentMB: Int = kr == KERN_SUCCESS ? Int(taskInfo.resident_size / 1_048_576) : -1
+
             let metricsPayload: [String: Any] = [
-                "schema": 1,
+                "schema": 2,
                 "written_at_unix": nowUnix,
                 "uptime_seconds": uptime,
                 "events_total": events,
                 "alerts_total": alerts,
+                "events_dropped_total": droppedTotal,
+                "events_per_sec_lifetime": uptime > 0 ? Double(events) / Double(uptime) : 0,
+                "resident_memory_mb": residentMB,
                 "sysext_has_fda": sysextHasFDA,
                 "power_state": PowerGate.stateDescription,
             ]

@@ -524,6 +524,21 @@ struct SettingsView: View {
                         } label: {
                             Label(String(localized: "settings.checkForUpdates", defaultValue: "Check for Updates"), systemImage: "arrow.down.circle")
                         }
+
+                        // v1.7.9: brew-install caption. When MacCrab.app
+                        // lives under /Caskroom/ we've already disabled
+                        // Sparkle's automatic background checks (see
+                        // MacCrabApp.updaterController init) to prevent the
+                        // v1.6.13 → v1.7.5 drift incident. Surface the
+                        // recommendation so the user knows where to
+                        // upgrade from.
+                        if MacCrabApp.isBrewInstalled {
+                            Text(String(localized: "settings.brewInstalled.hint",
+                                        defaultValue: "Installed via Homebrew. Background auto-update is off; upgrade with `brew upgrade --cask maccrab`. Manual checks above still work."))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     .padding(8)
                 }

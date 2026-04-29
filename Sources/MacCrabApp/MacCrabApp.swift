@@ -26,15 +26,32 @@ struct MacCrabApp: App {
     @State private var showWelcome = false
     @Environment(\.scenePhase) private var scenePhase
 
-    // Sparkle auto-updater. `startingUpdater: true` kicks off the first
-    // background check about 30s after launch and then every 24h
-    // (SUScheduledCheckInterval in Info.plist). The controller retains
-    // SPUUpdater + SPUStandardUserDriver for the app's lifetime.
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: nil,
-        userDriverDelegate: nil
-    )
+    /// True when the running MacCrab.app was installed via Homebrew Cask
+    /// (binary lives under a `/Caskroom/` path). v1.7.9: detected at launch
+    /// so we can disable Sparkle's automatic background checks for brew
+    /// users. Without this, the v1.6.13 → v1.7.5 channel-drift incident
+    /// recurs: Sparkle silently bumps the .app to v1.7.x while brew still
+    /// thinks it owns v1.6.x, then `brew upgrade` overwrites the newer
+    /// Sparkle-installed binary with the older brew-formula one.
+    static let isBrewInstalled: Bool = {
+        Bundle.main.bundleURL.path.contains("/Caskroom/")
+    }()
+
+    // Sparkle auto-updater. `startingUpdater` is gated on installation
+    // source: brew-installed users see "Check for Updates" still
+    // available (manual click) but won't get auto-bumped behind brew's
+    // back. DMG-installed users get the normal 24h auto-check cadence.
+    private let updaterController: SPUStandardUpdaterController = {
+        let controller = SPUStandardUpdaterController(
+            startingUpdater: !MacCrabApp.isBrewInstalled,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+        if MacCrabApp.isBrewInstalled {
+            controller.updater.automaticallyChecksForUpdates = false
+        }
+        return controller
+    }()
 
     var body: some Scene {
         // Main dashboard window — opens on launch.

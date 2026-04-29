@@ -1,0 +1,50 @@
+title: Unsigned Network Extension Provider Installation
+id: a1b2c3d4-0002-4000-a002-000000000002
+status: experimental
+description: >
+    Detects creation of NEPacketTunnelProvider, NEDNSProxyProvider,
+    NEAppProxyProvider, or NEFilterDataProvider bundles by an
+    unsigned or ad-hoc-signed process. These providers can intercept
+    every packet leaving the device — legitimate VPN/firewall apps
+    are always Developer-ID-signed and notarized. An unsigned
+    Network Extension is a strong indicator of malware attempting
+    to establish a covert VPN tunnel or DNS hijack.
+author: MacCrab Community
+date: 2026/04/29
+references:
+    - https://attack.mitre.org/techniques/T1556/
+    - https://developer.apple.com/documentation/networkextension
+tags:
+    - attack.defense_evasion
+    - attack.t1556
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '.appex/Contents/Info.plist'
+            - 'NetworkExtension'
+        FileAction:
+            - 'create'
+            - 'write'
+    selection_provider:
+        TargetFilename|contains:
+            - 'PacketTunnelProvider'
+            - 'DNSProxyProvider'
+            - 'AppProxyProvider'
+            - 'FilterDataProvider'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/Applications/'
+    condition: (selection or selection_provider) and not filter_signed and not filter_system
+falsepositives:
+    - In-house enterprise VPN clients deployed via MDM with internal signing
+    - Open-source security research tools running unsigned
+level: critical

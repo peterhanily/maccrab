@@ -185,25 +185,32 @@ public final class UnifiedLogCollector: @unchecked Sendable {
         var residual = Data()
 
         while !Task.isCancelled {
-            let data = fileHandle.availableData
-            guard !data.isEmpty else {
-                // EOF — the subprocess has exited
-                break
-            }
-
-            residual.append(data)
-
-            // Split on newlines and process each complete line.
+            // v1.7.9: outer autoreleasepool wraps the per-CHUNK body so
+            // `fileHandle.availableData` (autoreleased NSConcreteData,
+            // typically 16 KB per call) drains every iteration. v1.7.7
+            // wrapped only the inner per-LINE block, missing the chunk
+            // itself. Field-reproduced on a v1.7.8 install: heap dump
+            // showed 135,689 × 16 KB NSConcreteData = 2.22 GB private
+            // heap (chunk-only leak shape).
             //
-            // v1.7.7: per-iteration autoreleasepool — same rationale as
-            // EsloggerCollector. JSONSerialization.jsonObject autoreleases
-            // NSDictionary/NSError/_NSJSONReader plus the input Data; in
-            // a long-running async Task the pool never drains, growing
-            // private heap by ~300 bytes/event. At unified-log streaming
-            // rates that's measured in GB over hours.
-            var earlyReturn = false
-            while let newlineRange = residual.range(of: Data([0x0A])) {
-                autoreleasepool {
+            // Inner autoreleasepool retained as belt-and-suspenders for
+            // tighter peak memory on chunks containing many lines: drains
+            // JSON parser temporaries per line, before the outer pool
+            // drains the chunk at end of iteration.
+            var outerBreak = false
+            autoreleasepool {
+                let data = fileHandle.availableData
+                guard !data.isEmpty else {
+                    outerBreak = true  // EOF — the subprocess has exited
+                    return
+                }
+
+                residual.append(data)
+
+                // Split on newlines and process each complete line.
+                var earlyReturn = false
+                while let newlineRange = residual.range(of: Data([0x0A])) {
+                    autoreleasepool {
                     let lineData = residual[residual.startIndex..<newlineRange.lowerBound]
                     residual = Data(residual[newlineRange.upperBound...])
 
@@ -241,8 +248,10 @@ public final class UnifiedLogCollector: @unchecked Sendable {
                         }
                     }
                 }
-                if earlyReturn { return }
-            }
+                if earlyReturn { outerBreak = true; return }
+                }
+            }  // end outer autoreleasepool (drains chunk Data)
+            if outerBreak { break }
         }
 
         continuation.finish()

@@ -200,27 +200,39 @@ public actor EsloggerCollector {
         let newline = UInt8(0x0A)
 
         while true {
-            let chunk = fileHandle.availableData
-            guard !chunk.isEmpty else { break }  // EOF
-
-            residual.append(chunk)
-
-            // Process complete lines
+            // v1.7.9: outer autoreleasepool wraps the per-CHUNK body so
+            // `fileHandle.availableData` (which returns an autoreleased
+            // NSConcreteData of typically 16 KB) drains every iteration
+            // instead of accumulating forever in the long-running Task's
+            // pool.
             //
-            // v1.7.7: per-iteration autoreleasepool. JSONSerialization.jsonObject
-            // returns autoreleased Foundation objects (NSDictionary, NSError,
-            // _NSJSONReader) plus the input Data buffer is read-traversed via
-            // autoreleased NSConcreteData. In a long-running async Task the
-            // outer pool never drains, so 100 events/sec × hours = 1+ GB heap
-            // of dead Foundation objects. Field-reproduced: heap dump showed
-            // 2.34M each of NSDictionary/NSError/_NSJSONReader (1:1:1 = one
-            // per parse) plus 692 MB of NSConcreteData buffers. Wrapping each
-            // line's processing drains the pool every iteration. The inner
-            // continuation.yield is synchronous (AsyncStream.yield doesn't
-            // suspend), so the pool unwinds cleanly per event.
-            var earlyReturn = false
-            while let newlineIndex = residual.firstIndex(of: newline) {
-                autoreleasepool {
+            // v1.7.7's fix only wrapped the inner per-LINE body, which
+            // drained JSON-parser temporaries but missed the per-CHUNK
+            // chunk Data itself. Field-reproduced on a v1.7.8 install:
+            // heap dump showed 135,689 × 16 KB NSConcreteData = 2.22 GB
+            // private heap (no JSON triplets — chunk-only leak shape).
+            //
+            // This pool wraps everything: the chunk read, the residual
+            // append, the inner per-line loop. Inner autoreleasepool
+            // remains as belt-and-suspenders for tighter peak memory
+            // (drains JSON parsers per line, before the outer pool drains
+            // the chunk at end of iteration).
+            var outerEarlyReturn = false
+            autoreleasepool {
+                let chunk = fileHandle.availableData
+                guard !chunk.isEmpty else {
+                    outerEarlyReturn = true  // EOF
+                    return
+                }
+
+                residual.append(chunk)
+
+                // Process complete lines (inner pool: drains JSON parser
+                // temporaries per line so peak memory stays low even on
+                // chunks containing thousands of lines).
+                var earlyReturn = false
+                while let newlineIndex = residual.firstIndex(of: newline) {
+                    autoreleasepool {
                     let lineData = residual[residual.startIndex..<newlineIndex]
                     residual = Data(residual[residual.index(after: newlineIndex)...])
 
@@ -257,8 +269,10 @@ public actor EsloggerCollector {
                     let result = continuation.yield(event)
                     if case .terminated = result { earlyReturn = true }
                 }
-                if earlyReturn { return }
+                if earlyReturn { outerEarlyReturn = true; return }
             }
+            }  // end outer autoreleasepool (drains the chunk Data)
+            if outerEarlyReturn { break }
         }
 
         continuation.finish()

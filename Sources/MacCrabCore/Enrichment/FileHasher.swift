@@ -195,8 +195,24 @@ public actor FileHasher {
         var hasher = SHA256()
         let chunkSize = 64 * 1024
         do {
-            while let data = try handle.read(upToCount: chunkSize), !data.isEmpty {
-                hasher.update(data: data)
+            // v1.7.9: per-iteration autoreleasepool — `handle.read(upToCount:)`
+            // returns autoreleased NSConcreteData per chunk. Hashing a 1 GB
+            // binary at 64 KB/chunk = 16K autoreleased Data objects. Called
+            // from per-file-event paths, accumulates fast — heap evidence
+            // on a v1.7.8 install showed 135K × 16 KB NSConcreteData = 2.22 GB
+            // private heap as the dominant leak after the v1.7.7 collector
+            // wraps. Drains per chunk so memory peak stays at one buffer's
+            // worth regardless of file size.
+            while true {
+                var done = false
+                try autoreleasepool {
+                    if let data = try handle.read(upToCount: chunkSize), !data.isEmpty {
+                        hasher.update(data: data)
+                    } else {
+                        done = true
+                    }
+                }
+                if done { break }
             }
         } catch {
             return nil

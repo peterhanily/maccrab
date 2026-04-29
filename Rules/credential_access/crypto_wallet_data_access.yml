@@ -1,0 +1,103 @@
+title: Cryptocurrency Wallet Data Accessed by Untrusted Process
+id: a1b2c3d4-0003-4000-a003-000000000003
+status: experimental
+description: >
+    Detects reads of native cryptocurrency wallet data directories or
+    browser-extension wallet storage by an unsigned, ad-hoc-signed, or
+    Developer-ID-signed process that is NOT the wallet application itself.
+    Atomic Stealer (AMOS), Banshee Stealer, and similar macOS infostealers
+    explicitly target these paths for crypto exfiltration. Each wallet vendor
+    runs its own signed app; any other process touching this data should be
+    investigated.
+author: MacCrab Community
+date: 2026/04/29
+references:
+    - https://attack.mitre.org/techniques/T1555/
+    - https://www.sentinelone.com/labs/atomic-macos-stealer-amos-strikes-again/
+    - https://blog.kandji.io/banshee-stealer-targets-macos
+tags:
+    - attack.credential_access
+    - attack.collection
+    - attack.t1555
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_native_wallets:
+        TargetFilename|contains:
+            # Native desktop wallets — common targets in AMOS/Banshee
+            - 'Application Support/Electrum/wallets/'
+            - 'Application Support/Exodus/exodus.wallet/'
+            - 'Application Support/Atomic/Local Storage/'
+            - 'Application Support/Coinomi/'
+            - 'Application Support/Daedalus/'
+            - 'Application Support/monero-project/'
+            - 'Application Support/Trezor Suite/'
+            - 'Application Support/Ledger Live/'
+            # Hardware-wallet bridge data (Trezor, KeepKey)
+            - 'Library/Containers/io.trezor.TrezorSuite/'
+    selection_browser_extension_wallets:
+        TargetFilename|contains:
+            # Browser-extension wallets (MetaMask, Phantom, Coinbase, etc.)
+            # store data under the browser's Local Extension Settings dir,
+            # one subdirectory per extension UUID.
+            - '/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn'  # MetaMask
+            - '/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa'  # Phantom (Solana)
+            - '/Local Extension Settings/hnfanknocfeofbddgcijnmhnfnkdnaad'  # Coinbase Wallet
+            - '/Local Extension Settings/fhbohimaelbohpjbbldcngcnapndodjp'  # Binance Chain Wallet
+            - '/Local Extension Settings/egjidjbpglichdcondbcbdnbeeppgdph'  # Trust Wallet
+            - '/Local Extension Settings/lmenefjjbnabbnchedhpaichpfphndbg'  # WalletConnect
+            - '/Local Extension Settings/efbglgofoippbgcjepnhiblaibcnclgk'  # MetaMask Flask (dev)
+    filter_signed_wallet_apps:
+        # Wallet apps that legitimately read their own data. Anchor on
+        # binary path (not bundle ID) so we catch the actual binary
+        # making the read.
+        Image|contains:
+            - '/Exodus.app/'
+            - '/Electrum.app/'
+            - '/Atomic Wallet.app/'
+            - '/Coinomi.app/'
+            - '/Daedalus Mainnet.app/'
+            - '/Monero.app/'
+            - '/Trezor Suite.app/'
+            - '/Ledger Live.app/'
+    filter_browsers:
+        # Browser processes legitimately read their own extension storage
+        # — not exfil unless they're being driven by injection.
+        Image|endswith:
+            - '/Google Chrome'
+            - '/Google Chrome Helper'
+            - '/Google Chrome Helper (Renderer)'
+            - '/Safari'
+            - '/firefox'
+            - '/firefox-bin'
+            - '/Microsoft Edge'
+            - '/Microsoft Edge Helper'
+            - '/Arc'
+            - '/Brave Browser'
+            - '/Brave Browser Helper'
+    filter_apple_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+        SignerType: 'apple'
+    filter_backup_tools:
+        # Time Machine, Backblaze, Arq legitimately read everything
+        # under ~/Library during backup runs.
+        Image|contains:
+            - 'Time Machine'
+            - 'Backblaze.app'
+            - 'Arq.app'
+            - '/backupd'
+            - '/com.backblaze.bzbmenu'
+    condition: >
+        (selection_native_wallets or selection_browser_extension_wallets)
+        and not filter_signed_wallet_apps
+        and not filter_browsers
+        and not filter_apple_system
+        and not filter_backup_tools
+falsepositives:
+    - User-invoked grep/find/du across Library directories during disk-cleanup
+    - Cloud sync agents (iCloud, Dropbox, Google Drive) if user has sync set on Library — narrow filter via user complaint, never default-allowlist a sync agent for wallet data
+    - Custom backup scripts not on the filter list — add via maccrabctl suppress
+level: critical

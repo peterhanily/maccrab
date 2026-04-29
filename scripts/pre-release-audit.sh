@@ -644,6 +644,153 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS 9 — autoreleasepool in collector hot loops (v1.7.7 lesson)
+# ---------------------------------------------------------------------
+# Foundation APIs that internally autorelease (JSONSerialization,
+# many CFString/CFData factories, NSRegularExpression, NSDate
+# formatters) accumulate their returns in the calling Task's pool.
+# Swift async Tasks DO NOT carry an implicit @autoreleasepool — for
+# event-loop Tasks that never end, this is a slow leak proportional
+# to call frequency.
+#
+# Field reproduction (v1.7.6 → v1.7.7): EsloggerCollector and
+# UnifiedLogCollector each parsed JSON per event in a `while true`
+# loop driven by an async Task. At ~107 events/sec, that's ~1 GB
+# of NSDictionary/NSError/_NSJSONReader/NSConcreteData accumulating
+# per hour. Heap dump showed exactly 2.34M each (1:1:1 ratio = one
+# triplet per JSONSerialization.jsonObject call) plus 692 MB of
+# autoreleased input Data buffers.
+#
+# This pass scans collector + enricher source for the pattern:
+# autoreleasing-Foundation-API call inside a `while`/`for await`
+# body, with no `autoreleasepool` block on the surrounding lines.
+
+section "PASS 9 — autoreleasepool in collector hot loops"
+
+# Files in scope: anything in Collectors/ or Enrichment/ that runs
+# a streaming/event-loop processor. We deliberately don't scan the
+# whole tree because one-shot CLI tools and per-alert sinks don't
+# leak — this pass is about long-running per-event hot paths.
+PASS9_DIRS=(
+    "Sources/MacCrabCore/Collectors"
+    "Sources/MacCrabCore/Enrichment"
+    "Sources/MacCrabAgentKit"
+)
+
+# Foundation APIs known to return autoreleased objects.
+# v1.7.9: extended to include `fileHandle.availableData` and friends
+# after a v1.7.8 field reproduction showed the v1.7.7 fix had only
+# wrapped JSON parsing — the per-chunk Data reads from the file
+# handle stayed autoreleased and accumulated 135K × 16 KB = 2.2 GB
+# in 9 hours.
+PASS9_PATTERNS='JSONSerialization\.jsonObject|JSONSerialization\.data|NSRegularExpression\.firstMatch|DateFormatter\(\)|ISO8601DateFormatter\(\)|\.availableData|\.readDataOfLength|\.read\(upToCount:|Data\(contentsOf:'
+
+PASS9_FINDINGS=()
+for dir in "${PASS9_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r f; do
+        # Find lines matching the Foundation pattern. For each, look at
+        # the surrounding 8 lines (above + below) — if there's a
+        # while/for loop opening above AND no `autoreleasepool` between
+        # that loop and the call, flag.
+        while IFS=: read -r line content; do
+            [[ -z "$line" ]] && continue
+            # Window from max(1, line-15) to line+2 — wide enough to
+            # catch a `while`/`for await` opening that's a few lines up
+            # plus the call itself.
+            start=$(( line > 15 ? line - 15 : 1 ))
+            end=$(( line + 2 ))
+            window=$(sed -n "${start},${end}p" "$f")
+            # Must have a loop opening AND lack autoreleasepool in the
+            # window. Allow `// audit-pass-9: hand-wrapped` opt-out
+            # comment for cases where the wrapping is in a helper.
+            # Match streaming/event-loop constructs only — bare `for` is too
+            # noisy (catches words like "before", "force", and finite
+            # `for x in fixedArray` startup loops which don't need pool drain).
+            if echo "$window" | grep -qE '\bwhile (true|let)\b|for (try )?await\b' \
+               && ! echo "$window" | grep -qE 'autoreleasepool|audit-pass-9: hand-wrapped'; then
+                PASS9_FINDINGS+=("$f:$line — $(echo "$content" | sed 's/^[[:space:]]*//' | cut -c1-80)")
+            fi
+        done < <(grep -nE "$PASS9_PATTERNS" "$f" 2>/dev/null || true)
+    done < <(find "$dir" -name '*.swift' -type f 2>/dev/null)
+done
+
+if [[ ${#PASS9_FINDINGS[@]} -gt 0 ]]; then
+    err "Pass 9: ${#PASS9_FINDINGS[@]} autoreleasing Foundation call(s) in hot loops without autoreleasepool wrap:"
+    for finding in "${PASS9_FINDINGS[@]}"; do
+        echo "    $finding" >&2
+    done
+    echo "    Fix: wrap the per-iteration body in autoreleasepool { ... }" >&2
+    echo "    Or add comment '// audit-pass-9: hand-wrapped' if wrapping is in a helper" >&2
+else
+    ok "All collector/enricher hot loops with autoreleasing Foundation calls are pool-wrapped"
+fi
+
+# ---------------------------------------------------------------------
+# PASS 10 — co-resident store migration discipline (v1.7.6 lesson)
+# ---------------------------------------------------------------------
+# PRAGMA user_version is a SINGLE per-database counter. EventStore +
+# AlertStore both run their own migration chains against shared
+# events.db. Pre-fix logic (`pending = migrations.filter { $0.version
+# > current }`) silently dropped one store's migrations whenever the
+# other had bumped the counter past the dropping store's latest.
+# Field reproduction (v1.7.5 → v1.7.6): AlertStore prepare crashed
+# at every boot with "table alerts has no column named
+# llm_investigation_json" because EventStore had bumped user_version
+# to 2 first.
+#
+# This pass enforces:
+#   - Any file declaring `schemaMigrations: [Migration]` AND opening
+#     a `.db` file path that another store also uses must rely on
+#     the SchemaMigrator's idempotent re-run path — i.e., the call
+#     site must be `SchemaMigrator.run(...)` (the helper that
+#     re-applies migrations idempotently when current >= latest)
+#     and NOT a hand-rolled forward-only filter.
+
+section "PASS 10 — co-resident store migration discipline"
+
+# Find all stores that open events.db
+PASS10_EVENTS_OPENERS=$(grep -rln 'appendingPathComponent("events.db")' Sources/MacCrabCore/Storage/ 2>/dev/null | wc -l | tr -d ' ')
+PASS10_FAILURES=()
+
+# Each opener must use SchemaMigrator.run() (which handles co-residency)
+# rather than rolling its own filter.
+for f in $(grep -rln 'appendingPathComponent("events.db")' Sources/MacCrabCore/Storage/ 2>/dev/null); do
+    # File must call SchemaMigrator.run (proves it uses the shared,
+    # co-resident-aware migrator).
+    if ! grep -q 'SchemaMigrator\.run(' "$f"; then
+        PASS10_FAILURES+=("$f opens events.db but doesn't call SchemaMigrator.run()")
+        continue
+    fi
+    # File must NOT call PRAGMA user_version directly (a sign it's
+    # rolling its own version filter that bypasses SchemaMigrator).
+    if grep -qE '"PRAGMA user_version' "$f"; then
+        PASS10_FAILURES+=("$f opens events.db AND reads/writes user_version directly — bypasses SchemaMigrator's co-residency handling")
+    fi
+done
+
+# SchemaMigrator itself must contain the v1.7.6 idempotent re-run
+# branch. If someone refactors and removes it, the bug returns.
+if ! grep -q 'at-or-ahead' Sources/MacCrabCore/Storage/SchemaMigrator.swift 2>/dev/null \
+   || ! grep -q 'bumpVersion' Sources/MacCrabCore/Storage/SchemaMigrator.swift 2>/dev/null; then
+    PASS10_FAILURES+=("SchemaMigrator.swift missing the v1.7.6 idempotent-re-run branch (bumpVersion flag + at-or-ahead handling)")
+fi
+
+if [[ ${#PASS10_FAILURES[@]} -gt 0 ]]; then
+    err "Pass 10: ${#PASS10_FAILURES[@]} co-resident store discipline violation(s):"
+    for finding in "${PASS10_FAILURES[@]}"; do
+        echo "    $finding" >&2
+    done
+    echo "    Background: PRAGMA user_version is per-database, not per-store." >&2
+    echo "    Multiple stores sharing one .db must rely on SchemaMigrator's" >&2
+    echo "    idempotent re-run path (bumpVersion=false when current>=latest)" >&2
+    echo "    so a store whose migrations were silently skipped on first boot" >&2
+    echo "    gets them applied on next launch instead of crashing." >&2
+else
+    ok "events.db openers ($PASS10_EVENTS_OPENERS file(s)) all use SchemaMigrator.run() with no direct user_version manipulation"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

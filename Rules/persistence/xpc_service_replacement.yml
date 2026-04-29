@@ -1,0 +1,47 @@
+title: XPC Service Replacement by Unsigned Process
+id: a1b2c3d4-0001-4000-a001-000000000001
+status: experimental
+description: >
+    Detects writes to /Library/LaunchDaemons/*.plist or
+    /Library/LaunchAgents/*.plist by an unsigned or ad-hoc-signed
+    process. System XPC service definitions are normally written by
+    Apple-signed installers, package managers, or MDM agents — an
+    unsigned process modifying these is a strong persistence-via-
+    XPC-replacement signal. Targeted by malware families that hijack
+    legitimate-looking service names to survive reboot.
+author: MacCrab Community
+date: 2026/04/29
+references:
+    - https://attack.mitre.org/techniques/T1543/004/
+    - https://www.sentinelone.com/labs/macos-malware-persistence-techniques/
+tags:
+    - attack.persistence
+    - attack.t1543.004
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection:
+        TargetFilename|contains:
+            - '/Library/LaunchDaemons/'
+            - '/Library/LaunchAgents/'
+        TargetFilename|endswith: '.plist'
+        FileAction:
+            - 'create'
+            - 'write'
+            - 'rename'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    filter_pkg:
+        Image|startswith:
+            - '/usr/sbin/installer'
+            - '/usr/bin/pkgutil'
+            - '/System/Library/CoreServices/Installer.app/'
+    condition: selection and not filter_signed and not filter_pkg
+falsepositives:
+    - Self-built developer tools that haven't been signed yet
+    - Custom in-house deployment scripts
+level: high

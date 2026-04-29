@@ -152,26 +152,42 @@ public actor KdebugCollector {
         var residual = Data()
         let newline = UInt8(0x0A)
 
+        // v1.7.9: outer + inner autoreleasepool — same pattern as
+        // EsloggerCollector / UnifiedLogCollector. `availableData` returns
+        // autoreleased NSConcreteData (~16 KB chunks); without per-iteration
+        // pool drainage these accumulate into multi-GB heaps in long-running
+        // Tasks. Caught by Pass 9 audit after v1.7.8 field reproduction.
         while true {
-            let chunk = fileHandle.availableData
-            guard !chunk.isEmpty else { break }  // EOF
+            var outerBreak = false
+            autoreleasepool {
+                let chunk = fileHandle.availableData
+                guard !chunk.isEmpty else {
+                    outerBreak = true  // EOF
+                    return
+                }
 
-            residual.append(chunk)
+                residual.append(chunk)
 
-            // Process complete lines
-            while let newlineIndex = residual.firstIndex(of: newline) {
-                let lineData = residual[residual.startIndex..<newlineIndex]
-                residual = Data(residual[residual.index(after: newlineIndex)...])
+                // Process complete lines
+                while let newlineIndex = residual.firstIndex(of: newline) {
+                    var earlyReturn = false
+                    autoreleasepool {
+                        let lineData = residual[residual.startIndex..<newlineIndex]
+                        residual = Data(residual[residual.index(after: newlineIndex)...])
 
-                guard let line = String(data: lineData, encoding: .utf8),
-                      !line.isEmpty else { continue }
+                        guard let line = String(data: lineData, encoding: .utf8),
+                              !line.isEmpty else { return }
 
-                // Parse the fs_usage line into an Event
-                guard let event = parseFsUsageLine(line, selfPid: selfPid) else { continue }
+                        // Parse the fs_usage line into an Event
+                        guard let event = parseFsUsageLine(line, selfPid: selfPid) else { return }
 
-                let result = continuation.yield(event)
-                if case .terminated = result { return }
+                        let result = continuation.yield(event)
+                        if case .terminated = result { earlyReturn = true }
+                    }
+                    if earlyReturn { outerBreak = true; return }
+                }
             }
+            if outerBreak { break }
         }
 
         continuation.finish()
