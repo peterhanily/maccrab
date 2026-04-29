@@ -193,44 +193,55 @@ public final class UnifiedLogCollector: @unchecked Sendable {
 
             residual.append(data)
 
-            // Split on newlines and process each complete line
+            // Split on newlines and process each complete line.
+            //
+            // v1.7.7: per-iteration autoreleasepool — same rationale as
+            // EsloggerCollector. JSONSerialization.jsonObject autoreleases
+            // NSDictionary/NSError/_NSJSONReader plus the input Data; in
+            // a long-running async Task the pool never drains, growing
+            // private heap by ~300 bytes/event. At unified-log streaming
+            // rates that's measured in GB over hours.
+            var earlyReturn = false
             while let newlineRange = residual.range(of: Data([0x0A])) {
-                let lineData = residual[residual.startIndex..<newlineRange.lowerBound]
-                residual = Data(residual[newlineRange.upperBound...])
+                autoreleasepool {
+                    let lineData = residual[residual.startIndex..<newlineRange.lowerBound]
+                    residual = Data(residual[newlineRange.upperBound...])
 
-                guard !lineData.isEmpty else { continue }
+                    guard !lineData.isEmpty else { return }
 
-                guard var lineString = String(data: lineData, encoding: .utf8) else {
-                    continue
-                }
-
-                // Trim whitespace and strip leading/trailing JSON array syntax
-                lineString = lineString.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                // Skip empty lines and array markers
-                if lineString.isEmpty || lineString == "[" || lineString == "]" {
-                    continue
-                }
-
-                // Strip trailing comma (the log tool outputs JSON objects
-                // separated by commas inside an array)
-                if lineString.hasSuffix(",") {
-                    lineString = String(lineString.dropLast())
-                }
-
-                // Attempt to parse as JSON
-                guard let jsonData = lineString.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                    logger.debug("Skipped non-JSON log line: \(lineString.prefix(120))")
-                    continue
-                }
-
-                if let event = normalise(json: json, logger: logger) {
-                    let result = continuation.yield(event)
-                    if case .terminated = result {
+                    guard var lineString = String(data: lineData, encoding: .utf8) else {
                         return
                     }
+
+                    // Trim whitespace and strip leading/trailing JSON array syntax
+                    lineString = lineString.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    // Skip empty lines and array markers
+                    if lineString.isEmpty || lineString == "[" || lineString == "]" {
+                        return
+                    }
+
+                    // Strip trailing comma (the log tool outputs JSON objects
+                    // separated by commas inside an array)
+                    if lineString.hasSuffix(",") {
+                        lineString = String(lineString.dropLast())
+                    }
+
+                    // Attempt to parse as JSON
+                    guard let jsonData = lineString.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                        logger.debug("Skipped non-JSON log line: \(lineString.prefix(120))")
+                        return
+                    }
+
+                    if let event = normalise(json: json, logger: logger) {
+                        let result = continuation.yield(event)
+                        if case .terminated = result {
+                            earlyReturn = true
+                        }
+                    }
                 }
+                if earlyReturn { return }
             }
         }
 

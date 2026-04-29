@@ -3,6 +3,49 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.7] — 2026-04-29
+
+Memory hot-fix: 1.31 GB private heap → bounded steady state. Field-reproduced
+on a v1.7.6 install where the daemon climbed from 50 MB → 1.52 GB RSS over
+~1 hour at 197 events/sec sustained. Heap dump pinpointed 2.34M each of
+`NSDictionary` / `NSError` / `_NSJSONReader` (1:1:1 ratio = one matched
+triplet per parse) and 692 MB of `NSConcreteData` buffers — Foundation
+objects autoreleased by `JSONSerialization.jsonObject(with:)` accumulating
+in the autorelease pool of long-running async Tasks that never drain.
+
+### Fixed — autorelease pool drained per event in collector hot loops
+
+`EsloggerCollector.readLoop` and `UnifiedLogCollector` both stream NDJSON
+through `JSONSerialization.jsonObject(with:)` per line, in `while` loops
+that run for the lifetime of the daemon. Swift async Tasks don't carry
+an implicit `@autoreleasepool` — Foundation autoreleased objects (the
+parser's `NSDictionary`, `NSError`, `_NSJSONReader`, plus the input
+`NSConcreteData` buffer for each chunk) accumulate until the Task ends,
+which for these collectors is "never".
+
+Fix: wrap each per-line iteration body in `autoreleasepool { ... }`.
+The inner `continuation.yield` is synchronous (AsyncStream.yield doesn't
+suspend), so the pool unwinds cleanly per event with zero behavior change.
+
+Cost: one autoreleasepool entry/exit per event (~nanoseconds).
+Benefit: at the field-reproduction rate (197 events/sec, 75% file events
+streamed through these collectors), this prevents the ~1 GB/hour Swift
+heap growth that v1.7.6 exposed.
+
+The leak was masked in v1.7.5 because the daemon was crash-looping in
+storage init (the SchemaMigrator bug that v1.7.6 fixed). With v1.7.6
+keeping the daemon alive, both collector loops finally ran long enough
+to reveal the autorelease accumulation. So v1.7.7 doesn't introduce a
+new fix — it surfaces and patches a latent bug that pre-dates v1.7.0.
+
+### Compatibility
+
+No data migration. Existing v1.7.6 installs upgrade in place via Sparkle
+or `brew upgrade --cask maccrab`. The new daemon takes over from sysextd
+on next launch with bounded heap behaviour from the first event onwards.
+
+No reboot or extension re-approval required.
+
 ## [1.7.6] — 2026-04-28
 
 Hot-fix for a v1.7.5 daemon-init crash-loop reproduced in the field.

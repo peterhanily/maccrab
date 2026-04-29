@@ -206,42 +206,58 @@ public actor EsloggerCollector {
             residual.append(chunk)
 
             // Process complete lines
+            //
+            // v1.7.7: per-iteration autoreleasepool. JSONSerialization.jsonObject
+            // returns autoreleased Foundation objects (NSDictionary, NSError,
+            // _NSJSONReader) plus the input Data buffer is read-traversed via
+            // autoreleased NSConcreteData. In a long-running async Task the
+            // outer pool never drains, so 100 events/sec × hours = 1+ GB heap
+            // of dead Foundation objects. Field-reproduced: heap dump showed
+            // 2.34M each of NSDictionary/NSError/_NSJSONReader (1:1:1 = one
+            // per parse) plus 692 MB of NSConcreteData buffers. Wrapping each
+            // line's processing drains the pool every iteration. The inner
+            // continuation.yield is synchronous (AsyncStream.yield doesn't
+            // suspend), so the pool unwinds cleanly per event.
+            var earlyReturn = false
             while let newlineIndex = residual.firstIndex(of: newline) {
-                let lineData = residual[residual.startIndex..<newlineIndex]
-                residual = Data(residual[residual.index(after: newlineIndex)...])
+                autoreleasepool {
+                    let lineData = residual[residual.startIndex..<newlineIndex]
+                    residual = Data(residual[residual.index(after: newlineIndex)...])
 
-                guard !lineData.isEmpty else { continue }
+                    guard !lineData.isEmpty else { return }
 
-                // Fast-path mute: check for system paths BEFORE JSON parsing
-                if shouldMute(lineData) { continue }
+                    // Fast-path mute: check for system paths BEFORE JSON parsing
+                    if shouldMute(lineData) { return }
 
-                // Parse JSON
-                guard let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
-                    continue
-                }
-
-                // Self-mute: skip events from our own PID
-                if let proc = json["process"] as? [String: Any],
-                   let auditToken = proc["audit_token"] as? [String: Any],
-                   let pid = auditToken["pid"] as? Int,
-                   pid == Int(selfPid) {
-                    continue
-                }
-
-                // Sequence gap detection
-                if let globalSeq = json["global_seq_num"] as? UInt64 {
-                    if lastGlobalSeq > 0 && globalSeq > lastGlobalSeq + 1 {
-                        let gap = globalSeq - lastGlobalSeq - 1
-                        onGap(gap)
+                    // Parse JSON
+                    guard let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                        return
                     }
-                    lastGlobalSeq = globalSeq
+
+                    // Self-mute: skip events from our own PID
+                    if let proc = json["process"] as? [String: Any],
+                       let auditToken = proc["audit_token"] as? [String: Any],
+                       let pid = auditToken["pid"] as? Int,
+                       pid == Int(selfPid) {
+                        return
+                    }
+
+                    // Sequence gap detection
+                    if let globalSeq = json["global_seq_num"] as? UInt64 {
+                        if lastGlobalSeq > 0 && globalSeq > lastGlobalSeq + 1 {
+                            let gap = globalSeq - lastGlobalSeq - 1
+                            onGap(gap)
+                        }
+                        lastGlobalSeq = globalSeq
+                    }
+
+                    // Parse into Event
+                    guard let event = EsloggerParser.parse(json) else { return }
+
+                    let result = continuation.yield(event)
+                    if case .terminated = result { earlyReturn = true }
                 }
-
-                // Parse into Event
-                guard let event = EsloggerParser.parse(json) else { continue }
-
-                let result = continuation.yield(event)
-                if case .terminated = result { return }
+                if earlyReturn { return }
             }
         }
 

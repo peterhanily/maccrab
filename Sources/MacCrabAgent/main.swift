@@ -27,4 +27,10 @@ import MacCrabAgentKit
 // even if storage init fails, the dashboard can distinguish "launched
 // but crashed in init" (banner: "Detection database failed — click
 // Recover") from "never launched" (banner: "Reactivate Extension").
+//
+// v1.7.7: collector hot-loops (Eslogger, UnifiedLog) now wrap each
+// per-event JSON parse in autoreleasepool to drain Foundation
+// autoreleased objects (NSDictionary/NSError/_NSJSONReader/NSConcreteData)
+// that previously accumulated in long-running async Tasks — fixed a
+// 1+ GB/hour heap growth observed in the field on v1.7.6.
 await DaemonBootstrap.runForever(printBanner: false)

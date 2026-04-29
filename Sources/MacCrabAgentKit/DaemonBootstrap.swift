@@ -95,7 +95,7 @@ public enum DaemonBootstrap {
         // think I activated it but the process never started").
         DaemonSetup.writeStartupMarker(
             supportDir: "/Library/Application Support/MacCrab",
-            version: "1.7.6"
+            version: "1.7.7"
         )
         let handles = await prepare(printBanner: printBanner)
         // Keep the handles alive for the lifetime of the event loop.
