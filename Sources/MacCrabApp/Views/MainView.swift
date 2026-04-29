@@ -76,12 +76,6 @@ struct MainView: View {
 
     @AppStorage(UIMode.storageKey) private var uiModeRaw: String = UIMode.advanced.rawValue
 
-    /// v1.7.8: persisted dismiss for the zombie-sysext banner. Stores the
-    /// highest zombie count the user has acknowledged. Banner re-shows if
-    /// MORE zombies appear later (e.g., another upgrade adds to the queue),
-    /// but stays hidden after the user has chosen to defer the reboot.
-    @AppStorage("dismissedZombieSysextCount") private var dismissedZombieSysextCount: Int = 0
-
     private var uiMode: UIMode {
         UIMode(rawValue: uiModeRaw) ?? .advanced
     }
@@ -202,13 +196,6 @@ struct MainView: View {
             }
             .listStyle(.sidebar)
             .navigationTitle("MacCrab")
-            // v1.7.8: constrain sidebar width so NavigationSplitView's
-            // .automatic style doesn't slide it over the detail content
-            // when the window is resized narrow. Combined with
-            // .navigationSplitViewStyle(.balanced) below, the sidebar
-            // stays visible side-by-side until the user explicitly
-            // collapses it via the toolbar toggle, instead of overlaying.
-            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } detail: {
             switch selectedSection {
             case .overview:
@@ -247,75 +234,24 @@ struct MainView: View {
                 OverviewDashboard(appState: appState, sysextManager: sysextManager, selectedSection: $selectedSection)
             }
         }
-        // v1.7.8: .balanced style keeps both columns side-by-side instead of
-        // collapsing the sidebar into an overlay when the window is narrow.
-        // Combined with .navigationSplitViewColumnWidth on the sidebar above,
-        // this means a narrow window pushes the detail content (which can
-        // scroll) rather than letting the sidebar slide over and obscure it.
-        .navigationSplitViewStyle(.balanced)
-        // Window minimum sized for sidebar (220) + detail (730 minimum) =
-        // 950. Bumped from earlier minWidth so the sidebar is never clipped
-        // even at the smallest allowed window size.
-        .frame(minWidth: 950, minHeight: 600)
-        // v1.7.5: zombie-sysext banner. When the daemon reports many
-        // prior versions queued for uninstall on reboot, the most
-        // common cause of "engine silent" is that sysextd is in a
-        // weird state and the new sysext can't reliably start until
-        // the user reboots. This banner specifically tells them to
-        // reboot — much more actionable than the generic "engine
-        // offline" message below.
+        // Sidebar layout: .prominentDetail keeps the sidebar at its system
+        // default width and lets the detail content fill the rest. We set
+        // a generous window minWidth so the user simply can't drag the
+        // window narrow enough to trigger any overlay/collapse behaviour
+        // — the cleanest UX is "the dashboard always looks right because
+        // it can't be sized into a state where it doesn't". Mail.app and
+        // Calendar.app use the same approach: large minWidth, no clever
+        // narrow-window adaptation.
+        .navigationSplitViewStyle(.prominentDetail)
+        .frame(minWidth: 1100, minHeight: 600)
+        // Note: the zombie-sysext banner (v1.7.5–v1.7.8) was removed.
+        // The data is still available via `maccrabctl repair`, which is the
+        // right surface for an operator-action recommendation (it can
+        // diagnose AND offer next steps), and zombies clear on reboot
+        // anyway. The dashboard banner was confusing and visually noisy;
+        // operators with the issue saw it every launch with no productive
+        // action available from the dashboard itself.
         //
-        // v1.7.8 fixes:
-        //   - Background: 12% orange opacity → opaque .regularMaterial
-        //     so underlying content doesn't bleed through. Visual cue
-        //     comes from the leading orange accent stripe instead.
-        //   - Dismiss button (×) — persists via @AppStorage so the
-        //     banner stays hidden once acknowledged, but re-appears
-        //     if a future upgrade adds MORE zombies.
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if appState.zombieSysextCount >= 3
-                && appState.zombieSysextCount > dismissedZombieSysextCount {
-                HStack(spacing: 10) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .foregroundColor(.orange)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(String(localized: "status.zombieSysexts",
-                                    defaultValue: "\(appState.zombieSysextCount) prior MacCrab versions queued for uninstall"))
-                            .font(.subheadline.weight(.semibold))
-                        Text(String(localized: "status.zombieSysextsHint",
-                                    defaultValue: "Reboot to clear them and ensure the active version starts cleanly. After reboot, the dashboard's heartbeat banner will clear within 30 s."))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button {
-                        dismissedZombieSysextCount = appState.zombieSysextCount
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.body)
-                            .foregroundColor(.secondary)
-                            .accessibilityLabel(String(localized: "common.dismiss",
-                                                       defaultValue: "Dismiss"))
-                    }
-                    .buttonStyle(.plain)
-                    .help(String(localized: "common.dismiss",
-                                 defaultValue: "Dismiss"))
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(.regularMaterial)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(Color.orange)
-                        .frame(width: 3)
-                        .accessibilityHidden(true)
-                }
-                .overlay(alignment: .bottom) {
-                    Divider()
-                }
-            }
-        }
         // Daemon-disconnect banner — shown when connection is lost after initial
         // data load. The overview tab has its own connecting spinner for the
         // "never connected" case, so this targets the subsequent-disconnect case.

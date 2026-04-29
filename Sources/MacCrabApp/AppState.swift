@@ -698,46 +698,6 @@ final class AppState: ObservableObject {
     /// the timeline view to render a "Updated <relative time>" caption.
     @Published var aiSessionsLastRefresh: Date?
 
-    /// v1.7.5: number of prior MacCrab system extensions in the
-    /// "[terminated waiting to uninstall on reboot]" state. Surfaced
-    /// in MainView via a banner when ≥3 — strong signal that a reboot
-    /// is needed for sysextd to cleanly start the active version.
-    /// Refreshed on the same poll cycle as heartbeat via
-    /// `refreshZombieSysextCount()`.
-    @Published var zombieSysextCount: Int = 0
-
-    /// Refresh the count of prior sysexts pending uninstall. Runs
-    /// `systemextensionsctl list` (no sudo needed) and parses output
-    /// for our bundle identifier in the terminated-waiting state.
-    /// Returns 0 on parse failure — better to underreport than to
-    /// surface a false alarm.
-    func refreshZombieSysextCount() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/systemextensionsctl")
-        proc.arguments = ["list"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch {
-            zombieSysextCount = 0
-            return
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else {
-            zombieSysextCount = 0
-            return
-        }
-        let count = text.split(separator: "\n").reduce(0) { acc, line in
-            (line.contains("com.maccrab.agent")
-             && line.contains("[terminated waiting to uninstall on reboot]"))
-                ? acc + 1 : acc
-        }
-        zombieSysextCount = count
-    }
-
     /// MCP behavioral baselines, populated from `mcp_baselines.json`
     /// (v1.7.0). Most-recently-active baseline first. Each entry is a
     /// per-(tool, server) fingerprint with file basenames, domains, and
@@ -1036,7 +996,6 @@ final class AppState: ObservableObject {
         refreshMCPBaselines()
         refreshRuleTelemetry()
         refreshTCCSnapshot()
-        refreshZombieSysextCount()
         maybeKickWatchdog()
 
         // Rules rarely change — only load once

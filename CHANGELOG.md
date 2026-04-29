@@ -3,6 +3,42 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Holding for the next substantial-feature release rather than shipping
+as a separate point version. Code is on `main`, not yet tagged.
+
+### Removed — zombie-sysext banner
+
+The reboot-recommendation banner (introduced v1.7.5, restyled v1.7.8)
+is gone. Showed every dashboard launch on installs with leftover sysexts
+queued for uninstall, with no productive action available from the
+dashboard itself. The diagnostic + recommendation already lives in
+`maccrabctl repair`, which is the right surface — it can both diagnose
+and walk the operator through next steps. Dashboard banner was
+confusing and visually noisy.
+
+Removed: the `.safeAreaInset(.top)` banner block in `MainView.swift`,
+the `@AppStorage("dismissedZombieSysextCount")` declaration, the
+`AppState.zombieSysextCount` published property, the
+`refreshZombieSysextCount()` method, and the per-poll-cycle call.
+Net deletion: ~50 lines.
+
+### Changed — sidebar layout (different approach)
+
+v1.7.8's column-width-constraint + `.balanced` style approach still
+showed the sidebar visibly narrowing on resize before snapping. The
+cleaner UX, matching Mail.app and Calendar.app: enforce a generous
+window minimum width so the user simply can't drag the window narrow
+enough to trigger any awkward sidebar behaviour.
+
+`MainView.swift`:
+- `.navigationSplitViewStyle(.prominentDetail)` (replaces `.balanced`)
+- `.frame(minWidth: 1100, minHeight: 600)` (up from 950)
+- Removed `.navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)`
+  — let the system pick the sidebar default at the now-guaranteed
+  comfortable window width
+
 ## [1.7.8] — 2026-04-29
 
 Dashboard UX hot-fix: zombie-sysext banner styling + sidebar layout.
