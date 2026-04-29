@@ -1168,7 +1168,10 @@ struct SettingsView: View {
                 Text(String(localized: "settings.aboutTagline", defaultValue: "Local-first macOS threat detection engine"))
                     .foregroundColor(.secondary)
 
-                Text("v1.3.4")
+                // v1.7.10: read version dynamically from Info.plist so this
+                // line tracks every release automatically. Pre-fix it was
+                // hardcoded "v1.3.4" and had drifted ~20 releases out of date.
+                Text(verbatim: "v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -1176,7 +1179,7 @@ struct SettingsView: View {
                     .frame(width: 200)
 
                 VStack(spacing: 4) {
-                    Text(String(localized: "settings.aboutStats", defaultValue: "7 event sources | 8 detection layers | 304 rules"))
+                    Text(String(localized: "settings.aboutStats", defaultValue: "19 event sources | 5 detection layers | 424 rules"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Text(String(localized: "settings.aboutLicense", defaultValue: "Apache 2.0 (code)  |  DRL 1.1 (rules)"))

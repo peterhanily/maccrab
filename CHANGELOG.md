@@ -3,6 +3,31 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.10] — 2026-04-29
+
+UX hot-fix on top of v1.7.9: the Settings → About tab version label
+read "v1.3.4" — hardcoded ~20 releases ago and never updated.
+
+### Fixed — About page version label dynamic
+
+`Sources/MacCrabApp/Views/SettingsView.swift`: replaced the hardcoded
+`Text("v1.3.4")` with `Text(verbatim: "v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")`.
+Now tracks `Info.plist` automatically — every future release is
+correctly self-reported in the About panel without a manual edit.
+
+The adjacent stats line ("7 event sources | 8 detection layers | 304
+rules") was also updated to current values: 19 event sources | 5
+detection layers | 424 rules. Still hardcoded (these counts only
+change when the architecture changes), but at least current.
+
+### v1.7.9 release rollout
+
+v1.7.9 was published to GitHub but its Sparkle appcast and Homebrew
+tap were intentionally held pending verification of the memory fix
+on a second test machine. Verification confirmed the fix; v1.7.10
+bundles the About-page fix and rolls v1.7.9's content out to all
+channels in one shipping action.
+
 ## [1.7.9] — 2026-04-29
 
 Memory hot-fix (round 2) + 3 new detection rules + observability +
