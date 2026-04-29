@@ -76,6 +76,12 @@ struct MainView: View {
 
     @AppStorage(UIMode.storageKey) private var uiModeRaw: String = UIMode.advanced.rawValue
 
+    /// v1.7.8: persisted dismiss for the zombie-sysext banner. Stores the
+    /// highest zombie count the user has acknowledged. Banner re-shows if
+    /// MORE zombies appear later (e.g., another upgrade adds to the queue),
+    /// but stays hidden after the user has chosen to defer the reboot.
+    @AppStorage("dismissedZombieSysextCount") private var dismissedZombieSysextCount: Int = 0
+
     private var uiMode: UIMode {
         UIMode(rawValue: uiModeRaw) ?? .advanced
     }
@@ -196,6 +202,13 @@ struct MainView: View {
             }
             .listStyle(.sidebar)
             .navigationTitle("MacCrab")
+            // v1.7.8: constrain sidebar width so NavigationSplitView's
+            // .automatic style doesn't slide it over the detail content
+            // when the window is resized narrow. Combined with
+            // .navigationSplitViewStyle(.balanced) below, the sidebar
+            // stays visible side-by-side until the user explicitly
+            // collapses it via the toolbar toggle, instead of overlaying.
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } detail: {
             switch selectedSection {
             case .overview:
@@ -234,6 +247,15 @@ struct MainView: View {
                 OverviewDashboard(appState: appState, sysextManager: sysextManager, selectedSection: $selectedSection)
             }
         }
+        // v1.7.8: .balanced style keeps both columns side-by-side instead of
+        // collapsing the sidebar into an overlay when the window is narrow.
+        // Combined with .navigationSplitViewColumnWidth on the sidebar above,
+        // this means a narrow window pushes the detail content (which can
+        // scroll) rather than letting the sidebar slide over and obscure it.
+        .navigationSplitViewStyle(.balanced)
+        // Window minimum sized for sidebar (220) + detail (730 minimum) =
+        // 950. Bumped from earlier minWidth so the sidebar is never clipped
+        // even at the smallest allowed window size.
         .frame(minWidth: 950, minHeight: 600)
         // v1.7.5: zombie-sysext banner. When the daemon reports many
         // prior versions queued for uninstall on reboot, the most
@@ -242,8 +264,17 @@ struct MainView: View {
         // the user reboots. This banner specifically tells them to
         // reboot — much more actionable than the generic "engine
         // offline" message below.
+        //
+        // v1.7.8 fixes:
+        //   - Background: 12% orange opacity → opaque .regularMaterial
+        //     so underlying content doesn't bleed through. Visual cue
+        //     comes from the leading orange accent stripe instead.
+        //   - Dismiss button (×) — persists via @AppStorage so the
+        //     banner stays hidden once acknowledged, but re-appears
+        //     if a future upgrade adds MORE zombies.
         .safeAreaInset(edge: .top, spacing: 0) {
-            if appState.zombieSysextCount >= 3 {
+            if appState.zombieSysextCount >= 3
+                && appState.zombieSysextCount > dismissedZombieSysextCount {
                 HStack(spacing: 10) {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .foregroundColor(.orange)
@@ -258,10 +289,28 @@ struct MainView: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
+                    Button {
+                        dismissedZombieSysextCount = appState.zombieSysextCount
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.body)
+                            .foregroundColor(.secondary)
+                            .accessibilityLabel(String(localized: "common.dismiss",
+                                                       defaultValue: "Dismiss"))
+                    }
+                    .buttonStyle(.plain)
+                    .help(String(localized: "common.dismiss",
+                                 defaultValue: "Dismiss"))
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(Color.orange.opacity(0.12))
+                .background(.regularMaterial)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.orange)
+                        .frame(width: 3)
+                        .accessibilityHidden(true)
+                }
                 .overlay(alignment: .bottom) {
                     Divider()
                 }

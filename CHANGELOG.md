@@ -3,6 +3,48 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.8] — 2026-04-29
+
+Dashboard UX hot-fix: zombie-sysext banner styling + sidebar layout.
+
+### Fixed — zombie-sysext banner now opaque + dismissible
+
+The reboot-recommendation banner (added v1.7.5, shown when 3+ prior
+sysexts are queued for uninstall) used `Color.orange.opacity(0.12)`
+as its background — translucent enough that the underlying content
+showed through, and on tall windows it visually overlapped the
+daemon-disconnect banner stacked above it. It also had no way to
+dismiss.
+
+Fix in `Sources/MacCrabApp/Views/MainView.swift`:
+- Background: `.regularMaterial` (opaque, system-blur appearance)
+- Visual cue: a 3-pt orange leading edge stripe instead of full-tint
+- Dismiss: `xmark.circle.fill` button on the right, persisted via
+  `@AppStorage("dismissedZombieSysextCount")`. Hides the banner once
+  the user has acknowledged the count, but **re-appears** if a future
+  upgrade adds MORE zombies (because the comparison is `current >
+  dismissed`, not equality).
+
+### Fixed — sidebar no longer overlays content on narrow windows
+
+`NavigationSplitView`'s default `.automatic` style collapses the
+sidebar into an overlay (sliding over the detail content) once the
+window narrows past a threshold. Combined with no width constraint
+on the sidebar column, this caused the sidebar to obscure detail
+content during normal window-resizing rather than letting the detail
+area scroll.
+
+Fix:
+- `.navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)`
+  on the sidebar column constrains its width range
+- `.navigationSplitViewStyle(.balanced)` keeps both columns visible
+  side-by-side; sidebar collapses only when explicitly toggled via
+  the toolbar, never as a side-effect of window resize
+
+### Compatibility
+
+UX-only. No data migration. Same install path as v1.7.7.
+
 ## [1.7.7] — 2026-04-29
 
 Memory hot-fix: 1.31 GB private heap → bounded steady state. Field-reproduced
