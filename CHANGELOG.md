@@ -3,6 +3,56 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.12] — 2026-04-30
+
+Resolves [#1](https://github.com/peterhanily/maccrab/issues/1) reported by
+[@jjdresselhaus](https://github.com/jjdresselhaus) — thank you for the
+field reproduction. After uninstalling MacCrab via
+`brew uninstall --cask maccrab`, the launch-at-login LaunchAgent
+persisted under `~/Library/LaunchAgents/`, causing launchd to retry a
+missing binary on every subsequent login.
+
+### Fixed — defensive LaunchAgent file sweep on launch-at-login disable
+
+`Sources/MacCrabApp/LaunchAtLogin.swift` now sweeps both possible
+`~/Library/LaunchAgents/` paths after `SMAppService.mainApp.unregister()`:
+- `com.maccrab.app.plist` (legacy SMAppService write path)
+- `79S425CW99.com.maccrab.app.plist` (modern team-id-prefixed path that
+  most macOS 13+ systems actually create)
+
+`SMAppService.unregister()` removes the registration from the system
+database but on some macOS versions doesn't delete the underlying
+`.plist` file. Without the explicit sweep, the file persisted across
+toggle-off, app deletion, and `brew uninstall`. v1.7.12 catches all
+three paths (toggle-off, startup self-heal when preference is
+disabled, and via the cask uninstall stanza shipped on April 30 in
+the v1.7.11 cask-only patch).
+
+### Added — startup self-heal
+
+`LaunchAtLogin.reconcile(preferenceEnabled:)` (called once at app
+startup from `MacCrabApp.swift`) now sweeps stale `.plist` files when
+the preference is disabled and the API status agrees. Previously this
+was a no-op when both said "disabled" — but the file could still be
+on disk if something orphaned it. Belt-and-suspenders.
+
+### Cask side (already shipped April 30, no version bump there)
+
+The cask's `uninstall` stanza was patched on April 30 (commits
+`30974a2` + `6f585b2`, both pure formula changes — no DMG rebuild)
+to also handle the user-context LaunchAgent. The two changes
+together close the bug class from both directions: app-side cleanup
+when the user disables launch-at-login through Settings, plus
+cask-side cleanup when the user runs `brew uninstall` while still
+having launch-at-login enabled.
+
+### Compatibility
+
+Patch-only. Daemon code unchanged from v1.7.11. No data migration.
+No reboot or extension re-approval required. Existing installs that
+previously had launch-at-login enabled get the stale `.plist` swept
+on first launch of v1.7.12 (via the new `reconcile()` self-heal path).
+
 ## [1.7.11] — 2026-04-30
 
 Dashboard memory hot-fix. Field-reproduced: parking the dashboard on
