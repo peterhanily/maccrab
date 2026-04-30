@@ -81,6 +81,14 @@ cask "maccrab" do
   #   - ~/Library/LaunchAgents/79S425CW99.com.maccrab.app.plist (modern,
   #     team-id-prefixed; what most macOS 13+ systems actually create)
   uninstall quit:      ["com.maccrab.app"],
+            # Belt-and-suspenders: if `quit` doesn't fully terminate the
+            # menubar app within Homebrew's grace window (SwiftUI menubar
+            # apps don't always respond to the quit AppleEvent if a
+            # dialog or modal is up), force-signal SIGTERM. Field-
+            # observed: post-uninstall a running process at PID-N kept
+            # showing in `launchctl list` as `application.com.maccrab.app.X.Y`
+            # because `quit` returned before the app actually exited.
+            signal:    [["TERM", "com.maccrab.app"]],
             launchctl: [
               "com.maccrab.agent",
               "com.maccrab.daemon",
