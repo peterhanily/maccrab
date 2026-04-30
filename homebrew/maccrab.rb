@@ -70,10 +70,28 @@ cask "maccrab" do
     # and clicks "Enable Protection" (see SystemExtensionPanel.swift).
   end
 
-  uninstall launchctl: ["com.maccrab.agent", "com.maccrab.daemon"],
+  # v1.7.11 cask-only patch: clean up the user-context LaunchAgent that
+  # SMAppService.mainApp.register() creates when a user enables
+  # launch-at-login (Settings → General). Pre-fix the cask only handled
+  # system-level LaunchDaemons (the ES sysext + legacy maccrabd plists),
+  # so the SMAppService-registered agent persisted post-uninstall and
+  # launchd kept trying to launch a now-missing binary on every login.
+  # Two registration-name variants because SMAppService writes either:
+  #   - ~/Library/LaunchAgents/com.maccrab.app.plist (legacy path)
+  #   - ~/Library/LaunchAgents/79S425CW99.com.maccrab.app.plist (modern,
+  #     team-id-prefixed; what most macOS 13+ systems actually create)
+  uninstall quit:      ["com.maccrab.app"],
+            launchctl: [
+              "com.maccrab.agent",
+              "com.maccrab.daemon",
+              "com.maccrab.app",
+              "79S425CW99.com.maccrab.app",
+            ],
             delete:    [
               "/Library/LaunchDaemons/com.maccrab.agent.plist",
               "/Library/LaunchDaemons/com.maccrab.daemon.plist",
+              "~/Library/LaunchAgents/com.maccrab.app.plist",
+              "~/Library/LaunchAgents/79S425CW99.com.maccrab.app.plist",
             ]
 
   # /Library/Application Support/MacCrab is *deliberately* NOT in the
