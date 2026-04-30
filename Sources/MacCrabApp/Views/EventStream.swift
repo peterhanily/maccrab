@@ -35,16 +35,34 @@ struct EventStream: View {
     @State private var sortOrder = [KeyPathComparator(\EventViewModel.timestamp, order: .reverse)]
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
-    /// Events filtered by the current category and text filters.
-    private var filteredEvents: [EventViewModel] {
+    /// v1.7.11: memoized cache. Pre-fix this was a computed `var
+    /// filteredCache: [EventViewModel]` that re-filtered AND re-sorted
+    /// `appState.events` on every body re-evaluation, AND was read TWICE
+    /// per body call (count badge + Table data). Combined with macOS
+    /// `Table`'s NSTableView backing — which inflates Auto Layout
+    /// constraints on every rebind and doesn't release them until the
+    /// view is dismantled — this drove a 333-constraint/sec leak.
+    /// Field-reproduced: 5 min on Events tab added 100K NSLayoutConstraint
+    /// instances. With the dashboard parked on Events all day, total
+    /// retained constraints reached 1+ million / ~500 MB RSS.
+    ///
+    /// Fix: hold the filtered+sorted result in @State and only recompute
+    /// when an actual input changes (events list, filter category, filter
+    /// text, time range, sort order). SwiftUI sees a stable array
+    /// reference between unrelated AppState mutations (heartbeat,
+    /// agentLineage, mcpBaselines, etc.) and stops re-binding the Table.
+    @State private var filteredCache: [EventViewModel] = []
+
+    /// Recompute the filtered+sorted cache. Called from .onAppear,
+    /// .onReceive(appState.$events), and .onChange of any filter input.
+    /// Pure function over current state — no @Published mutations.
+    private func recomputeFilter() {
         var results = appState.events
 
-        // Filter by category
         if let category = filterCategory {
             results = results.filter { $0.category == category }
         }
 
-        // Filter by text
         if !filterText.isEmpty {
             let query = filterText.lowercased()
             results = results.filter { event in
@@ -56,17 +74,12 @@ struct EventStream: View {
             }
         }
 
-        return results
-    }
-
-    /// Events filtered by both category/text and time range, then sorted.
-    private var timeFilteredEvents: [EventViewModel] {
-        var results = filteredEvents
         if let seconds = timeRange.seconds {
             let cutoff = Date().addingTimeInterval(-seconds)
             results = results.filter { $0.timestamp >= cutoff }
         }
-        return results.sorted(using: sortOrder)
+
+        filteredCache = results.sorted(using: sortOrder)
     }
 
     var body: some View {
@@ -77,7 +90,7 @@ struct EventStream: View {
                     .font(.title2)
                     .fontWeight(.bold)
 
-                Text("\(timeFilteredEvents.count)")
+                Text("\(filteredCache.count)")
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
@@ -145,7 +158,7 @@ struct EventStream: View {
             Divider()
 
             // Event table
-            if timeFilteredEvents.isEmpty {
+            if filteredCache.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
@@ -166,7 +179,7 @@ struct EventStream: View {
                 .frame(maxWidth: .infinity)
             } else {
                 HStack(spacing: 0) {
-                    Table(timeFilteredEvents, selection: $selectedEventID, sortOrder: $sortOrder) {
+                    Table(filteredCache, selection: $selectedEventID, sortOrder: $sortOrder) {
                         TableColumn("Time", value: \.timestamp) { event in
                             Text(event.dateTimeString)
                                 .font(.system(.caption, design: .monospaced))
@@ -204,7 +217,7 @@ struct EventStream: View {
 
                     // Event detail panel — only when selected
                     if let selectedID = selectedEventID,
-                       let event = timeFilteredEvents.first(where: { $0.id == selectedID }) {
+                       let event = filteredCache.first(where: { $0.id == selectedID }) {
                         Divider()
                         EventDetailPanel(event: event)
                             .frame(minWidth: 280, idealWidth: 350, maxWidth: 450)
@@ -241,7 +254,20 @@ struct EventStream: View {
         }
         .onAppear {
             Task { await appState.loadEvents() }
+            recomputeFilter()
         }
+        // v1.7.11: recompute the cached filtered+sorted list only when an
+        // input actually changes. Without these, the body's previous use
+        // of `timeFilteredEvents` (computed property) re-filtered and
+        // re-sorted on every body re-evaluation — and SwiftUI re-evaluates
+        // body on every @Published mutation in AppState (heartbeat,
+        // agentLineage, etc.), driving 333 Auto Layout constraint
+        // allocations/sec via NSTableView rebinds.
+        .onReceive(appState.$events) { _ in recomputeFilter() }
+        .onChange(of: filterCategory) { _ in recomputeFilter() }
+        .onChange(of: filterText) { _ in recomputeFilter() }
+        .onChange(of: timeRange) { _ in recomputeFilter() }
+        .onChange(of: sortOrder) { _ in recomputeFilter() }
     }
 }
 

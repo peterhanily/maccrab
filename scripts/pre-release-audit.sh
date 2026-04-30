@@ -675,6 +675,17 @@ PASS9_DIRS=(
     "Sources/MacCrabCore/Collectors"
     "Sources/MacCrabCore/Enrichment"
     "Sources/MacCrabAgentKit"
+    # v1.7.11: extended to cover the dashboard target. SwiftUI poll
+    # cadence (Timer.scheduledTimer { Task { await refresh() } })
+    # doesn't match the existing while-let / for-await regex shape,
+    # so the dashboard-side memory regression that v1.7.11 fixes
+    # (Auto Layout constraint inflation in EventStream's Table) is
+    # NOT detected by Pass 9. Including the directory anyway because:
+    # (a) one of its 39 Foundation autoreleasing call sites might
+    # land in a future while-let / for-await loop and Pass 9 would
+    # then catch it, and (b) it forces future authors to think
+    # about pool drainage when adding to MacCrabApp's hot paths.
+    "Sources/MacCrabApp"
 )
 
 # Foundation APIs known to return autoreleased objects.

@@ -3,6 +3,79 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.11] — 2026-04-30
+
+Dashboard memory hot-fix. Field-reproduced: parking the dashboard on
+the Events tab grew daemon-process retained memory ~1.5 GB/day via
+1+ million NSLayoutConstraint + NSISRestrictedToZeroMarkerVariable
+allocations. **Different process, different bug class** from the
+v1.7.6-v1.7.10 daemon-side leaks — this one is in the SwiftUI app
+target, retained (not autoreleased), driven by NSTableView
+constraint inflation.
+
+### Fixed — `EventStream` memoizes its filtered list
+
+`Sources/MacCrabApp/Views/EventStream.swift`: replaced the computed
+`filteredEvents` and `timeFilteredEvents` properties with a `@State`
+cache that recomputes only when an actual input changes (the events
+list, filter category, filter text, time range, sort order). The
+body reads the cache directly. Previously the body re-filtered AND
+re-sorted the entire `appState.events` list on every body
+re-evaluation, AND read `timeFilteredEvents` twice per body call
+(count badge + Table data) — so each unrelated `@Published` mutation
+in AppState (heartbeat, agentLineage, mcpBaselines, etc.) drove a
+double recomputation followed by a fresh `Table` rebind. Each
+rebind inflated Auto Layout constraints in NSTableView's solver
+that aren't released until the view is dismantled. Field-reproduced
+rate: ~333 constraints/sec.
+
+### Fixed — `AppState.refresh()` no-op `@Published` writes
+
+Three high-frequency refresh functions (`refreshHeartbeat`,
+`refreshStorageHealth`, `refreshRuleTamper`) re-read their backing
+JSON file every poll and unconditionally re-published their snapshot,
+even when neither the file nor the parsed value had changed. Each
+unconditional write fired SwiftUI body re-evaluations across every
+view bound to AppState. v1.7.11 adds mtime short-circuit guards
+mirroring the existing pattern in `refreshAgentLineage`,
+`refreshMCPBaselines`, and `refreshTCCSnapshot`. The functions now
+skip the parse + assignment entirely when the file hasn't been
+re-written since the last successful refresh.
+
+### Fixed — equality-checked `@Published` Bool writes in `refresh()`
+
+`isConnected`, `appHasFDA`, `sysextHasFDA`, and `fullDiskAccessGranted`
+change at most once per session in normal operation (daemon up/down,
+FDA grant/revoke). Pre-fix the unconditional assignment at every
+poll fired `@Published` regardless. Now wrapped:
+`if x != newValue { x = newValue }`. Reduces SwiftUI body re-eval
+pressure across every view, not just Events.
+
+### Added — Pass 9 extended to scan `Sources/MacCrabApp/`
+
+`scripts/pre-release-audit.sh` Pass 9's directory list now includes
+the dashboard target. The current leak shape (constraint retention)
+isn't catchable by the existing `while-let / for-await + autoreleasing
+Foundation API` regex, but extending the directory list:
+- Catches future polling-path code that lands in a streaming-loop
+  shape with autoreleasing Foundation calls
+- Forces future authors to think about Foundation pool drainage when
+  adding to MacCrabApp's hot paths
+
+### Compatibility
+
+Dashboard target only. Daemon code unchanged from v1.7.10. No data
+migration. No reboot or extension re-approval required.
+
+### Expected steady-state
+
+For a dashboard parked on the Events tab:
+- `NSLayoutConstraint` count: **stable around 5-15K** (normal
+  SwiftUI layout churn), instead of climbing at ~333/sec
+- Daemon-process RSS: **~120-250 MB**, stable indefinitely
+- 24-hour soak should add < 50 MB of resident memory, vs the ~1.5 GB
+  growth seen on v1.7.10
+
 ## [1.7.10] — 2026-04-29
 
 UX hot-fix on top of v1.7.9: the Settings → About tab version label

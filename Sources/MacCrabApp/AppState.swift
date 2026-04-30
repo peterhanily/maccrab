@@ -151,10 +151,16 @@ final class AppState: ObservableObject {
     /// hot path). Silent if file is absent — no errors yet recorded.
     func refreshStorageHealth() {
         let path = "/Library/Application Support/MacCrab/storage_errors.json"
+        // v1.7.11: skip re-parse when file hasn't changed since last poll.
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let mtime, let last = lastStorageHealthMtime, mtime <= last {
+            return
+        }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }
+        lastStorageHealthMtime = mtime
         let alertErrs = json["alert_insert_errors"] as? Int ?? 0
         let eventErrs = json["event_insert_errors"] as? Int ?? 0
         let msg = json["last_error_message"] as? String ?? ""
@@ -177,12 +183,18 @@ final class AppState: ObservableObject {
     /// indicator the Overview banner surfaces.
     func refreshRuleTamper() {
         let path = "/Library/Application Support/MacCrab/rule_tamper.json"
+        // v1.7.11: skip re-parse when file hasn't changed since last poll.
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let mtime, let last = lastRuleTamperMtime, mtime <= last {
+            return
+        }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             // No file → no tamper detected. Clear any stale state.
             if ruleTamper != nil { ruleTamper = nil }
             return
         }
+        lastRuleTamperMtime = mtime
         ruleTamper = RuleTamperSnapshot(
             bundledTampered: json["bundled_tampered"] as? Bool ?? false,
             installedTampered: json["installed_tampered"] as? Bool ?? false,
@@ -207,6 +219,24 @@ final class AppState: ObservableObject {
     /// present (backward-compatible).
     func refreshHeartbeat() {
         let path = "/Library/Application Support/MacCrab/heartbeat.json"
+        // v1.7.11: skip re-parse when neither heartbeat.json nor
+        // heartbeat_rich.json have changed since the last successful
+        // refresh. The daemon writes heartbeat every 30 s; the dashboard
+        // polls every 5 s; without this guard 5 of every 6 polls do a
+        // full Foundation autorelease cycle (Data + JSONSerialization +
+        // dict downcasts) AND an unconditional `heartbeat = ...` @Published
+        // mutation that triggers SwiftUI body re-evaluation across every
+        // view bound to AppState. The Events tab in particular re-binds
+        // its NSTableView, which inflates Auto Layout constraints that
+        // never release until the view is dismantled. Field-reproduced:
+        // ~333 constraints/sec, ~1.5 GB/day on a parked dashboard.
+        let richPathForMtime = "/Library/Application Support/MacCrab/heartbeat_rich.json"
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        let richMtime = (try? FileManager.default.attributesOfItem(atPath: richPathForMtime)[.modificationDate]) as? Date
+        let combined = [mtime, richMtime].compactMap { $0 }.max()
+        if let combined, let last = lastHeartbeatMtime, combined <= last {
+            return
+        }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let writtenAtUnix = json["written_at_unix"] as? TimeInterval else {
@@ -317,10 +347,27 @@ final class AppState: ObservableObject {
             collectorHealth: richCollectorHealth,
             eventsDropped: richDropped
         )
+        // Record successful parse so the next call short-circuits when
+        // neither heartbeat.json nor heartbeat_rich.json have been
+        // re-written by the daemon.
+        lastHeartbeatMtime = combined
     }
 
     /// mtime of the TCC snapshot the last time we decoded it (v1.7.1).
     private var lastTCCSnapshotMtime: Date?
+
+    /// v1.7.11: mtime tracking for the three refresh paths that previously
+    /// re-parsed and re-published their snapshot every 5 s regardless of
+    /// whether the underlying file had changed. Each unconditional
+    /// @Published write triggered a SwiftUI body re-eval across every
+    /// view bound to AppState (it's @ObservedObject, not a derived
+    /// projection), which on Events drove ~333 Auto Layout
+    /// constraints/sec via NSTableView rebinds. Mirroring the
+    /// `lastLineageMtime` / `lastMCPBaselineMtime` / `lastTCCSnapshotMtime`
+    /// pattern that already gates the AI/MCP/TCC paths.
+    private var lastHeartbeatMtime: Date?
+    private var lastStorageHealthMtime: Date?
+    private var lastRuleTamperMtime: Date?
 
     /// Refresh TCC current-state matrix from the daemon's
     /// `<dataDir>/tcc_snapshot.json`. The rebuilt Permissions panel
@@ -893,12 +940,20 @@ final class AppState: ObservableObject {
         let fm = FileManager.default
         let dbExists = fm.isReadableFile(atPath: dbPath)
         let walExists = fm.fileExists(atPath: dbPath + "-wal")
-        isConnected = dbExists && (walExists || fm.fileExists(atPath: dbPath + "-shm"))
+        // v1.7.11: equality-checked @Published writes. These three Bools
+        // change at most once per session in normal operation (daemon
+        // up/down, FDA grant/revoke). Pre-fix the unconditional assign
+        // fired @Published every poll, triggering SwiftUI body re-eval
+        // across every view bound to AppState — driving NSTableView
+        // rebinds in EventStream that inflated Auto Layout constraints.
+        let newIsConnected = dbExists && (walExists || fm.fileExists(atPath: dbPath + "-shm"))
+        if isConnected != newIsConnected { isConnected = newIsConnected }
 
         // FDA probe for the APP principal — readability of the user TCC.db
         // requires Full Disk Access granted to MacCrab.app.
         let tccPath = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC/TCC.db"
-        appHasFDA = fm.isReadableFile(atPath: tccPath)
+        let newAppHasFDA = fm.isReadableFile(atPath: tccPath)
+        if appHasFDA != newAppHasFDA { appHasFDA = newAppHasFDA }
 
         // FDA probe for the SYSEXT principal — three-tier detection.
         //
@@ -923,27 +978,35 @@ final class AppState: ObservableObject {
         // gate Tier 1.
         refreshHeartbeat()
 
+        // v1.7.11: compute new sysextHasFDA into a local, then apply with
+        // equality check. Same rationale as the isConnected/appHasFDA
+        // pattern above — the value rarely changes per-poll, but the
+        // unconditional @Published write fired SwiftUI body re-evals on
+        // every poll cycle.
+        let newSysextHasFDA: Bool
         if let hb = heartbeat, !hb.isStale, let hbFDA = hb.sysextHasFDA {
-            sysextHasFDA = hbFDA
+            newSysextHasFDA = hbFDA
         } else {
             let systemTCCPath = "/Library/Application Support/com.apple.TCC/TCC.db"
             let foundInTCC = Self.querySysextFDA(userTCC: appHasFDA ? tccPath : nil,
                                                   systemTCC: systemTCCPath)
             if foundInTCC {
-                sysextHasFDA = true
+                newSysextHasFDA = true
             } else if appHasFDA {
-                sysextHasFDA = false
+                newSysextHasFDA = false
             } else {
                 let walPath = dbPath + "-wal"
                 if let attrs = try? fm.attributesOfItem(atPath: walPath),
                    let mtime = attrs[.modificationDate] as? Date {
-                    sysextHasFDA = Date().timeIntervalSince(mtime) < 1800
+                    newSysextHasFDA = Date().timeIntervalSince(mtime) < 1800
                 } else {
-                    sysextHasFDA = !isConnected ? false : sysextHasFDA
+                    newSysextHasFDA = !isConnected ? false : sysextHasFDA
                 }
             }
         }
-        fullDiskAccessGranted = appHasFDA && sysextHasFDA
+        if sysextHasFDA != newSysextHasFDA { sysextHasFDA = newSysextHasFDA }
+        let newFDAGranted = appHasFDA && sysextHasFDA
+        if fullDiskAccessGranted != newFDAGranted { fullDiskAccessGranted = newFDAGranted }
 
         // User override: once both principals are detected as granted,
         // clear any prior "dismiss banner" flag so future FDA-revocation
