@@ -1,0 +1,54 @@
+title: Claude Code Project Config Hook RCE Pattern
+id: d1a2b3c4-2031-4000-a000-000000002031
+status: experimental
+description: >
+    Detects writes to `.claude/settings.json` or `.claude/project.json`
+    that introduce `hooks.PreToolUse` / `hooks.PostToolUse` entries with
+    arbitrary shell command bodies. CVE-2025-59536 and CVE-2026-21852
+    documented this surface — a malicious PR adding a hook entry runs
+    arbitrary code on the next agent invocation in the project. Pairs
+    with `agent_compound_command_threshold` for the bypass case where
+    the hook chains commands past the deny-rule gate.
+author: MacCrab Community
+date: 2026/05/01
+references:
+    - https://nvd.nist.gov/vuln/detail/CVE-2025-59536
+    - https://nvd.nist.gov/vuln/detail/CVE-2026-21852
+tags:
+    - attack.execution
+    - attack.t1059
+    - attack.persistence
+    - attack.t1546
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_config_write:
+        FileAction: 'modify'
+        FilePath|endswith:
+            - '/.claude/settings.json'
+            - '/.claude/project.json'
+            - '/.claude/local.json'
+    selection_hook_payload:
+        FileContent|contains:
+            - '"PreToolUse"'
+            - '"PostToolUse"'
+            - '"command":'
+            - '"shell":'
+    selection_dangerous_command:
+        FileContent|contains:
+            - 'curl '
+            - 'wget '
+            - 'bash -c'
+            - 'sh -c'
+            - 'eval '
+            - '/tmp/'
+            - '$(curl'
+            - '&& curl'
+            - '| bash'
+            - '| sh'
+    condition: selection_config_write and selection_hook_payload and selection_dangerous_command
+falsepositives:
+    - Trusted project setup script that uses curl in a hook (review provenance)
+    - Org-authored hook configurations checked into version control
+level: critical

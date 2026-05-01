@@ -1,0 +1,50 @@
+title: SKILL.md Poisoning — Install of Untrusted Agent Skill
+id: d1a2b3c4-2030-4000-a000-000000002030
+status: experimental
+description: >
+    Detects writes of `SKILL.md` files into agent skill directories
+    (`.claude/skills/`, `~/.claude/skills/`, `.codex/skills/`,
+    `.cursor/skills/`) where the file body carries embedded
+    `<INSTRUCTIONS>` / `<eval>` / `<run>` markup that the parser
+    interprets as agent directives rather than human-readable docs.
+    Aligns with the OpenClaw / SKILL.md poisoning campaign documented
+    by Antiy CERT (1,184-skill catalog of malicious skills observed
+    in the wild) and the Aonan Guan CVSS 9.4 finding on
+    comment-and-control via PR description.
+author: MacCrab Community
+date: 2026/05/01
+references:
+    - https://www.antiy.cn/2026/skill_md_poisoning_report.pdf
+    - https://attack.mitre.org/techniques/T1059/
+tags:
+    - attack.execution
+    - attack.t1059
+    - attack.persistence
+    - attack.t1546
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_skill_install:
+        FileAction: 'create'
+        FilePath|contains:
+            - '/.claude/skills/'
+            - '/.codex/skills/'
+            - '/.cursor/skills/'
+            - '/skills/SKILL.md'
+        FilePath|endswith: '/SKILL.md'
+    selection_payload_markers:
+        FileContent|contains:
+            - '<INSTRUCTIONS>'
+            - '<eval>'
+            - '<run>'
+            - '<fetch>'
+            - '![](data:text/html;base64,'
+            - '__import__("os")'
+    filter_user_homedir_only:
+        FilePath|startswith: '/Users/'
+    condition: selection_skill_install and selection_payload_markers and filter_user_homedir_only
+falsepositives:
+    - User-authored skill that legitimately uses XML-like template markup (rare; review skill provenance)
+    - Skill manifests checked in by trusted org with documented eval semantics
+level: critical

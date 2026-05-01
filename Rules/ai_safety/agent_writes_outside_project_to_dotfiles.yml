@@ -1,0 +1,64 @@
+title: AI Coding Tool Writes to Shell Dotfile Outside Project
+id: d1a2b3c4-2032-4000-a000-000000002032
+status: experimental
+description: >
+    Detects an AI coding tool process (Claude Code, Codex, Cursor, etc.)
+    or its child process writing to a shell-startup dotfile in the
+    user's home directory. Common payload pattern for prompt-injection-
+    driven persistence: the agent is convinced to "improve your shell
+    setup" and appends a malicious alias / backdoor / exfil command to
+    `.zshrc` / `.bashrc` / `.profile` / `.zprofile`. Persists across
+    sessions and survives chat history reset.
+author: MacCrab Community
+date: 2026/05/01
+references:
+    - https://attack.mitre.org/techniques/T1546/004/
+tags:
+    - attack.persistence
+    - attack.t1546.004
+    - attack.execution
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_dotfile:
+        FileAction:
+            - 'modify'
+            - 'create'
+        FilePath|endswith:
+            - '/.zshrc'
+            - '/.zprofile'
+            - '/.zlogin'
+            - '/.bashrc'
+            - '/.bash_profile'
+            - '/.profile'
+            - '/.gitconfig'
+            - '/.netrc'
+            - '/.ssh/config'
+    selection_ai_tool_process:
+        Image|endswith:
+            - '/claude'
+            - '/cursor-tunnel'
+            - '/codex'
+            - '/Cursor Helper'
+            - '/Cursor Helper (Renderer)'
+            - '/code'
+        ProcessAncestors|contains:
+            - 'Claude Code'
+            - 'Cursor'
+            - 'Codex'
+            - 'Continue'
+    filter_user_initiated:
+        # Direct shell action by the user (pasted command, ran a script
+        # explicitly) — the dotfile write would have a shell parent, not
+        # an AI tool ancestor.
+        ParentImage|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+        ProcessAncestors|contains: 'Terminal'
+    condition: selection_dotfile and selection_ai_tool_process and not filter_user_initiated
+falsepositives:
+    - User explicitly asked the AI to set up their shell environment
+    - Project-local zsh hooks configured via the AI tool
+level: high
