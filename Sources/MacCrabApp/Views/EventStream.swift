@@ -35,6 +35,10 @@ struct EventStream: View {
     @State private var timeRange: TimeRange = .all
     @State private var sortOrder = [KeyPathComparator(\EventViewModel.timestamp, order: .reverse)]
     @Environment(\.accessibilityReduceMotion) var reduceMotion
+    /// v1.8.0: Discover-style time histogram toggle. Off by default —
+    /// existing users open the Events tab to today's flat table; SIEM
+    /// chrome is opt-in. AppStorage persists the choice across launches.
+    @AppStorage("events.showHistogram") private var showHistogram: Bool = false
 
     /// v1.7.11: memoized cache. Pre-fix this was a computed `var
     /// filteredCache: [EventViewModel]` that re-filtered AND re-sorted
@@ -252,6 +256,20 @@ struct EventStream: View {
                     .font(.caption)
                     .accessibilityLabel("Auto-scroll to newest events")
 
+                // v1.8.0: SIEM-style histogram toggle. Hidden behind a
+                // small icon button so the simple-mode UX stays clean
+                // for users who want flat-table-only.
+                Button {
+                    showHistogram.toggle()
+                } label: {
+                    Image(systemName: showHistogram ? "chart.bar.fill" : "chart.bar")
+                }
+                .controlSize(.small)
+                .help(showHistogram
+                    ? String(localized: "events.histogramHide", defaultValue: "Hide time histogram")
+                    : String(localized: "events.histogramShow", defaultValue: "Show time histogram"))
+                .accessibilityLabel("Toggle time histogram")
+
                 Button {
                     isPaused.toggle()
                 } label: {
@@ -268,6 +286,20 @@ struct EventStream: View {
             .padding()
 
             Divider()
+
+            // v1.8.0: time histogram (Discover-style). Bars are the hourly
+            // count in hot-tier mode and the daily count in aggregate mode.
+            // Toggled by the toolbar chart icon; off by default so existing
+            // users see today's familiar layout until they opt in.
+            if showHistogram {
+                EventTimeHistogram(
+                    bins: isAggregateMode
+                        ? EventTimeHistogram.dailyBins(from: aggregateRows)
+                        : EventTimeHistogram.hourlyBins(from: filteredCache),
+                    unitLabel: isAggregateMode ? "Day" : "Hour"
+                )
+                Divider()
+            }
 
             // v1.8.0: aggregate-mode banner. Shown whenever the user picks a
             // time range past the 24h hot tier — explains why detail rows
