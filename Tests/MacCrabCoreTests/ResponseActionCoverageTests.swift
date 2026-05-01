@@ -127,12 +127,17 @@ struct ResponseActionCoverageTests {
 
     // MARK: - script
 
-    @Test("script action executes the configured script path")
-    func scriptRuns() async throws {
+    @Test("script action rejects paths outside the root-owned allowlist")
+    func scriptOutsideAllowlistIsRejected() async throws {
+        // v1.8.0 hardening: runScript must refuse anything not under
+        // /Library/Application Support/MacCrab/scripts/ or
+        // /usr/local/maccrab/scripts/. A user-writable path in /tmp is
+        // exactly the privilege-escalation case the allowlist exists to
+        // block, so this test asserts rejection and that no marker is
+        // produced (the script body must NOT have executed).
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // Marker file proves the script actually executed.
         let markerPath = dir.appendingPathComponent("marker.txt").path
         let scriptPath = dir.appendingPathComponent("test_script.sh").path
         let script = "#!/bin/sh\necho \"$MACCRAB_ALERT_ID\" > \(markerPath)\n"
@@ -159,11 +164,8 @@ struct ResponseActionCoverageTests {
         let log = await engine.getExecutionLog()
         #expect(log.count == 1)
         #expect(log[0].action == .script)
-        #expect(log[0].target == scriptPath)
-        #expect(log[0].success == true)
-
-        // Marker file exists → the script body ran.
-        #expect(FileManager.default.fileExists(atPath: markerPath))
+        #expect(log[0].success == false)
+        #expect(!FileManager.default.fileExists(atPath: markerPath))
     }
 
     @Test("script action without scriptPath is skipped with a warning")

@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (643 tests in 138 suites)
+swift test                     # Unit tests (929 tests in 189 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -41,24 +41,28 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 
 ```
 Sources/MacCrabCore/
+  Events/         Unified event model: Event, EventEnums, ProcessInfo, FileInfo, NetworkInfo, TCCInfo
+  Models/         Alert model and other top-level data types
   Collectors/     Event sources (ES, Unified Log, network, DNS, TCC, EDR monitor, etc.)
-  Detection/      Rule engine, sequence engine, baseline, campaign detector
-  Enrichment/     Process lineage, code signing, threat intel, CDHash
-  Prevention/     DNS sinkhole, network blocker, persistence guard, etc.
+  Detection/      Rule engine, sequence engine, baseline, campaign detector, behavior scoring, response actions
+  Enrichment/     Process lineage, code signing, threat intel, CDHash, cert transparency, file hasher
+  Prevention/     DNS sinkhole, network blocker, persistence guard, response-action safety validators
   Fleet/          Fleet telemetry client and data models
-  AIGuard/        AI coding tool monitoring
+  AIGuard/        AI coding tool monitoring (AIToolRegistry, MCPAttributor, AgentLineageService)
   LLM/            LLM backends (Ollama, Claude, OpenAI, Mistral, Gemini), prompts, cache, sanitizer
-  Storage/        SQLite event and alert stores
-  Models/         Core data types (Event, Alert, Severity, etc.)
-  Output/         Notifications, webhooks, syslog, reports
+  Storage/        SQLite event/alert/campaign stores, schema migrator, suppressions, encryption
+  Output/         Notifications, webhooks, syslog, reports, OCSF mapper, S3, SFTP, stream sinks
+  Network/        SecureURLSession (TLS 1.2 floor, optional SPKI pinning) used by all outbound HTTP
+  Deception/      Honeyfile manager (canary credential paths)
+  Utilities/      LockedCounter, PowerGate (battery/thermal gating), shared primitives
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            420 Sigma-compatible YAML detection rules (17 tactic directories)
+Rules/            421 Sigma-compatible YAML detection rules (17 tactic directories)
   sequences/      38 multi-step sequence rules
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (643 tests in 138 suites)
+Tests/            Swift Testing unit tests (929 tests in 189 suites)
 ```
 
 ## Detection Stack (5 tiers)

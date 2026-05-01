@@ -638,8 +638,58 @@ public actor ResponseEngine {
 
     // MARK: Run Script
 
+    /// v1.8.0: only allow scripts under root-managed dirs the user cannot
+    /// write to. The sysext runs as root; pre-fix, scriptPath came from a
+    /// user-writable `actions.json` and was passed straight to Process.run,
+    /// so any user could pick `/usr/bin/curl` (or drop a binary anywhere
+    /// they had write access) and have it executed with root privileges
+    /// plus sensitive event metadata in env vars — local privilege
+    /// escalation. Now we require the script to live under one of the
+    /// dirs below AND be owned by root:wheel AND have no world/group
+    /// write bits. The allowlisted dir is created at install time with
+    /// 0o755 root:wheel so a non-root user cannot drop scripts there.
+    private static let scriptAllowlistedDirs: [String] = [
+        "/Library/Application Support/MacCrab/scripts/",
+        "/usr/local/maccrab/scripts/",
+    ]
+
+    private static func validateScriptPath(_ path: String) -> Bool {
+        // Must canonicalize first to defeat `..` traversal.
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        let canonical = url.path
+        let inAllowlist = scriptAllowlistedDirs.contains { canonical.hasPrefix($0) }
+        guard inAllowlist else { return false }
+
+        // Reject symlinks — defeat "swap allowlisted path → user-writable
+        // target" trick. attributesOfItem follows symlinks; we want lstat.
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: canonical) else {
+            return false
+        }
+        if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            return false
+        }
+
+        // Owner must be root (uid 0).
+        let ownerUID = (attrs[.ownerAccountID] as? NSNumber)?.uint32Value
+        guard ownerUID == 0 else { return false }
+
+        // Permissions must be no-world-write, no-group-write.
+        // We accept 0o755, 0o750, 0o700, etc. — anything with the
+        // group-write or world-write bits clear.
+        let posix = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o777
+        let groupWrite: UInt16 = 0o020
+        let worldWrite: UInt16 = 0o002
+        if (posix & (groupWrite | worldWrite)) != 0 {
+            return false
+        }
+        return true
+    }
+
     /// Execute a user-defined script with alert context as environment variables.
     private nonisolated func runScript(path: String, alert: Alert, event: Event) async -> Bool {
+        guard Self.validateScriptPath(path) else {
+            return false
+        }
         guard FileManager.default.isExecutableFile(atPath: path) else {
             return false
         }

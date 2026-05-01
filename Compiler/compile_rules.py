@@ -121,6 +121,10 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     "AncestorDepth", "EnvVarsFlat",
     # Deception tier: honeyfile access markers set by EventEnricher.
     "IsHoneyfile", "HoneyfileType",
+    # EventType is a top-level Event enum (process, file, network, ...) used
+    # by rules that need to disambiguate sub-categories. Resolved directly
+    # from Event.eventType in RuleEngine, no mapping needed.
+    "EventType",
 }
 
 # Track fields we've already warned about to avoid spam.

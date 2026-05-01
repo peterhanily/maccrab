@@ -72,9 +72,16 @@ public actor S3Output: Output {
                 string: "https://\(bucket).s3.\(region).amazonaws.com"
             )!
         }
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        self.session = URLSession(configuration: config)
+        // v1.8.0: validate endpoint through the same policy as WebhookOutput.
+        // Custom endpoints (MinIO, Wasabi, Cloudflare R2 with self-signed)
+        // could otherwise be `http://` and leak SigV4-signed credentials in
+        // cleartext. Allow loopback http:// for local MinIO testing only.
+        try? WebhookOutput.validate(
+            url: self.endpoint,
+            allowPrivate: Foundation.ProcessInfo.processInfo.environment["MACCRAB_S3_ALLOW_PRIVATE"] == "1"
+        )
+        // SecureURLSession pins TLS 1.2+ and disables cookie/credential storage.
+        self.session = SecureURLSession.makeGeneric(timeout: 30, retryBudgetFactor: 3)
     }
 
     // MARK: - Output

@@ -181,9 +181,19 @@ public struct SecretsStore: Sendable {
 
         // Try update first — most writes are overwrites, and update is cheaper
         // than delete+add (which briefly leaves the key absent on disk).
+        //
+        // v1.8.0: also pass kSecAttrAccessible on update so an item created
+        // by an older / buggier version with weaker accessibility (e.g. the
+        // pre-fix DatabaseEncryption used …AfterFirstUnlock instead of
+        // …AfterFirstUnlockThisDeviceOnly) gets tightened on next write.
+        // Without this, accessibility tightening only happens on add and a
+        // stale weak-acl item could persist indefinitely on the user's machine.
         let updateStatus = SecItemUpdate(
             baseQuery(for: key) as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
+            [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            ] as CFDictionary
         )
         if updateStatus == errSecSuccess { return }
 

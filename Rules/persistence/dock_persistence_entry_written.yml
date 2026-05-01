@@ -25,11 +25,12 @@ detection:
         Image|endswith: '/defaults'
         CommandLine|contains:
             - 'com.apple.dock'
-    selection_mutation:
+    selection_verb:
         CommandLine|contains:
             - 'write '
             - 'delete '
             - 'import '
+    selection_key:
         CommandLine|contains:
             - 'persistent-apps'
             - 'persistent-others'
@@ -57,7 +58,7 @@ detection:
             - '/usr/sbin/'
     filter_apple_parent:
         ParentSignerType: 'apple'
-    condition: selection and selection_mutation and not filter_terminal and not filter_system and not filter_apple_parent
+    condition: selection and selection_verb and selection_key and not filter_terminal and not filter_system and not filter_apple_parent
 falsepositives:
     - Dock-customization utilities (Dockey, uBar) — verify the exact parent binary
     - Enterprise MDM Dock-preset scripts dispatched via profiles

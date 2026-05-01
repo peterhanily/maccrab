@@ -354,6 +354,22 @@ public actor NotificationIntegrations {
         guard let requestURL = URL(string: url),
               let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
 
+        // v1.8.0: apply the same SSRF policy WebhookOutput uses to the
+        // Slack/Teams/Discord/PagerDuty paths. Pre-fix, these accepted
+        // http:// (cleartext token leak), RFC1918 (intranet pivot),
+        // and 169.254.169.254 (cloud-metadata exfil). PagerDuty's URL
+        // is hardcoded HTTPS in the caller so it always validates;
+        // user-supplied Slack/Teams/Discord webhooks are the surface.
+        do {
+            try WebhookOutput.validate(
+                url: requestURL,
+                allowPrivate: Foundation.ProcessInfo.processInfo.environment["MACCRAB_NOTIFICATION_ALLOW_PRIVATE"] == "1"
+            )
+        } catch {
+            logger.warning("Notification webhook URL rejected by SSRF policy: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
         var request = URLRequest(url: requestURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

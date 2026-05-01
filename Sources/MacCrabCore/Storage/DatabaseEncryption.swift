@@ -188,7 +188,11 @@ public final class DatabaseEncryption: Sendable {
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: keychainAccount,
             kSecValueData as String: key,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            // v1.8.0: ThisDeviceOnly stops iCloud Keychain from syncing
+            // the DB encryption key off-device. Local-only forensic data
+            // should never roam — and `…AfterFirstUnlock` (the previous
+            // value) is iCloud-Keychain-syncable. Matches SecretsStore.swift.
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         // Remove old key if it exists (ignore result)
         let deleteQuery: [String: Any] = [

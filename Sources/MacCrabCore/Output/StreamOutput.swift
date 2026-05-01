@@ -70,6 +70,16 @@ public actor StreamOutput: Output {
         retryCount: Int = 2,
         timeout: TimeInterval = 10
     ) {
+        // v1.8.0: validate the URL through the same policy used by
+        // WebhookOutput. Block plaintext http:// (except loopback),
+        // metadata addresses (169.254.169.254 / EC2 / GCP), and
+        // RFC1918 unless explicitly opted in. A misconfigured Splunk
+        // HEC / Elastic Bulk / Datadog endpoint pointing at http://
+        // would otherwise leak the bearer token in plaintext.
+        try? WebhookOutput.validate(
+            url: url,
+            allowPrivate: Foundation.ProcessInfo.processInfo.environment["MACCRAB_STREAM_ALLOW_PRIVATE"] == "1"
+        )
         self.kind = kind
         self.name = kind.rawValue
         self.url = url
@@ -78,11 +88,17 @@ public actor StreamOutput: Output {
         self.retryCount = retryCount
         self.timeout = timeout
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout * Double(retryCount + 1)
-        config.httpAdditionalHeaders = [:]
-        self.session = URLSession(configuration: config)
+        // v1.8.0: route through SecureURLSession so the TLS minimum is
+        // pinned to TLS 1.2+ and we get the same scheme/private-IP
+        // discipline as WebhookOutput. Pre-fix, this used a bare
+        // `URLSessionConfiguration.ephemeral` with no `tlsMinimumSupportedProtocolVersion`
+        // and no scheme check — a misconfigured `http://siem.local/_bulk`
+        // would silently exfiltrate the HEC token + alert content in
+        // cleartext.
+        self.session = SecureURLSession.makeGeneric(
+            timeout: timeout,
+            retryBudgetFactor: retryCount + 1
+        )
     }
 
     // MARK: - Output protocol
