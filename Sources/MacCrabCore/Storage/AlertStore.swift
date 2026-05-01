@@ -392,6 +392,154 @@ public actor AlertStore {
         return try queryAlerts(sql: sql, bindings: bindings)
     }
 
+    /// Keyset-paginated variant. Returns at most `pageSize` alerts strictly
+    /// older than `cursor` (or the newest page if `cursor == nil`), plus
+    /// the cursor for the next page.
+    ///
+    /// Use this for "Load older" style UIs over Alerts: the list view holds
+    /// the cursor for the oldest currently-visible row, and a button calls
+    /// this with that cursor to append the next page. Stable under writes
+    /// — new alerts arriving between fetches don't shift the window.
+    ///
+    /// `pageSize` is the requested batch size; the underlying SQL clamps
+    /// to at most 1000 to keep a single page fast and bounded. Callers
+    /// wanting bulk export should iterate.
+    public func alerts(
+        before cursor: PaginationCursor?,
+        severity: Severity? = nil,
+        suppressed: Bool? = nil,
+        pageSize: Int = 100
+    ) throws -> PagedResults<Alert> {
+        let clamped = max(1, min(pageSize, 1000))
+
+        var sql = "SELECT * FROM alerts WHERE 1=1"
+        var bindings: [(Int32, BindingValue)] = []
+        var nextIndex: Int32 = 1
+
+        if let cursor {
+            // Tuple comparison: (ts, id) strictly less than the cursor in
+            // (timestamp DESC, id DESC) order.
+            sql += " AND (timestamp < ?\(nextIndex) OR (timestamp = ?\(nextIndex + 1) AND id < ?\(nextIndex + 2)))"
+            bindings.append((nextIndex, .double(cursor.timestamp.timeIntervalSince1970)))
+            bindings.append((nextIndex + 1, .double(cursor.timestamp.timeIntervalSince1970)))
+            bindings.append((nextIndex + 2, .text(cursor.id)))
+            nextIndex += 3
+        }
+
+        if let severity {
+            let validSeverities = Severity.allCases.filter { $0 >= severity }
+            let placeholders = validSeverities.enumerated().map { i, _ in
+                "?\(nextIndex + Int32(i))"
+            }.joined(separator: ", ")
+            sql += " AND severity IN (\(placeholders))"
+            for (i, sev) in validSeverities.enumerated() {
+                bindings.append((nextIndex + Int32(i), .text(sev.rawValue)))
+            }
+            nextIndex += Int32(validSeverities.count)
+        }
+
+        if let suppressed {
+            sql += " AND suppressed = ?\(nextIndex)"
+            bindings.append((nextIndex, .int(suppressed ? 1 : 0)))
+            nextIndex += 1
+        }
+
+        sql += " ORDER BY timestamp DESC, id DESC LIMIT ?\(nextIndex)"
+        bindings.append((nextIndex, .int(Int32(clamped))))
+
+        let rows = try queryAlerts(sql: sql, bindings: bindings)
+
+        // If we got a full page, hand back a cursor pointing at the last
+        // row so the caller can fetch the next page. A short page means
+        // we hit the end of the table — no more pages exist.
+        let next: PaginationCursor?
+        if rows.count == clamped, let last = rows.last {
+            next = PaginationCursor(timestamp: last.timestamp, id: last.id)
+        } else {
+            next = nil
+        }
+        return PagedResults(items: rows, nextCursor: next)
+    }
+
+    /// Keyset-paginated variant for **campaign rows only** — the synthetic
+    /// alerts whose `rule_id` starts with `maccrab.campaign.`. Filtering at
+    /// the SQL layer (LIKE `'maccrab.campaign.%'`) replaces the legacy
+    /// "fetch 1000 alerts then in-process .filter().prefix()" pattern, which
+    /// silently dropped any campaign older than the most-recent 1000 alerts.
+    ///
+    /// Mirrors `alerts(before:)` for shape — same cursor contract, same
+    /// `pageSize` clamp.
+    public func campaigns(
+        before cursor: PaginationCursor?,
+        pageSize: Int = 100
+    ) throws -> PagedResults<Alert> {
+        let clamped = max(1, min(pageSize, 1000))
+
+        var sql = "SELECT * FROM alerts WHERE rule_id LIKE 'maccrab.campaign.%'"
+        var bindings: [(Int32, BindingValue)] = []
+        var nextIndex: Int32 = 1
+
+        if let cursor {
+            sql += " AND (timestamp < ?\(nextIndex) OR (timestamp = ?\(nextIndex + 1) AND id < ?\(nextIndex + 2)))"
+            bindings.append((nextIndex, .double(cursor.timestamp.timeIntervalSince1970)))
+            bindings.append((nextIndex + 1, .double(cursor.timestamp.timeIntervalSince1970)))
+            bindings.append((nextIndex + 2, .text(cursor.id)))
+            nextIndex += 3
+        }
+
+        sql += " ORDER BY timestamp DESC, id DESC LIMIT ?\(nextIndex)"
+        bindings.append((nextIndex, .int(Int32(clamped))))
+
+        let rows = try queryAlerts(sql: sql, bindings: bindings)
+        let next: PaginationCursor?
+        if rows.count == clamped, let last = rows.last {
+            next = PaginationCursor(timestamp: last.timestamp, id: last.id)
+        } else {
+            next = nil
+        }
+        return PagedResults(items: rows, nextCursor: next)
+    }
+
+    /// Substring search across the alert's user-visible text fields.
+    ///
+    /// Unlike `EventStore.search`, the alerts table has no FTS5 virtual
+    /// table — it's small enough (typically <10K rows) that LIKE on five
+    /// columns is fast. Pattern is parameterized so it can't escape the
+    /// query; SQLite's LIKE operator only treats `%` and `_` as wildcards
+    /// and we wrap the user's text with `%…%` for substring semantics. The
+    /// caller doesn't need to escape the input.
+    ///
+    /// Results are most-recent-first (matches the dashboard ordering).
+    public func search(text: String, limit: Int = 100) throws -> [Alert] {
+        let clamped = max(1, min(limit, 1000))
+        // Strip any embedded LIKE wildcards so a user typing literal `%` or
+        // `_` doesn't get unexpected matches. We don't support glob syntax
+        // here — search is plain substring.
+        let cleaned = text
+            .replacingOccurrences(of: "%", with: "")
+            .replacingOccurrences(of: "_", with: "")
+        let pattern = "%\(cleaned)%"
+
+        let sql = """
+            SELECT * FROM alerts
+            WHERE rule_title LIKE ?1
+               OR process_name LIKE ?2
+               OR process_path LIKE ?3
+               OR description LIKE ?4
+               OR mitre_techniques LIKE ?5
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?6
+            """
+        return try queryAlerts(sql: sql, bindings: [
+            (1, .text(pattern)),
+            (2, .text(pattern)),
+            (3, .text(pattern)),
+            (4, .text(pattern)),
+            (5, .text(pattern)),
+            (6, .int(Int32(clamped))),
+        ])
+    }
+
     /// Returns all alerts associated with a specific event.
     ///
     /// - Parameter eventId: The event's unique identifier.

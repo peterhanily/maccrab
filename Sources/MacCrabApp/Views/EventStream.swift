@@ -56,22 +56,18 @@ struct EventStream: View {
     /// Recompute the filtered+sorted cache. Called from .onAppear,
     /// .onReceive(appState.$events), and .onChange of any filter input.
     /// Pure function over current state — no @Published mutations.
+    ///
+    /// v1.8.0: free-text search no longer filters in-memory. The 500-row
+    /// in-memory window meant `bash` matched ~5/100K events; the user thought
+    /// the search was broken. Search now goes through `appState.loadEvents
+    /// (filter:)`, which hits the FTS5 index, and the in-memory pass below
+    /// only handles category + time-range — the two filters that don't have
+    /// a database-side equivalent and cheap to evaluate locally.
     private func recomputeFilter() {
         var results = appState.events
 
         if let category = filterCategory {
             results = results.filter { $0.category == category }
-        }
-
-        if !filterText.isEmpty {
-            let query = filterText.lowercased()
-            results = results.filter { event in
-                event.action.lowercased().contains(query)
-                    || event.processName.lowercased().contains(query)
-                    || event.detail.lowercased().contains(query)
-                    || event.signerType.lowercased().contains(query)
-                    || String(event.pid).contains(query)
-            }
         }
 
         if let seconds = timeRange.seconds {
@@ -227,9 +223,40 @@ struct EventStream: View {
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedEventID)
             }
 
+            // v1.8.0: keyset-paginated "Load older" footer. Sits between the
+            // table and the live-status bar so the live indicator stays
+            // anchored at the bottom. Hidden once we hit the end-of-table.
+            if appState.hasMoreEvents {
+                HStack {
+                    Spacer()
+                    Button {
+                        Task { await appState.loadOlderEvents() }
+                    } label: {
+                        Label(
+                            String(localized: "events.loadOlder", defaultValue: "Load older"),
+                            systemImage: "arrow.down.circle"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Spacer()
+                }
+                .padding(.vertical, 6)
+                .background(.bar)
+            }
+
             // Status bar
             HStack {
-                if isPaused {
+                if appState.eventSearchActive {
+                    // v1.8.0: search results are FTS-ranked, not time-ordered.
+                    // Make it explicit so the user doesn't expect newest-first
+                    // and isn't surprised when the live counter still ticks.
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.accentColor)
+                        .accessibilityHidden(true)
+                    Text(String(localized: "events.searchMode", defaultValue: "Search results — clear to resume live"))
+                        .foregroundColor(.accentColor)
+                } else if isPaused {
                     Image(systemName: "pause.circle.fill")
                         .foregroundColor(.orange)
                         .accessibilityHidden(true)
@@ -253,8 +280,19 @@ struct EventStream: View {
             .background(.bar)
         }
         .onAppear {
-            Task { await appState.loadEvents() }
             recomputeFilter()
+        }
+        // v1.8.0: filterText drives a debounced FTS5 fetch. SwiftUI cancels
+        // the previous task on every keystroke, so the only one that fires
+        // store.search() is the one whose 300ms quiet window elapses. Empty
+        // string returns to live mode (regular events query + poll prepend).
+        .task(id: filterText) {
+            do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
+            if filterText.isEmpty {
+                await appState.loadEvents()
+            } else {
+                await appState.loadEvents(filter: filterText)
+            }
         }
         // v1.7.11: recompute the cached filtered+sorted list only when an
         // input actually changes. Without these, the body's previous use
@@ -265,7 +303,6 @@ struct EventStream: View {
         // allocations/sec via NSTableView rebinds.
         .onReceive(appState.$events) { _ in recomputeFilter() }
         .onChange(of: filterCategory) { _ in recomputeFilter() }
-        .onChange(of: filterText) { _ in recomputeFilter() }
         .onChange(of: timeRange) { _ in recomputeFilter() }
         .onChange(of: sortOrder) { _ in recomputeFilter() }
     }

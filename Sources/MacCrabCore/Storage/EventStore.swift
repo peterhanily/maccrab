@@ -482,6 +482,68 @@ public actor EventStore {
         return try queryEvents(sql: sql, bindings: bindings)
     }
 
+    /// Keyset-paginated variant of `events(...)`. Returns at most
+    /// `pageSize` events strictly older than `cursor` (or the newest page
+    /// if `cursor == nil`), plus the cursor for the next page.
+    ///
+    /// Same use case as `AlertStore.alerts(before:)`: backs the "Load older"
+    /// UI in the Events tab. Constant-time index seek regardless of page
+    /// depth (no OFFSET scan), stable under inserts.
+    public func events(
+        before cursor: PaginationCursor?,
+        category: EventCategory? = nil,
+        severity: Severity? = nil,
+        pageSize: Int = 100
+    ) throws -> PagedResults<Event> {
+        let clamped = max(1, min(pageSize, 1000))
+
+        var sql = "SELECT raw_json FROM events WHERE 1=1"
+        var bindings: [(Int32, BindingValue)] = []
+        var nextIndex: Int32 = 1
+
+        if let cursor {
+            sql += " AND (timestamp < ?\(nextIndex) OR (timestamp = ?\(nextIndex + 1) AND id < ?\(nextIndex + 2)))"
+            bindings.append((nextIndex, .double(cursor.timestamp.timeIntervalSince1970)))
+            bindings.append((nextIndex + 1, .double(cursor.timestamp.timeIntervalSince1970)))
+            bindings.append((nextIndex + 2, .text(cursor.id)))
+            nextIndex += 3
+        }
+
+        if let category {
+            sql += " AND event_category = ?\(nextIndex)"
+            bindings.append((nextIndex, .text(category.rawValue)))
+            nextIndex += 1
+        }
+
+        if let severity {
+            let validSeverities = Severity.allCases.filter { $0 >= severity }
+            let placeholders = validSeverities.enumerated().map { i, _ in
+                "?\(nextIndex + Int32(i))"
+            }.joined(separator: ", ")
+            sql += " AND severity IN (\(placeholders))"
+            for (i, sev) in validSeverities.enumerated() {
+                bindings.append((nextIndex + Int32(i), .text(sev.rawValue)))
+            }
+            nextIndex += Int32(validSeverities.count)
+        }
+
+        sql += " ORDER BY timestamp DESC, id DESC LIMIT ?\(nextIndex)"
+        bindings.append((nextIndex, .int(Int32(clamped))))
+
+        let rows = try queryEvents(sql: sql, bindings: bindings)
+
+        let next: PaginationCursor?
+        if rows.count == clamped, let last = rows.last {
+            next = PaginationCursor(
+                timestamp: last.timestamp,
+                id: last.id.uuidString
+            )
+        } else {
+            next = nil
+        }
+        return PagedResults(items: rows, nextCursor: next)
+    }
+
     /// Performs a full-text search across indexed event fields.
     ///
     /// Uses the FTS5 virtual table to search process names, paths, command

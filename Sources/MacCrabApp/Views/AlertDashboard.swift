@@ -48,21 +48,16 @@ struct AlertDashboard: View {
                 || appState.isPatternSuppressed(alert)
         }
 
-        let query = searchText.isEmpty ? nil : searchText.lowercased()
-
-        // Single-pass filter using lazy evaluation — no intermediate array
-        // allocations, no per-keystroke full-array rebuild. Campaigns are
-        // excluded structurally (they have their own tab). The old
-        // implementation rebuilt a 500-element AlertViewModel array every
-        // keystroke via .map before filtering; that was the hot path.
+        // v1.8.0: free-text search no longer filters in-memory. The 500-row
+        // window meant the user could only search alerts already loaded into
+        // dashboardAlerts; matches in older alerts (post "Load older") were
+        // dropped. Search now goes through `appState.loadAlerts(filter:)`,
+        // which hits the DB. This pass only handles severity + suppressed —
+        // the two cheap predicates with no DB equivalent.
         let filteredLazy = appState.dashboardAlerts.lazy.filter { alert in
             if alert.ruleId.hasPrefix("maccrab.campaign.") { return false }
             if !showSuppressed && isEffectivelySuppressed(alert) { return false }
             if let sev = selectedSeverity, alert.severity != sev { return false }
-            if let q = query {
-                let hay = "\(alert.ruleTitle) \(alert.processName) \(alert.processPath) \(alert.description) \(alert.mitreTechniques)".lowercased()
-                if !hay.contains(q) { return false }
-            }
             return true
         }
 
@@ -259,6 +254,30 @@ struct AlertDashboard: View {
                             }
                             .tag(alert)
                         }
+                        // v1.8.0: keyset-paginated "Load older" footer. Visible
+                        // only when the DB has rows behind the oldest currently
+                        // loaded — which is also when the user-typed search
+                        // box can't find what they're looking for in the loaded
+                        // window. The button itself is in-list-aware: it goes
+                        // away once `hasMoreAlerts` flips off.
+                        if appState.hasMoreAlerts {
+                            HStack {
+                                Spacer()
+                                Button {
+                                    Task { await appState.loadOlderAlerts() }
+                                } label: {
+                                    Label(
+                                        String(localized: "alerts.loadOlder", defaultValue: "Load older"),
+                                        systemImage: "arrow.down.circle"
+                                    )
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                Spacer()
+                            }
+                            .padding(.vertical, 6)
+                            .background(.bar)
+                        }
                     }
 
                     // Detail panel — shown when exactly one alert selected
@@ -317,6 +336,18 @@ struct AlertDashboard: View {
         }
         .task {
             await appState.loadAlerts()
+        }
+        // v1.8.0: route searchText through the DB. Mirrors EventStream's
+        // .task(id:) pattern — debounce 300ms so each keystroke cancels the
+        // prior task; only the trailing edge fires `loadAlerts(filter:)`.
+        // Empty string returns to live mode.
+        .task(id: searchText) {
+            do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
+            if searchText.isEmpty {
+                await appState.loadAlerts()
+            } else {
+                await appState.loadAlerts(filter: searchText)
+            }
         }
     }
 

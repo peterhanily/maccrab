@@ -697,6 +697,20 @@ final class AppState: ObservableObject {
     @Published var recentAlerts: [AlertViewModel] = []
     @Published var dashboardAlerts: [AlertViewModel] = []
     @Published var events: [EventViewModel] = []
+    /// True when the keyset cursor for the alerts/events list still has older
+    /// rows behind it. Drives the "Load older" affordance in `AlertDashboard`
+    /// and `EventStream`. Set when an initial load returns a full page; cleared
+    /// when a paged fetch comes back short (end-of-table).
+    @Published var hasMoreAlerts: Bool = false
+    @Published var hasMoreEvents: Bool = false
+    /// True while the Events tab is showing FTS5 search results rather than
+    /// the live time-ordered window. Used by `loadEventsIncremental` to skip
+    /// its prepend so a relevance-ordered search isn't clobbered by newer
+    /// rows arriving on the poll tick.
+    @Published var eventSearchActive: Bool = false
+    /// Mirror flag for the Alerts tab — same reasoning as `eventSearchActive`
+    /// but the underlying query is LIKE-based (no FTS5 on the alerts table).
+    @Published var alertSearchActive: Bool = false
     @Published var rules: [RuleViewModel] = []
     @Published var tccEvents: [TCCEventViewModel] = []
 
@@ -800,6 +814,11 @@ final class AppState: ObservableObject {
     private var lastAlertTimestamp: Date = .distantPast
     private var lastEventTimestamp: Date = .distantPast
     private var lastSecurityScoreUpdate: Date = .distantPast
+    /// Keyset cursor pointing at the oldest row currently in `dashboardAlerts`
+    /// / `events`. `loadOlderAlerts()` / `loadOlderEvents()` advance from here.
+    /// Refreshed by every initial load or paged fetch.
+    private var alertCursor: PaginationCursor?
+    private var eventCursor: PaginationCursor?
 
     /// Authoritative set of alert IDs the user has manually suppressed this session.
     /// Published so SwiftUI views (filteredAlerts) re-render whenever it changes,
@@ -1094,10 +1113,16 @@ final class AppState: ObservableObject {
         callback()
     }
 
-    func loadAlerts(limit: Int = 500) async {
+    func loadAlerts(limit: Int = 500, filter: String? = nil) async {
         do {
             let store = try alertStore()
-            let alerts = try await store.alerts(since: Date.distantPast, limit: limit)
+            let isSearch = filter.map { !$0.isEmpty } ?? false
+            let alerts: [Alert]
+            if let query = filter, isSearch {
+                alerts = try await store.search(text: query, limit: limit)
+            } else {
+                alerts = try await store.alerts(since: Date.distantPast, limit: limit)
+            }
             // Apply suppressedIDs overlay: if the user suppressed an alert this session,
             // keep it suppressed regardless of what the DB says (handles read-only DB case).
             let overlay = suppressedIDs
@@ -1112,6 +1137,20 @@ final class AppState: ObservableObject {
             if let mostRecent = dashboardAlerts.first?.timestamp {
                 lastAlertTimestamp = mostRecent
             }
+            // Gate the live poll while a search is active — same reasoning as
+            // events. LIKE search results aren't a contiguous time window.
+            alertSearchActive = isSearch
+            // Park a keyset cursor at the oldest row so "Load older" can pick
+            // up from here. Treat a full page as "more available"; a short
+            // page means we already have everything. Searches don't get a
+            // cursor — they aren't time-ordered windows.
+            if !isSearch, alerts.count == limit, let oldest = alerts.last {
+                alertCursor = PaginationCursor(timestamp: oldest.timestamp, id: oldest.id)
+                hasMoreAlerts = true
+            } else {
+                alertCursor = nil
+                hasMoreAlerts = false
+            }
         } catch {
             // DB may not exist yet
         }
@@ -1121,15 +1160,82 @@ final class AppState: ObservableObject {
         do {
             let store = try eventStore()
             let raw: [Event]
-            if let query = filter, !query.isEmpty {
+            let isSearch = filter.map { !$0.isEmpty } ?? false
+            if let query = filter, isSearch {
                 raw = try await store.search(text: query, limit: limit)
             } else {
                 raw = try await store.events(since: Date.distantPast, limit: limit)
             }
             events = raw.map { eventToViewModel($0) }
+            // Gate the live poll: while a search is active, the events array
+            // holds FTS-ranked results; the live prepend would mix unrelated
+            // newer rows in at the top.
+            eventSearchActive = isSearch
+            // FTS5 search is ordered by relevance, not time, so its tail isn't
+            // a meaningful cursor — disable "Load older" while a search is
+            // active. The non-search path orders by (timestamp DESC, id DESC),
+            // matching the keyset cursor contract.
+            if !isSearch, raw.count == limit, let oldest = raw.last {
+                eventCursor = PaginationCursor(
+                    timestamp: oldest.timestamp,
+                    id: oldest.id.uuidString
+                )
+                hasMoreEvents = true
+            } else {
+                eventCursor = nil
+                hasMoreEvents = false
+            }
         } catch {
             // DB may not exist yet
         }
+    }
+
+    /// Append the next page of older alerts to `dashboardAlerts`. Backed by
+    /// the keyset cursor so the call is constant-time at any depth and stable
+    /// under concurrent inserts (the incremental newer-poll prepends, so its
+    /// rows never collide with a paged fetch). No-op when `hasMoreAlerts` is
+    /// false. Errors are swallowed — UI just stops offering "Load older".
+    func loadOlderAlerts(pageSize: Int = 100) async {
+        guard hasMoreAlerts, let cursor = alertCursor else { return }
+        do {
+            let store = try alertStore()
+            let page = try await store.alerts(before: cursor, pageSize: pageSize)
+            let overlay = suppressedIDs
+            // Dedup against what we already have. The cursor's strict-less-than
+            // predicate means duplicates only happen if a fetch overlapped a
+            // trim — cheap to defend regardless.
+            let existing = Set(dashboardAlerts.map { $0.id })
+            let appended = page.items
+                .filter { !existing.contains($0.id) }
+                .map { alert -> AlertViewModel in
+                    var vm = alertToViewModel(alert)
+                    if overlay.contains(vm.id) { vm.suppressed = true }
+                    return vm
+                }
+            if !appended.isEmpty {
+                dashboardAlerts.append(contentsOf: appended)
+            }
+            alertCursor = page.nextCursor
+            hasMoreAlerts = page.nextCursor != nil
+        } catch {}
+    }
+
+    /// Mirror of `loadOlderAlerts` for the Events tab.
+    func loadOlderEvents(pageSize: Int = 200) async {
+        guard hasMoreEvents, let cursor = eventCursor else { return }
+        do {
+            let store = try eventStore()
+            let page = try await store.events(before: cursor, pageSize: pageSize)
+            let existing = Set(events.map { $0.id })
+            let appended = page.items
+                .filter { !existing.contains($0.id) }
+                .map { eventToViewModel($0) }
+            if !appended.isEmpty {
+                events.append(contentsOf: appended)
+            }
+            eventCursor = page.nextCursor
+            hasMoreEvents = page.nextCursor != nil
+        } catch {}
     }
 
     func loadRules() async {
@@ -1529,6 +1635,9 @@ final class AppState: ObservableObject {
     // MARK: Incremental Loading
 
     private func loadAlertsIncremental() async {
+        // Mirror loadEventsIncremental: skip the prepend during search so the
+        // relevance-ordered LIKE results stay intact between poll ticks.
+        if alertSearchActive { return }
         do {
             let store = try alertStore()
             let newAlerts = try await store.alerts(since: lastAlertTimestamp, limit: 100)
@@ -1543,8 +1652,11 @@ final class AppState: ObservableObject {
                 }
             if !newViewModels.isEmpty {
                 dashboardAlerts.insert(contentsOf: newViewModels, at: 0)
-                // Cap at 500
-                if dashboardAlerts.count > 500 { dashboardAlerts = Array(dashboardAlerts.prefix(500)) }
+                // Soft cap to bound memory while leaving "Load older" room.
+                // 5000 alerts is plenty (a busy day rarely exceeds 1-2k); the
+                // 500-trim that lived here pre-v1.8 silently discarded any
+                // alerts the user had paged in.
+                if dashboardAlerts.count > 5000 { dashboardAlerts = Array(dashboardAlerts.prefix(5000)) }
                 refreshAlertBadges()
                 lastAlertTimestamp = newViewModels.first?.timestamp ?? lastAlertTimestamp
 
@@ -1565,6 +1677,8 @@ final class AppState: ObservableObject {
     }
 
     private func loadEventsIncremental() async {
+        // Don't trample search results with newer rows the user didn't ask for.
+        if eventSearchActive { return }
         do {
             let store = try eventStore()
             let newEvents = try await store.events(since: lastEventTimestamp, limit: 200)
@@ -1573,7 +1687,8 @@ final class AppState: ObservableObject {
                 .map { eventToViewModel($0) }
             if !newViewModels.isEmpty {
                 events.insert(contentsOf: newViewModels, at: 0)
-                if events.count > 500 { events = Array(events.prefix(500)) }
+                // Soft cap matches the alerts list — see loadAlertsIncremental.
+                if events.count > 5000 { events = Array(events.prefix(5000)) }
                 lastEventTimestamp = newViewModels.first?.timestamp ?? lastEventTimestamp
             }
         } catch {}
