@@ -334,38 +334,39 @@ enum DaemonTimers {
         // noticed. This timer checks file size every hour and
         // iteratively prunes the oldest events + VACUUMs until the
         // file drops below 80% of the cap.
-        let startupMaxSizeMB = max(50, state.maxDatabaseSizeMB)
-        let startupTargetSizeMB = Int(Double(startupMaxSizeMB) * 0.8)
         let dbFilePath = state.supportDir + "/events.db"
 
-        // Startup log so operators can verify the cap is armed by
-        // grepping the first 15 minutes of daemon logs. Measures
-        // current size too (db + wal + shm), so "why is this taking
-        // so long to prune?" has an immediate answer (big starting DB).
+        // v1.8.0: replaces the legacy size-cap-and-VACUUM dance. The
+        // tiered storage model bounds DB growth by design — the hot tier
+        // never holds more than 24h of events, so file size tracks
+        // events-per-second × 24h, not retention × insert rate. No more
+        // 18-GB stuck-cap incidents.
+        //
+        // The roll-up sweep:
+        //   1. Aggregates events older than 24h into `event_aggregates`
+        //   2. Deletes them from the hot tier (FTS5 + main both)
+        //   3. Trims aggregates older than 30 days
+        //
+        // Alert evidence is captured eagerly at alert-firing time
+        // (AlertSink.captureEvidenceIfPossible) so it doesn't need a
+        // sweep here — the snapshot happens inside the 24h window when
+        // the events are still hot.
         let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
-        if startupSizeMB > startupMaxSizeMB {
-            logger.notice("Size-cap timer armed: cap=\(startupMaxSizeMB) MB, target=\(startupTargetSizeMB) MB, currently \(startupSizeMB) MB (OVER CAP — first sweep in 15 min, hourly thereafter)")
-        } else {
-            logger.info("Size-cap timer armed: cap=\(startupMaxSizeMB) MB, target=\(startupTargetSizeMB) MB, currently \(startupSizeMB) MB (under cap)")
-        }
+        logger.notice("Tier-rollup timer armed: hot-tier retention=24h, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
 
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
-        // v1.6.13: first sweep at 15 min (up from 10) so collectors
-        // + inventory warm-up settle before we compete for IO.
-        // Hourly thereafter. v1.6.14: cap + target are read live from
-        // `state` at each tick so a SIGHUP-driven config reload is
-        // honored without a daemon restart.
-        sizeCapTimer.schedule(deadline: .now() + 900, repeating: 3600)
+        sizeCapTimer.schedule(deadline: .now() + 900, repeating: 6 * 3600)
         sizeCapTimer.setEventHandler {
             Task {
-                let maxSizeMB = max(50, state.maxDatabaseSizeMB)
-                let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
-                await enforceDatabaseSizeCap(
-                    dbPath: dbFilePath,
-                    maxSizeMB: maxSizeMB,
-                    targetSizeMB: targetSizeMB,
-                    eventStore: state.eventStore
-                )
+                let cutoff = Date().addingTimeInterval(-24 * 3600)
+                do {
+                    let deleted = try await state.eventStore.rollUpAndPrune(olderThan: cutoff)
+                    if deleted > 0 {
+                        logger.notice("Tier-rollup sweep: aggregated + pruned \(deleted) events older than 24h.")
+                    }
+                } catch {
+                    logger.error("Tier-rollup sweep failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
         }
         sizeCapTimer.resume()

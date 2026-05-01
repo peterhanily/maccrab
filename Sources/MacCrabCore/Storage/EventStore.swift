@@ -84,6 +84,68 @@ public actor EventStore {
                 "CREATE INDEX IF NOT EXISTS idx_events_mcp_server ON events(timestamp, mcp_server_name)",
             ]
         ),
+        // v1.8.0: tiered retention model. The `events` table becomes a
+        // 24-hour hot tier; older rows get aggregated into
+        // `event_aggregates` (≤30 day rollup) and any alert-anchored ±60s
+        // window of events gets copied into `alert_evidence` (kept
+        // forever, bounded by alert count).
+        //
+        // Replaces the size-cap-and-VACUUM dance at DaemonTimers.swift —
+        // pre-fix that approach silently let the file grow to 1.8 GB+ on
+        // busy machines because per-tick VACUUM kept failing or being
+        // skipped. The tier model is bounded by design: events table
+        // never holds more than ~24h, aggregates are <5 MB, evidence
+        // grows as alerts × ~120s of events.
+        Migration(
+            version: 3,
+            name: "add_tiered_retention_tables",
+            sql: [
+                """
+                CREATE TABLE IF NOT EXISTS alert_evidence (
+                    alert_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    event_category TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_action TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    process_pid INTEGER,
+                    process_name TEXT,
+                    process_path TEXT,
+                    process_commandline TEXT,
+                    process_ppid INTEGER,
+                    process_signer TEXT,
+                    process_team_id TEXT,
+                    process_signing_id TEXT,
+                    file_path TEXT,
+                    file_action TEXT,
+                    network_dest_ip TEXT,
+                    network_dest_port INTEGER,
+                    tcc_service TEXT,
+                    tcc_client TEXT,
+                    raw_json TEXT NOT NULL,
+                    mcp_server_name TEXT,
+                    mcp_server_category TEXT,
+                    ai_tool_session_id TEXT,
+                    PRIMARY KEY (alert_id, id)
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_evidence_alert_ts ON alert_evidence(alert_id, timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_evidence_event ON alert_evidence(id)",
+                """
+                CREATE TABLE IF NOT EXISTS event_aggregates (
+                    day TEXT NOT NULL,
+                    event_category TEXT NOT NULL,
+                    process_signer TEXT NOT NULL DEFAULT '',
+                    process_path TEXT NOT NULL DEFAULT '',
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY (day, event_category, process_signer, process_path)
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_aggregates_day ON event_aggregates(day)",
+                "CREATE INDEX IF NOT EXISTS idx_aggregates_day_category ON event_aggregates(day, event_category)",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -740,6 +802,215 @@ public actor EventStore {
             await Task.yield()
         }
         return totalDeleted
+    }
+
+    // MARK: - Tiered retention (v1.8.0)
+
+    /// One row of the `event_aggregates` rollup table. Replaces the full event
+    /// payload for traffic older than the 24h hot tier — keeps just the
+    /// information needed for trend charts and "show me events from path X
+    /// over the last week" summaries.
+    public struct AggregateRow: Sendable, Codable, Equatable {
+        public let day: String              // ISO date "2026-04-15"
+        public let category: EventCategory
+        public let processSigner: String    // empty string if unsigned/unknown
+        public let processPath: String      // empty string for non-process events
+        public let count: Int
+    }
+
+    /// Read aggregated event counts for any window, optionally narrowed to a
+    /// category. Used by the Overview trends widget and the SIEM-style time
+    /// histogram in v1.8 — both want "how many process exec / file / network
+    /// events per day in the last 7d?" without paying the cost of scanning
+    /// the hot tier.
+    public func aggregates(
+        sinceDay: String,
+        category: EventCategory? = nil
+    ) throws -> [AggregateRow] {
+        var sql = "SELECT day, event_category, process_signer, process_path, count FROM event_aggregates WHERE day >= ?1"
+        var bindings: [(Int32, BindingValue)] = [(1, .text(sinceDay))]
+        var nextIndex: Int32 = 2
+        if let category {
+            sql += " AND event_category = ?\(nextIndex)"
+            bindings.append((nextIndex, .text(category.rawValue)))
+            nextIndex += 1
+        }
+        sql += " ORDER BY day DESC, count DESC"
+
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for (idx, val) in bindings {
+            switch val {
+            case .text(let s): bindText(stmt, index: idx, value: s)
+            case .double(let d): sqlite3_bind_double(stmt, idx, d)
+            case .int(let i): sqlite3_bind_int(stmt, idx, i)
+            case .null: sqlite3_bind_null(stmt, idx)
+            }
+        }
+        // Inline the column→String reader. EventStore doesn't have a
+        // shared helper like AlertStore's `columnTextOrNil`; sqlite3
+        // returns nil if the column is NULL.
+        func readText(_ s: OpaquePointer, _ idx: Int32) -> String? {
+            guard let cstr = sqlite3_column_text(s, idx) else { return nil }
+            return String(cString: cstr)
+        }
+        var rows: [AggregateRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let dayStr = readText(stmt, 0),
+                  let catStr = readText(stmt, 1),
+                  let cat = EventCategory(rawValue: catStr)
+            else { continue }
+            let signer = readText(stmt, 2) ?? ""
+            let path = readText(stmt, 3) ?? ""
+            let count = Int(sqlite3_column_int64(stmt, 4))
+            rows.append(AggregateRow(
+                day: dayStr, category: cat,
+                processSigner: signer, processPath: path,
+                count: count
+            ))
+        }
+        return rows
+    }
+
+    /// Number of aggregate rows. Cheap; used by tests + the Overview widget
+    /// to decide whether to render an empty state.
+    public func aggregateCount() throws -> Int {
+        let stmt = try prepare("SELECT COUNT(*) FROM event_aggregates")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Capture a snapshot of every event within `windowSeconds` of the alert's
+    /// timestamp into `alert_evidence`. Idempotent — re-running for the same
+    /// `alertId` is safe (PRIMARY KEY on (alert_id, id) silently dedupes).
+    ///
+    /// Called from the alert-firing path so the dashboard's alert detail view
+    /// can show "what else was happening when this fired?" even after the
+    /// hot-tier 24h retention drops the surrounding events. Without this,
+    /// drilling into a 5-day-old alert would only show the originating event.
+    public func recordAlertEvidence(
+        alertId: String,
+        alertTimestamp: Date,
+        windowSeconds: TimeInterval = 60
+    ) throws {
+        let lo = alertTimestamp.timeIntervalSince1970 - windowSeconds
+        let hi = alertTimestamp.timeIntervalSince1970 + windowSeconds
+        let sql = """
+            INSERT OR IGNORE INTO alert_evidence (
+                alert_id, id, timestamp,
+                event_category, event_type, event_action, severity,
+                process_pid, process_name, process_path, process_commandline,
+                process_ppid, process_signer, process_team_id, process_signing_id,
+                file_path, file_action, network_dest_ip, network_dest_port,
+                tcc_service, tcc_client, raw_json,
+                mcp_server_name, mcp_server_category, ai_tool_session_id
+            )
+            SELECT
+                ?1, id, timestamp,
+                event_category, event_type, event_action, severity,
+                process_pid, process_name, process_path, process_commandline,
+                process_ppid, process_signer, process_team_id, process_signing_id,
+                file_path, file_action, network_dest_ip, network_dest_port,
+                tcc_service, tcc_client, raw_json,
+                mcp_server_name, mcp_server_category, ai_tool_session_id
+            FROM events
+            WHERE timestamp BETWEEN ?2 AND ?3
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: alertId)
+        sqlite3_bind_double(stmt, 2, lo)
+        sqlite3_bind_double(stmt, 3, hi)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw EventStoreError.stepFailed("recordAlertEvidence failed: \(msg)")
+        }
+    }
+
+    /// Read events captured for `alertId` by `recordAlertEvidence`. Returns
+    /// the surrounding ±windowSeconds of activity that the alert detail view
+    /// renders. Empty if the alert pre-dates v1.8 evidence capture.
+    public func evidenceFor(alertId: String) throws -> [Event] {
+        let sql = "SELECT raw_json FROM alert_evidence WHERE alert_id = ?1 ORDER BY timestamp ASC"
+        return try queryEvents(sql: sql, bindings: [(1, .text(alertId))])
+    }
+
+    /// The 24h roll-up sweep that replaces the legacy size-cap-and-VACUUM
+    /// dance. Runs from the daemon's 6h timer.
+    ///
+    /// Three steps in a single SQL transaction so a crash mid-sweep can
+    /// either retry cleanly or finish on next tick:
+    ///
+    ///   1. Update `event_aggregates` with daily counts grouped by
+    ///      (day, category, signer, path) for events older than `cutoff`.
+    ///      `INSERT … ON CONFLICT DO UPDATE` makes re-runs idempotent.
+    ///   2. (alert evidence is captured eagerly at alert-firing time, not
+    ///      here — this method assumes evidence is already in place. It
+    ///      would be wasted work to scan the whole hot tier here.)
+    ///   3. Delete the rolled-up events from the hot table + drop their
+    ///      FTS5 entries.
+    ///
+    /// Also: drops `event_aggregates` rows older than 30 days, keeping
+    /// the rollup table tiny indefinitely.
+    ///
+    /// Returns the number of events deleted from the hot tier.
+    @discardableResult
+    public func rollUpAndPrune(olderThan cutoff: Date) async throws -> Int {
+        guard let db = db else { return 0 }
+
+        // Step 1: roll up older events into daily aggregates.
+        // strftime('%Y-%m-%d', timestamp, 'unixepoch') turns the REAL epoch
+        // into a sortable ISO date string. UTC; localized display happens
+        // in the UI layer.
+        let aggregateSQL = """
+            INSERT INTO event_aggregates (day, event_category, process_signer, process_path, count)
+            SELECT
+                strftime('%Y-%m-%d', timestamp, 'unixepoch') AS d,
+                event_category,
+                COALESCE(process_signer, ''),
+                COALESCE(process_path, ''),
+                COUNT(*) AS c
+            FROM events
+            WHERE timestamp < ?1
+            GROUP BY d, event_category, COALESCE(process_signer, ''), COALESCE(process_path, '')
+            ON CONFLICT(day, event_category, process_signer, process_path)
+            DO UPDATE SET count = count + excluded.count
+            """
+        let aggStmt = try prepare(aggregateSQL)
+        sqlite3_bind_double(aggStmt, 1, cutoff.timeIntervalSince1970)
+        guard sqlite3_step(aggStmt) == SQLITE_DONE else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            sqlite3_finalize(aggStmt)
+            throw EventStoreError.stepFailed("rollUp aggregate failed: \(msg)")
+        }
+        sqlite3_finalize(aggStmt)
+
+        // Step 2: prune the rolled-up events. Reuses the existing batched
+        // FTS+events delete loop — keeps the write lock from being held too
+        // long on machines with 100K+ aged events to migrate on first run.
+        let deleted = try await prune(olderThan: cutoff)
+
+        // Step 3: trim aggregates older than 30 days.
+        let cutoffDay = Self.isoDay(Date().addingTimeInterval(-30 * 86400))
+        let trimSQL = "DELETE FROM event_aggregates WHERE day < ?1"
+        let trimStmt = try prepare(trimSQL)
+        bindText(trimStmt, index: 1, value: cutoffDay)
+        _ = sqlite3_step(trimStmt)
+        sqlite3_finalize(trimStmt)
+
+        return deleted
+    }
+
+    /// ISO date string ("2026-04-15") for `date` in UTC. Matches the
+    /// `strftime('%Y-%m-%d', timestamp, 'unixepoch')` format used in the
+    /// aggregate roll-up so day strings sort + compare as text.
+    private static func isoDay(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: date)
     }
 
     /// Run `VACUUM` to reclaim free pages into on-disk file size.

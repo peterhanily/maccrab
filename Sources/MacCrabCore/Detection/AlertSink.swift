@@ -25,6 +25,7 @@ import os.log
 public actor AlertSink {
 
     private let alertStore: AlertStore
+    private let eventStore: EventStore?
     private let deduplicator: AlertDeduplicator
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "AlertSink")
 
@@ -33,9 +34,31 @@ public actor AlertSink {
     private(set) public var suppressedCount: Int = 0
     private(set) public var insertedCount: Int = 0
 
-    public init(alertStore: AlertStore, deduplicator: AlertDeduplicator) {
+    public init(
+        alertStore: AlertStore,
+        deduplicator: AlertDeduplicator,
+        eventStore: EventStore? = nil
+    ) {
         self.alertStore = alertStore
+        self.eventStore = eventStore
         self.deduplicator = deduplicator
+    }
+
+    // v1.8.0: when an alert is committed, snapshot the surrounding ±60s of
+    // events into `alert_evidence` so the dashboard's alert detail can show
+    // "what was happening when this fired?" even after the 24h hot tier
+    // drops the originating events. Best-effort — failure is logged but
+    // does not back out the alert insert.
+    private func captureEvidenceIfPossible(alertId: String, timestamp: Date) async {
+        guard let eventStore else { return }
+        do {
+            try await eventStore.recordAlertEvidence(
+                alertId: alertId,
+                alertTimestamp: timestamp
+            )
+        } catch {
+            logger.warning("Evidence capture failed for alert \(alertId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Single alert with event context
@@ -59,6 +82,7 @@ public actor AlertSink {
         }
         try await alertStore.insert(alert: alert)
         insertedCount += 1
+        await captureEvidenceIfPossible(alertId: alert.id, timestamp: alert.timestamp)
         return true
     }
 
@@ -80,6 +104,7 @@ public actor AlertSink {
         }
         try await alertStore.insert(alert: alert)
         insertedCount += 1
+        await captureEvidenceIfPossible(alertId: alert.id, timestamp: alert.timestamp)
         return true
     }
 
@@ -93,6 +118,12 @@ public actor AlertSink {
         guard !alerts.isEmpty else { return }
         try await alertStore.insert(alerts: alerts)
         insertedCount += alerts.count
+        // Evidence capture is per-alert because each alert's window center
+        // is its own timestamp. The PRIMARY KEY (alert_id, id) on
+        // alert_evidence dedupes overlapping windows automatically.
+        for alert in alerts {
+            await captureEvidenceIfPossible(alertId: alert.id, timestamp: alert.timestamp)
+        }
     }
 
     // MARK: - Stats

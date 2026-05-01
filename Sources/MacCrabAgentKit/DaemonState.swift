@@ -338,7 +338,15 @@ final class DaemonState {
         // Build AlertSink from the already-stored alertStore + deduplicator so
         // we don't need a new initializer parameter. Construction is cheap
         // (the actor is empty); first use is what triggers any work.
-        self.alertSink = AlertSink(alertStore: alertStore, deduplicator: deduplicator)
+        // v1.8.0: pass eventStore so the sink can snapshot the ±60s
+        // event window into `alert_evidence` on every alert insert.
+        // Backs the dashboard's alert detail view after the 24h hot
+        // tier drops the originating events.
+        self.alertSink = AlertSink(
+            alertStore: alertStore,
+            deduplicator: deduplicator,
+            eventStore: eventStore
+        )
         self.enricher = enricher
         self.ruleEngine = ruleEngine
         self.sequenceEngine = sequenceEngine
