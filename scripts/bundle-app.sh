@@ -46,6 +46,36 @@ if [ -n "$RESOURCE_BUNDLE" ]; then
     done
 fi
 
+# Embed Sparkle.framework. SPM links MacCrabApp against Sparkle but does
+# NOT copy the framework into the bundle, so launching the bare app dies
+# at dyld with "Library not loaded: @rpath/Sparkle.framework/...". Mirrors
+# the equivalent step in scripts/build-release.sh for release artefacts.
+SPARKLE_SRC=""
+for candidate in \
+    "$PROJECT_DIR/.build/arm64-apple-macosx/debug/Sparkle.framework" \
+    "$PROJECT_DIR/.build/debug/Sparkle.framework" \
+    "$PROJECT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"; do
+    if [ -d "$candidate" ]; then
+        SPARKLE_SRC="$candidate"
+        break
+    fi
+done
+
+if [ -n "$SPARKLE_SRC" ]; then
+    FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
+    mkdir -p "$FRAMEWORKS_DIR"
+    # -R preserves the framework's internal Versions/B ↔ Current symlinks.
+    cp -R "$SPARKLE_SRC" "$FRAMEWORKS_DIR/"
+
+    # SPM-built executables don't carry @executable_path/../Frameworks in
+    # their rpath (that's Xcode's .app default). Without this, dyld
+    # searches Contents/MacOS/ for the framework, fails, and aborts at
+    # launch — matches scripts/build-release.sh:333.
+    if ! otool -l "$APP_BUNDLE/Contents/MacOS/MacCrab" | grep -q "@executable_path/../Frameworks"; then
+        install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/MacCrab" 2>/dev/null || true
+    fi
+fi
+
 # Create Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
