@@ -35,4 +35,10 @@ detection:
 falsepositives:
     - Python development and debugging one-liners
     - Legitimate system administration scripts
-level: high
+    - pyenv / conda / uv environment bootstrap (`python -c "import sys; ..."`)
+# v1.8.0: demoted high → medium. The base rule fires on any python -c
+# with the listed imports — common in dev workflows (pyenv shims,
+# conda activation scripts, uv environment introspection). Real
+# reverse-shell payloads still get caught at medium and surface in the
+# campaign engine when paired with network egress.
+level: medium

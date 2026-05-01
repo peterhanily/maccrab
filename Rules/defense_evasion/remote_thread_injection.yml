@@ -30,6 +30,14 @@ detection:
             - '/DTServiceHub'
             - '/Xcode'
     filter_same_signer:
+        # NOTE (v1.8.0): the |fieldref modifier is not implemented in the
+        # MacCrab compiler — it's silently dropped from the predicate, so
+        # the filter does not currently exclude same-signer-pair injections.
+        # Tracked: re-implement once the compiler grows native fieldref
+        # support (would require comparing two columns at predicate time).
+        # In the meantime, accept slightly higher FP on legitimate
+        # same-signer cross-process Mach activity (entitlement / IPC
+        # plumbing) — net detection still surfaces real cross-app injection.
         SigningID|fieldref: 'TargetSigningID'
     condition: selection and not filter_apple and not filter_debugger and not filter_same_signer
 falsepositives:

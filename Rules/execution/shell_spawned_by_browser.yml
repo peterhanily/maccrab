@@ -36,4 +36,9 @@ detection:
 falsepositives:
     - Browser extensions that legitimately invoke shell scripts
     - Web development tools
-level: high
+    - DevTools terminals (Chrome / Edge developer-extension shell)
+# v1.8.0: demoted high → medium. Field FP rate was unsustainably high
+# on dev machines (devtools terminals fire this dozens of times per
+# session). Real exploitation chains still surface as medium and are
+# correlated by sequence + campaign rules.
+level: medium
