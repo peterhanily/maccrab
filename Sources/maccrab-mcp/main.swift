@@ -162,37 +162,40 @@ func writeJSON(_ obj: Any) {
 let tools: [[String: Any]] = [
     [
         "name": "get_alerts",
-        "description": "Get recent security alerts from MacCrab. Returns alert details including rule name, severity, process info, MITRE techniques, and AI analysis if available.",
+        "description": "Get recent security alerts from MacCrab. Returns alert details including rule name, severity, process info, MITRE techniques, and AI analysis if available. For result sets larger than `limit`, the response ends with `[next_cursor: <token>]` — pass that opaque token back as `cursor` to fetch the next page. Cursor pagination is keyset-based (constant-time at any depth) and ignores the `hours` filter.",
         "inputSchema": [
             "type": "object",
             "properties": [
                 "limit": ["type": "integer", "description": "Max alerts to return (default 20, max 100)", "default": 20],
                 "severity": ["type": "string", "description": "Filter by minimum severity: critical, high, medium, low, informational", "enum": ["critical", "high", "medium", "low", "informational"]],
-                "hours": ["type": "number", "description": "Only alerts from the last N hours (default: 24)", "default": 24],
+                "hours": ["type": "number", "description": "Only alerts from the last N hours (default: 24). Ignored when `cursor` is set.", "default": 24],
                 "include_suppressed": ["type": "boolean", "description": "Include suppressed alerts (default false)", "default": false],
+                "cursor": ["type": "string", "description": "Opaque pagination token from a previous response's `next_cursor`. Returns alerts strictly older than the token's position."],
             ],
         ] as [String: Any],
     ],
     [
         "name": "get_events",
-        "description": "Get recent security events (process executions, file operations, network connections, TCC changes) from MacCrab.",
+        "description": "Get recent security events (process executions, file operations, network connections, TCC changes) from MacCrab. For result sets larger than `limit`, the response ends with `[next_cursor: <token>]` — pass that opaque token back as `cursor` to fetch the next page. Cursor pagination is keyset-based and ignores the `hours` and `search` filters.",
         "inputSchema": [
             "type": "object",
             "properties": [
                 "limit": ["type": "integer", "description": "Max events to return (default 20, max 100)", "default": 20],
                 "category": ["type": "string", "description": "Filter by category: process, file, network, auth, tcc, dns", "enum": ["process", "file", "network", "auth", "tcc", "dns"]],
-                "search": ["type": "string", "description": "Full-text search query"],
-                "hours": ["type": "number", "description": "Only events from the last N hours (default: 24)", "default": 24],
+                "search": ["type": "string", "description": "Full-text search query. Ignored when `cursor` is set."],
+                "hours": ["type": "number", "description": "Only events from the last N hours (default: 24). Ignored when `cursor` is set.", "default": 24],
+                "cursor": ["type": "string", "description": "Opaque pagination token from a previous response's `next_cursor`. Returns events strictly older than the token's position."],
             ],
         ] as [String: Any],
     ],
     [
         "name": "get_campaigns",
-        "description": "Get detected attack campaigns — kill chains, alert storms, AI compromise attempts, coordinated attacks, and lateral movement patterns.",
+        "description": "Get detected attack campaigns — kill chains, alert storms, AI compromise attempts, coordinated attacks, and lateral movement patterns. For result sets larger than `limit`, the response ends with `[next_cursor: <token>]` — pass that opaque token back as `cursor` to fetch the next page. Cursor pagination is keyset-based and queries the full alerts table (no in-process pre-filter cap).",
         "inputSchema": [
             "type": "object",
             "properties": [
-                "limit": ["type": "integer", "description": "Max campaigns to return (default 10)", "default": 10],
+                "limit": ["type": "integer", "description": "Max campaigns to return (default 10, max 100)", "default": 10],
+                "cursor": ["type": "string", "description": "Opaque pagination token from a previous response's `next_cursor`. Returns campaigns strictly older than the token's position."],
             ],
         ] as [String: Any],
     ],
@@ -208,6 +211,7 @@ let tools: [[String: Any]] = [
             "type": "object",
             "properties": [
                 "query": ["type": "string", "description": "Natural language threat hunting query or SQL SELECT"],
+                "limit": ["type": "integer", "description": "Max results to return (default 50, max 100)", "default": 50],
             ],
             "required": ["query"],
         ] as [String: Any],
@@ -389,18 +393,73 @@ func handleClusterAlerts(_ args: [String: Any]) async -> Any {
     ]
 }
 
+// MARK: - Cursor encoding (v1.8.0)
+//
+// MCP responses are textual, so we serialize the keyset cursor as
+// "<epoch>:<id>". The id portion is a UUID string for events and a
+// UUID string for alerts — neither contains a colon, so a single-split
+// is unambiguous. Token is opaque to callers; they pass it back unchanged.
+
+private func encodeCursor(_ cursor: PaginationCursor) -> String {
+    return "\(cursor.timestamp.timeIntervalSince1970):\(cursor.id)"
+}
+
+private func decodeCursor(_ raw: String) -> PaginationCursor? {
+    guard let colon = raw.firstIndex(of: ":") else { return nil }
+    let tsPart = raw[..<colon]
+    let idPart = raw[raw.index(after: colon)...]
+    guard let ts = Double(tsPart), !idPart.isEmpty else { return nil }
+    return PaginationCursor(
+        timestamp: Date(timeIntervalSince1970: ts),
+        id: String(idPart)
+    )
+}
+
 func handleGetAlerts(_ args: [String: Any]) async -> Any {
-    let limit = min(args["limit"] as? Int ?? 20, 100)
+    let limit = min(max(args["limit"] as? Int ?? 20, 1), 100)
     let hours = args["hours"] as? Double ?? 24
     let severityFilter = (args["severity"] as? String).flatMap { Severity(rawValue: $0) }
     let includeSuppressed = args["include_suppressed"] as? Bool ?? false
+    let cursor = (args["cursor"] as? String).flatMap(decodeCursor)
 
     do {
         let store = try AlertStore(directory: dataDir)
-        let since = Date().addingTimeInterval(-hours * 3600)
-        let alerts = try await store.alerts(since: since, severity: severityFilter, suppressed: includeSuppressed ? nil : false, limit: limit)
+        let alerts: [Alert]
+        let nextCursor: PaginationCursor?
+        let header: String
 
-        var lines: [String] = ["\(alerts.count) alert(s) from last \(Int(hours))h:"]
+        if cursor != nil {
+            // Cursor path: keyset-paginated. The hours filter doesn't compose
+            // with cursor pagination — the cursor IS the upper bound. Caller
+            // can stop paging when results get older than they want.
+            let page = try await store.alerts(
+                before: cursor,
+                severity: severityFilter,
+                suppressed: includeSuppressed ? nil : false,
+                pageSize: limit
+            )
+            alerts = page.items
+            nextCursor = page.nextCursor
+            header = "\(alerts.count) alert(s) (cursor page):"
+        } else {
+            let since = Date().addingTimeInterval(-hours * 3600)
+            alerts = try await store.alerts(
+                since: since,
+                severity: severityFilter,
+                suppressed: includeSuppressed ? nil : false,
+                limit: limit
+            )
+            // Hand back a cursor only when the caller hit the page cap —
+            // shorter result sets mean there's nothing more to read.
+            if alerts.count == limit, let oldest = alerts.last {
+                nextCursor = PaginationCursor(timestamp: oldest.timestamp, id: oldest.id)
+            } else {
+                nextCursor = nil
+            }
+            header = "\(alerts.count) alert(s) from last \(Int(hours))h:"
+        }
+
+        var lines: [String] = [header]
         for alert in alerts {
             let time = ISO8601DateFormatter().string(from: alert.timestamp)
             lines.append("")
@@ -412,6 +471,10 @@ func handleGetAlerts(_ args: [String: Any]) async -> Any {
             if let desc = alert.description { lines.append("  Detail: \(desc.prefix(300))") }
             if let techs = alert.mitreTechniques, !techs.isEmpty { lines.append("  MITRE: \(techs)") }
         }
+        if let next = nextCursor {
+            lines.append("")
+            lines.append("[next_cursor: \(encodeCursor(next))]")
+        }
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
@@ -420,20 +483,43 @@ func handleGetAlerts(_ args: [String: Any]) async -> Any {
 }
 
 func handleGetEvents(_ args: [String: Any]) async -> Any {
-    let limit = min(args["limit"] as? Int ?? 20, 100)
+    let limit = min(max(args["limit"] as? Int ?? 20, 1), 100)
     let hours = args["hours"] as? Double ?? 24
     let search = args["search"] as? String
     let category = args["category"] as? String
+    let cursor = (args["cursor"] as? String).flatMap(decodeCursor)
+    let cat = category.flatMap { EventCategory(rawValue: $0) }
 
     do {
         let store = try EventStore(directory: dataDir)
-        let since = Date().addingTimeInterval(-hours * 3600)
         let events: [Event]
-        if let q = search {
+        let nextCursor: PaginationCursor?
+
+        if cursor != nil {
+            // Cursor takes precedence over `search` and `hours` — same reasoning
+            // as alerts, plus FTS search is relevance-ordered (incompatible
+            // with keyset cursor's time ordering).
+            let page = try await store.events(
+                before: cursor,
+                category: cat,
+                pageSize: limit
+            )
+            events = page.items
+            nextCursor = page.nextCursor
+        } else if let q = search, !q.isEmpty {
             events = try await store.search(text: q, limit: limit)
+            nextCursor = nil
         } else {
-            let cat = category.flatMap { EventCategory(rawValue: $0) }
+            let since = Date().addingTimeInterval(-hours * 3600)
             events = try await store.events(since: since, category: cat, limit: limit)
+            if events.count == limit, let oldest = events.last {
+                nextCursor = PaginationCursor(
+                    timestamp: oldest.timestamp,
+                    id: oldest.id.uuidString
+                )
+            } else {
+                nextCursor = nil
+            }
         }
 
         var lines: [String] = ["\(events.count) event(s):"]
@@ -449,6 +535,10 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
                 lines.append("  Network: \(net.destinationIp):\(net.destinationPort)")
             }
         }
+        if let next = nextCursor {
+            lines.append("")
+            lines.append("[next_cursor: \(encodeCursor(next))]")
+        }
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
@@ -457,14 +547,19 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
 }
 
 func handleGetCampaigns(_ args: [String: Any]) async -> Any {
-    let limit = min(args["limit"] as? Int ?? 10, 50)
+    let limit = min(max(args["limit"] as? Int ?? 10, 1), 100)
+    let cursor = (args["cursor"] as? String).flatMap(decodeCursor)
 
     do {
         let store = try AlertStore(directory: dataDir)
-        let all = try await store.alerts(since: Date.distantPast, limit: 1000)
-        let campaigns = all.filter { $0.ruleId.hasPrefix("maccrab.campaign.") }.prefix(limit)
+        // Pre-fix this fetched 1000 alerts and filtered in-process — any
+        // campaign older than the most-recent 1000 alerts was silently
+        // dropped. Now the SQL filter (`rule_id LIKE 'maccrab.campaign.%'`)
+        // is the only filter applied; pagination is keyset-based.
+        let page = try await store.campaigns(before: cursor, pageSize: limit)
+        let campaigns = page.items
 
-        if campaigns.isEmpty {
+        if campaigns.isEmpty && cursor == nil {
             return ["content": [["type": "text", "text": "No campaigns detected. This is good — no multi-stage attacks identified."]]]
         }
 
@@ -478,6 +573,10 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
             lines.append("  Time: \(time)")
             if let desc = c.description { lines.append("  Detail: \(desc.prefix(300))") }
             if let tactics = c.mitreTactics { lines.append("  Tactics: \(tactics)") }
+        }
+        if let next = page.nextCursor {
+            lines.append("")
+            lines.append("[next_cursor: \(encodeCursor(next))]")
         }
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
@@ -530,16 +629,18 @@ func handleHunt(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": "Error: query too long (max 1000 characters)"]]]
     }
 
+    let limit = min(max(args["limit"] as? Int ?? 50, 1), 100)
+
     do {
         let store = try EventStore(directory: dataDir)
-        let results = try await store.search(text: query, limit: 50)
+        let results = try await store.search(text: query, limit: limit)
 
         if results.isEmpty {
             return ["content": [["type": "text", "text": "No results for: \(query)\n\nTry broader terms or check different time ranges."]]]
         }
 
         var lines: [String] = ["\(results.count) result(s) for: \(query)"]
-        for event in results.prefix(20) {
+        for event in results {
             let time = ISO8601DateFormatter().string(from: event.timestamp)
             lines.append("")
             lines.append("\(time) [\(event.eventCategory.rawValue)] \(event.process.name)")
@@ -693,7 +794,7 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
 }
 
 func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
-    let limit = min(args["limit"] as? Int ?? 20, 100)
+    let limit = min(max(args["limit"] as? Int ?? 20, 1), 100)
     let hours = args["hours"] as? Double ?? 24
 
     do {
