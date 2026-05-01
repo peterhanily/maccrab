@@ -170,4 +170,36 @@ struct StreamOutputFramingTests {
         let eStr = try #require(String(data: eBody, encoding: .utf8))
         #expect(eStr.contains("\"_index\":\"maccrab-alerts\""))
     }
+
+    // MARK: - SSRF policy enforcement (v1.8.0)
+
+    @Test("SSRF-rejected URL drops sends without networking")
+    func ssrfRejectionDrops() async throws {
+        // 169.254.169.254 is the AWS / GCP / Azure metadata address.
+        // Pre-fix this would have been silently accepted (try? swallow).
+        let out = StreamOutput(
+            kind: .splunkHEC,
+            url: URL(string: "https://169.254.169.254/services/collector")!,
+            token: "would-leak-via-ssrf"
+        )
+        let (a, e) = alertAndEvent()
+        await out.send(alert: a, event: e)
+        let stats = await out.outputStats()
+        #expect(stats.dropped >= 1)
+        #expect(stats.sent == 0)
+    }
+
+    @Test("SSRF-rejected URL drops plaintext http:// without networking")
+    func ssrfRejectionDropsPlainHTTP() async throws {
+        let out = StreamOutput(
+            kind: .elasticBulk,
+            url: URL(string: "http://siem.public.example.com/_bulk")!,
+            token: "would-leak-bearer-in-cleartext"
+        )
+        let (a, e) = alertAndEvent()
+        await out.send(alert: a, event: e)
+        let stats = await out.outputStats()
+        #expect(stats.dropped >= 1)
+        #expect(stats.sent == 0)
+    }
 }

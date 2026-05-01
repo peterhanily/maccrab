@@ -43,6 +43,11 @@ public actor StreamOutput: Output {
     private let session: URLSession
     private let retryCount: Int
     private let timeout: TimeInterval
+    /// True when the configured `url` was rejected by `WebhookOutput.validate`
+    /// — typically `http://`, RFC1918 / metadata IP without an explicit opt-in,
+    /// or a non-HTTP scheme. `send` short-circuits to a logged drop so a
+    /// misconfigured operator can't silently leak HEC tokens or alert content.
+    private let policyRejected: Bool
 
     // MARK: - State
 
@@ -76,10 +81,23 @@ public actor StreamOutput: Output {
         // RFC1918 unless explicitly opted in. A misconfigured Splunk
         // HEC / Elastic Bulk / Datadog endpoint pointing at http://
         // would otherwise leak the bearer token in plaintext.
-        try? WebhookOutput.validate(
-            url: url,
-            allowPrivate: Foundation.ProcessInfo.processInfo.environment["MACCRAB_STREAM_ALLOW_PRIVATE"] == "1"
-        )
+        //
+        // The previous `try?` swallowed validation errors — TLS floor was
+        // still enforced by SecureURLSession, but the private-IP /
+        // metadata-address policy was effectively dead. Now we capture
+        // the result; `send()` checks `policyRejected` and refuses.
+        var rejected = false
+        do {
+            try WebhookOutput.validate(
+                url: url,
+                allowPrivate: Foundation.ProcessInfo.processInfo.environment["MACCRAB_STREAM_ALLOW_PRIVATE"] == "1"
+            )
+        } catch {
+            Logger(subsystem: "com.maccrab.output", category: "stream")
+                .error("StreamOutput URL rejected by SSRF policy: \(error.localizedDescription, privacy: .public)")
+            rejected = true
+        }
+        self.policyRejected = rejected
         self.kind = kind
         self.name = kind.rawValue
         self.url = url
@@ -104,6 +122,10 @@ public actor StreamOutput: Output {
     // MARK: - Output protocol
 
     public func send(alert: Alert, event: Event?) async {
+        if policyRejected {
+            stats.dropped += 1
+            return
+        }
         guard let body = buildBody(alert: alert, event: event) else {
             stats.dropped += 1
             return

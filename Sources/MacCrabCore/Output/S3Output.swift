@@ -28,6 +28,10 @@ public actor S3Output: Output {
     private let endpoint: URL          // default https://<bucket>.s3.<region>.amazonaws.com/
     private let maxBatchBytes: Int
     private let session: URLSession
+    /// True when the configured `endpoint` was rejected by `WebhookOutput.validate`.
+    /// Both `send` and `flush` short-circuit so a misconfigured custom endpoint
+    /// (`http://minio.internal/`) can't leak SigV4-signed payloads in cleartext.
+    private let policyRejected: Bool
 
     // MARK: - State
 
@@ -76,10 +80,21 @@ public actor S3Output: Output {
         // Custom endpoints (MinIO, Wasabi, Cloudflare R2 with self-signed)
         // could otherwise be `http://` and leak SigV4-signed credentials in
         // cleartext. Allow loopback http:// for local MinIO testing only.
-        try? WebhookOutput.validate(
-            url: self.endpoint,
-            allowPrivate: Foundation.ProcessInfo.processInfo.environment["MACCRAB_S3_ALLOW_PRIVATE"] == "1"
-        )
+        //
+        // Captured (not swallowed via try?) so `send`/`flush` can refuse —
+        // see `policyRejected` field doc.
+        var rejected = false
+        do {
+            try WebhookOutput.validate(
+                url: self.endpoint,
+                allowPrivate: Foundation.ProcessInfo.processInfo.environment["MACCRAB_S3_ALLOW_PRIVATE"] == "1"
+            )
+        } catch {
+            Logger(subsystem: "com.maccrab.output", category: "s3")
+                .error("S3Output endpoint rejected by SSRF policy: \(error.localizedDescription, privacy: .public)")
+            rejected = true
+        }
+        self.policyRejected = rejected
         // SecureURLSession pins TLS 1.2+ and disables cookie/credential storage.
         self.session = SecureURLSession.makeGeneric(timeout: 30, retryBudgetFactor: 3)
     }
@@ -87,6 +102,10 @@ public actor S3Output: Output {
     // MARK: - Output
 
     public func send(alert: Alert, event: Event?) async {
+        if policyRejected {
+            stats.dropped += 1
+            return
+        }
         let finding = OCSFMapper.mapAlert(alert, event: event)
         guard let json = try? OCSFMapper.encodeJSON(finding) else {
             stats.dropped += 1
@@ -100,6 +119,7 @@ public actor S3Output: Output {
     }
 
     public func flush() async {
+        if policyRejected { return }
         await flushBuffer()
     }
 
