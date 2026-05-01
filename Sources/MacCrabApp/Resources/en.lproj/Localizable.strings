@@ -493,8 +493,8 @@
 /* Suppression toast — Undo flow */
 "alerts.undoSuppress" = "Undo";
 "alerts.dismissToast" = "Dismiss";
-"alerts.suppressedCount" = "%@ alerts";
-"alerts.unsuppressedCount" = "Unsuppressed %@ alerts";
+"alerts.suppressedCount" = "%lld alerts";
+"alerts.unsuppressedCount" = "Unsuppressed %lld alerts";
 
 /* Destructive-action confirmation messages */
 "action.kill.message" = "This will terminate %1$@ at %2$@. This action cannot be undone.";
@@ -533,9 +533,9 @@
 /* Overview — additional fallbacks */
 "overview.enableAbove" = "Enable protection above to start the detection engine.";
 "overview.populating" = "The extension is active — populating the dashboard.";
-"overview.critical.count" = "%@ critical alerts need investigation";
-"overview.high.count" = "%@ high-severity alerts to review";
-"overview.eventsRate" = "%@ events/sec monitored";
+"overview.critical.count" = "%lld %@ %@ investigation";
+"overview.high.count" = "%lld %@ to review";
+"overview.eventsRate" = "%lld events/sec monitored";
 
 /* Overview — Full Disk Access warning banner */
 "overview.fda.title" = "Full Disk Access is not granted";

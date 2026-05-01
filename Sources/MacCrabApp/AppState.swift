@@ -711,6 +711,12 @@ final class AppState: ObservableObject {
     /// Mirror flag for the Alerts tab — same reasoning as `eventSearchActive`
     /// but the underlying query is LIKE-based (no FTS5 on the alerts table).
     @Published var alertSearchActive: Bool = false
+    /// Guards against rapid double-clicks on "Load older". Two concurrent
+    /// `loadOlderAlerts` calls would both read the same cursor, fire the
+    /// same SQL, and rely on the dedup `Set` to discard one — correct but
+    /// wasted DB + memory churn. Set on entry, cleared on exit.
+    private var isLoadingOlderAlerts: Bool = false
+    private var isLoadingOlderEvents: Bool = false
     @Published var rules: [RuleViewModel] = []
     @Published var tccEvents: [TCCEventViewModel] = []
 
@@ -1197,6 +1203,9 @@ final class AppState: ObservableObject {
     /// false. Errors are swallowed — UI just stops offering "Load older".
     func loadOlderAlerts(pageSize: Int = 100) async {
         guard hasMoreAlerts, let cursor = alertCursor else { return }
+        if isLoadingOlderAlerts { return }
+        isLoadingOlderAlerts = true
+        defer { isLoadingOlderAlerts = false }
         do {
             let store = try alertStore()
             let page = try await store.alerts(before: cursor, pageSize: pageSize)
@@ -1223,6 +1232,9 @@ final class AppState: ObservableObject {
     /// Mirror of `loadOlderAlerts` for the Events tab.
     func loadOlderEvents(pageSize: Int = 200) async {
         guard hasMoreEvents, let cursor = eventCursor else { return }
+        if isLoadingOlderEvents { return }
+        isLoadingOlderEvents = true
+        defer { isLoadingOlderEvents = false }
         do {
             let store = try eventStore()
             let page = try await store.events(before: cursor, pageSize: pageSize)
