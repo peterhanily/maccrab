@@ -519,6 +519,9 @@ struct AlertDetailView: View {
     @State private var showBlockConfirm = false
     @State private var actionFeedback: String?
     @State private var triggerEvent: Event?
+    /// v1.8.0: ±60s of events captured into `alert_evidence` when this alert
+    /// fired. Empty for pre-v1.8 alerts (no eager snapshot existed).
+    @State private var evidenceEvents: [Event] = []
 
     var body: some View {
         ScrollView {
@@ -612,6 +615,30 @@ struct AlertDetailView: View {
                             if let tcc = event.tcc {
                                 DetailRow(label: "TCC Service", value: tcc.service)
                                 DetailRow(label: "TCC Allowed", value: tcc.allowed ? "yes" : "no")
+                            }
+                        }.padding(4)
+                    }
+                }
+
+                // v1.8.0: surrounding ±60s of activity captured into
+                // alert_evidence at alert-firing time. Survives the 24h hot
+                // tier expiry, so even week-old alerts keep their context.
+                // Hidden when no evidence (pre-v1.8 alerts, or capture
+                // failed) so we don't surface an empty box.
+                if !evidenceEvents.isEmpty {
+                    GroupBox(String(localized: "alertDetail.evidence", defaultValue: "Activity Around This Alert (±60s)")) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(evidenceEvents.prefix(50), id: \.id) { e in
+                                EvidenceRow(event: e, alertTimestamp: alert.timestamp)
+                            }
+                            if evidenceEvents.count > 50 {
+                                Text(String(
+                                    localized: "alertDetail.evidenceTruncated",
+                                    defaultValue: "\(evidenceEvents.count - 50) more events not shown"
+                                ))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.top, 4)
                             }
                         }.padding(4)
                     }
@@ -880,11 +907,22 @@ struct AlertDetailView: View {
             // changes) so switching alerts reloads the correct event.
             // Skip for alerts without an eventId (USB / clipboard /
             // tamper — they have no backing Event).
-            guard !alert.eventId.isEmpty, let state = appState else {
+            guard let state = appState else {
                 triggerEvent = nil
+                evidenceEvents = []
                 return
             }
-            triggerEvent = await state.fetchEvent(id: alert.eventId)
+            // Trigger event: only meaningful for alerts with an eventId
+            // (USB/clipboard/tamper alerts don't have one).
+            if !alert.eventId.isEmpty {
+                triggerEvent = await state.fetchEvent(id: alert.eventId)
+            } else {
+                triggerEvent = nil
+            }
+            // v1.8.0: load the surrounding ±60s evidence window. Empty
+            // list collapses the GroupBox below — no flash for alerts
+            // with no captured evidence.
+            evidenceEvents = await state.fetchEvidence(alertId: alert.id)
         }
     }
 
@@ -1044,6 +1082,55 @@ struct DetailRow: View {
                 .font(.system(.body, design: .monospaced))
                 .textSelection(.enabled)
         }
+    }
+}
+
+// MARK: - EvidenceRow (v1.8.0)
+
+/// One event from the alert's surrounding ±60s window. Renders the
+/// time as a relative offset ("-12s") since the absolute timestamp is
+/// already shown at the top of the detail panel — operators want to
+/// see "what happened JUST BEFORE this alert" at a glance.
+private struct EvidenceRow: View {
+    let event: Event
+    let alertTimestamp: Date
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(offsetString)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.secondary)
+                .frame(width: 44, alignment: .trailing)
+            Text(event.eventCategory.rawValue.prefix(4))
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(.accentColor)
+                .frame(width: 36, alignment: .leading)
+            Text(detail)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var offsetString: String {
+        let delta = Int(event.timestamp.timeIntervalSince(alertTimestamp))
+        if delta == 0 { return "0s" }
+        return delta > 0 ? "+\(delta)s" : "\(delta)s"
+    }
+
+    private var detail: String {
+        if let net = event.network {
+            let host = net.destinationHostname ?? net.destinationIp
+            return "\(event.process.name) → \(host):\(net.destinationPort)"
+        }
+        if let file = event.file {
+            return "\(event.process.name) \(file.path)"
+        }
+        if let tcc = event.tcc {
+            return "\(tcc.service) ← \(tcc.client)"
+        }
+        return event.process.name
     }
 }
 

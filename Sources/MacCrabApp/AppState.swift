@@ -1740,6 +1740,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// v1.8.0: read the surrounding ±60s window of events that the daemon
+    /// snapshotted into `alert_evidence` when this alert fired. The list
+    /// is empty for alerts predating v1.8 evidence capture, and for any
+    /// alert where the snapshot transaction failed (best-effort by design).
+    func fetchEvidence(alertId: String) async -> [Event] {
+        do {
+            let store = try eventStore()
+            return try await store.evidenceFor(alertId: alertId)
+        } catch {
+            return []
+        }
+    }
+
+    /// v1.8.0: read aggregate counts (day, category, signer, path) from the
+    /// warm-tier rollup table. Backs the Overview trends widget and the
+    /// Events tab "summarized" indicator when the user picks a range >24h.
+    func fetchAggregates(sinceDay: String, category: MacCrabCore.EventCategory? = nil) async -> [EventStore.AggregateRow] {
+        do {
+            let store = try eventStore()
+            return try await store.aggregates(sinceDay: sinceDay, category: category)
+        } catch {
+            return []
+        }
+    }
+
     private func eventToViewModel(_ e: Event) -> EventViewModel {
         let detail: String
         if let file = e.file {

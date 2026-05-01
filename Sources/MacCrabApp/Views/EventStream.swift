@@ -5,6 +5,7 @@
 // in a scrollable table with category filtering and pause controls.
 
 import SwiftUI
+import MacCrabCore
 
 // MARK: - EventStream
 
@@ -52,6 +53,121 @@ struct EventStream: View {
     /// reference between unrelated AppState mutations (heartbeat,
     /// agentLineage, mcpBaselines, etc.) and stops re-binding the Table.
     @State private var filteredCache: [EventViewModel] = []
+    /// v1.8.0: warm-tier aggregate rows surfaced when `timeRange` exceeds the
+    /// 24h hot-tier window. Empty inside the window — the live filteredCache
+    /// covers that path. Backed by `event_aggregates` rolled up by the daemon's
+    /// 6-hourly sweep; only summary fields (no per-event detail).
+    @State private var aggregateRows: [EventStore.AggregateRow] = []
+    /// True when the current `timeRange` selection looks past the 24h hot
+    /// tier. Drives the "summarized — drill in for detail" banner + table swap.
+    private var isAggregateMode: Bool {
+        guard let seconds = timeRange.seconds else { return true }   // .all
+        return seconds > 86400
+    }
+
+    /// Number of days back to ask the warm tier for. `.all` clamps to 30
+    /// since that's the aggregate retention window.
+    private var rangeDays: Int {
+        guard let seconds = timeRange.seconds else { return 30 }
+        return max(1, Int(seconds / 86400))
+    }
+
+    /// Composite key forcing the .task(id:) to re-run on either input change.
+    private var aggregateInputsKey: String {
+        "\(timeRange.rawValue)|\(filterCategory?.rawValue ?? "all")"
+    }
+
+    /// ISO date string for `daysAgo` days before now. Matches the
+    /// `strftime('%Y-%m-%d', timestamp, 'unixepoch')` format the daemon's
+    /// roll-up uses, so day strings sort + compare as text.
+    private static func isoDay(daysAgo: Int) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: Date().addingTimeInterval(-Double(daysAgo) * 86400))
+    }
+
+    /// Identifiable wrapper so SwiftUI's Table can key rows by composite
+    /// (day, category, signer, path) without requiring AggregateRow itself
+    /// to gain an id property in the Core target.
+    fileprivate struct IdentifiedAggregate: Identifiable {
+        let id: String
+        let row: EventStore.AggregateRow
+    }
+
+    private var identifiedAggregates: [IdentifiedAggregate] {
+        aggregateRows.map {
+            IdentifiedAggregate(
+                id: "\($0.day)|\($0.category.rawValue)|\($0.processSigner)|\($0.processPath)",
+                row: $0
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var aggregateTable: some View {
+        if aggregateRows.isEmpty {
+            VStack(spacing: 12) {
+                Spacer()
+                Image(systemName: "tray")
+                    .font(.system(size: 48))
+                    .foregroundColor(.secondary.opacity(0.5))
+                    .accessibilityHidden(true)
+                Text(String(
+                    localized: "events.noAggregates",
+                    defaultValue: "No aggregated events for this range — the daemon's daily roll-up runs every 6 hours"
+                ))
+                .font(.headline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            Table(identifiedAggregates) {
+                TableColumn(String(localized: "events.day", defaultValue: "Day")) { agg in
+                    Text(agg.row.day)
+                        .font(.system(.caption, design: .monospaced))
+                }
+                .width(min: 90, ideal: 100, max: 120)
+
+                TableColumn(String(localized: "events.category", defaultValue: "Category")) { agg in
+                    // Cross-module rawValue bridge: aggregate rows carry
+                    // MacCrabCore.EventCategory; CategoryBadge takes the
+                    // MacCrabApp local mirror. Same raw values by design.
+                    if let appCat = EventCategory(rawValue: agg.row.category.rawValue) {
+                        CategoryBadge(category: appCat)
+                    } else {
+                        Text(agg.row.category.rawValue.capitalized).font(.caption2)
+                    }
+                }
+                .width(min: 70, ideal: 90, max: 110)
+
+                TableColumn(String(localized: "events.signer", defaultValue: "Signer")) { agg in
+                    Text(agg.row.processSigner.isEmpty ? "—" : agg.row.processSigner)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(agg.row.processSigner.isEmpty ? .secondary : .primary)
+                }
+                .width(min: 70, ideal: 90, max: 120)
+
+                TableColumn(String(localized: "events.path", defaultValue: "Process Path")) { agg in
+                    Text(agg.row.processPath.isEmpty ? "—" : agg.row.processPath)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                TableColumn(String(localized: "events.count", defaultValue: "Count")) { agg in
+                    Text("\(agg.row.count)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(agg.row.count > 1000 ? .orange : .primary)
+                }
+                .width(min: 60, ideal: 70, max: 90)
+            }
+        }
+    }
 
     /// Recompute the filtered+sorted cache. Called from .onAppear,
     /// .onReceive(appState.$events), and .onChange of any filter input.
@@ -153,8 +269,32 @@ struct EventStream: View {
 
             Divider()
 
+            // v1.8.0: aggregate-mode banner. Shown whenever the user picks a
+            // time range past the 24h hot tier — explains why detail rows
+            // are sparse / aggregate columns are different.
+            if isAggregateMode {
+                HStack(spacing: 8) {
+                    Image(systemName: "chart.bar.fill")
+                        .foregroundColor(.accentColor)
+                        .font(.caption)
+                        .accessibilityHidden(true)
+                    Text(String(
+                        localized: "events.aggregateModeBanner",
+                        defaultValue: "Showing daily summaries — narrow the time range to last 24h or shorter for per-event detail"
+                    ))
+                    .font(.caption)
+                    .foregroundColor(.accentColor)
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 6)
+                .background(Color.accentColor.opacity(0.08))
+            }
+
             // Event table
-            if filteredCache.isEmpty {
+            if isAggregateMode {
+                aggregateTable
+            } else if filteredCache.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
@@ -292,6 +432,20 @@ struct EventStream: View {
                 await appState.loadEvents()
             } else {
                 await appState.loadEvents(filter: filterText)
+            }
+        }
+        // v1.8.0: refresh aggregate rows whenever the time range crosses the
+        // 24h boundary or the category filter changes. Runs only in aggregate
+        // mode — inside 24h the filteredCache + live polling is canonical.
+        .task(id: aggregateInputsKey) {
+            if isAggregateMode {
+                let sinceDay = Self.isoDay(daysAgo: rangeDays)
+                aggregateRows = await appState.fetchAggregates(
+                    sinceDay: sinceDay,
+                    category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
+                )
+            } else {
+                aggregateRows = []
             }
         }
         // v1.7.11: recompute the cached filtered+sorted list only when an
