@@ -32,7 +32,10 @@ struct EventStream: View {
     @State private var isPaused: Bool = false
     @State private var autoScroll: Bool = true
     @State private var selectedEventID: EventViewModel.ID? = nil
-    @State private var timeRange: TimeRange = .all
+    // v1.8.0: default to Last 24h so the user lands in the hot tier on
+    // open — `.all` immediately put them in aggregate mode against an
+    // empty rollup table on a fresh DB, which read as broken.
+    @State private var timeRange: TimeRange = .last24h
     @State private var sortOrder = [KeyPathComparator(\EventViewModel.timestamp, order: .reverse)]
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     /// v1.8.0: Discover-style time histogram toggle. Off by default —
@@ -397,20 +400,25 @@ struct EventStream: View {
 
             // v1.8.0: keyset-paginated "Load older" footer. Sits between the
             // table and the live-status bar so the live indicator stays
-            // anchored at the bottom. Hidden once we hit the end-of-table.
-            if appState.hasMoreEvents {
+            // anchored at the bottom. Hidden once we hit the end-of-table OR
+            // when the user is in aggregate mode (the cursor only makes
+            // sense over the hot-tier events table, not over rollup rows).
+            if appState.hasMoreEvents && !isAggregateMode {
                 HStack {
                     Spacer()
                     Button {
                         Task { await appState.loadOlderEvents() }
                     } label: {
                         Label(
-                            String(localized: "events.loadOlder", defaultValue: "Load older"),
-                            systemImage: "arrow.down.circle"
+                            appState.isLoadingOlderEvents
+                                ? String(localized: "events.loadOlder.loading", defaultValue: "Loading…")
+                                : String(localized: "events.loadOlder", defaultValue: "Load older"),
+                            systemImage: appState.isLoadingOlderEvents ? "hourglass" : "arrow.down.circle"
                         )
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .disabled(appState.isLoadingOlderEvents)
                     Spacer()
                 }
                 .padding(.vertical, 6)

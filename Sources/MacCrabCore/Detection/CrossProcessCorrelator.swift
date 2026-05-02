@@ -231,6 +231,17 @@ public actor CrossProcessCorrelator {
         // /private/var/log/wifi.log.0 etc. is not attacker convergence.
         "/private/var/log/",
         "/var/log/",
+        // v1.8.0: Claude Code per-session task scratch dirs. Each subagent
+        // run writes its captured stdout/stderr to a per-task .output file
+        // here, with sh / df / head / tail / ps / zsh as part of the
+        // command being captured. With ~12 tools per subagent and several
+        // subagents per session, the writer fanout fires this rule
+        // continuously through any active dev session. The
+        // ProcessAncestors-on-Claude-Code path can't be relied on here
+        // (the captured tools' parent is sh, not Claude). Path-side gate
+        // is the right answer.
+        "/private/tmp/claude-",
+        "/private/var/folders/",                    // macOS per-user TemporaryItems / DerivedData
     ]
 
     /// Network destinations that are never interesting.

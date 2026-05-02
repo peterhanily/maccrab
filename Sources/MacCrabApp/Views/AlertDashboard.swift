@@ -21,6 +21,15 @@ struct AlertDashboard: View {
     @State private var showSuppressionManager = false
     @State private var showClusterSheet = false
     @Environment(\.accessibilityReduceMotion) var reduceMotion
+    /// v1.8.0 audit fix: memoized filtered list. Pre-fix this was a computed
+    /// property `filteredAlerts` that re-filtered the full `dashboardAlerts`
+    /// array on every body re-evaluation — and SwiftUI re-evaluates body on
+    /// every @Published mutation in AppState (heartbeat, agentLineage, mcpBaselines).
+    /// With the v1.8 cap bumped 500 → 5000 rows the per-rebind cost rose 10×;
+    /// without memoization that produced the same NSTableView constraint-leak
+    /// shape that the EventStream v1.7.11 fix already addresses there.
+    /// Recomputed only on actual input changes via .onChange / .onReceive.
+    @State private var filteredCache: [AlertViewModel] = []
 
     /// Derived severity filter from the persisted raw value.
     private var selectedSeverity: Severity? {
@@ -36,7 +45,10 @@ struct AlertDashboard: View {
         selectedAlerts.count == 1 ? selectedAlerts.first : nil
     }
 
-    private var filteredAlerts: [AlertViewModel] {
+    /// Recompute the memoized filtered list. Called from .onAppear,
+    /// .onReceive(appState.$dashboardAlerts), and .onChange of any filter
+    /// input. Pure function over current state; mutates only `filteredCache`.
+    private func recomputeFilter() {
         // Inline helper — the authoritative "is this alert effectively
         // suppressed?" check that overlays session-level state on top of
         // whatever the DB returned. Kept as a closure so both the filter
@@ -49,11 +61,10 @@ struct AlertDashboard: View {
         }
 
         // v1.8.0: free-text search no longer filters in-memory. The 500-row
-        // window meant the user could only search alerts already loaded into
-        // dashboardAlerts; matches in older alerts (post "Load older") were
-        // dropped. Search now goes through `appState.loadAlerts(filter:)`,
-        // which hits the DB. This pass only handles severity + suppressed —
-        // the two cheap predicates with no DB equivalent.
+        // window meant the user could only search alerts already loaded;
+        // search now goes through `appState.loadAlerts(filter:)` (DB-side LIKE).
+        // This pass only handles severity + suppressed — the two cheap
+        // predicates with no DB equivalent.
         let filteredLazy = appState.dashboardAlerts.lazy.filter { alert in
             if alert.ruleId.hasPrefix("maccrab.campaign.") { return false }
             if !showSuppressed && isEffectivelySuppressed(alert) { return false }
@@ -65,14 +76,15 @@ struct AlertDashboard: View {
         // has explicitly asked to see suppressed rows; otherwise the filter
         // already excluded them, so the stored `suppressed` flag is accurate.
         if showSuppressed {
-            return filteredLazy.map { alert -> AlertViewModel in
+            filteredCache = filteredLazy.map { alert -> AlertViewModel in
                 guard !alert.suppressed, isEffectivelySuppressed(alert) else { return alert }
                 var a = alert
                 a.suppressed = true
                 return a
             }
+        } else {
+            filteredCache = Array(filteredLazy)
         }
-        return Array(filteredLazy)
     }
 
     var body: some View {
@@ -83,7 +95,7 @@ struct AlertDashboard: View {
                     .font(.title2)
                     .fontWeight(.bold)
 
-                Text("\(filteredAlerts.count)")
+                Text("\(filteredCache.count)")
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
@@ -144,12 +156,12 @@ struct AlertDashboard: View {
                     .frame(minWidth: 150, idealWidth: 200, maxWidth: 300)
                     .accessibilityLabel("Search alerts")
 
-                if !filteredAlerts.isEmpty {
+                if !filteredCache.isEmpty {
                     Button(String(localized: "alerts.selectAll", defaultValue: "Select All")) {
-                        selectedAlerts = Set(filteredAlerts)
+                        selectedAlerts = Set(filteredCache)
                     }
                     .controlSize(.small)
-                    .disabled(filteredAlerts.allSatisfy { selectedAlerts.contains($0) })
+                    .disabled(filteredCache.allSatisfy { selectedAlerts.contains($0) })
                 }
 
                 Menu {
@@ -166,7 +178,7 @@ struct AlertDashboard: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 80)
-                .disabled(filteredAlerts.isEmpty || exportInProgress)
+                .disabled(filteredCache.isEmpty || exportInProgress)
                 .accessibilityLabel("Export alerts")
             }
             .padding()
@@ -174,7 +186,7 @@ struct AlertDashboard: View {
             Divider()
 
             // Alert list + detail panel
-            if filteredAlerts.isEmpty {
+            if filteredCache.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "shield.checkmark")
@@ -247,7 +259,7 @@ struct AlertDashboard: View {
                         }
 
                         // Alert list with multi-selection (Cmd+click, Shift+click, Cmd+A)
-                        List(filteredAlerts, selection: $selectedAlerts) { alert in
+                        List(filteredCache, selection: $selectedAlerts) { alert in
                             AlertRow(alert: alert) {
                                 presentSuppressToast(names: [alert.ruleTitle], ids: [alert.id])
                                 Task { await appState.suppressAlert(alert.id) }
@@ -266,13 +278,20 @@ struct AlertDashboard: View {
                                 Button {
                                     Task { await appState.loadOlderAlerts() }
                                 } label: {
+                                    // v1.8.0 audit fix: in-flight feedback. Pre-fix
+                                    // the button stayed enabled during the keyset
+                                    // fetch — rapid clicks gave no signal that
+                                    // anything was happening.
                                     Label(
-                                        String(localized: "alerts.loadOlder", defaultValue: "Load older"),
-                                        systemImage: "arrow.down.circle"
+                                        appState.isLoadingOlderAlerts
+                                            ? String(localized: "alerts.loadOlder.loading", defaultValue: "Loading…")
+                                            : String(localized: "alerts.loadOlder", defaultValue: "Load older"),
+                                        systemImage: appState.isLoadingOlderAlerts ? "hourglass" : "arrow.down.circle"
                                     )
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
+                                .disabled(appState.isLoadingOlderAlerts)
                                 Spacer()
                             }
                             .padding(.vertical, 6)
@@ -349,6 +368,18 @@ struct AlertDashboard: View {
                 await appState.loadAlerts(filter: searchText)
             }
         }
+        // v1.8.0 audit fix: recompute the memoized filtered list only when
+        // a real input changes. Pre-fix, `filteredAlerts` (computed) ran on
+        // every body re-evaluation — and SwiftUI re-evaluates body on every
+        // @Published mutation in AppState (heartbeat, agentLineage, etc.),
+        // so the 5000-row scan ran continuously. This is the AlertDashboard
+        // equivalent of the v1.7.11 EventStream NSTableView fix.
+        .onAppear { recomputeFilter() }
+        .onReceive(appState.$dashboardAlerts) { _ in recomputeFilter() }
+        .onReceive(appState.$suppressedIDs) { _ in recomputeFilter() }
+        .onReceive(appState.$suppressionPatterns) { _ in recomputeFilter() }
+        .onChange(of: selectedSeverityRaw) { _ in recomputeFilter() }
+        .onChange(of: showSuppressed) { _ in recomputeFilter() }
     }
 
     // MARK: - Toast & Undo
@@ -436,7 +467,7 @@ struct AlertDashboard: View {
         exportInProgress = true
         Task {
             let exporter = AlertExporter()
-            let exportable = filteredAlerts.map { alert in
+            let exportable = filteredCache.map { alert in
                 AlertExporter.ExportableAlert(
                     id: alert.id,
                     timestamp: alert.timestamp,
@@ -472,7 +503,7 @@ struct AlertDashboard: View {
         exportInProgress = true
         Task {
             let generator = ReportGenerator()
-            let alertData = filteredAlerts.map { alert in
+            let alertData = filteredCache.map { alert in
                 Alert(
                     id: alert.id,
                     timestamp: alert.timestamp,
@@ -627,20 +658,27 @@ struct AlertDetailView: View {
                 // failed) so we don't surface an empty box.
                 if !evidenceEvents.isEmpty {
                     GroupBox(String(localized: "alertDetail.evidence", defaultValue: "Activity Around This Alert (±60s)")) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(evidenceEvents.prefix(50), id: \.id) { e in
-                                EvidenceRow(event: e, alertTimestamp: alert.timestamp)
-                            }
-                            if evidenceEvents.count > 50 {
-                                Text(String(
-                                    localized: "alertDetail.evidenceTruncated",
-                                    defaultValue: "\(evidenceEvents.count - 50) more events not shown"
-                                ))
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .padding(.top, 4)
-                            }
-                        }.padding(4)
+                        // v1.8.0 audit fix: inner ScrollView with capped height
+                        // so a 50-event evidence list doesn't trap the parent
+                        // ScrollView's wheel into "scroll the whole detail"
+                        // when the user is trying to scan within the box.
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(evidenceEvents.prefix(50), id: \.id) { e in
+                                    EvidenceRow(event: e, alertTimestamp: alert.timestamp)
+                                }
+                                if evidenceEvents.count > 50 {
+                                    Text(String(
+                                        localized: "alertDetail.evidenceTruncated",
+                                        defaultValue: "\(evidenceEvents.count - 50) more events not shown"
+                                    ))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .padding(.top, 4)
+                                }
+                            }.padding(4)
+                        }
+                        .frame(maxHeight: 320)
                     }
                 }
 

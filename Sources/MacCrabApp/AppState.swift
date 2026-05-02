@@ -715,8 +715,10 @@ final class AppState: ObservableObject {
     /// `loadOlderAlerts` calls would both read the same cursor, fire the
     /// same SQL, and rely on the dedup `Set` to discard one — correct but
     /// wasted DB + memory churn. Set on entry, cleared on exit.
-    private var isLoadingOlderAlerts: Bool = false
-    private var isLoadingOlderEvents: Bool = false
+    /// v1.8.0 audit fix: published so the UI can disable the button + show
+    /// a "Loading…" label while the keyset fetch is in flight.
+    @Published var isLoadingOlderAlerts: Bool = false
+    @Published var isLoadingOlderEvents: Bool = false
     @Published var rules: [RuleViewModel] = []
     @Published var tccEvents: [TCCEventViewModel] = []
 

@@ -449,31 +449,42 @@ enum DaemonTimers {
             // Synchronous on the dispatch queue. No Task wrapper, no
             // actor hops. The probeSysextFDA call is itself sync —
             // it opens TCC.db directly via sqlite3_open_v2 + close.
-            let sysextHasFDA = probeSysextFDA()
-            let nowUnix = Date().timeIntervalSince1970
-            let uptime = Int(Date().timeIntervalSince(startTime))
-            let payload: [String: Any] = [
-                "written_at_unix": nowUnix,
-                "uptime_seconds": uptime,
-                "sysext_has_fda": sysextHasFDA,
-                "fda_checked_at_unix": nowUnix,
-                "events_processed": eventCount(),
-                "alerts_emitted": alertCount(),
-                "schema_version": 4,
-                "liveness": true,
-            ]
-            guard let data = try? JSONSerialization.data(
-                withJSONObject: payload,
-                options: [.sortedKeys]
-            ) else { return }
-            let path = "/Library/Application Support/MacCrab/heartbeat.json"
-            let tmp = path + ".tmp"
-            do {
-                try data.write(to: URL(fileURLWithPath: tmp))
-                try FileManager.default.moveItem(atPath: tmp, toPath: path)
-            } catch {
-                try? FileManager.default.removeItem(atPath: path)
-                try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+            //
+            // v1.8.0 audit: wrap JSONSerialization in autoreleasepool.
+            // DispatchSource timer event handlers run on a long-lived
+            // global queue with no Swift Task scope, so autoreleased
+            // NSDictionary / NSString temporaries created by
+            // JSONSerialization survive until the queue thread exits
+            // (effectively forever). Same shape as the v1.7.7-v1.7.9
+            // EsloggerCollector / FileHasher leak chain that put
+            // ~1 GB of NSConcreteData into long-running daemons.
+            autoreleasepool {
+                let sysextHasFDA = probeSysextFDA()
+                let nowUnix = Date().timeIntervalSince1970
+                let uptime = Int(Date().timeIntervalSince(startTime))
+                let payload: [String: Any] = [
+                    "written_at_unix": nowUnix,
+                    "uptime_seconds": uptime,
+                    "sysext_has_fda": sysextHasFDA,
+                    "fda_checked_at_unix": nowUnix,
+                    "events_processed": eventCount(),
+                    "alerts_emitted": alertCount(),
+                    "schema_version": 4,
+                    "liveness": true,
+                ]
+                guard let data = try? JSONSerialization.data(
+                    withJSONObject: payload,
+                    options: [.sortedKeys]
+                ) else { return }
+                let path = "/Library/Application Support/MacCrab/heartbeat.json"
+                let tmp = path + ".tmp"
+                do {
+                    try data.write(to: URL(fileURLWithPath: tmp))
+                    try FileManager.default.moveItem(atPath: tmp, toPath: path)
+                } catch {
+                    try? FileManager.default.removeItem(atPath: path)
+                    try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+                }
             }
         }
         livenessTimer.resume()
@@ -596,25 +607,34 @@ enum DaemonTimers {
                 "sysext_has_fda": sysextHasFDA,
                 "power_state": PowerGate.stateDescription,
             ]
-            if let metricsData = try? JSONSerialization.data(
-                withJSONObject: metricsPayload,
-                options: [.sortedKeys]
-            ) {
-                let metricsPath = "/var/tmp/maccrab.metrics.json"
-                let metricsTmp = metricsPath + ".tmp"
-                do {
-                    try metricsData.write(to: URL(fileURLWithPath: metricsTmp))
-                    _ = try? FileManager.default.removeItem(atPath: metricsPath)
-                    try FileManager.default.moveItem(atPath: metricsTmp, toPath: metricsPath)
-                } catch {
-                    // Metrics writes are best-effort — no alert if /var/tmp
-                    // is unreadable for some reason; next tick will retry.
+            // v1.8.0 audit: autoreleasepool wrap. The Task scope drains on
+            // completion, but inside a long-running per-tick body the
+            // JSONSerialization temporaries persist across suspension points
+            // (FileManager I/O is synchronous but the Foundation API
+            // returns autoreleased Data). Match the livenessTimer pattern.
+            autoreleasepool {
+                if let metricsData = try? JSONSerialization.data(
+                    withJSONObject: metricsPayload,
+                    options: [.sortedKeys]
+                ) {
+                    let metricsPath = "/var/tmp/maccrab.metrics.json"
+                    let metricsTmp = metricsPath + ".tmp"
+                    do {
+                        try metricsData.write(to: URL(fileURLWithPath: metricsTmp))
+                        _ = try? FileManager.default.removeItem(atPath: metricsPath)
+                        try FileManager.default.moveItem(atPath: metricsTmp, toPath: metricsPath)
+                    } catch {
+                        // Metrics writes are best-effort — no alert if /var/tmp
+                        // is unreadable for some reason; next tick will retry.
+                    }
                 }
             }
-            guard let data = try? JSONSerialization.data(
-                withJSONObject: payload,
-                options: [.prettyPrinted, .sortedKeys]
-            ) else { return }
+            guard let data = autoreleasepool(invoking: { () -> Data? in
+                try? JSONSerialization.data(
+                    withJSONObject: payload,
+                    options: [.prettyPrinted, .sortedKeys]
+                )
+            }) else { return }
             // v1.7.5: rich heartbeat goes to a SEPARATE file. Liveness
             // detection (heartbeat.json) is the synchronous fast path
             // above. This file carries the rich payload (per-event-

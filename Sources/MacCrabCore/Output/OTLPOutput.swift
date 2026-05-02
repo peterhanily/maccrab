@@ -127,11 +127,30 @@ public actor OTLPOutput: Output {
 
     // MARK: - Private
 
+    /// Hard ceiling per OTLP/HTTP POST body. Most collectors default to
+    /// 4-10 MB; we stay well under that. Above this cap, the batch is
+    /// recursively split — drop half, send half, retry the other half.
+    /// Prevents a rule-storm carrying outsized investigations
+    /// (llmInvestigation.evidenceChain can balloon to 5-10 MB per alert)
+    /// from producing 500 MB POSTs that the collector would refuse.
+    private static let maxEnvelopeBytes = 1_048_576   // 1 MB
+
     private func flushBuffer() async {
         guard !buffer.isEmpty else { return }
         let batch = buffer
         buffer.removeAll(keepingCapacity: true)
         lastFlushAt = Date()
+
+        await sendBatch(batch)
+    }
+
+    /// Recursive batch splitter. Encodes once, checks size; if over the
+    /// envelope cap, halves the batch and retries each half. Single-record
+    /// batches that exceed the cap are dropped (logged) rather than split
+    /// further — at that point the alert itself is malformed-large and
+    /// rejecting it is the right call.
+    private func sendBatch(_ batch: [(Alert, Event?)]) async {
+        guard !batch.isEmpty else { return }
 
         guard let body = try? JSONSerialization.data(
             withJSONObject: buildEnvelope(for: batch),
@@ -141,6 +160,27 @@ public actor OTLPOutput: Output {
             stats.lastError = "json encode failed"
             return
         }
+
+        if body.count > Self.maxEnvelopeBytes {
+            if batch.count == 1 {
+                // A single alert that doesn't fit — drop it. Encoding a
+                // truncated version would corrupt the OTLP envelope, and
+                // splitting an already-singleton batch is a no-op loop.
+                stats.dropped += 1
+                stats.lastError = "single-alert envelope exceeded \(Self.maxEnvelopeBytes) byte cap"
+                logger.warning("OTLP: dropped 1 oversize alert (\(body.count, privacy: .public) bytes)")
+                return
+            }
+            let mid = batch.count / 2
+            await sendBatch(Array(batch[..<mid]))
+            await sendBatch(Array(batch[mid...]))
+            return
+        }
+
+        await postEnvelope(body: body, recordCount: batch.count)
+    }
+
+    private func postEnvelope(body: Data, recordCount: Int) async {
 
         let url = endpoint.appendingPathComponentIfMissing("v1/logs")
         var request = URLRequest(url: url)
@@ -156,15 +196,15 @@ public actor OTLPOutput: Output {
         do {
             let (_, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                stats.failed += batch.count
+                stats.failed += recordCount
                 stats.lastError = "HTTP \(http.statusCode)"
-                logger.warning("OTLP send returned \(http.statusCode, privacy: .public) for \(batch.count, privacy: .public) records")
+                logger.warning("OTLP send returned \(http.statusCode, privacy: .public) for \(recordCount, privacy: .public) records")
                 return
             }
-            stats.sent += batch.count
+            stats.sent += recordCount
             stats.lastSentAt = Date()
         } catch {
-            stats.failed += batch.count
+            stats.failed += recordCount
             stats.lastError = error.localizedDescription
             logger.warning("OTLP send failed: \(error.localizedDescription, privacy: .public)")
         }

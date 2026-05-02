@@ -999,6 +999,28 @@ public actor EventStore {
     public func rollUpAndPrune(olderThan cutoff: Date) async throws -> Int {
         guard let db = db else { return 0 }
 
+        // v1.8.0 audit fix: wrap aggregation + event-prune in a single
+        // transaction. Pre-fix, a crash between Step 1 (INSERT INTO
+        // event_aggregates ... ON CONFLICT DO UPDATE) and Step 2 (DELETE
+        // events) caused silent double-counting on the next sweep — the
+        // aggregates from the crashed run already existed, and re-aggregating
+        // the same events on retry added to the existing counts.
+        //
+        // BEGIN IMMEDIATE acquires the write lock up front, so concurrent
+        // actor writes queue behind it. The actor model already serializes
+        // writes through this store, so the transaction is just a durability
+        // guarantee — no additional latency over actor isolation alone.
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        var transactionCommitted = false
+        defer {
+            // Belt-and-braces: if we throw out of this function before the
+            // explicit COMMIT, SQLite needs an explicit ROLLBACK to release
+            // the write lock and discard partial aggregates.
+            if !transactionCommitted {
+                try? execute("ROLLBACK")
+            }
+        }
+
         // Step 1: roll up older events into daily aggregates.
         // strftime('%Y-%m-%d', timestamp, 'unixepoch') turns the REAL epoch
         // into a sortable ISO date string. UTC; localized display happens
@@ -1029,9 +1051,17 @@ public actor EventStore {
         // Step 2: prune the rolled-up events. Reuses the existing batched
         // FTS+events delete loop — keeps the write lock from being held too
         // long on machines with 100K+ aged events to migrate on first run.
+        // Inside the same transaction so a crash before COMMIT rolls back
+        // both aggregates AND deletes atomically.
         let deleted = try await prune(olderThan: cutoff)
 
-        // Step 3: trim aggregates older than 30 days.
+        try execute("COMMIT")
+        transactionCommitted = true
+
+        // Step 3: trim aggregates older than 30 days. Independent + idempotent
+        // — runs outside the main transaction so it doesn't block on Step 2's
+        // long delete batch. A crash here just leaves stale aggregates that
+        // the next sweep cleans up.
         let cutoffDay = Self.isoDay(Date().addingTimeInterval(-30 * 86400))
         let trimSQL = "DELETE FROM event_aggregates WHERE day < ?1"
         let trimStmt = try prepare(trimSQL)
