@@ -56,6 +56,12 @@ public actor EventStore {
     /// Whether this store was opened in read-only mode (fallback for non-owner access).
     private var isReadOnly = false
 
+    /// v1.8.0 Layer 1: pre-insert filter. Nil = no filtering (legacy behavior).
+    /// Set after init via `setInsertFilter` so `init(path:)` test paths can
+    /// bypass filtering. The daemon's bootstrap installs the default filter
+    /// + any operator-extended patterns.
+    private var insertFilter: EventInsertFilter?
+
     // MARK: - Schema migrations
 
     /// Ordered list of schema migrations applied on top of the baseline
@@ -250,8 +256,22 @@ public actor EventStore {
         // Apply versioned schema migrations on top of the baseline tables above.
         // v1 marks "baseline schema present"; later versions add columns for
         // enrichment fields (file/process hashes, session context, etc).
+        //
+        // v1.8.0 hardening: catch + log instead of throw. SQLite can return
+        // SQLITE_OK from sqlite3_open_v2 with READWRITE flags against a
+        // file the OS will later refuse writes on (root-owned 0640 +
+        // user-uid open succeeds at the open syscall but EACCESs at the
+        // first WRITE). Pre-fix, this surfaced as a fatal error in any
+        // user-uid CLI tool that touched the root daemon's DB. Now we
+        // log and continue — the store is still readable, which is what
+        // the CLI actually needs for status / events / hunt.
         if !isReadOnly {
-            try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
+            do {
+                try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
+            } catch {
+                Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                    .warning("Schema migration skipped (likely opened RW but DB is effectively read-only for this uid): \(error.localizedDescription, privacy: .public)")
+            }
         }
 
         // Prepare insert statement.
@@ -362,7 +382,27 @@ public actor EventStore {
     ///
     /// - Parameter event: The event to store.
     /// - Throws: `EventStoreError` on serialisation or database failure.
+    /// Install (or replace) the pre-insert filter. Called by daemon bootstrap
+    /// after the support dir is resolved + DaemonConfig parsed. Tests can call
+    /// this to dial a specific filter into a temp store.
+    public func setInsertFilter(_ filter: EventInsertFilter?) {
+        self.insertFilter = filter
+    }
+
+    /// Snapshot the filter's drop counter. Wired into the daemon's heartbeat
+    /// so the dashboard can surface "X events dropped at insert filter today"
+    /// — operators tuning their filter list need to see the impact.
+    public func insertFilterCounters() -> (dropped: Int, passed: Int)? {
+        return insertFilter?.counters.snapshot()
+    }
+
     public func insert(event: Event) throws {
+        // v1.8.0 Layer 1: drop noise events at insert. Cheaper than letting
+        // them hit SQLite + FTS5 + indexes. Self-monitoring (daemon watches
+        // its own log/DB) was 17% of volume on field-measured hardware.
+        if let filter = insertFilter, filter.shouldDrop(event: event) {
+            return
+        }
         guard let stmt = insertStmt else {
             throw EventStoreError.prepareFailed("Insert statement not prepared")
         }

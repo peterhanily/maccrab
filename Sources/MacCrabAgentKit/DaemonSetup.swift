@@ -276,6 +276,18 @@ enum DaemonSetup {
         alertStore = (try? AlertStore(directory: supportDir))
             ?? Self.recoverAlertStore(supportDir: supportDir, logger: logger)
 
+        // v1.8.0 Layer 1: install the pre-insert filter so noise events
+        // never reach SQLite. Default filter drops the daemon's own self-
+        // monitoring loop (own log/DB/support dir, /dev/null, /dev/ttys*)
+        // — empirically 17% of event volume on field-measured hardware.
+        // Operator-extended patterns from daemon_config can be merged in
+        // here in a follow-up; the default alone closes the biggest gap.
+        Task {
+            await eventStore.setInsertFilter(
+                EventInsertFilter.defaultFilter(supportDir: supportDir)
+            )
+        }
+
         // ProcessHasher populates SHA-256 + CDHash on exec/fork events so
         // downstream rules and exports can match against threat-intel hashes.
         // Shared state across the daemon lifetime for cache reuse.

@@ -336,37 +336,43 @@ enum DaemonTimers {
         // file drops below 80% of the cap.
         let dbFilePath = state.supportDir + "/events.db"
 
-        // v1.8.0: replaces the legacy size-cap-and-VACUUM dance. The
-        // tiered storage model bounds DB growth by design — the hot tier
-        // never holds more than 24h of events, so file size tracks
-        // events-per-second × 24h, not retention × insert rate. No more
-        // 18-GB stuck-cap incidents.
+        // v1.8.0: tiered storage with adaptive retention (Layer 2) + hard
+        // size cap as defense-in-depth (Layer 3).
         //
-        // The roll-up sweep:
-        //   1. Aggregates events older than 24h into `event_aggregates`
-        //   2. Deletes them from the hot tier (FTS5 + main both)
-        //   3. Trims aggregates older than 30 days
+        // First-cut design assumed ~5-10k events/hour. Field measurement on
+        // production data showed ~950k events/hour on a busy dev/AI machine
+        // — 13× higher. The 24h hot tier alone produces 4.4 GB at that
+        // rate, which a 200 MB cap couldn't hold.
         //
-        // Alert evidence is captured eagerly at alert-firing time
-        // (AlertSink.captureEvidenceIfPossible) so it doesn't need a
-        // sweep here — the snapshot happens inside the 24h window when
-        // the events are still hot.
+        // Layered fix:
+        //   - Layer 1 (EventInsertFilter): drop self-monitoring + dev-tool
+        //     scratch at insert time. Closes ~17%+ of volume.
+        //   - Layer 2 (this code): adaptive retention. Default cutoff 24h;
+        //     if DB > targetSizeMB, tighten cutoff iteratively
+        //     (24h → 12h → 6h → 3h → 1h) until the DB fits.
+        //   - Layer 3 (this code): hard cap fallback. If even the 1h cutoff
+        //     can't bring the DB under cap, force pruneOldest() so we never
+        //     exceed the user's disk-budget intent.
+        //
+        // Configurable via state.maxDatabaseSizeMB (daemon_config.json key
+        // `max_database_size_mb`). Default 1024 MB. The targetSizeMB the
+        // adaptive loop aims for is 80% of that.
         let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
-        logger.notice("Tier-rollup timer armed: hot-tier retention=24h, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
+        let startupCapMB = max(100, state.maxDatabaseSizeMB)
+        logger.notice("Tier-rollup timer armed: hot-tier retention=24h adaptive, cap=\(startupCapMB) MB, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
 
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         sizeCapTimer.schedule(deadline: .now() + 900, repeating: 6 * 3600)
         sizeCapTimer.setEventHandler {
             Task {
-                let cutoff = Date().addingTimeInterval(-24 * 3600)
-                do {
-                    let deleted = try await state.eventStore.rollUpAndPrune(olderThan: cutoff)
-                    if deleted > 0 {
-                        logger.notice("Tier-rollup sweep: aggregated + pruned \(deleted) events older than 24h.")
-                    }
-                } catch {
-                    logger.error("Tier-rollup sweep failed: \(error.localizedDescription, privacy: .public)")
-                }
+                let capMB = max(100, state.maxDatabaseSizeMB)
+                let targetMB = Int(Double(capMB) * 0.8)
+                await runAdaptiveRollupSweep(
+                    eventStore: state.eventStore,
+                    dbPath: dbFilePath,
+                    targetSizeMB: targetMB,
+                    capSizeMB: capMB
+                )
             }
         }
         sizeCapTimer.resume()
@@ -683,6 +689,85 @@ func measureDatabaseFootprintMB(dbPath: String) -> Int {
     }
     let total = size(dbPath) + size(dbPath + "-wal") + size(dbPath + "-shm")
     return Int(total / 1_000_000)
+}
+
+// MARK: - Adaptive rollup sweep (v1.8.0)
+
+/// Three-layer storage discipline: pre-insert filter (Layer 1) → adaptive
+/// retention (this function, Layer 2) → defense-in-depth size cap (also
+/// here, Layer 3).
+///
+/// Tries the default 24h cutoff first. If the DB is still over `targetSizeMB`
+/// afterwards (heavy-event machine that won't fit a 24h hot tier), tightens
+/// the cutoff iteratively: 12h → 6h → 3h → 1h. Stops when DB fits or all
+/// cutoffs are exhausted.
+///
+/// If after the 1h cutoff the DB STILL exceeds `capSizeMB` (worst case: a
+/// machine generating so many events per hour that 1h doesn't fit), Layer 3
+/// kicks in: pruneOldest() to bring file size under cap by sheer row count,
+/// followed by VACUUM if disk has the headroom.
+///
+/// All steps are best-effort; failures log + continue. The next 6-hourly
+/// tick retries the same logic from scratch — idempotent by design.
+func runAdaptiveRollupSweep(
+    eventStore: EventStore,
+    dbPath: String,
+    targetSizeMB: Int,
+    capSizeMB: Int
+) async {
+    let cutoffsHours: [Double] = [24, 12, 6, 3, 1]
+    let startSizeMB = measureDatabaseFootprintMB(dbPath: dbPath)
+    var totalPruned = 0
+
+    for hours in cutoffsHours {
+        let beforeMB = measureDatabaseFootprintMB(dbPath: dbPath)
+        if beforeMB <= targetSizeMB && hours < 24 {
+            // Don't tighten further than needed. Only the first cutoff
+            // (24h) always runs; tighter cutoffs only kick in if the DB
+            // is still over target.
+            break
+        }
+        do {
+            let cutoff = Date().addingTimeInterval(-hours * 3600)
+            let pruned = try await eventStore.rollUpAndPrune(olderThan: cutoff)
+            totalPruned += pruned
+            if pruned > 0 {
+                logger.notice("Adaptive rollup: cutoff \(Int(hours))h pruned \(pruned) events")
+            }
+            if hours == cutoffsHours.first {
+                continue   // always do the 24h pass; the loop's guard checks AFTER
+            }
+            // Re-check size after each tighter pass.
+            let afterMB = measureDatabaseFootprintMB(dbPath: dbPath)
+            if afterMB <= targetSizeMB {
+                logger.notice("Adaptive rollup: DB \(beforeMB) MB → \(afterMB) MB at \(Int(hours))h cutoff (target \(targetSizeMB) MB) — done.")
+                break
+            }
+        } catch {
+            logger.error("Adaptive rollup at cutoff \(Int(hours))h failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // Layer 3: defense-in-depth cap. After all the time-based cutoffs, if
+    // the DB still exceeds the hard ceiling, prune by row count until it
+    // fits. Last-resort guarantee that the user's disk-budget is honored.
+    let sizeAfterAdaptiveMB = measureDatabaseFootprintMB(dbPath: dbPath)
+    if sizeAfterAdaptiveMB > capSizeMB {
+        logger.warning("Adaptive rollup left DB at \(sizeAfterAdaptiveMB) MB (cap \(capSizeMB) MB) — engaging Layer 3 row-count cap.")
+        do {
+            // Estimate how many rows to drop: the over-cap fraction × row count.
+            let total = (try? await eventStore.count()) ?? 0
+            let overFraction = Double(sizeAfterAdaptiveMB - capSizeMB) / Double(sizeAfterAdaptiveMB)
+            let dropTarget = max(10_000, Int(Double(total) * (overFraction + 0.1)))
+            let dropped = (try? await eventStore.pruneOldest(count: dropTarget)) ?? 0
+            logger.notice("Layer 3 cap: pruned \(dropped) oldest events (target \(dropTarget))")
+        }
+    }
+
+    let endMB = measureDatabaseFootprintMB(dbPath: dbPath)
+    if startSizeMB != endMB || totalPruned > 0 {
+        logger.notice("Tier-rollup sweep complete: DB \(startSizeMB) MB → \(endMB) MB, pruned \(totalPruned) events total.")
+    }
 }
 
 // MARK: - On-demand sweep entry point (v1.6.14)

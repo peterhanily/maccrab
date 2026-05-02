@@ -191,7 +191,7 @@ final class DaemonState {
     /// before the discrepancy was noticed. Populated from
     /// `DaemonConfig.maxDatabaseSizeMB`; consumed by the hourly size-
     /// cap timer in DaemonTimers.
-    var maxDatabaseSizeMB: Int = 500
+    var maxDatabaseSizeMB: Int = 1024  // v1.8.0: see DaemonConfig.swift comment
 
     // MARK: - v1.6.6 AI Suite
     //

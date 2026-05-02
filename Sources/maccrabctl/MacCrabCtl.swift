@@ -188,6 +188,23 @@ struct MacCrabCtl {
             await runWhy(args: args)
         case "repair":
             await runRepair(args: args)
+        case "rollup":
+            // v1.8.0: force the tier-rollup-and-prune sweep immediately,
+            // outside the daemon's 6h timer. Useful for ops + first-launch
+            // verification against an oversized v1.7-era events.db.
+            // Pass --hours N to roll up everything older than N hours
+            // (default 24, matching the daemon).
+            // Pass --db <path> to operate against an arbitrary events.db
+            // file (testing against a copy without touching the live one).
+            var hours: Double = 24
+            var dbPathOverride: String? = nil
+            if let h = args.firstIndex(of: "--hours"), h + 1 < args.count, let n = Double(args[h + 1]) {
+                hours = n
+            }
+            if let d = args.firstIndex(of: "--db"), d + 1 < args.count {
+                dbPathOverride = args[d + 1]
+            }
+            await runRollup(olderThanHours: hours, dbPathOverride: dbPathOverride)
         case "version":
             printVersion()
         case "help", "-h", "--help":
