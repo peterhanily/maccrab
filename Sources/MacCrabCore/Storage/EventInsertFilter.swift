@@ -108,12 +108,25 @@ public struct EventInsertFilter: Sendable {
             : supportDir
         return EventInsertFilter(
             pathSubstrings: [
-                normalizedDir,                       // daemon's own DB / support files
+                // --- Daemon self-monitoring (own writes) ---
+                normalizedDir,                       // resolved support dir (root or user-uid)
+                "Library/Application Support/MacCrab/", // catches both /Library/ and ~/Library/ (dev-mode parallel daemon)
                 "/private/tmp/maccrabd.log",         // daemon's own log file
+                // --- pty / null device noise ---
                 "/dev/null",                         // shells / scripts redirecting
                 "/dev/ttys",                         // pty noise on Terminal-heavy machines
+                "/dev/ptmx",                         // pty multiplexer
+                "/dev/console",                      // virtual console
+                // --- SQLite temp-file pattern (universal across SQLite-using apps) ---
+                "/T/etilqs_",                        // /private/var/folders/.../T/etilqs_<hash> — SQLite's mkstemp prefix
+                // --- Apple internal log/data daemons ---
+                "/private/var/log/com.apple.xpc.launchd/", // launchd's own log churn
+                "/private/var/db/systemstats/",      // systemstats coalitions/memory dumps
             ],
-            processNames: []
+            processNames: [
+                "maccrabctl",                        // own CLI
+                "maccrabd",                          // own dev/legacy daemon
+            ]
         )
     }
 }

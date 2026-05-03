@@ -72,6 +72,58 @@ struct EventInsertFilterTests {
         #expect(!filter.shouldDrop(event: suspiciousTmp))
     }
 
+    @Test("Default filter drops dev-mode daemon's user-uid support dir")
+    // Sysext (root) running while a `swift run maccrabd` (user-uid) is also
+    // alive: the sysext sees the user-uid daemon's writes to
+    // ~/Library/Application Support/MacCrab/. The trailing-slash-no-leading-slash
+    // pattern catches both /Library/ and /Users/.../Library/.
+    func defaultFilterDropsCrossModeDaemonWrites() {
+        let filter = EventInsertFilter.defaultFilter(supportDir: "/Library/Application Support/MacCrab")
+        let devModeWAL = makeProcessEvent(filePath: "/Users/alice/Library/Application Support/MacCrab/events.db-wal")
+        #expect(filter.shouldDrop(event: devModeWAL))
+    }
+
+    @Test("Default filter drops SQLite temp files (etilqs_ pattern)")
+    // Field measurement showed ~5% of events were SQLite's own mkstemp temp
+    // files in /private/var/folders/.../T/etilqs_<hash>. Universal across
+    // any SQLite-using app, including MacCrab itself.
+    func defaultFilterDropsSqliteTemps() {
+        let filter = EventInsertFilter.defaultFilter(supportDir: "/Library/Application Support/MacCrab")
+        let sqliteTemp = makeProcessEvent(filePath: "/private/var/folders/zz/abc/T/etilqs_80a9c80f5d002b6c")
+        #expect(filter.shouldDrop(event: sqliteTemp))
+    }
+
+    @Test("Default filter drops Apple internal log/data daemon noise")
+    func defaultFilterDropsAppleInternal() {
+        let filter = EventInsertFilter.defaultFilter(supportDir: "/Library/Application Support/MacCrab")
+        let launchdLog = makeProcessEvent(filePath: "/private/var/log/com.apple.xpc.launchd/launchd.log")
+        let systemstats = makeProcessEvent(filePath: "/private/var/db/systemstats/12345.coalitions.XX.stats")
+        #expect(filter.shouldDrop(event: launchdLog))
+        #expect(filter.shouldDrop(event: systemstats))
+    }
+
+    @Test("Default filter drops /dev/ptmx and /dev/console")
+    func defaultFilterDropsExtraDevNoise() {
+        let filter = EventInsertFilter.defaultFilter(supportDir: "/Library/Application Support/MacCrab")
+        let ptmx = makeProcessEvent(filePath: "/dev/ptmx")
+        let console = makeProcessEvent(filePath: "/dev/console")
+        #expect(filter.shouldDrop(event: ptmx))
+        #expect(filter.shouldDrop(event: console))
+    }
+
+    @Test("Default filter drops events whose actor is maccrabctl or maccrabd")
+    // Field measurement showed maccrabctl invocations alone produced
+    // 24% of events on a dev box (test runs, status checks, hunt queries
+    // each generate hundreds of file events as the CLI walks support dirs).
+    // Self-process filtering by name closes that loop.
+    func defaultFilterDropsOwnProcesses() {
+        let filter = EventInsertFilter.defaultFilter(supportDir: "/Library/Application Support/MacCrab")
+        let cli = makeProcessEvent(name: "maccrabctl", filePath: "/Users/alice/Documents/notes.md")
+        let dev = makeProcessEvent(name: "maccrabd", filePath: "/Users/alice/Documents/notes.md")
+        #expect(filter.shouldDrop(event: cli))
+        #expect(filter.shouldDrop(event: dev))
+    }
+
     @Test("Custom process-name filter drops by process regardless of path")
     func processNameFilterShortCircuits() {
         let filter = EventInsertFilter(
