@@ -1,4 +1,4 @@
-.PHONY: build test compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg
+.PHONY: build test compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown
 
 PREFIX ?= /usr/local
 SUPPORT_DIR = /Library/Application\ Support/MacCrab
@@ -82,6 +82,12 @@ lint-rules:
 
 test-stress:
 	./scripts/stress-test.sh 60
+
+# Diagnostic — print event volume + composition from the running sysext's
+# events.db. Used to validate that EventInsertFilter is dropping what we
+# think it's dropping. Reads only; safe to run while the daemon is alive.
+breakdown:
+	@sudo ./scripts/event-breakdown.sh
 
 # ─── Install (system-wide, requires sudo) ─────────────────────────────
 
