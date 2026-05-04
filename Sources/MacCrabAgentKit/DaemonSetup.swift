@@ -1194,15 +1194,19 @@ enum DaemonSetup {
         // alert visible to the operator. Pre-fix the gate logged silently.
         await state.responseEngine.setAlertSinkForPending(state.alertSink)
 
-        // Apply configured retention so the daily prune timer uses the
-        // operator's chosen window rather than the hardcoded default.
-        state.retentionDays = config.retentionDays
-
-        // Apply configured DB size cap so the hourly size-cap timer
-        // (v1.6.12) reads the operator's Settings value. Minimum
-        // clamped at 50 MB so a hostile config can't make the
-        // enforcer delete everything on first run.
-        state.maxDatabaseSizeMB = max(50, config.maxDatabaseSizeMB)
+        // Apply v1.8.0 per-tier storage budgets. DaemonTimers reads each
+        // knob live so a SIGHUP-driven config reload is honored on the
+        // next sweep without a daemon restart. Floors clamp hostile
+        // values: 1h floor on retention, 50 MB floor on caps.
+        var storage = config.storage
+        storage.eventsHotTierHours    = max(1, storage.eventsHotTierHours)
+        storage.eventsMaxSizeMB       = max(50, storage.eventsMaxSizeMB)
+        storage.aggregateDays         = max(1, storage.aggregateDays)
+        storage.alertsRetentionDays   = max(1, storage.alertsRetentionDays)
+        storage.alertsMaxSizeMB       = max(50, storage.alertsMaxSizeMB)
+        storage.campaignsRetentionDays = max(1, storage.campaignsRetentionDays)
+        storage.campaignsMaxSizeMB    = max(50, storage.campaignsMaxSizeMB)
+        state.storage = storage
 
         return state
     }

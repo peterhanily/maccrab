@@ -69,26 +69,38 @@ enum SignalHandlers {
                     // v1.6.14: reload storage config so the operator's
                     // Settings slider value (written to daemon_config.json
                     // by the dashboard) takes effect without a daemon
-                    // restart. Before this change, `maxDatabaseSizeMB`
-                    // and `retentionDays` were captured into the timer
-                    // closures at setup time and a SIGHUP only reloaded
-                    // rules — so lowering the cap in Settings required
-                    // a full reinstall or reboot to land.
+                    // restart. v1.8.0 expanded this from a single (cap, ret)
+                    // pair to per-tier {events, alerts, campaigns} budgets.
                     let freshConfig = DaemonConfig.load(from: state.supportDir)
-                    let oldCap = state.maxDatabaseSizeMB
-                    let oldRet = state.retentionDays
-                    let newCap = max(50, freshConfig.maxDatabaseSizeMB)
-                    let newRet = freshConfig.retentionDays
-                    state.maxDatabaseSizeMB = newCap
-                    state.retentionDays = newRet
-                    if oldCap != newCap || oldRet != newRet {
-                        print("[SIGHUP] Storage config reloaded: maxDatabaseSizeMB \(oldCap)->\(newCap), retentionDays \(oldRet)->\(newRet)")
-                        // Kick an immediate size-cap sweep so a lowered
-                        // cap visibly prunes without waiting up to an
-                        // hour. No-op if currently under the new cap.
-                        await enforceDatabaseSizeCapNow(state: state)
+                    let old = state.storage
+                    var newStorage = freshConfig.storage
+                    newStorage.eventsHotTierHours    = max(1, newStorage.eventsHotTierHours)
+                    newStorage.eventsMaxSizeMB       = max(50, newStorage.eventsMaxSizeMB)
+                    newStorage.aggregateDays         = max(1, newStorage.aggregateDays)
+                    newStorage.alertsRetentionDays   = max(1, newStorage.alertsRetentionDays)
+                    newStorage.alertsMaxSizeMB       = max(50, newStorage.alertsMaxSizeMB)
+                    newStorage.campaignsRetentionDays = max(1, newStorage.campaignsRetentionDays)
+                    newStorage.campaignsMaxSizeMB    = max(50, newStorage.campaignsMaxSizeMB)
+                    state.storage = newStorage
+
+                    let eventsCapChanged = old.eventsMaxSizeMB != newStorage.eventsMaxSizeMB
+                    let anyChange = old.eventsHotTierHours    != newStorage.eventsHotTierHours
+                                 || old.eventsMaxSizeMB       != newStorage.eventsMaxSizeMB
+                                 || old.aggregateDays         != newStorage.aggregateDays
+                                 || old.alertsRetentionDays   != newStorage.alertsRetentionDays
+                                 || old.alertsMaxSizeMB       != newStorage.alertsMaxSizeMB
+                                 || old.campaignsRetentionDays != newStorage.campaignsRetentionDays
+                                 || old.campaignsMaxSizeMB    != newStorage.campaignsMaxSizeMB
+                    if anyChange {
+                        print("[SIGHUP] Storage config reloaded: events=\(newStorage.eventsHotTierHours)h/\(newStorage.eventsMaxSizeMB)MB, alerts=\(newStorage.alertsRetentionDays)d/\(newStorage.alertsMaxSizeMB)MB, campaigns=\(newStorage.campaignsRetentionDays)d/\(newStorage.campaignsMaxSizeMB)MB, aggregates=\(newStorage.aggregateDays)d")
+                        if eventsCapChanged {
+                            // Lowered events cap: kick an immediate sweep so the
+                            // operator sees the DB shrink in seconds instead of
+                            // waiting up to 6h for the next rollup tick.
+                            await enforceDatabaseSizeCapNow(state: state)
+                        }
                     } else {
-                        print("[SIGHUP] Storage config unchanged (cap=\(newCap) MB, retention=\(newRet)d)")
+                        print("[SIGHUP] Storage config unchanged")
                     }
 
                     // v1.6.19: pick up dashboard-written notifications.json

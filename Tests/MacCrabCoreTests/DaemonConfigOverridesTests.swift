@@ -2,18 +2,15 @@
 //
 // v1.6.14: regression tests for the user_overrides.json overlay path
 // that wires the dashboard's storage sliders to the sysext.
-//
-// These tests exercise `DaemonConfig.load(from:)` only, not the full
-// applyUserOverrides path (which reads from `/Users/*` and requires
-// ownership matching the home directory — not reproducible in CI
-// without root). That path is exercised by the integration test
-// suite.
+// v1.8.0: rewritten for the per-tier `storage` block. Legacy
+// retentionDays / maxDatabaseSizeMB inputs still work — they get
+// folded onto the new fields by `migrateLegacyStorageKeys`.
 
 import Testing
 import Foundation
 @testable import MacCrabAgentKit
 
-@Suite("DaemonConfig: user_overrides.json overlay (v1.6.14)")
+@Suite("DaemonConfig: user_overrides.json overlay (v1.6.14 / v1.8.0)")
 struct DaemonConfigOverridesTests {
 
     /// When no `daemon_config.json` exists, `load` returns pure defaults
@@ -25,19 +22,19 @@ struct DaemonConfigOverridesTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
-        #expect(cfg.maxDatabaseSizeMB == 500)
-        #expect(cfg.retentionDays == 30)
+        #expect(cfg.storage.eventsMaxSizeMB == 200)
+        #expect(cfg.storage.eventsHotTierHours == 1)
+        #expect(cfg.storage.alertsRetentionDays == 365)
+        #expect(cfg.storage.campaignsRetentionDays == 365)
+        #expect(cfg.storage.aggregateDays == 90)
     }
 
-    /// CLAUDE.md documents the `daemon_config.json` keys as snake_case.
-    /// This test locks in the v1.6.14 fix: pre-v1.6.14, the decoder
-    /// used `.convertFromSnakeCase` which turned `max_database_size_mb`
-    /// into `maxDatabaseSizeMb` (lowercase `b`) — no match for the
-    /// Swift property `maxDatabaseSizeMB`. The decode failed, and
-    /// because `load()` used `try?`, the ENTIRE config was silently
-    /// discarded. Any operator following the docs got full defaults.
-    @Test("snake_case keys in daemon_config.json are honored (v1.6.14 regression)")
-    func snakeCaseKeys() throws {
+    /// v1.6.14 + v1.8.0: snake_case `max_database_size_mb` and
+    /// `retention_days` are LEGACY keys. They must still load — folded
+    /// onto storage.eventsMaxSizeMB / storage.alertsRetentionDays /
+    /// storage.campaignsRetentionDays.
+    @Test("legacy snake_case keys fold onto storage block")
+    func legacySnakeCaseKeys() throws {
         let tmp = NSTemporaryDirectory() + "MacCrabCfgTest-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
@@ -56,16 +53,15 @@ struct DaemonConfigOverridesTests {
         )
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
-        #expect(cfg.maxDatabaseSizeMB == 250)
-        #expect(cfg.retentionDays == 7)
+        #expect(cfg.storage.eventsMaxSizeMB == 250)
+        #expect(cfg.storage.alertsRetentionDays == 7)
+        #expect(cfg.storage.campaignsRetentionDays == 7)
         #expect(cfg.behaviorAlertThreshold == 15.0)
     }
 
-    /// camelCase keys must also work — the dashboard's
-    /// `user_overrides.json` writer uses camelCase, and operators
-    /// hand-editing might do either.
-    @Test("camelCase keys are honored")
-    func camelCaseKeys() throws {
+    /// camelCase legacy keys: same migration semantics.
+    @Test("legacy camelCase keys fold onto storage block")
+    func legacyCamelCaseKeys() throws {
         let tmp = NSTemporaryDirectory() + "MacCrabCfgTest-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
@@ -83,11 +79,96 @@ struct DaemonConfigOverridesTests {
         )
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
-        #expect(cfg.maxDatabaseSizeMB == 300)
-        #expect(cfg.retentionDays == 14)
+        #expect(cfg.storage.eventsMaxSizeMB == 300)
+        #expect(cfg.storage.alertsRetentionDays == 14)
+        #expect(cfg.storage.campaignsRetentionDays == 14)
     }
 
-    /// A partial config that only sets the storage keys should leave
+    /// New v1.8.0 shape: `storage` block with full per-tier control.
+    @Test("v1.8.0 storage block shape decodes")
+    func newStorageBlockShape() throws {
+        let tmp = NSTemporaryDirectory() + "MacCrabCfgTest-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let json = """
+        {
+          "storage": {
+            "eventsHotTierHours": 6,
+            "eventsMaxSizeMB": 500,
+            "aggregateDays": 60,
+            "alertsRetentionDays": 180,
+            "alertsMaxSizeMB": 250,
+            "campaignsRetentionDays": 180,
+            "campaignsMaxSizeMB": 75
+          }
+        }
+        """
+        try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
+
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
+        #expect(cfg.storage.eventsHotTierHours == 6)
+        #expect(cfg.storage.eventsMaxSizeMB == 500)
+        #expect(cfg.storage.aggregateDays == 60)
+        #expect(cfg.storage.alertsRetentionDays == 180)
+        #expect(cfg.storage.alertsMaxSizeMB == 250)
+        #expect(cfg.storage.campaignsRetentionDays == 180)
+        #expect(cfg.storage.campaignsMaxSizeMB == 75)
+    }
+
+    /// New v1.8.0 shape: snake_case nested keys also rewrite.
+    @Test("v1.8.0 storage block snake_case keys rewrite")
+    func newStorageBlockSnakeCase() throws {
+        let tmp = NSTemporaryDirectory() + "MacCrabCfgTest-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let json = """
+        {
+          "storage": {
+            "events_hot_tier_hours": 2,
+            "alerts_retention_days": 90
+          }
+        }
+        """
+        try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
+
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
+        #expect(cfg.storage.eventsHotTierHours == 2)
+        #expect(cfg.storage.alertsRetentionDays == 90)
+    }
+
+    /// New keys in `storage` win over legacy top-level keys when both
+    /// are present — operators upgrading their config file shouldn't
+    /// surprise themselves.
+    @Test("new storage keys take precedence over legacy")
+    func newKeysWinOverLegacy() throws {
+        let tmp = NSTemporaryDirectory() + "MacCrabCfgTest-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let json = """
+        {
+          "retentionDays": 30,
+          "maxDatabaseSizeMB": 1024,
+          "storage": {
+            "alertsRetentionDays": 365,
+            "eventsMaxSizeMB": 200
+          }
+        }
+        """
+        try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
+
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
+        // New keys present — legacy is ignored for those slots.
+        #expect(cfg.storage.alertsRetentionDays == 365)
+        #expect(cfg.storage.eventsMaxSizeMB == 200)
+        // Legacy retentionDays still folds onto campaignsRetentionDays
+        // (no new key set for that slot).
+        #expect(cfg.storage.campaignsRetentionDays == 30)
+    }
+
+    /// A partial config that only sets one storage key should leave
     /// every other field at its default. Before v1.6.14 the decoder
     /// failed on any unknown key shape and returned all defaults,
     /// which hid the fact that the file was partially broken.
@@ -100,15 +181,11 @@ struct DaemonConfigOverridesTests {
         let json = """
         { "max_database_size_mb": 200 }
         """
-        try json.write(
-            toFile: tmp + "/daemon_config.json",
-            atomically: true,
-            encoding: .utf8
-        )
+        try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
-        #expect(cfg.maxDatabaseSizeMB == 200)
-        #expect(cfg.retentionDays == 30)  // default
+        #expect(cfg.storage.eventsMaxSizeMB == 200)
+        #expect(cfg.storage.alertsRetentionDays == 365)  // default
         #expect(cfg.behaviorAlertThreshold == 10.0)  // default
     }
 }

@@ -995,8 +995,16 @@ public actor EventStore {
     /// the rollup table tiny indefinitely.
     ///
     /// Returns the number of events deleted from the hot tier.
+    ///
+    /// `aggregateRetentionDays` controls the trim cutoff for the
+    /// `event_aggregates` table (Step 3 below). v1.8.0 made this
+    /// configurable from `StorageConfig.aggregateDays` — pre-v1.8 it was
+    /// hardcoded at 30 days.
     @discardableResult
-    public func rollUpAndPrune(olderThan cutoff: Date) async throws -> Int {
+    public func rollUpAndPrune(
+        olderThan cutoff: Date,
+        aggregateRetentionDays: Int = 30
+    ) async throws -> Int {
         guard let db = db else { return 0 }
 
         // v1.8.0 audit fix: wrap aggregation + event-prune in a single
@@ -1058,11 +1066,12 @@ public actor EventStore {
         try execute("COMMIT")
         transactionCommitted = true
 
-        // Step 3: trim aggregates older than 30 days. Independent + idempotent
-        // — runs outside the main transaction so it doesn't block on Step 2's
-        // long delete batch. A crash here just leaves stale aggregates that
-        // the next sweep cleans up.
-        let cutoffDay = Self.isoDay(Date().addingTimeInterval(-30 * 86400))
+        // Step 3: trim aggregates older than `aggregateRetentionDays`.
+        // Independent + idempotent — runs outside the main transaction so it
+        // doesn't block on Step 2's long delete batch. A crash here just
+        // leaves stale aggregates that the next sweep cleans up.
+        let aggDays = max(1, aggregateRetentionDays)
+        let cutoffDay = Self.isoDay(Date().addingTimeInterval(-Double(aggDays) * 86400))
         let trimSQL = "DELETE FROM event_aggregates WHERE day < ?1"
         let trimStmt = try prepare(trimSQL)
         bindText(trimStmt, index: 1, value: cutoffDay)

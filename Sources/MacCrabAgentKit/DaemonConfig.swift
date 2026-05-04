@@ -30,9 +30,60 @@ struct DaemonConfig: Codable {
     // MARK: - Prompt Injection
     var promptInjectionConfidence: Int = 40
 
-    // MARK: - Storage
-    var maxDatabaseSizeMB: Int = 500
-    var retentionDays: Int = 30
+    // MARK: - Storage (v1.8.0)
+    //
+    // Per-tier retention budgets. Pre-v1.8 used a single retentionDays +
+    // maxDatabaseSizeMB pair to govern events, alerts, and campaigns
+    // together — meaning a heavy event firehose would evict alert and
+    // campaign history as collateral damage. v1.8 splits these into three
+    // independent tiers with their own retention and size caps.
+    //
+    // Migration: v1.7-shape config files (top-level retentionDays /
+    // maxDatabaseSizeMB) are folded into `storage` at decode time —
+    // retentionDays maps onto BOTH alertsRetentionDays AND
+    // campaignsRetentionDays (the union of their old behavior);
+    // maxDatabaseSizeMB maps onto eventsMaxSizeMB (events were the file's
+    // dominant tenant). See `migrateLegacyStorageKeys`.
+    var storage: StorageConfig = StorageConfig()
+
+    /// Three independent retention budgets — events (firehose, short),
+    /// alerts (signal, long), campaigns (signal, long).
+    struct StorageConfig: Codable {
+        /// Hot-tier retention for raw events, in hours. Past this window,
+        /// events are rolled into daily aggregates and the rows deleted
+        /// from the events table. Default 1h: events are firehose data
+        /// with near-zero half-life past correlation; alerts and aggregates
+        /// carry forward what's worth keeping.
+        var eventsHotTierHours: Int = 1
+
+        /// Hard cap on the events.db file size, in MB. The adaptive rollup
+        /// tightens the cutoff (1h → 30m → 15m) if needed to stay under
+        /// this. Last-resort row-count prune kicks in if even the tightest
+        /// cutoff can't fit.
+        var eventsMaxSizeMB: Int = 200
+
+        /// Days of `event_aggregates` rows to keep. Aggregates are tiny
+        /// (one row per day per category per signer per path); 90d is
+        /// cheap and useful for "what did this machine do last Tuesday?".
+        var aggregateDays: Int = 90
+
+        /// Alert retention, in days. Alerts are small (~1-10 KB each) and
+        /// intrinsically valuable; defaulting to a year captures the
+        /// forensic horizon most operators want. Independent of events —
+        /// a year of alert history won't blow the disk because the alert
+        /// rate is orders of magnitude lower than the event rate.
+        var alertsRetentionDays: Int = 365
+
+        /// Hard cap on the alerts.db file size, in MB.
+        var alertsMaxSizeMB: Int = 100
+
+        /// Campaign retention, in days. Campaigns are the highest-density
+        /// signal in the store — even a year is tiny.
+        var campaignsRetentionDays: Int = 365
+
+        /// Hard cap on the campaigns.db file size, in MB.
+        var campaignsMaxSizeMB: Int = 50
+    }
 
     // MARK: - LLM Backend
     var llm: LLMConfig = LLMConfig()
@@ -168,25 +219,53 @@ struct DaemonConfig: Codable {
             "event_tap_poll_interval": "eventTapPollInterval",
             "system_policy_poll_interval": "systemPolicyPollInterval",
             "prompt_injection_confidence": "promptInjectionConfidence",
+            // v1.8.0 legacy keys: rewritten in place by migrateLegacyStorageKeys
+            // below. Keeping the snake_case → camelCase rewrite here so the
+            // legacy migrator sees a consistent input dict.
             "max_database_size_mb": "maxDatabaseSizeMB",
             "retention_days": "retentionDays",
+            // v1.8.0 storage block — snake_case nested keys also rewrite, so
+            // operators can write storage.events_hot_tier_hours and have it
+            // decode correctly. The nested block itself is rewritten inside
+            // migrateLegacyStorageKeys.
         ]
         for (snake, camel) in snakeToCamel where userObj[snake] != nil && userObj[camel] == nil {
             userObj[camel] = userObj.removeValue(forKey: snake)
         }
+
+        // v1.8.0: fold legacy top-level retention/size keys into the new
+        // storage{} block, then snake-case-rewrite the storage block's own
+        // keys.
+        migrateLegacyStorageKeys(in: &userObj)
 
         // Build a "complete defaults" dict by encoding a blank
         // DaemonConfig, then overlay the user's keys on top. This
         // gives us a JSON payload that contains every key the
         // synthesized decoder expects, regardless of how sparse the
         // user's file is.
+        //
+        // v1.8.0: shallow-overlay was wrong for nested structs like
+        // `storage` and `llm`. A user setting only `storage.alertsRetentionDays`
+        // would replace the entire defaults storage dict with a partial
+        // one — making the synthesized StorageConfig decoder fail
+        // (missing eventsHotTierHours, etc.). Deep-merge dict-typed values
+        // one level so the user's keys overlay onto defaults, not replace.
         let encoder = JSONEncoder()
         guard let defaultsData = try? encoder.encode(DaemonConfig()),
               var merged = try? JSONSerialization.jsonObject(with: defaultsData) as? [String: Any] else {
             return nil
         }
         for (k, v) in userObj {
-            merged[k] = v
+            if let userDict = v as? [String: Any],
+               let defaultDict = merged[k] as? [String: Any] {
+                var combined = defaultDict
+                for (subK, subV) in userDict {
+                    combined[subK] = subV
+                }
+                merged[k] = combined
+            } else {
+                merged[k] = v
+            }
         }
 
         guard let mergedData = try? JSONSerialization.data(withJSONObject: merged) else {
@@ -196,14 +275,21 @@ struct DaemonConfig: Codable {
     }
 
     /// Read `user_overrides.json` from the console user's home (if
-    /// any) and merge the `maxDatabaseSizeMB` / `retentionDays` keys
-    /// into `config`. Any other keys in the file are ignored — we do
-    /// not let a user-writable file override security-sensitive
-    /// settings like `statisticalZThreshold` or `outputs`.
+    /// any) and merge the storage tuning keys into `config`. Any other
+    /// keys in the file are ignored — we do not let a user-writable
+    /// file override security-sensitive settings like
+    /// `statisticalZThreshold` or `outputs`.
     ///
     /// File ownership is validated: the overrides file must be owned
     /// by the same uid as the enclosing `/Users/<u>` home. This blocks
     /// a rogue process that wrote the file as a different user.
+    ///
+    /// v1.8.0: read both new (storage.{eventsMaxSizeMB, alertsRetentionDays,
+    /// ...}) and legacy (top-level maxDatabaseSizeMB, retentionDays) shapes.
+    /// Legacy keys are folded onto the new shape via the same mapping
+    /// `migrateLegacyStorageKeys` uses — alertsRetentionDays gets the legacy
+    /// retentionDays, campaignsRetentionDays gets it too, eventsMaxSizeMB
+    /// gets the legacy maxDatabaseSizeMB.
     private static func applyUserOverrides(into config: inout DaemonConfig) {
         let fm = FileManager.default
         guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return }
@@ -232,13 +318,67 @@ struct DaemonConfig: Codable {
         // favor the freshest edit.
         guard let pick = candidates.max(by: { $0.mtime < $1.mtime }) else { return }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: pick.path)),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+              var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
-        if let cap = obj["maxDatabaseSizeMB"] as? Int {
-            config.maxDatabaseSizeMB = cap
+        // Mirror decode()'s migration pass so legacy keys in the user
+        // overrides file get folded the same way.
+        migrateLegacyStorageKeys(in: &obj)
+
+        // Merge the storage{} block into the running config. Each key is
+        // optional — only the ones the user actually set get applied.
+        if let storage = obj["storage"] as? [String: Any] {
+            if let v = storage["eventsHotTierHours"] as? Int { config.storage.eventsHotTierHours = v }
+            if let v = storage["eventsMaxSizeMB"]    as? Int { config.storage.eventsMaxSizeMB = v }
+            if let v = storage["aggregateDays"]      as? Int { config.storage.aggregateDays = v }
+            if let v = storage["alertsRetentionDays"]    as? Int { config.storage.alertsRetentionDays = v }
+            if let v = storage["alertsMaxSizeMB"]    as? Int { config.storage.alertsMaxSizeMB = v }
+            if let v = storage["campaignsRetentionDays"] as? Int { config.storage.campaignsRetentionDays = v }
+            if let v = storage["campaignsMaxSizeMB"] as? Int { config.storage.campaignsMaxSizeMB = v }
         }
-        if let days = obj["retentionDays"] as? Int {
-            config.retentionDays = days
+    }
+
+    /// Fold v1.7-shape storage keys onto the v1.8 `storage{}` block.
+    ///
+    /// Pre-v1.8 daemon_config.json had `retentionDays` + `maxDatabaseSizeMB`
+    /// at the top level. v1.8 moves them into a nested `storage` block with
+    /// six per-tier knobs. This function rewrites the legacy keys onto the
+    /// new shape so a user upgrading their config without changes still
+    /// gets sensible behavior:
+    ///
+    ///   - `retentionDays` → `storage.alertsRetentionDays` AND
+    ///     `storage.campaignsRetentionDays` (the legacy knob governed both)
+    ///   - `maxDatabaseSizeMB` → `storage.eventsMaxSizeMB` (events were the
+    ///     file's dominant tenant; the legacy cap effectively bounded events)
+    ///
+    /// New (v1.8) keys, if present, take precedence over folded legacy keys.
+    /// If only the new shape is in the file this is a no-op.
+    static func migrateLegacyStorageKeys(in obj: inout [String: Any]) {
+        var storage = (obj["storage"] as? [String: Any]) ?? [:]
+
+        if let legacyDays = obj.removeValue(forKey: "retentionDays") {
+            if storage["alertsRetentionDays"] == nil    { storage["alertsRetentionDays"] = legacyDays }
+            if storage["campaignsRetentionDays"] == nil { storage["campaignsRetentionDays"] = legacyDays }
+        }
+        if let legacyCap = obj.removeValue(forKey: "maxDatabaseSizeMB") {
+            if storage["eventsMaxSizeMB"] == nil { storage["eventsMaxSizeMB"] = legacyCap }
+        }
+
+        // Snake-case rewrite for the storage block's own keys.
+        let storageSnakeToCamel: [String: String] = [
+            "events_hot_tier_hours":   "eventsHotTierHours",
+            "events_max_size_mb":      "eventsMaxSizeMB",
+            "aggregate_days":          "aggregateDays",
+            "alerts_retention_days":   "alertsRetentionDays",
+            "alerts_max_size_mb":      "alertsMaxSizeMB",
+            "campaigns_retention_days":"campaignsRetentionDays",
+            "campaigns_max_size_mb":   "campaignsMaxSizeMB",
+        ]
+        for (snake, camel) in storageSnakeToCamel where storage[snake] != nil && storage[camel] == nil {
+            storage[camel] = storage.removeValue(forKey: snake)
+        }
+
+        if !storage.isEmpty {
+            obj["storage"] = storage
         }
     }
 }

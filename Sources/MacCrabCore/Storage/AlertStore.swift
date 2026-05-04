@@ -664,6 +664,42 @@ public actor AlertStore {
         return totalDeleted
     }
 
+    /// v1.8.0: drop the oldest `count` alerts by timestamp. Defense-in-
+    /// depth size cap when alerts.db exceeds `alertsMaxSizeMB` despite
+    /// time-based retention. Mirrors EventStore.pruneOldest.
+    @discardableResult
+    public func pruneOldest(count: Int) async throws -> Int {
+        guard count > 0 else { return 0 }
+        let batchSize: Int32 = min(100_000, Int32(count))
+        var remaining = count
+        var totalDeleted = 0
+
+        let sql = """
+            DELETE FROM alerts WHERE rowid IN (
+                SELECT rowid FROM alerts ORDER BY timestamp ASC LIMIT ?1
+            )
+            """
+
+        while remaining > 0 {
+            let thisBatch = min(batchSize, Int32(remaining))
+            let stmt = try prepare(sql)
+            sqlite3_bind_int(stmt, 1, thisBatch)
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                throw AlertStoreError.stepFailed(msg)
+            }
+            let rowsDeleted = Int(sqlite3_changes(db))
+            totalDeleted += rowsDeleted
+            remaining -= rowsDeleted
+            if rowsDeleted == 0 { break }
+            await Task.yield()
+        }
+
+        return totalDeleted
+    }
+
     // MARK: - Private Helpers
 
     /// A sum type for binding values to prepared statements.

@@ -176,22 +176,15 @@ final class DaemonState {
         Date().timeIntervalSince(daemonStartTime) < 60
     }
 
-    /// Retention window for persisted events and alerts, in days.
-    /// Populated by DaemonSetup from `DaemonConfig.retentionDays` so the
-    /// retention timer in DaemonTimers uses the operator's configured
-    /// value rather than a hardcoded constant.
-    /// Outside the init path to avoid churning the enormous designated
-    /// initializer signature.
-    var retentionDays: Int = 30
-
-    /// Hard cap on the SQLite database file size, in megabytes. v1.6.12
-    /// ends a long-standing bug where this config field was defined and
-    /// surfaced in Settings but no code ever read it — the daily pruner
-    /// only enforced time-based retention. A user's DB grew to ~19 GB
-    /// before the discrepancy was noticed. Populated from
-    /// `DaemonConfig.maxDatabaseSizeMB`; consumed by the hourly size-
-    /// cap timer in DaemonTimers.
-    var maxDatabaseSizeMB: Int = 1024  // v1.8.0: see DaemonConfig.swift comment
+    /// v1.8.0 per-tier retention budgets for events / alerts / campaigns.
+    /// Populated by DaemonSetup from `DaemonConfig.storage`. DaemonTimers
+    /// reads each knob live so a SIGHUP-driven config reload is honored on
+    /// the next sweep without a daemon restart.
+    ///
+    /// Pre-v1.8 used a single `retentionDays` + `maxDatabaseSizeMB` pair
+    /// shared across all three tiers. The split here lets event-firehose
+    /// churn coexist with multi-year alert/campaign history.
+    var storage: DaemonConfig.StorageConfig = DaemonConfig.StorageConfig()
 
     // MARK: - v1.6.6 AI Suite
     //

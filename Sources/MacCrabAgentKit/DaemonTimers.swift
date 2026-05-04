@@ -26,7 +26,12 @@ enum DaemonTimers {
         let forensicTimer: DispatchSourceTimer
         let hourlyTimer: DispatchSourceTimer
         let statsTimer: DispatchSourceTimer
-        let pruneTimer: DispatchSourceTimer
+        /// v1.8.0: split from one shared `pruneTimer` so events / alerts /
+        /// campaigns each have their own retention cadence + size cap.
+        let alertsPruneTimer: DispatchSourceTimer
+        let alertsSizeCapTimer: DispatchSourceTimer
+        let campaignsPruneTimer: DispatchSourceTimer?
+        let campaignsSizeCapTimer: DispatchSourceTimer?
         let sizeCapTimer: DispatchSourceTimer
         let maintenanceTimer: DispatchSourceTimer
         let feedbackTimer: DispatchSourceTimer
@@ -307,75 +312,146 @@ enum DaemonTimers {
         }
         statsTimer.resume()
 
-        // Retention pruning (daily). Clamp retentionDays to [1, 3650] so a
-        // misconfigured value can't delete everything on the next tick or
-        // overflow the TimeInterval math. Read the value live from `state`
-        // at each tick so a SIGHUP-driven config reload is honored on the
-        // next sweep without needing a daemon restart.
-        let pruneTimer = DispatchSource.makeTimerSource(queue: .global())
-        pruneTimer.schedule(deadline: .now() + 3600, repeating: 86400) // First at 1h, then daily
-        pruneTimer.setEventHandler {
+        // v1.8.0 storage redesign: per-tier retention, decoupled timers.
+        // Pre-v1.8 used one daily timer to prune both events and alerts
+        // with the same cutoff, so a heavy event firehose evicted alerts
+        // as collateral damage. The redesign:
+        //
+        //   - Events are governed by the adaptive rollup below (1h hot
+        //     tier by default). No separate daily timer for events.
+        //   - Alerts and campaigns each get their own daily prune timer
+        //     reading their own retentionDays — typically 365d, fully
+        //     independent of event churn.
+        //   - Each store also has an hourly size-cap timer for defense
+        //     in depth: alertsMaxSizeMB / campaignsMaxSizeMB.
+        //
+        // All knobs read live from state.storage so a SIGHUP-driven
+        // config reload is honored on the next tick.
+
+        let alertsPruneTimer = DispatchSource.makeTimerSource(queue: .global())
+        alertsPruneTimer.schedule(deadline: .now() + 3600, repeating: 86400)
+        alertsPruneTimer.setEventHandler {
             Task {
-                let retentionDays = max(1, min(state.retentionDays, 3650))
-                let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86400)
-                let prunedEvents = (try? await state.eventStore.prune(olderThan: cutoff)) ?? 0
-                let prunedAlerts = (try? await state.alertStore.prune(olderThan: cutoff)) ?? 0
-                logger.info("Retention sweep: \(prunedEvents) events + \(prunedAlerts) alerts older than \(retentionDays)d pruned")
+                let days = max(1, min(state.storage.alertsRetentionDays, 3650))
+                let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+                let pruned = (try? await state.alertStore.prune(olderThan: cutoff)) ?? 0
+                if pruned > 0 {
+                    logger.info("Alerts retention sweep: \(pruned) alerts older than \(days)d pruned")
+                }
             }
         }
-        pruneTimer.resume()
+        alertsPruneTimer.resume()
 
-        // v1.6.12: DB size-cap enforcement (hourly). The retention
-        // timer above only deletes events older than `retentionDays`,
-        // which on a high-event-rate machine lets the SQLite file
-        // grow past the configured `maxDatabaseSizeMB` cap anyway.
-        // Field case: 30d retention, ~50 events/s → DB grew to
-        // 18.95 GB (38× the 500 MB cap) before the discrepancy was
-        // noticed. This timer checks file size every hour and
-        // iteratively prunes the oldest events + VACUUMs until the
-        // file drops below 80% of the cap.
-        let dbFilePath = state.supportDir + "/events.db"
+        let campaignsPruneTimer: DispatchSourceTimer?
+        if let campaignStore = state.campaignStore {
+            let t = DispatchSource.makeTimerSource(queue: .global())
+            t.schedule(deadline: .now() + 3600, repeating: 86400)
+            t.setEventHandler {
+                Task {
+                    let days = max(1, min(state.storage.campaignsRetentionDays, 3650))
+                    let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+                    let pruned = (try? await campaignStore.prune(olderThan: cutoff)) ?? 0
+                    if pruned > 0 {
+                        logger.info("Campaigns retention sweep: \(pruned) campaigns older than \(days)d pruned")
+                    }
+                }
+            }
+            t.resume()
+            campaignsPruneTimer = t
+        } else {
+            campaignsPruneTimer = nil
+        }
 
-        // v1.8.0: tiered storage with adaptive retention (Layer 2) + hard
-        // size cap as defense-in-depth (Layer 3).
+        // v1.8.0 tiered storage with adaptive retention + size-cap fallback.
         //
         // First-cut design assumed ~5-10k events/hour. Field measurement on
         // production data showed ~950k events/hour on a busy dev/AI machine
         // — 13× higher. The 24h hot tier alone produces 4.4 GB at that
-        // rate, which a 200 MB cap couldn't hold.
+        // rate, which a 200 MB cap couldn't hold. v1.8.0-final defaults the
+        // hot tier to 1h instead of 24h.
         //
         // Layered fix:
         //   - Layer 1 (EventInsertFilter): drop self-monitoring + dev-tool
         //     scratch at insert time. Closes ~17%+ of volume.
-        //   - Layer 2 (this code): adaptive retention. Default cutoff 24h;
-        //     if DB > targetSizeMB, tighten cutoff iteratively
-        //     (24h → 12h → 6h → 3h → 1h) until the DB fits.
-        //   - Layer 3 (this code): hard cap fallback. If even the 1h cutoff
-        //     can't bring the DB under cap, force pruneOldest() so we never
-        //     exceed the user's disk-budget intent.
+        //   - Layer 2 (this code): adaptive retention. Default cutoff =
+        //     state.storage.eventsHotTierHours (1h); if DB > targetSizeMB,
+        //     tighten progressively (h, h/2, h/4, h/8) until it fits.
+        //   - Layer 3 (this code): hard cap fallback. If even the tightest
+        //     cutoff can't bring the DB under cap, force pruneOldest() so
+        //     we never exceed the user's disk-budget intent.
         //
-        // Configurable via state.maxDatabaseSizeMB (daemon_config.json key
-        // `max_database_size_mb`). Default 1024 MB. The targetSizeMB the
-        // adaptive loop aims for is 80% of that.
+        // Configurable via state.storage.{eventsHotTierHours, eventsMaxSizeMB}.
+        // Defaults: 1h / 200 MB. Target = 80% of cap.
+        let dbFilePath = state.supportDir + "/events.db"
         let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
-        let startupCapMB = max(100, state.maxDatabaseSizeMB)
-        logger.notice("Tier-rollup timer armed: hot-tier retention=24h adaptive, cap=\(startupCapMB) MB, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
+        let startupCapMB = max(100, state.storage.eventsMaxSizeMB)
+        let startupHotHours = max(1, state.storage.eventsHotTierHours)
+        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotHours)h adaptive, cap=\(startupCapMB) MB, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
 
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         sizeCapTimer.schedule(deadline: .now() + 900, repeating: 6 * 3600)
         sizeCapTimer.setEventHandler {
             Task {
-                let capMB = max(100, state.maxDatabaseSizeMB)
+                let capMB = max(100, state.storage.eventsMaxSizeMB)
                 let targetMB = Int(Double(capMB) * 0.8)
+                let hotHours = max(1, state.storage.eventsHotTierHours)
+                let aggregateDays = max(1, state.storage.aggregateDays)
                 await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
                     targetSizeMB: targetMB,
-                    capSizeMB: capMB
+                    capSizeMB: capMB,
+                    hotTierHours: hotHours,
+                    aggregateDays: aggregateDays
                 )
             }
         }
         sizeCapTimer.resume()
+
+        // Hourly size-cap defense for alerts.db. Alert volume is orders of
+        // magnitude lower than events, so this rarely fires — but if a
+        // pathological rule-author commits an alert-spamming rule, the cap
+        // bounds the blast radius.
+        let alertsSizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
+        alertsSizeCapTimer.schedule(deadline: .now() + 1800, repeating: 3600)
+        alertsSizeCapTimer.setEventHandler {
+            Task {
+                let capMB = max(50, state.storage.alertsMaxSizeMB)
+                let alertsPath = state.supportDir + "/alerts.db"
+                let nowMB = measureDatabaseFootprintMB(dbPath: alertsPath)
+                guard nowMB > capMB else { return }
+                let total = (try? await state.alertStore.count()) ?? 0
+                let overFraction = Double(nowMB - capMB) / Double(max(1, nowMB))
+                let dropTarget = max(1_000, Int(Double(total) * (overFraction + 0.1)))
+                let dropped = (try? await state.alertStore.pruneOldest(count: dropTarget)) ?? 0
+                logger.warning("Alerts size cap: pruned \(dropped) oldest alerts (\(nowMB) MB > \(capMB) MB cap, target drop \(dropTarget))")
+            }
+        }
+        alertsSizeCapTimer.resume()
+
+        // Same hourly defense for campaigns.db when present.
+        let campaignsSizeCapTimer: DispatchSourceTimer?
+        if let campaignStore = state.campaignStore {
+            let t = DispatchSource.makeTimerSource(queue: .global())
+            t.schedule(deadline: .now() + 1800, repeating: 3600)
+            t.setEventHandler {
+                Task {
+                    let capMB = max(50, state.storage.campaignsMaxSizeMB)
+                    let cPath = state.supportDir + "/campaigns.db"
+                    let nowMB = measureDatabaseFootprintMB(dbPath: cPath)
+                    guard nowMB > capMB else { return }
+                    let total = (try? await campaignStore.count()) ?? 0
+                    let overFraction = Double(nowMB - capMB) / Double(max(1, nowMB))
+                    let dropTarget = max(100, Int(Double(total) * (overFraction + 0.1)))
+                    let dropped = (try? await campaignStore.pruneOldest(count: dropTarget)) ?? 0
+                    logger.warning("Campaigns size cap: pruned \(dropped) oldest campaigns (\(nowMB) MB > \(capMB) MB cap, target drop \(dropTarget))")
+                }
+            }
+            t.resume()
+            campaignsSizeCapTimer = t
+        } else {
+            campaignsSizeCapTimer = nil
+        }
 
         // Periodic baseline save + dedup sweep (every 5 minutes)
         let maintenanceTimer = DispatchSource.makeTimerSource(queue: .global())
@@ -679,7 +755,10 @@ enum DaemonTimers {
             forensicTimer: forensicTimer,
             hourlyTimer: hourlyTimer,
             statsTimer: statsTimer,
-            pruneTimer: pruneTimer,
+            alertsPruneTimer: alertsPruneTimer,
+            alertsSizeCapTimer: alertsSizeCapTimer,
+            campaignsPruneTimer: campaignsPruneTimer,
+            campaignsSizeCapTimer: campaignsSizeCapTimer,
             sizeCapTimer: sizeCapTimer,
             maintenanceTimer: maintenanceTimer,
             feedbackTimer: feedbackTimer,
@@ -717,15 +796,15 @@ func measureDatabaseFootprintMB(dbPath: String) -> Int {
 /// retention (this function, Layer 2) → defense-in-depth size cap (also
 /// here, Layer 3).
 ///
-/// Tries the default 24h cutoff first. If the DB is still over `targetSizeMB`
-/// afterwards (heavy-event machine that won't fit a 24h hot tier), tightens
-/// the cutoff iteratively: 12h → 6h → 3h → 1h. Stops when DB fits or all
-/// cutoffs are exhausted.
+/// Tries the configured `hotTierHours` cutoff first. If the DB is still
+/// over `targetSizeMB` afterwards (heavy-event machine that won't fit a
+/// hotTier-h hot tier), tightens the cutoff progressively: hotTier, /2,
+/// /4, /8 (rounded up to whole hours). Stops when DB fits or all cutoffs
+/// are exhausted.
 ///
-/// If after the 1h cutoff the DB STILL exceeds `capSizeMB` (worst case: a
-/// machine generating so many events per hour that 1h doesn't fit), Layer 3
-/// kicks in: pruneOldest() to bring file size under cap by sheer row count,
-/// followed by VACUUM if disk has the headroom.
+/// If after the tightest cutoff the DB STILL exceeds `capSizeMB`, Layer 3
+/// kicks in: pruneOldest() to bring file size under cap by sheer row
+/// count, followed by VACUUM if disk has the headroom.
 ///
 /// All steps are best-effort; failures log + continue. The next 6-hourly
 /// tick retries the same logic from scratch — idempotent by design.
@@ -733,29 +812,40 @@ func runAdaptiveRollupSweep(
     eventStore: EventStore,
     dbPath: String,
     targetSizeMB: Int,
-    capSizeMB: Int
+    capSizeMB: Int,
+    hotTierHours: Int = 1,
+    aggregateDays: Int = 90
 ) async {
-    let cutoffsHours: [Double] = [24, 12, 6, 3, 1]
+    // Build a progressively-tightening cutoff ladder from the configured
+    // hot-tier window. Default 1h yields [1, 1, 1, 1] (no tightening
+    // possible; Layer 3 takes over). 24h would yield [24, 12, 6, 3].
+    // Filter dupes so we don't run the same cutoff repeatedly.
+    let raw = [hotTierHours, hotTierHours / 2, hotTierHours / 4, hotTierHours / 8]
+    let cutoffsHours: [Double] = Array(NSOrderedSet(array: raw.map { max(1, $0) }))
+        .compactMap { ($0 as? Int).map(Double.init) }
     let startSizeMB = measureDatabaseFootprintMB(dbPath: dbPath)
     var totalPruned = 0
 
     for hours in cutoffsHours {
         let beforeMB = measureDatabaseFootprintMB(dbPath: dbPath)
-        if beforeMB <= targetSizeMB && hours < 24 {
+        if beforeMB <= targetSizeMB && hours != cutoffsHours.first {
             // Don't tighten further than needed. Only the first cutoff
-            // (24h) always runs; tighter cutoffs only kick in if the DB
-            // is still over target.
+            // (the configured hot tier) always runs; tighter cutoffs only
+            // kick in if the DB is still over target.
             break
         }
         do {
             let cutoff = Date().addingTimeInterval(-hours * 3600)
-            let pruned = try await eventStore.rollUpAndPrune(olderThan: cutoff)
+            let pruned = try await eventStore.rollUpAndPrune(
+                olderThan: cutoff,
+                aggregateRetentionDays: aggregateDays
+            )
             totalPruned += pruned
             if pruned > 0 {
                 logger.notice("Adaptive rollup: cutoff \(Int(hours))h pruned \(pruned) events")
             }
             if hours == cutoffsHours.first {
-                continue   // always do the 24h pass; the loop's guard checks AFTER
+                continue   // always do the configured pass; the loop's guard checks AFTER
             }
             // Re-check size after each tighter pass.
             let afterMB = measureDatabaseFootprintMB(dbPath: dbPath)
@@ -835,7 +925,7 @@ private func freeDiskMB(forPath path: String) -> Int {
 /// of waiting up to an hour for the next tick. Reads cap + target
 /// from `state` so the freshly-reloaded `DaemonConfig` is honored.
 func enforceDatabaseSizeCapNow(state: DaemonState) async {
-    let maxSizeMB = max(50, state.maxDatabaseSizeMB)
+    let maxSizeMB = max(50, state.storage.eventsMaxSizeMB)
     let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
     let dbFilePath = state.supportDir + "/events.db"
     await enforceDatabaseSizeCap(

@@ -382,6 +382,28 @@ public actor CampaignStore {
         return Int(sqlite3_changes(db))
     }
 
+    /// v1.8.0: drop the oldest `count` campaigns by detected_at. Defense-in-
+    /// depth size cap when campaigns.db exceeds `campaignsMaxSizeMB`. Tiny
+    /// table in practice — this exists for parity with the events / alerts
+    /// stores rather than because campaigns ever fill 50 MB on real workloads.
+    @discardableResult
+    public func pruneOldest(count: Int) async throws -> Int {
+        guard count > 0 else { return 0 }
+        let sql = """
+            DELETE FROM campaigns WHERE id IN (
+                SELECT id FROM campaigns ORDER BY detected_at ASC LIMIT ?1
+            )
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(count))
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            throw CampaignStoreError.stepFailed(msg)
+        }
+        return Int(sqlite3_changes(db))
+    }
+
     // MARK: - Private helpers
 
     private enum BindingValue {
