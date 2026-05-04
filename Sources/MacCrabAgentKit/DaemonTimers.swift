@@ -396,13 +396,15 @@ enum DaemonTimers {
                 let targetMB = Int(Double(capMB) * 0.8)
                 let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
                 let aggregateDays = max(1, state.storage.aggregateDays)
+                let alertsRetention = max(1, state.storage.alertsRetentionDays)
                 await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
                     targetSizeMB: targetMB,
                     capSizeMB: capMB,
                     hotTierMinutes: hotMinutes,
-                    aggregateDays: aggregateDays
+                    aggregateDays: aggregateDays,
+                    alertsRetentionDays: alertsRetention
                 )
             }
         }
@@ -813,8 +815,25 @@ func runAdaptiveRollupSweep(
     targetSizeMB: Int,
     capSizeMB: Int,
     hotTierMinutes: Int = 30,
-    aggregateDays: Int = 90
+    aggregateDays: Int = 90,
+    alertsRetentionDays: Int = 365,
+    evidencePerAlertCap: Int = 50
 ) async {
+    // v1.8.0-rc6: Prune oversized alert_evidence FIRST. On the field test
+    // host, a single sweep found 802K evidence rows / 2.4 GB — the storage
+    // split decoupled evidence (in events.db) from its parent alerts (now
+    // in alerts.db) without any retention bridging the two. Two prune steps:
+    //   - Per-alert row cap (existing oversize from pre-rc6 captures)
+    //   - Time-based prune (orphans whose parent alert was deleted from alerts.db)
+    do {
+        let evidenceCutoff = Date().addingTimeInterval(-Double(alertsRetentionDays) * 86400)
+        let evictedByAge = (try? await eventStore.pruneAlertEvidence(olderThan: evidenceCutoff)) ?? 0
+        let evictedByCap = (try? await eventStore.pruneAlertEvidenceCap(perAlertMax: evidencePerAlertCap)) ?? 0
+        if evictedByAge > 0 || evictedByCap > 0 {
+            logger.notice("alert_evidence prune: \(evictedByAge) by age (>\(alertsRetentionDays)d), \(evictedByCap) by per-alert cap (>\(evidencePerAlertCap) rows)")
+        }
+    }
+
     // Build a progressively-tightening cutoff ladder from the configured
     // hot-tier window. Floors at 15 min (sequence-rebuild safety).
     let raw = [hotTierMinutes, hotTierMinutes / 2, hotTierMinutes / 4]

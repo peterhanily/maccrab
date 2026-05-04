@@ -977,21 +977,30 @@ public actor EventStore {
         return results
     }
 
-    /// Capture a snapshot of every event within `windowSeconds` of the alert's
+    /// Capture a snapshot of events within `windowSeconds` of the alert's
     /// timestamp into `alert_evidence`. Idempotent — re-running for the same
     /// `alertId` is safe (PRIMARY KEY on (alert_id, id) silently dedupes).
     ///
     /// Called from the alert-firing path so the dashboard's alert detail view
     /// can show "what else was happening when this fired?" even after the
-    /// hot-tier 24h retention drops the surrounding events. Without this,
-    /// drilling into a 5-day-old alert would only show the originating event.
+    /// hot-tier retention drops the surrounding events.
+    ///
+    /// v1.8.0-rc6: capped at `maxRows` (default 50) to keep the evidence table
+    /// bounded on high-volume hosts. Pre-cap, a 264 events/sec machine could
+    /// drop ~30K rows per alert into evidence, and 1.6K alerts pushed the
+    /// table past 800K rows / 2.4 GB on the field test host. Selection prefers
+    /// higher-severity rows so the cap doesn't drop the most informative
+    /// context — same-severity rows tie-break by closeness to the alert
+    /// timestamp.
     public func recordAlertEvidence(
         alertId: String,
         alertTimestamp: Date,
-        windowSeconds: TimeInterval = 60
+        windowSeconds: TimeInterval = 30,
+        maxRows: Int = 50
     ) throws {
         let lo = alertTimestamp.timeIntervalSince1970 - windowSeconds
         let hi = alertTimestamp.timeIntervalSince1970 + windowSeconds
+        let alertTs = alertTimestamp.timeIntervalSince1970
         let sql = """
             INSERT OR IGNORE INTO alert_evidence (
                 alert_id, id, timestamp,
@@ -1012,16 +1021,88 @@ public actor EventStore {
                 mcp_server_name, mcp_server_category, ai_tool_session_id
             FROM events
             WHERE timestamp BETWEEN ?2 AND ?3
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 3
+                    ELSE 4
+                END,
+                ABS(timestamp - ?4) ASC
+            LIMIT ?5
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bindText(stmt, index: 1, value: alertId)
         sqlite3_bind_double(stmt, 2, lo)
         sqlite3_bind_double(stmt, 3, hi)
+        sqlite3_bind_double(stmt, 4, alertTs)
+        sqlite3_bind_int(stmt, 5, Int32(max(1, maxRows)))
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
             throw EventStoreError.stepFailed("recordAlertEvidence failed: \(msg)")
         }
+    }
+
+    /// v1.8.0-rc6: trim alert_evidence to at most `perAlertMax` rows per
+    /// alert. Selection prefers higher-severity + closer-to-alert rows.
+    /// Used by the rollup sweep to bound an existing oversize evidence
+    /// table — recordAlertEvidence above caps writes going forward, but
+    /// existing rows from earlier releases need cleanup.
+    @discardableResult
+    public func pruneAlertEvidenceCap(perAlertMax: Int) async throws -> Int {
+        guard perAlertMax > 0 else { return 0 }
+        // Window function (SQLite 3.25+) ranks rows within each alert; we
+        // delete those that fall outside the cap. macOS 13 ships SQLite
+        // 3.39+, so this is safe.
+        let sql = """
+            DELETE FROM alert_evidence
+            WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY alert_id
+                               ORDER BY
+                                   CASE severity
+                                       WHEN 'critical' THEN 0
+                                       WHEN 'high' THEN 1
+                                       WHEN 'medium' THEN 2
+                                       WHEN 'low' THEN 3
+                                       ELSE 4
+                                   END,
+                                   timestamp ASC
+                           ) AS rn
+                    FROM alert_evidence
+                )
+                WHERE rn > ?1
+            )
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(perAlertMax))
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw EventStoreError.stepFailed("pruneAlertEvidenceCap failed: \(msg)")
+        }
+        return Int(sqlite3_changes(db))
+    }
+
+    /// v1.8.0-rc6: drop alert_evidence rows older than `cutoff`. Aligns
+    /// evidence retention with the parent alerts.db retention, so an
+    /// orphaned evidence row whose alert was already pruned doesn't
+    /// outlive the alert.
+    @discardableResult
+    public func pruneAlertEvidence(olderThan cutoff: Date) async throws -> Int {
+        let sql = "DELETE FROM alert_evidence WHERE timestamp < ?1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw EventStoreError.stepFailed("pruneAlertEvidence failed: \(msg)")
+        }
+        return Int(sqlite3_changes(db))
     }
 
     /// Read events captured for `alertId` by `recordAlertEvidence`. Returns
