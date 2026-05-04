@@ -96,10 +96,10 @@ enum DaemonSetup {
         }
     }
 
-    /// Same shape for AlertStore. AlertStore opens the same file as
-    /// EventStore, so by the time we get here the EventStore recovery
-    /// has already moved the corrupt file aside — AlertStore should
-    /// open cleanly. If it still fails, that's a different problem.
+    /// Same shape for AlertStore. v1.8.0 split alerts into their own
+    /// `alerts.db` file, so EventStore recovery (which only touches
+    /// events.db) doesn't help an AlertStore failure. If init fails,
+    /// back up the corrupt alerts.db and retry once.
     static func recoverAlertStore(supportDir: String, logger: Logger) -> AlertStore {
         let originalError: String
         do {
@@ -108,10 +108,17 @@ enum DaemonSetup {
         } catch {
             originalError = "\(error.localizedDescription) — \(error)"
         }
-        logger.error("AlertStore init failed after EventStore recovery: \(originalError, privacy: .public)")
-        writeCrashReport(supportDir: supportDir, error: originalError, action: "AlertStore init failed after EventStore recovery succeeded")
-        fputs("FATAL: AlertStore init failed: \(originalError)\n", stderr)
-        exit(1)
+        logger.error("AlertStore init failed: \(originalError, privacy: .public). Backing up corrupt alerts.db and retrying with a fresh database.")
+        backupCorruptDatabase(directory: supportDir, base: "alerts.db")
+        do {
+            return try AlertStore(directory: supportDir)
+        } catch {
+            let msg = "AlertStore recovery failed: \(error.localizedDescription)"
+            logger.error("\(msg, privacy: .public)")
+            writeCrashReport(supportDir: supportDir, error: originalError, action: "AlertStore recovery failed: \(error)")
+            fputs("FATAL: \(msg)\n", stderr)
+            exit(1)
+        }
     }
 
     static func initialize() async -> DaemonState {
@@ -273,6 +280,13 @@ enum DaemonSetup {
         // specific "click to Recover" banner).
         eventStore = (try? EventStore(directory: supportDir))
             ?? Self.recoverEventStore(supportDir: supportDir, logger: logger)
+
+        // v1.8.0 storage split: relocate `alerts` from events.db -> alerts.db
+        // before AlertStore opens. Idempotent — no-op once migrated.
+        // Best-effort: failure leaves both states present and AlertStore
+        // initializes against an empty alerts.db. The next start retries.
+        AlertsTableRelocator.relocate(directory: supportDir, logger: logger)
+
         alertStore = (try? AlertStore(directory: supportDir))
             ?? Self.recoverAlertStore(supportDir: supportDir, logger: logger)
 

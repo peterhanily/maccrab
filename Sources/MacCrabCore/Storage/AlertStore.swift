@@ -225,8 +225,11 @@ public actor AlertStore {
 
     /// Creates an `AlertStore` backed by a SQLite database at the default location.
     ///
-    /// The database is stored at `~/Library/Application Support/MacCrab/events.db`
-    /// (shared with the event store). The directory is created if needed.
+    /// The database is stored at `<directory>/alerts.db`. v1.8.0 split this
+    /// out of the shared `events.db` file so alert history can have its own
+    /// retention budget — a heavy event firehose can no longer evict alerts
+    /// as collateral damage on storage prune. Existing v1.7-shape DBs are
+    /// migrated by `AlertsTableRelocator` at daemon startup.
     ///
     /// - Throws: `AlertStoreError` if the database cannot be opened or initialized.
     public init(directory: String = "/Library/Application Support/MacCrab") throws {
@@ -243,7 +246,7 @@ public actor AlertStore {
             ofItemAtPath: maccrabDir.path
         )
 
-        self.databasePath = maccrabDir.appendingPathComponent("events.db").path
+        self.databasePath = maccrabDir.appendingPathComponent("alerts.db").path
         // See EventStore.init for why 0o027/0o640 (not 0o077/0o600): sysext
         // writes as root, dashboard reads as admin-group user.
         let oldUmask = umask(0o027)
