@@ -13,7 +13,6 @@ import os.log
 
 struct SettingsView: View {
     @ObservedObject var appState: AppState
-    @AppStorage("retentionDays") var retentionDays: Int = 30
     @AppStorage("alertNotifications") var alertNotifications: Bool = true
     @AppStorage("minAlertSeverity") var minAlertSeverity: String = "medium"
     @AppStorage("pollIntervalSeconds") var pollIntervalSeconds: Int = 5
@@ -30,7 +29,18 @@ struct SettingsView: View {
     // produced a false sense of security. The Response Actions tab already
     // exposes per-rule action configuration that IS wired into
     // ResponseEngine — that's the canonical surface.
-    @AppStorage("maxDatabaseSizeMB") private var maxDatabaseSizeMB: Int = 500
+
+    // v1.8.0: per-tier storage budgets replace the singleton
+    // (maxDatabaseSizeMB, retentionDays). Defaults match
+    // DaemonConfig.StorageConfig in MacCrabAgentKit. Legacy keys are
+    // migrated onto these on first appear via `migrateLegacyStorageKeys`.
+    @AppStorage("storage.eventsHotTierHours")    private var eventsHotTierHours: Int = 1
+    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 200
+    @AppStorage("storage.alertsRetentionDays")   private var alertsRetentionDays: Int = 365
+    @AppStorage("storage.alertsMaxSizeMB")       private var alertsMaxSizeMB: Int = 100
+    @AppStorage("storage.campaignsRetentionDays") private var campaignsRetentionDays: Int = 365
+    @AppStorage("storage.campaignsMaxSizeMB")    private var campaignsMaxSizeMB: Int = 50
+
     @AppStorage("retentionWindowDays") private var retentionWindowDays: Int = 30
     @State private var retentionConfirmShown: Bool = false
 
@@ -194,52 +204,73 @@ struct SettingsView: View {
     private var generalTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                GroupBox(String(localized: "settings.dataRetention", defaultValue: "Data Retention")) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(String(localized: "settings.keepEventsFor", defaultValue: "Keep events for"))
-                            Stepper(
-                                "\(retentionDays) days",
-                                value: $retentionDays,
-                                in: 1...365,
-                                step: 1
-                            )
-                            .onChange(of: retentionDays) { _ in syncStorageOverrides() }
-                        }
-                        Text(String(localized: "settings.retentionHelp", defaultValue: "Events, alerts, and baseline data older than this will be automatically pruned."))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                GroupBox(String(localized: "settings.storage", defaultValue: "Storage")) {
+                    VStack(alignment: .leading, spacing: 12) {
+
+                        // Event firehose — short window, small budget.
+                        // The 1h default reflects that events are firehose
+                        // data with near-zero half-life past correlation.
+                        storageRow(
+                            label: String(localized: "settings.events.label", defaultValue: "Event firehose"),
+                            help: String(localized: "settings.events.help", defaultValue: "Last hour of raw activity for live rules. Aggregates carry forward what's worth keeping."),
+                            stepperValue: "\(eventsHotTierHours)h",
+                            stepperBinding: $eventsHotTierHours,
+                            stepperRange: 1...24,
+                            stepperStep: 1,
+                            sizeBinding: $eventsMaxSizeMB,
+                            sizeRange: 100...2000,
+                            sizeStep: 100,
+                            currentSize: currentSize(databaseFile: "events.db"),
+                            currentBytes: currentBytes(databaseFile: "events.db"),
+                            capMB: eventsMaxSizeMB
+                        )
+
+                        Divider()
+
+                        // Alert history — long window, generous budget.
+                        // 365 days of alerts is small (~10 KB/alert × ~50/day
+                        // × 365 = 180 MB) and forensically valuable.
+                        storageRow(
+                            label: String(localized: "settings.alerts.label", defaultValue: "Alert history"),
+                            help: String(localized: "settings.alerts.help", defaultValue: "Detections fired by MacCrab. Survives any event-firehose prune."),
+                            stepperValue: "\(alertsRetentionDays)d",
+                            stepperBinding: $alertsRetentionDays,
+                            stepperRange: 30...1095,
+                            stepperStep: 30,
+                            sizeBinding: $alertsMaxSizeMB,
+                            sizeRange: 50...500,
+                            sizeStep: 50,
+                            currentSize: currentSize(databaseFile: "alerts.db"),
+                            currentBytes: currentBytes(databaseFile: "alerts.db"),
+                            capMB: alertsMaxSizeMB
+                        )
+
+                        Divider()
+
+                        // Campaign history — even longer; campaigns are tiny.
+                        storageRow(
+                            label: String(localized: "settings.campaigns.label", defaultValue: "Campaign history"),
+                            help: String(localized: "settings.campaigns.help", defaultValue: "Multi-step attack chains MacCrab has correlated."),
+                            stepperValue: "\(campaignsRetentionDays)d",
+                            stepperBinding: $campaignsRetentionDays,
+                            stepperRange: 30...1095,
+                            stepperStep: 30,
+                            sizeBinding: $campaignsMaxSizeMB,
+                            sizeRange: 25...200,
+                            sizeStep: 25,
+                            currentSize: currentSize(databaseFile: "campaigns.db"),
+                            currentBytes: currentBytes(databaseFile: "campaigns.db"),
+                            capMB: campaignsMaxSizeMB
+                        )
                     }
                     .padding(8)
-                }
-
-                GroupBox(String(localized: "settings.storageLimit", defaultValue: "Storage Limit")) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(String(localized: "settings.maxDBSize", defaultValue: "Max database size"))
-                            Stepper(
-                                "\(maxDatabaseSizeMB) MB",
-                                value: $maxDatabaseSizeMB,
-                                in: 100...5000,
-                                step: 100
-                            )
-                            .onChange(of: maxDatabaseSizeMB) { _ in syncStorageOverrides() }
-                        }
-
-                        HStack {
-                            Text(String(localized: "settings.currentDBSize", defaultValue: "Current size:"))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text(currentDatabaseSize)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundColor(isDatabaseNearLimit ? .orange : .secondary)
-                        }
-
-                        Text(String(localized: "settings.storageLimitHelp", defaultValue: "When the database exceeds this size, the oldest events will be pruned automatically."))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(8)
+                    .onChange(of: eventsHotTierHours)    { _ in syncStorageOverrides() }
+                    .onChange(of: eventsMaxSizeMB)       { _ in syncStorageOverrides() }
+                    .onChange(of: alertsRetentionDays)   { _ in syncStorageOverrides() }
+                    .onChange(of: alertsMaxSizeMB)       { _ in syncStorageOverrides() }
+                    .onChange(of: campaignsRetentionDays) { _ in syncStorageOverrides() }
+                    .onChange(of: campaignsMaxSizeMB)    { _ in syncStorageOverrides() }
+                    .onAppear { migrateLegacyStorageKeys() }
                 }
 
                 GroupBox(String(localized: "settings.uiRefresh", defaultValue: "UI Refresh")) {
@@ -1019,27 +1050,32 @@ struct SettingsView: View {
         appState.invalidateLLMConfigCache()
     }
 
-    /// v1.6.14: write `maxDatabaseSizeMB` + `retentionDays` to
-    /// `~/Library/Application Support/MacCrab/user_overrides.json`
-    /// and SIGHUP the sysext so the new values take effect on the
-    /// next size-cap tick. Until this landed, both sliders wrote
-    /// only to `@AppStorage` (the app's UserDefaults) and the daemon
-    /// never saw them — a user could drop the cap from 500 MB to
-    /// 100 MB in Settings and the DB would keep growing unbounded.
+    /// v1.6.14 / v1.8.0: write the per-tier storage block to
+    /// `~/Library/Application Support/MacCrab/user_overrides.json` and
+    /// SIGHUP the sysext so the new values take effect on the next sweep
+    /// tick. Until v1.6.14 landed, the sliders wrote only to @AppStorage
+    /// and the daemon never saw them. v1.8.0 expanded the payload from
+    /// (maxDatabaseSizeMB, retentionDays) to the full storage block.
     ///
     /// The daemon overlays this file on top of its own
-    /// `daemon_config.json` in `DaemonConfig.applyUserOverrides`.
-    /// The file is restricted to these two numeric fields so a
-    /// writable user-home file can never perturb security-sensitive
-    /// settings (thresholds, outputs, LLM provider).
+    /// `daemon_config.json` in `DaemonConfig.applyUserOverrides`. The
+    /// file is restricted to the storage block so a writable user-home
+    /// file can never perturb security-sensitive settings (thresholds,
+    /// outputs, LLM provider).
     private func syncStorageOverrides() {
         let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
         try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
         let path = configDir + "/user_overrides.json"
 
         let payload: [String: Any] = [
-            "maxDatabaseSizeMB": maxDatabaseSizeMB,
-            "retentionDays": retentionDays,
+            "storage": [
+                "eventsHotTierHours":    eventsHotTierHours,
+                "eventsMaxSizeMB":       eventsMaxSizeMB,
+                "alertsRetentionDays":   alertsRetentionDays,
+                "alertsMaxSizeMB":       alertsMaxSizeMB,
+                "campaignsRetentionDays": campaignsRetentionDays,
+                "campaignsMaxSizeMB":    campaignsMaxSizeMB,
+            ]
         ]
         guard let data = try? JSONSerialization.data(
             withJSONObject: payload,
@@ -1200,18 +1236,112 @@ struct SettingsView: View {
 
     // MARK: - Private
 
-    private var currentDatabaseSize: String {
-        let path = databasePath
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = attrs[.size] as? UInt64 else { return "—" }
-        return ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+    /// v1.8.0: per-DB-file size lookup. Splitting alerts and campaigns
+    /// into their own SQLite files means each tier gets its own current-
+    /// size readout in Settings. Reads from whichever path
+    /// `databasePathForFile(_:)` resolves to (system if root daemon owns
+    /// it, user dir for non-root dev daemon).
+    private func currentSize(databaseFile name: String) -> String {
+        let bytes = currentBytes(databaseFile: name)
+        guard bytes > 0 else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
-    private var isDatabaseNearLimit: Bool {
-        let path = databasePath
+    private func currentBytes(databaseFile name: String) -> UInt64 {
+        let path = databasePathForFile(name)
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = attrs[.size] as? UInt64 else { return false }
-        return size > UInt64(maxDatabaseSizeMB) * 800_000 // warn at 80%
+              let size = attrs[.size] as? UInt64 else { return 0 }
+        return size
+    }
+
+    private func databasePathForFile(_ name: String) -> String {
+        let fm = FileManager.default
+        let userDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first.map { $0.appendingPathComponent("MacCrab").path }
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+
+        let userPath = userDir + "/" + name
+        let systemPath = systemDir + "/" + name
+        let userExists = fm.fileExists(atPath: userPath)
+        let systemReadable = fm.isReadableFile(atPath: systemPath)
+
+        if userExists && systemReadable {
+            let userMod = (try? fm.attributesOfItem(atPath: userPath))?[.modificationDate] as? Date
+            let sysMod  = (try? fm.attributesOfItem(atPath: systemPath))?[.modificationDate] as? Date
+            if let s = sysMod, let u = userMod, s >= u {
+                return systemPath
+            }
+            return userPath
+        }
+        if systemReadable { return systemPath }
+        if userExists { return userPath }
+        return systemPath
+    }
+
+    /// One row in the Storage GroupBox. Three of these stack with dividers
+    /// between them — events / alerts / campaigns.
+    @ViewBuilder
+    private func storageRow(
+        label: String,
+        help: String,
+        stepperValue: String,
+        stepperBinding: Binding<Int>,
+        stepperRange: ClosedRange<Int>,
+        stepperStep: Int,
+        sizeBinding: Binding<Int>,
+        sizeRange: ClosedRange<Int>,
+        sizeStep: Int,
+        currentSize: String,
+        currentBytes: UInt64,
+        capMB: Int
+    ) -> some View {
+        let nearLimit = currentBytes > UInt64(capMB) * 800_000  // 80% warning
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.headline)
+            HStack(spacing: 12) {
+                Stepper(stepperValue, value: stepperBinding, in: stepperRange, step: stepperStep)
+                    .frame(maxWidth: 180, alignment: .leading)
+                Text("·").foregroundColor(.secondary)
+                Stepper("≤ \(sizeBinding.wrappedValue) MB", value: sizeBinding, in: sizeRange, step: sizeStep)
+                    .frame(maxWidth: 200, alignment: .leading)
+                Spacer()
+                Text(currentSize)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(nearLimit ? .orange : .secondary)
+            }
+            Text(help).font(.caption).foregroundColor(.secondary)
+        }
+    }
+
+    /// v1.8.0: migrate legacy @AppStorage keys (retentionDays,
+    /// maxDatabaseSizeMB) onto the new per-tier shape on first appear.
+    /// One-shot — once the new keys are non-default OR the legacy keys
+    /// are absent, this becomes a no-op. After migration, the legacy
+    /// keys remain in UserDefaults but nothing reads them.
+    private func migrateLegacyStorageKeys() {
+        let defaults = UserDefaults.standard
+
+        // If a legacy retentionDays exists AND the new alerts/campaigns
+        // keys are still at default (365), apply the legacy value.
+        if let legacyRetention = defaults.object(forKey: "retentionDays") as? Int {
+            if alertsRetentionDays == 365 && campaignsRetentionDays == 365 {
+                alertsRetentionDays    = max(30, min(legacyRetention, 1095))
+                campaignsRetentionDays = max(30, min(legacyRetention, 1095))
+            }
+            // Don't remove the legacy key — keep it for safety. Nothing reads it.
+        }
+
+        // Same shape for the legacy size cap.
+        if let legacyCap = defaults.object(forKey: "maxDatabaseSizeMB") as? Int {
+            if eventsMaxSizeMB == 200 {
+                eventsMaxSizeMB = max(100, min(legacyCap, 2000))
+            }
+        }
+
+        // Push the (possibly migrated) values to user_overrides.json so
+        // the daemon's overlay reader sees them on the next SIGHUP / boot.
+        syncStorageOverrides()
     }
 
     private var databasePath: String {
