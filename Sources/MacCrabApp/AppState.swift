@@ -1767,6 +1767,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// v1.8.0 polish: SQL-side histogram bin counts. The Events-tab chart
+    /// was previously built from the 500-row in-memory cache, which on a
+    /// 264 events/sec host covered ~2 seconds of activity — every bin
+    /// collapsed into one regardless of window size. This fetches counts
+    /// straight from the events table via GROUP BY on a stepped bucket
+    /// expression so the chart accurately reflects the full window.
+    func fetchHistogramBins(
+        spanSeconds: TimeInterval,
+        stepSeconds: Int,
+        endingAt: Date = Date(),
+        category: MacCrabCore.EventCategory? = nil
+    ) async -> [(Date, Int)] {
+        do {
+            let store = try eventStore()
+            return try await store.histogramBins(
+                spanSeconds: spanSeconds,
+                stepSeconds: stepSeconds,
+                endingAt: endingAt,
+                category: category
+            )
+        } catch {
+            return []
+        }
+    }
+
     private func eventToViewModel(_ e: Event) -> EventViewModel {
         let detail: String
         if let file = e.file {

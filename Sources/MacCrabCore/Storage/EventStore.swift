@@ -921,6 +921,62 @@ public actor EventStore {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
+    /// v1.8.0: SQL-side histogram bin counts.
+    ///
+    /// Pre-fix, the dashboard's Events-tab histogram was built from the
+    /// 500-row in-memory event cache. On a high-volume machine (264
+    /// events/sec measured) those 500 events span ~2 seconds, so every
+    /// bin collapsed into one regardless of window size — the chart was
+    /// effectively broken since Phase 2c shipped.
+    ///
+    /// This query bins counts directly on the SQL side: GROUP BY a
+    /// truncated-to-bucket-step timestamp expression. Indexed on the
+    /// `timestamp` column so even a 24h window over 1.2 GB events.db
+    /// scans only the relevant range.
+    ///
+    /// Returns one (bucketDate, count) per occupied bin, sorted ascending
+    /// by time. Caller is expected to backfill 0-count bins for empty
+    /// portions of the window.
+    public func histogramBins(
+        spanSeconds: TimeInterval,
+        stepSeconds: Int,
+        endingAt: Date = Date(),
+        category: EventCategory? = nil
+    ) throws -> [(Date, Int)] {
+        guard stepSeconds > 0, spanSeconds > 0 else { return [] }
+        let lo = endingAt.timeIntervalSince1970 - spanSeconds
+        let hi = endingAt.timeIntervalSince1970
+
+        // CAST(timestamp/step AS INTEGER) * step floors the timestamp to
+        // the nearest bucket boundary. SQLite handles REAL math natively.
+        var sql = """
+            SELECT CAST(timestamp / ?1 AS INTEGER) * ?1 AS bucket, COUNT(*) AS c
+            FROM events
+            WHERE timestamp BETWEEN ?2 AND ?3
+            """
+        if category != nil {
+            sql += " AND event_category = ?4"
+        }
+        sql += " GROUP BY bucket ORDER BY bucket ASC"
+
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, Double(stepSeconds))
+        sqlite3_bind_double(stmt, 2, lo)
+        sqlite3_bind_double(stmt, 3, hi)
+        if let cat = category {
+            bindText(stmt, index: 4, value: cat.rawValue)
+        }
+
+        var results: [(Date, Int)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let bucket = sqlite3_column_double(stmt, 0)
+            let count = Int(sqlite3_column_int64(stmt, 1))
+            results.append((Date(timeIntervalSince1970: bucket), count))
+        }
+        return results
+    }
+
     /// Capture a snapshot of every event within `windowSeconds` of the alert's
     /// timestamp into `alert_evidence`. Idempotent — re-running for the same
     /// `alertId` is safe (PRIMARY KEY on (alert_id, id) silently dedupes).

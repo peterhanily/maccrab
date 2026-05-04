@@ -65,6 +65,11 @@ struct EventStream: View {
     /// covers that path. Backed by `event_aggregates` rolled up by the daemon's
     /// 6-hourly sweep; only summary fields (no per-event detail).
     @State private var aggregateRows: [EventStore.AggregateRow] = []
+    /// v1.8.0 polish: SQL-side histogram bin counts. Re-queried whenever
+    /// the time range, category filter, or refresh tick changes — the
+    /// previous filteredCache-derived path was broken on high-volume
+    /// hosts because the 500-row in-memory window covered ~2 seconds.
+    @State private var histogramRows: [(Date, Int)] = []
     /// True when the current `timeRange` selection looks past the 24h hot
     /// tier. Drives the "summarized — drill in for detail" banner + table swap.
     private var isAggregateMode: Bool {
@@ -296,18 +301,18 @@ struct EventStream: View {
             // users see today's familiar layout until they opt in.
             if showHistogram {
                 // v1.8.0 polish: granularity tracks the selected time
-                // range so the chart never collapses to a single bin.
-                //   Last Hour  → 60 minute-bins
-                //   Last 24h   → 24 hour-bins
-                //   Last 7d    → 7 day-bins (aggregate mode handles the data side)
-                //   All Time   → days when in aggregate mode, hours otherwise
+                // range so the chart shows ~24-60 bars across the window.
+                //   Last Hour  → 1m bins (60 bars)
+                //   Last 24h   → 30m bins (48 bars)
+                //   Last 7d    → 6h bins (28 bars) — hot mode, but typically aggregate
+                //   All Time   → days in aggregate mode, hourly otherwise
                 let now = Date()
                 let span = timeRange.seconds ?? 86400
                 let hotGranularity: HistogramGranularity = {
                     switch timeRange {
                     case .lastHour: return .minute
-                    case .last24h:  return .hour
-                    case .last7d:   return .day
+                    case .last24h:  return .thirtyMin
+                    case .last7d:   return .sixHour
                     case .all:      return .hour
                     }
                 }()
@@ -315,8 +320,8 @@ struct EventStream: View {
                 EventTimeHistogram(
                     bins: isAggregateMode
                         ? EventTimeHistogram.dailyBins(from: aggregateRows, endingAt: now, spanDays: dailySpanDays)
-                        : EventTimeHistogram.bins(from: filteredCache, granularity: hotGranularity, endingAt: now, spanSeconds: span),
-                    unitLabel: isAggregateMode ? "Day" : (hotGranularity == .minute ? "Minute" : (hotGranularity == .day ? "Day" : "Hour")),
+                        : EventTimeHistogram.bins(fromSQL: histogramRows, granularity: hotGranularity, endingAt: now, spanSeconds: span),
+                    unitLabel: isAggregateMode ? "Day" : "Time",
                     granularity: isAggregateMode ? .day : hotGranularity
                 )
                 Divider()
@@ -505,6 +510,30 @@ struct EventStream: View {
             } else {
                 aggregateRows = []
             }
+        }
+        // v1.8.0 polish: SQL-side histogram. Re-fetched on time-range,
+        // category, or aggregate-mode change. Skips work in aggregate mode
+        // (the daily aggregate path drives that chart instead).
+        .task(id: aggregateInputsKey) {
+            guard !isAggregateMode else {
+                histogramRows = []
+                return
+            }
+            let granularity: HistogramGranularity = {
+                switch timeRange {
+                case .lastHour: return .minute
+                case .last24h:  return .thirtyMin
+                case .last7d:   return .sixHour
+                case .all:      return .hour
+                }
+            }()
+            let span = timeRange.seconds ?? 86400
+            histogramRows = await appState.fetchHistogramBins(
+                spanSeconds: span,
+                stepSeconds: granularity.stepSeconds,
+                endingAt: Date(),
+                category: filterCategory.map { MacCrabCore.EventCategory(rawValue: $0.rawValue) } ?? nil
+            )
         }
         // v1.7.11: recompute the cached filtered+sorted list only when an
         // input actually changes. Without these, the body's previous use

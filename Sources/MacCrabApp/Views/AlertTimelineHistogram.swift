@@ -38,6 +38,9 @@ struct AlertTimelineHistogram: View {
     /// Hour vs day axis formatting.
     let granularity: HistogramGranularity
 
+    /// v1.8.0 polish: bin under the cursor (drives the tooltip overlay).
+    @State private var hoverBin: SeverityTimelineBin?
+
     var body: some View {
         if bins.isEmpty || (bins.allSatisfy { $0.total == 0 } && campaignHours.isEmpty) {
             // Match a populated chart's height so toggling between
@@ -105,17 +108,65 @@ struct AlertTimelineHistogram: View {
                     AxisTick()
                     AxisValueLabel {
                         if let d = value.as(Date.self) {
-                            switch granularity {
-                            case .minute, .hour: Text(d, format: .dateTime.hour().minute())
-                            case .day:           Text(d, format: .dateTime.month(.abbreviated).day())
-                            }
+                            Text(d, format: dateFormatStyle(for: granularity))
                         }
                     }
+                }
+            }
+            .chartOverlay { proxy in
+                GeometryReader { geo in
+                    Rectangle().fill(Color.clear).contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                let plotFrame = geo[proxy.plotAreaFrame]
+                                let xInPlot = location.x - plotFrame.origin.x
+                                guard xInPlot >= 0, xInPlot <= plotFrame.size.width else {
+                                    hoverBin = nil; return
+                                }
+                                if let date: Date = proxy.value(atX: xInPlot) {
+                                    hoverBin = bins.min(by: {
+                                        abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+                                    })
+                                }
+                            case .ended:
+                                hoverBin = nil
+                            }
+                        }
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if let hover = hoverBin {
+                    Text(tooltipText(for: hover))
+                        .font(.caption2)
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(.thinMaterial)
+                        .cornerRadius(4)
+                        .padding(6)
                 }
             }
             .frame(height: 130)
             .padding(.vertical, 4)
         }
+    }
+
+    private func dateFormatStyle(for g: HistogramGranularity) -> Date.FormatStyle {
+        switch g {
+        case .minute, .tenMinute, .thirtyMin, .hour, .sixHour:
+            return .dateTime.hour().minute()
+        case .day:
+            return .dateTime.month(.abbreviated).day()
+        }
+    }
+
+    private func tooltipText(for bin: SeverityTimelineBin) -> String {
+        let label = bin.date.formatted(dateFormatStyle(for: granularity))
+        var parts: [String] = ["\(label) · \(bin.total) alert\(bin.total == 1 ? "" : "s")"]
+        if bin.critical > 0 { parts.append("\(bin.critical)C") }
+        if bin.high > 0     { parts.append("\(bin.high)H") }
+        if bin.medium > 0   { parts.append("\(bin.medium)M") }
+        if bin.low > 0      { parts.append("\(bin.low)L") }
+        return parts.joined(separator: " · ")
     }
 }
 

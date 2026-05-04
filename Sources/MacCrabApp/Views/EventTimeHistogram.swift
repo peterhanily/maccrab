@@ -24,11 +24,26 @@ struct EventTimeBin: Identifiable {
 }
 
 /// Granularity hint for axis formatting + bin width.
-///   - minute: HH:mm ticks, 1-minute bin width (Last Hour view)
-///   - hour:   HH:mm ticks, 1-hour bin width (Last 24h view)
-///   - day:    MMM-d ticks, 1-day bin width (Last 7d / aggregate view)
+///   - minute:    HH:mm ticks, 1-minute bin width (Last Hour view)
+///   - tenMinute: HH:mm ticks, 10-minute bin width (Last 6h / sub-day window)
+///   - thirtyMin: HH:mm ticks, 30-minute bin width (Last 24h view — gives 48 bins)
+///   - hour:      HH:mm ticks, 1-hour bin width
+///   - sixHour:   HH:mm ticks, 6-hour bin width (Last 7d → 28 bins)
+///   - day:       MMM-d ticks, 1-day bin width (aggregate view)
 enum HistogramGranularity {
-    case minute, hour, day
+    case minute, tenMinute, thirtyMin, hour, sixHour, day
+
+    /// Step size in seconds — used by SQL-side histogram queries.
+    var stepSeconds: Int {
+        switch self {
+        case .minute:    return 60
+        case .tenMinute: return 600
+        case .thirtyMin: return 1800
+        case .hour:      return 3600
+        case .sixHour:   return 21600
+        case .day:       return 86400
+        }
+    }
 }
 
 /// Hourly histogram of event volume across the currently displayed range.
@@ -48,6 +63,10 @@ struct EventTimeHistogram: View {
         self.granularity = granularity
     }
 
+    /// v1.8.0 polish: hover-tracked bin index for the tooltip overlay.
+    /// Drives the floating "Mon 3:15 PM · 1,234 events" label.
+    @State private var hoverBin: EventTimeBin?
+
     var body: some View {
         if bins.isEmpty {
             Color.clear.frame(height: 32)
@@ -57,7 +76,11 @@ struct EventTimeHistogram: View {
                     x: .value(unitLabel, bin.date),
                     y: .value("Count", bin.count)
                 )
-                .foregroundStyle(Color.accentColor.opacity(0.7))
+                .foregroundStyle(
+                    bin.id == hoverBin?.id
+                        ? Color.accentColor
+                        : Color.accentColor.opacity(0.7)
+                )
             }
             .chartYAxis {
                 AxisMarks(position: .leading, values: .automatic(desiredCount: 3))
@@ -72,12 +95,45 @@ struct EventTimeHistogram: View {
                     AxisTick()
                     AxisValueLabel {
                         if let d = value.as(Date.self) {
-                            switch granularity {
-                            case .minute, .hour: Text(d, format: .dateTime.hour().minute())
-                            case .day:           Text(d, format: .dateTime.month(.abbreviated).day())
-                            }
+                            Text(d, format: dateFormatStyle(for: granularity))
                         }
                     }
+                }
+            }
+            // Hover overlay (macOS 13 compatible): map continuous mouse
+            // position to nearest bin via chartProxy.value(atX:).
+            .chartOverlay { proxy in
+                GeometryReader { geo in
+                    Rectangle().fill(Color.clear).contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                let plotFrame = geo[proxy.plotAreaFrame]
+                                let xInPlot = location.x - plotFrame.origin.x
+                                guard xInPlot >= 0, xInPlot <= plotFrame.size.width else {
+                                    hoverBin = nil; return
+                                }
+                                if let date: Date = proxy.value(atX: xInPlot) {
+                                    hoverBin = bins.min(by: {
+                                        abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+                                    })
+                                }
+                            case .ended:
+                                hoverBin = nil
+                            }
+                        }
+                }
+            }
+            // Tooltip caption shown above the chart when hovering. Sits
+            // outside the chart frame so it doesn't shift bar positions.
+            .overlay(alignment: .topTrailing) {
+                if let hover = hoverBin {
+                    Text(tooltipText(for: hover))
+                        .font(.caption2)
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(.thinMaterial)
+                        .cornerRadius(4)
+                        .padding(6)
                 }
             }
             .frame(height: 130)
@@ -85,21 +141,44 @@ struct EventTimeHistogram: View {
             .padding(.vertical, 4)
         }
     }
+
+    private func dateFormatStyle(for g: HistogramGranularity) -> Date.FormatStyle {
+        switch g {
+        case .minute, .tenMinute, .thirtyMin, .hour, .sixHour:
+            return .dateTime.hour().minute()
+        case .day:
+            return .dateTime.month(.abbreviated).day()
+        }
+    }
+
+    private func tooltipText(for bin: EventTimeBin) -> String {
+        let format = dateFormatStyle(for: granularity)
+        let label = bin.date.formatted(format)
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        let count = formatter.string(from: NSNumber(value: bin.count)) ?? "\(bin.count)"
+        return "\(label) · \(count) \(unitLabel == "Day" ? "events" : "events")"
+    }
 }
 
 // MARK: - Bin computation helpers
 
 extension EventTimeHistogram {
-    /// Bin width + truncation parameters for a given granularity. Kept
-    /// as one place so the truncation idiom (date-from-components) and
-    /// the step size stay in sync.
-    private static func binParams(_ g: HistogramGranularity)
-        -> (components: Set<Calendar.Component>, step: TimeInterval) {
-        switch g {
-        case .minute: return ([.year, .month, .day, .hour, .minute], 60)
-        case .hour:   return ([.year, .month, .day, .hour], 3600)
-        case .day:    return ([.year, .month, .day], 86400)
-        }
+    /// Bin width for a given granularity. Step size lives on the enum;
+    /// the truncation function below uses floor-by-step rather than
+    /// per-granularity Calendar components so a 30-minute or 6-hour
+    /// bucket aligns to the bucket boundary regardless of clock drift.
+    private static func step(for g: HistogramGranularity) -> TimeInterval {
+        TimeInterval(g.stepSeconds)
+    }
+
+    /// Floor `date` to the nearest `stepSeconds` boundary. Matches the
+    /// SQL-side `CAST(timestamp / step AS INTEGER) * step` expression so
+    /// SQL bins and in-memory bins land on the same bucket origins.
+    private static func bucketStart(_ date: Date, stepSeconds: Int) -> Date {
+        let s = date.timeIntervalSince1970
+        let bucket = floor(s / Double(stepSeconds)) * Double(stepSeconds)
+        return Date(timeIntervalSince1970: bucket)
     }
 
     /// Bin events at the requested granularity over the given window.
@@ -111,26 +190,49 @@ extension EventTimeHistogram {
         endingAt: Date = Date(),
         spanSeconds: TimeInterval
     ) -> [EventTimeBin] {
-        let cal = Calendar(identifier: .gregorian)
-        let (comps, step) = binParams(granularity)
+        let stepSec = granularity.stepSeconds
+        let stepInterval = TimeInterval(stepSec)
         var counts: [Date: Int] = [:]
 
-        // Count actual events.
         for event in events {
-            let bucketComps = cal.dateComponents(comps, from: event.timestamp)
-            if let bucket = cal.date(from: bucketComps) {
-                counts[bucket, default: 0] += 1
-            }
+            let bucket = bucketStart(event.timestamp, stepSeconds: stepSec)
+            counts[bucket, default: 0] += 1
         }
 
-        // Backfill the full window. `default: 0` never overwrites a
-        // populated key.
-        let startComps = cal.dateComponents(comps, from: endingAt.addingTimeInterval(-spanSeconds))
-        let startBin = cal.date(from: startComps) ?? endingAt.addingTimeInterval(-spanSeconds)
+        let startBin = bucketStart(endingAt.addingTimeInterval(-spanSeconds), stepSeconds: stepSec)
         var t = startBin
         while t <= endingAt {
             counts[t, default: 0] = counts[t] ?? 0
-            t = t.addingTimeInterval(step)
+            t = t.addingTimeInterval(stepInterval)
+        }
+
+        return counts
+            .map { EventTimeBin(id: $0.key, date: $0.key, count: $0.value) }
+            .sorted { $0.date < $1.date }
+    }
+
+    /// v1.8.0 polish: build bins from SQL-side counts (returned by
+    /// `EventStore.histogramBins`). The DB returns one (bucketDate, count)
+    /// per occupied bin; this backfills 0-count bins for empty stretches
+    /// of the window so the X-axis renders the full domain.
+    static func bins(
+        fromSQL rows: [(Date, Int)],
+        granularity: HistogramGranularity,
+        endingAt: Date = Date(),
+        spanSeconds: TimeInterval
+    ) -> [EventTimeBin] {
+        let stepSec = granularity.stepSeconds
+        let stepInterval = TimeInterval(stepSec)
+        var counts: [Date: Int] = [:]
+        for (date, count) in rows {
+            counts[bucketStart(date, stepSeconds: stepSec), default: 0] += count
+        }
+
+        let startBin = bucketStart(endingAt.addingTimeInterval(-spanSeconds), stepSeconds: stepSec)
+        var t = startBin
+        while t <= endingAt {
+            counts[t, default: 0] = counts[t] ?? 0
+            t = t.addingTimeInterval(stepInterval)
         }
 
         return counts
