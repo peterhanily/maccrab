@@ -3,6 +3,55 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-05-04
+
+Per-tier storage redesign, OpenTelemetry export, dashboard polish.
+Full notes: `RELEASE_NOTES.md`.
+
+### Added
+- Per-tier storage budgets — events / alerts / campaigns with independent
+  retention + size caps. Heavy event volume can no longer evict alert or
+  campaign history.
+- Three new ai_safety rules: SKILL.md poisoning install, Claude Code
+  project-config RCE (CVE-2025-59536), agent dotfile persistence.
+- OpenTelemetry Protocol (OTLP) HTTP/JSON output sink.
+- Activity timeline on Overview tab with severity-stacked bars + campaign
+  markers; SQL-side event histogram with hover tooltips and variable
+  granularity; Security grade hover popover with point breakdown.
+- AI Guard timeline search, CSV/JSON export, scroll container, spawn
+  cluster rollup.
+- Keyset pagination + database-side search across Alerts and Events.
+- `maccrabctl rollup` command + `make breakdown` diagnostic.
+
+### Changed
+- AlertStore moved from `events.db` to its own `alerts.db`. One-shot
+  startup migration; idempotent on re-run.
+- Notification severity default lowered from "medium" to "critical" for
+  fresh installs. Existing preferences preserved.
+- Event hot-tier default 30 minutes (slider 15 min – 24 h, floor 15 min).
+- Alert-evidence capture bounded: ±30 s window, 50 rows per alert,
+  severity-prioritized.
+- MCP tool limits aligned with declared schema (max 100).
+
+### Fixed
+- TLS floor + scheme validation on `StreamOutput` / `S3Output` outputs.
+- SSRF policy applied to Slack / Teams / Discord / PagerDuty webhooks.
+- Database encryption key + secrets store pinned to
+  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
+- `runScript` response action enforces root-owned allowlisted script
+  paths (local privilege-escalation fix).
+- Bulk-suppress crash from `%@` / `%lld` format mismatch in
+  Localizable.strings.
+
+### Removed
+- Two long-deprecated rules: `invisible_unicode_in_source.yml`,
+  `trojan_source_bidi_code.yml`.
+
+### Migration
+- Legacy `retentionDays` / `maxDatabaseSizeMB` config keys still parsed
+  and folded onto the new `storage` block automatically.
+- No reboot or extension re-approval required.
+
 ## [1.7.12] — 2026-04-30
 
 Resolves [#1](https://github.com/peterhanily/maccrab/issues/1) reported by
