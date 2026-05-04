@@ -534,7 +534,7 @@ private struct SpawnClusterRow: View {
         // Range if every pid is contiguous (sorted[i] == sorted[0]+i).
         let isRange = sorted.enumerated().allSatisfy { idx, p in p == sorted[0] + Int32(idx) }
         if isRange && sorted.count > 2 {
-            return "\(basename) · pids \(sorted.first!)–\(sorted.last!)"
+            return "\(basename) · pids \(sorted.first!)–\(sorted.last!)"  // OK: guarded by !pids.isEmpty above
         }
         let preview = sorted.prefix(6).map(String.init).joined(separator: ", ")
         let suffix = sorted.count > 6 ? ", …" : ""
