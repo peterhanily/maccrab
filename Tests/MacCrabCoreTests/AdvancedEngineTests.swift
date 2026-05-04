@@ -691,37 +691,8 @@ struct CrossProcessCorrelatorTests {
     }
 }
 
-// MARK: - Database Encryption Tests
-
-@Suite("Database Encryption")
-struct DatabaseEncryptionTests {
-
-    @Test("Encrypt and decrypt roundtrips correctly")
-    func encryptDecryptRoundtrip() {
-        let encryption = DatabaseEncryption(enabled: true)
-        let original = "sensitive data: password=hunter2"
-        let encrypted = encryption.encrypt(original)
-        let decrypted = encryption.decrypt(encrypted)
-        #expect(decrypted == original, "Decrypted text should match original")
-    }
-
-    @Test("Encrypted string has ENC: prefix")
-    func encryptedHasPrefix() {
-        let encryption = DatabaseEncryption(enabled: true)
-        let encrypted = encryption.encrypt("test data")
-        #expect(encrypted.hasPrefix("ENC:"), "Encrypted output should start with 'ENC:' prefix")
-    }
-
-    @Test("Disabled encryption passes through unchanged")
-    func disabledPassthrough() {
-        let encryption = DatabaseEncryption(enabled: false)
-        let original = "plaintext value"
-        let result = encryption.encrypt(original)
-        #expect(result == original, "With encryption disabled, encrypt should return original string")
-        let decryptResult = encryption.decrypt(original)
-        #expect(decryptResult == original, "With encryption disabled, decrypt should return original string")
-    }
-}
+// Database encryption tests moved to DatabaseEncryptionTests.swift in
+// v1.8.1 alongside the AES-GCM migration.
 
 // MARK: - Rule Generator Tests
 

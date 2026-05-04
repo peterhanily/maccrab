@@ -86,6 +86,13 @@ targets:
         # system-extension.install entitlement so OSSystemExtensionRequest
         # can activate the embedded sysext.
         com.apple.developer.system-extension.install: true
+        # v1.8.1: shared keychain access group with the sysext. Both
+        # bundles signed by the same team (79S425CW99) declare the same
+        # group, so either side can read items the other wrote — fixes
+        # the sysext-can't-read-API-keys-the-app-stored gap that the
+        # external review caught as a HIGH-severity finding.
+        keychain-access-groups:
+          - 79S425CW99.com.maccrab.shared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.maccrab.app
@@ -144,6 +151,11 @@ targets:
         # from an approved .systemextension bundle inside the containing
         # app — which is the whole point of this refactor.
         com.apple.developer.endpoint-security.client: true
+        # v1.8.1: see MacCrabApp.entitlements above for context. Both
+        # bundles must claim the same group with the same team-id
+        # prefix to share keychain items.
+        keychain-access-groups:
+          - 79S425CW99.com.maccrab.shared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.maccrab.agent

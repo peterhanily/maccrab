@@ -18,7 +18,13 @@ struct OverviewDashboard: View {
 
     /// v1.8.0-rc7: drives the hover popover on the Security StatCard
     /// that breaks down how the grade was calculated.
+    /// v1.8.1: dual-hover tracking — popover stays open while the cursor
+    /// is over EITHER the trigger OR the popover content, with a 250ms
+    /// grace period for transit between them. Pre-fix the popover was
+    /// dismissed the instant the cursor left the StatCard, making it
+    /// unreadable for anything beyond the first row.
     @State private var showSecurityBreakdown = false
+    @State private var securityDismissTask: Task<Void, Never>?
 
     // Severity + status colors sourced from MacCrabTheme so the dashboard
     // tracks the site's palette automatically and adapts to the system
@@ -29,6 +35,28 @@ struct OverviewDashboard: View {
 
     private var preventionActive: Bool {
         dnsSinkholeEnabled || networkBlockerEnabled || persistenceGuardEnabled
+    }
+
+    /// v1.8.1: dual-hover handler for the Security StatCard popover. Hover
+    /// on either the trigger card OR the popover content keeps it open;
+    /// a 250ms grace period covers the gap between them so the cursor can
+    /// transit without dismissing.
+    private func handleSecurityHover(hovering: Bool) {
+        if hovering {
+            securityDismissTask?.cancel()
+            securityDismissTask = nil
+            if !appState.securityFactors.isEmpty {
+                showSecurityBreakdown = true
+            }
+        } else {
+            securityDismissTask?.cancel()
+            securityDismissTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if !Task.isCancelled {
+                    showSecurityBreakdown = false
+                }
+            }
+        }
     }
 
     var body: some View {
@@ -258,7 +286,7 @@ struct OverviewDashboard: View {
                         StatCard(title: "Connected", value: appState.isConnected ? "Yes" : "No", icon: appState.isConnected ? "checkmark.circle" : "xmark.circle", color: appState.isConnected ? .green : .red)
                         StatCard(title: "Security", value: appState.securityGrade.isEmpty ? "\u{2014}" : appState.securityGrade, icon: "shield.checkered", color: appState.securityGrade.isEmpty ? .secondary : appState.securityScore >= 80 ? .green : appState.securityScore >= 60 ? .orange : .red)
                             .onHover { hovering in
-                                showSecurityBreakdown = hovering && !appState.securityFactors.isEmpty
+                                handleSecurityHover(hovering: hovering)
                             }
                             .popover(isPresented: $showSecurityBreakdown, arrowEdge: .bottom) {
                                 SecurityScoreBreakdown(
@@ -266,6 +294,9 @@ struct OverviewDashboard: View {
                                     grade: appState.securityGrade,
                                     factors: appState.securityFactors
                                 )
+                                .onHover { hovering in
+                                    handleSecurityHover(hovering: hovering)
+                                }
                             }
                     }
                     .padding(.horizontal)

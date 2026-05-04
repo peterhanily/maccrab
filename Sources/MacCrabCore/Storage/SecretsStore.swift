@@ -19,15 +19,18 @@
 // only processes with a matching code-signing identity + access group can
 // read them.
 //
-// # Current sysext gap
+// # Sysext sharing (v1.8.1)
 //
-// The sysext runs under `sysextd`, which is NOT the user's login session,
-// so it cannot read user-login keychain items by default. To close that
-// gap the sysext and the app need a shared `keychain-access-groups`
-// entitlement — which requires Apple to re-provision the ES profile.
-// That's a follow-up. For now, the sysext continues to read API keys
-// from the legacy env vars / llm_config.json paths the Dashboard
-// writes alongside its Keychain updates.
+// Both the dashboard (.app, user-login session) and the System Extension
+// (sysextd, root) declare the `keychain-access-groups` entitlement with
+// `79S425CW99.com.maccrab.shared`. This lets either bundle read/write
+// the same items via the shared group. Pre-v1.8.1 the sysext fell back
+// to env-vars and llm_config.json — the external review's #2 finding.
+//
+// Migration: on every read, if the with-group lookup misses, retry
+// without-group; on hit, rewrite with-group so the next read finds it
+// directly. After a release cycle the without-group items are gone and
+// the fallback path becomes dead code.
 
 import Foundation
 import Security
@@ -119,13 +122,17 @@ public struct SecretsStore: Sendable {
     /// Namespaced so the db-encryption and future features don't collide.
     public static let service = "com.maccrab.secrets"
 
-    /// Optional `kSecAttrAccessGroup`. Defaults to nil (item is visible
-    /// only to this signing identity). Set to `"79S425CW99.com.maccrab.shared"`
-    /// once the `keychain-access-groups` entitlement is provisioned, to
-    /// let the sysext read items written by the dashboard.
+    /// Default shared keychain access group. v1.8.1: both bundles
+    /// (.app + sysext) declare this group in their entitlements, so
+    /// either side can read items the other wrote.
+    public static let defaultAccessGroup = "79S425CW99.com.maccrab.shared"
+
+    /// `kSecAttrAccessGroup` to claim. Defaults to `defaultAccessGroup`;
+    /// pass `nil` for tests or to read pre-v1.8.1 items written before
+    /// the access group was set.
     public let accessGroup: String?
 
-    public init(accessGroup: String? = nil) {
+    public init(accessGroup: String? = SecretsStore.defaultAccessGroup) {
         self.accessGroup = accessGroup
     }
 
@@ -145,6 +152,12 @@ public struct SecretsStore: Sendable {
     /// Read the stored value for `key`. Returns `nil` if no item exists;
     /// throws for any other error so callers can distinguish "not set"
     /// from "Keychain is sulking".
+    ///
+    /// v1.8.1 migration: if a with-group lookup misses AND we have a
+    /// non-nil access group AND a without-group item exists, return its
+    /// value AND silently rewrite it with-group so the next read finds
+    /// it through the fast path. After one release cycle the without-
+    /// group fallback is empty and this branch becomes dead code.
     public func get(_ key: SecretKey) throws -> String? {
         var q = baseQuery(for: key)
         q[kSecReturnData as String] = true
@@ -160,10 +173,48 @@ public struct SecretsStore: Sendable {
             }
             return str
         case errSecItemNotFound:
+            // v1.8.1 access-group migration: if we're claiming a group,
+            // an item written pre-v1.8.1 (without the group) won't match
+            // the with-group query. Try the without-group lookup and
+            // rewrite if found.
+            if accessGroup != nil {
+                if let migrated = try migrateLegacyItem(for: key) {
+                    return migrated
+                }
+            }
             return nil
         default:
             throw SecretsStoreError.osStatus(status)
         }
+    }
+
+    /// Look up the item WITHOUT the access group. If found, rewrite it
+    /// with the group attached and delete the legacy entry. Returns the
+    /// migrated value, or nil if no legacy item exists.
+    private func migrateLegacyItem(for key: SecretKey) throws -> String? {
+        var legacyQuery: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: key.rawValue,
+            kSecReturnData as String:  true,
+            kSecMatchLimit as String:  kSecMatchLimitOne,
+        ]
+        // No accessGroup attribute — matches pre-v1.8.1 entries.
+        var result: AnyObject?
+        let status = SecItemCopyMatching(legacyQuery as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let str = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        // Rewrite with group attached. set() handles add-or-update.
+        try set(key, value: str)
+        // Delete the without-group version. Best-effort: if this fails
+        // we'll just pick it up on the next read and retry.
+        legacyQuery.removeValue(forKey: kSecReturnData as String)
+        legacyQuery.removeValue(forKey: kSecMatchLimit as String)
+        SecItemDelete(legacyQuery as CFDictionary)
+        return str
     }
 
     /// Write `value` for `key`, overwriting any existing item atomically.

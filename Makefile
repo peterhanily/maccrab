@@ -89,6 +89,14 @@ test-stress:
 breakdown:
 	@sudo ./scripts/event-breakdown.sh
 
+# v1.8.1: regenerate docs/COVERAGE.md from the rule corpus. Run on every
+# rule add/remove/status change. Output is checked-in (so a casual repo
+# browser can read it on github.com without running anything), but it's
+# generated — don't hand-edit.
+coverage-doc:
+	@python3 scripts/generate-coverage-doc.py > docs/COVERAGE.md
+	@echo "✓ docs/COVERAGE.md regenerated ($$(wc -l < docs/COVERAGE.md | tr -d ' ') lines)"
+
 # ─── Install (system-wide, requires sudo) ─────────────────────────────
 
 install: release
