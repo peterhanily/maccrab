@@ -3,6 +3,39 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] — 2026-05-04
+
+External-review-driven trust hardening. AES-GCM authenticated DB
+encryption, shared keychain access group between .app and sysext, four
+new trust/threat-model/response-safety/coverage docs, and website
+auto-fetch of release metadata. Full notes: `RELEASE_NOTES/v1.8.1.md`.
+
+### Added
+- `docs/TRUST.md`, `docs/THREAT_MODEL.md`, `docs/RESPONSE_SAFETY.md`,
+  `docs/MODULES.md`, `docs/COVERAGE.md` — full trust-surface docs.
+- `Sources/MacCrabCore/ModuleStatus.swift` — 41-entry stable /
+  experimental / opt-in catalog.
+- `scripts/build-release.sh` writes `release.json`;
+  `scripts/publish-release-json.sh` ships it to maccrab-site.
+- Site `index.html` auto-fetches `release.json` for version + rules +
+  tests display — eliminates manual version drift.
+- `make coverage-doc` regenerates rule-to-ATT&CK coverage matrix.
+
+### Changed
+- AES-CBC + PKCS7 → AES-GCM (authenticated). New writes use `ENC2:`
+  prefix; legacy `ENC:` decrypt still works.
+- SecretsStore + DatabaseEncryption keychain items now use shared
+  access group `79S425CW99.com.maccrab.shared` so the sysext can read
+  what the dashboard wrote. Self-healing migration on first read.
+- README + maccrab.com lede: "open, local-first detection and
+  investigation for developers, researchers, and Mac security
+  practitioners." No more "EDR replacement" framing.
+
+### Fixed
+- Overview Security grade hover popover dismissed when cursor crossed
+  into the popover. Dual-hover tracking with 250ms grace period now
+  keeps it open while either trigger or content is hovered.
+
 ## [1.8.0] — 2026-05-04
 
 Per-tier storage redesign, OpenTelemetry export, dashboard polish.
