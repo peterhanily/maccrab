@@ -49,12 +49,21 @@ struct DaemonConfig: Codable {
     /// Three independent retention budgets — events (firehose, short),
     /// alerts (signal, long), campaigns (signal, long).
     struct StorageConfig: Codable {
-        /// Hot-tier retention for raw events, in hours. Past this window,
+        /// Hot-tier retention for raw events, in MINUTES. Past this window,
         /// events are rolled into daily aggregates and the rows deleted
-        /// from the events table. Default 1h: events are firehose data
-        /// with near-zero half-life past correlation; alerts and aggregates
-        /// carry forward what's worth keeping.
-        var eventsHotTierHours: Int = 1
+        /// from the events table.
+        ///
+        /// Default 30 minutes: 3× the longest sequence-rule window
+        /// (`ransomware_kill_chain.yml` at 10 minutes) so the SequenceEngine
+        /// has a safe rebuild headroom on rule-reload / daemon-restart.
+        /// Floor enforcement (DaemonSetup) clamps to 15 min — anything
+        /// shorter risks dropping events mid-sequence.
+        ///
+        /// Renamed from `eventsHotTierHours` in v1.8.0 because 1h was
+        /// already too long for most workloads; the granularity needed to
+        /// be sub-hour configurable. Legacy `eventsHotTierHours` keys are
+        /// folded onto this field by `migrateLegacyStorageKeys` (× 60).
+        var eventsHotTierMinutes: Int = 30
 
         /// Hard cap on the events.db file size, in MB. The adaptive rollup
         /// tightens the cutoff (1h → 30m → 15m) if needed to stay under
@@ -327,7 +336,11 @@ struct DaemonConfig: Codable {
         // Merge the storage{} block into the running config. Each key is
         // optional — only the ones the user actually set get applied.
         if let storage = obj["storage"] as? [String: Any] {
-            if let v = storage["eventsHotTierHours"] as? Int { config.storage.eventsHotTierHours = v }
+            if let v = storage["eventsHotTierMinutes"] as? Int { config.storage.eventsHotTierMinutes = v }
+            // Legacy: eventsHotTierHours rolls onto minutes if no new-shape key.
+            if let v = storage["eventsHotTierHours"] as? Int, storage["eventsHotTierMinutes"] == nil {
+                config.storage.eventsHotTierMinutes = v * 60
+            }
             if let v = storage["eventsMaxSizeMB"]    as? Int { config.storage.eventsMaxSizeMB = v }
             if let v = storage["aggregateDays"]      as? Int { config.storage.aggregateDays = v }
             if let v = storage["alertsRetentionDays"]    as? Int { config.storage.alertsRetentionDays = v }
@@ -365,7 +378,8 @@ struct DaemonConfig: Codable {
 
         // Snake-case rewrite for the storage block's own keys.
         let storageSnakeToCamel: [String: String] = [
-            "events_hot_tier_hours":   "eventsHotTierHours",
+            "events_hot_tier_hours":   "eventsHotTierHours",   // legacy alias (handled below)
+            "events_hot_tier_minutes": "eventsHotTierMinutes",
             "events_max_size_mb":      "eventsMaxSizeMB",
             "aggregate_days":          "aggregateDays",
             "alerts_retention_days":   "alertsRetentionDays",
@@ -375,6 +389,14 @@ struct DaemonConfig: Codable {
         ]
         for (snake, camel) in storageSnakeToCamel where storage[snake] != nil && storage[camel] == nil {
             storage[camel] = storage.removeValue(forKey: snake)
+        }
+
+        // v1.8.0-rc4 → rc5: eventsHotTierHours folded onto
+        // eventsHotTierMinutes (× 60). New key wins if both present.
+        if let legacyHours = storage.removeValue(forKey: "eventsHotTierHours") as? Int {
+            if storage["eventsHotTierMinutes"] == nil {
+                storage["eventsHotTierMinutes"] = legacyHours * 60
+            }
         }
 
         if !storage.isEmpty {

@@ -23,7 +23,7 @@ struct DaemonConfigOverridesTests {
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.storage.eventsMaxSizeMB == 200)
-        #expect(cfg.storage.eventsHotTierHours == 1)
+        #expect(cfg.storage.eventsHotTierMinutes == 30)
         #expect(cfg.storage.alertsRetentionDays == 365)
         #expect(cfg.storage.campaignsRetentionDays == 365)
         #expect(cfg.storage.aggregateDays == 90)
@@ -94,7 +94,7 @@ struct DaemonConfigOverridesTests {
         let json = """
         {
           "storage": {
-            "eventsHotTierHours": 6,
+            "eventsHotTierMinutes": 360,
             "eventsMaxSizeMB": 500,
             "aggregateDays": 60,
             "alertsRetentionDays": 180,
@@ -107,7 +107,7 @@ struct DaemonConfigOverridesTests {
         try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
-        #expect(cfg.storage.eventsHotTierHours == 6)
+        #expect(cfg.storage.eventsHotTierMinutes == 360)
         #expect(cfg.storage.eventsMaxSizeMB == 500)
         #expect(cfg.storage.aggregateDays == 60)
         #expect(cfg.storage.alertsRetentionDays == 180)
@@ -126,7 +126,7 @@ struct DaemonConfigOverridesTests {
         let json = """
         {
           "storage": {
-            "events_hot_tier_hours": 2,
+            "events_hot_tier_minutes": 90,
             "alerts_retention_days": 90
           }
         }
@@ -134,8 +134,25 @@ struct DaemonConfigOverridesTests {
         try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
 
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
-        #expect(cfg.storage.eventsHotTierHours == 2)
+        #expect(cfg.storage.eventsHotTierMinutes == 90)
         #expect(cfg.storage.alertsRetentionDays == 90)
+    }
+
+    /// v1.8.0-rc4 → rc5: legacy `eventsHotTierHours` (or its snake_case)
+    /// folds onto `eventsHotTierMinutes` × 60.
+    @Test("legacy eventsHotTierHours folds onto eventsHotTierMinutes")
+    func legacyHotTierHoursFolds() throws {
+        let tmp = NSTemporaryDirectory() + "MacCrabCfgTest-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let json = """
+        { "storage": { "eventsHotTierHours": 2 } }
+        """
+        try json.write(toFile: tmp + "/daemon_config.json", atomically: true, encoding: .utf8)
+
+        let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
+        #expect(cfg.storage.eventsHotTierMinutes == 120)  // 2h × 60
     }
 
     /// New keys in `storage` win over legacy top-level keys when both

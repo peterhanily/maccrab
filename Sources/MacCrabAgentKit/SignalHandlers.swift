@@ -74,7 +74,7 @@ enum SignalHandlers {
                     let freshConfig = DaemonConfig.load(from: state.supportDir)
                     let old = state.storage
                     var newStorage = freshConfig.storage
-                    newStorage.eventsHotTierHours    = max(1, newStorage.eventsHotTierHours)
+                    newStorage.eventsHotTierMinutes  = max(15, newStorage.eventsHotTierMinutes)
                     newStorage.eventsMaxSizeMB       = max(50, newStorage.eventsMaxSizeMB)
                     newStorage.aggregateDays         = max(1, newStorage.aggregateDays)
                     newStorage.alertsRetentionDays   = max(1, newStorage.alertsRetentionDays)
@@ -84,7 +84,7 @@ enum SignalHandlers {
                     state.storage = newStorage
 
                     let eventsCapChanged = old.eventsMaxSizeMB != newStorage.eventsMaxSizeMB
-                    let anyChange = old.eventsHotTierHours    != newStorage.eventsHotTierHours
+                    let anyChange = old.eventsHotTierMinutes  != newStorage.eventsHotTierMinutes
                                  || old.eventsMaxSizeMB       != newStorage.eventsMaxSizeMB
                                  || old.aggregateDays         != newStorage.aggregateDays
                                  || old.alertsRetentionDays   != newStorage.alertsRetentionDays
@@ -92,7 +92,7 @@ enum SignalHandlers {
                                  || old.campaignsRetentionDays != newStorage.campaignsRetentionDays
                                  || old.campaignsMaxSizeMB    != newStorage.campaignsMaxSizeMB
                     if anyChange {
-                        print("[SIGHUP] Storage config reloaded: events=\(newStorage.eventsHotTierHours)h/\(newStorage.eventsMaxSizeMB)MB, alerts=\(newStorage.alertsRetentionDays)d/\(newStorage.alertsMaxSizeMB)MB, campaigns=\(newStorage.campaignsRetentionDays)d/\(newStorage.campaignsMaxSizeMB)MB, aggregates=\(newStorage.aggregateDays)d")
+                        print("[SIGHUP] Storage config reloaded: events=\(newStorage.eventsHotTierMinutes)m/\(newStorage.eventsMaxSizeMB)MB, alerts=\(newStorage.alertsRetentionDays)d/\(newStorage.alertsMaxSizeMB)MB, campaigns=\(newStorage.campaignsRetentionDays)d/\(newStorage.campaignsMaxSizeMB)MB, aggregates=\(newStorage.aggregateDays)d")
                         if eventsCapChanged {
                             // Lowered events cap: kick an immediate sweep so the
                             // operator sees the DB shrink in seconds instead of

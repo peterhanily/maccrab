@@ -385,8 +385,8 @@ enum DaemonTimers {
         let dbFilePath = state.supportDir + "/events.db"
         let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
         let startupCapMB = max(100, state.storage.eventsMaxSizeMB)
-        let startupHotHours = max(1, state.storage.eventsHotTierHours)
-        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotHours)h adaptive, cap=\(startupCapMB) MB, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
+        let startupHotMinutes = max(15, state.storage.eventsHotTierMinutes)
+        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, cap=\(startupCapMB) MB, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
 
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         sizeCapTimer.schedule(deadline: .now() + 900, repeating: 6 * 3600)
@@ -394,14 +394,14 @@ enum DaemonTimers {
             Task {
                 let capMB = max(100, state.storage.eventsMaxSizeMB)
                 let targetMB = Int(Double(capMB) * 0.8)
-                let hotHours = max(1, state.storage.eventsHotTierHours)
+                let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
                 let aggregateDays = max(1, state.storage.aggregateDays)
                 await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
                     targetSizeMB: targetMB,
                     capSizeMB: capMB,
-                    hotTierHours: hotHours,
+                    hotTierMinutes: hotMinutes,
                     aggregateDays: aggregateDays
                 )
             }
@@ -796,11 +796,10 @@ func measureDatabaseFootprintMB(dbPath: String) -> Int {
 /// retention (this function, Layer 2) → defense-in-depth size cap (also
 /// here, Layer 3).
 ///
-/// Tries the configured `hotTierHours` cutoff first. If the DB is still
-/// over `targetSizeMB` afterwards (heavy-event machine that won't fit a
-/// hotTier-h hot tier), tightens the cutoff progressively: hotTier, /2,
-/// /4, /8 (rounded up to whole hours). Stops when DB fits or all cutoffs
-/// are exhausted.
+/// Tries the configured `hotTierMinutes` cutoff first. If the DB is still
+/// over `targetSizeMB` afterwards, tightens the cutoff progressively
+/// (hotTier, /2, /4) — but never below 15 minutes (the SequenceEngine
+/// rebuild floor; the longest sequence rule has a 10-minute window).
 ///
 /// If after the tightest cutoff the DB STILL exceeds `capSizeMB`, Layer 3
 /// kicks in: pruneOldest() to bring file size under cap by sheer row
@@ -813,48 +812,46 @@ func runAdaptiveRollupSweep(
     dbPath: String,
     targetSizeMB: Int,
     capSizeMB: Int,
-    hotTierHours: Int = 1,
+    hotTierMinutes: Int = 30,
     aggregateDays: Int = 90
 ) async {
     // Build a progressively-tightening cutoff ladder from the configured
-    // hot-tier window. Default 1h yields [1, 1, 1, 1] (no tightening
-    // possible; Layer 3 takes over). 24h would yield [24, 12, 6, 3].
-    // Filter dupes so we don't run the same cutoff repeatedly.
-    let raw = [hotTierHours, hotTierHours / 2, hotTierHours / 4, hotTierHours / 8]
-    let cutoffsHours: [Double] = Array(NSOrderedSet(array: raw.map { max(1, $0) }))
+    // hot-tier window. Floors at 15 min (sequence-rebuild safety).
+    let raw = [hotTierMinutes, hotTierMinutes / 2, hotTierMinutes / 4]
+    let cutoffsMinutes: [Double] = Array(NSOrderedSet(array: raw.map { max(15, $0) }))
         .compactMap { ($0 as? Int).map(Double.init) }
     let startSizeMB = measureDatabaseFootprintMB(dbPath: dbPath)
     var totalPruned = 0
 
-    for hours in cutoffsHours {
+    for minutes in cutoffsMinutes {
         let beforeMB = measureDatabaseFootprintMB(dbPath: dbPath)
-        if beforeMB <= targetSizeMB && hours != cutoffsHours.first {
+        if beforeMB <= targetSizeMB && minutes != cutoffsMinutes.first {
             // Don't tighten further than needed. Only the first cutoff
             // (the configured hot tier) always runs; tighter cutoffs only
             // kick in if the DB is still over target.
             break
         }
         do {
-            let cutoff = Date().addingTimeInterval(-hours * 3600)
+            let cutoff = Date().addingTimeInterval(-minutes * 60)
             let pruned = try await eventStore.rollUpAndPrune(
                 olderThan: cutoff,
                 aggregateRetentionDays: aggregateDays
             )
             totalPruned += pruned
             if pruned > 0 {
-                logger.notice("Adaptive rollup: cutoff \(Int(hours))h pruned \(pruned) events")
+                logger.notice("Adaptive rollup: cutoff \(Int(minutes))m pruned \(pruned) events")
             }
-            if hours == cutoffsHours.first {
+            if minutes == cutoffsMinutes.first {
                 continue   // always do the configured pass; the loop's guard checks AFTER
             }
             // Re-check size after each tighter pass.
             let afterMB = measureDatabaseFootprintMB(dbPath: dbPath)
             if afterMB <= targetSizeMB {
-                logger.notice("Adaptive rollup: DB \(beforeMB) MB → \(afterMB) MB at \(Int(hours))h cutoff (target \(targetSizeMB) MB) — done.")
+                logger.notice("Adaptive rollup: DB \(beforeMB) MB → \(afterMB) MB at \(Int(minutes))m cutoff (target \(targetSizeMB) MB) — done.")
                 break
             }
         } catch {
-            logger.error("Adaptive rollup at cutoff \(Int(hours))h failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("Adaptive rollup at cutoff \(Int(minutes))m failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

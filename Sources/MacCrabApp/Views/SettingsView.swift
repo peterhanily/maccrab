@@ -14,7 +14,10 @@ import os.log
 struct SettingsView: View {
     @ObservedObject var appState: AppState
     @AppStorage("alertNotifications") var alertNotifications: Bool = true
-    @AppStorage("minAlertSeverity") var minAlertSeverity: String = "medium"
+    // v1.8.0: default raised to "critical" so a fresh install only
+    // notifies on the most serious detections. Existing installs retain
+    // whatever value is already in UserDefaults.
+    @AppStorage("minAlertSeverity") var minAlertSeverity: String = "critical"
     @AppStorage("pollIntervalSeconds") var pollIntervalSeconds: Int = 5
     // Launch at login is backed by macOS's ServiceManagement framework —
     // the @AppStorage value mirrors the registration state, so we can
@@ -34,7 +37,7 @@ struct SettingsView: View {
     // (maxDatabaseSizeMB, retentionDays). Defaults match
     // DaemonConfig.StorageConfig in MacCrabAgentKit. Legacy keys are
     // migrated onto these on first appear via `migrateLegacyStorageKeys`.
-    @AppStorage("storage.eventsHotTierHours")    private var eventsHotTierHours: Int = 1
+    @AppStorage("storage.eventsHotTierMinutes") private var eventsHotTierMinutes: Int = 30
     @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 200
     @AppStorage("storage.alertsRetentionDays")   private var alertsRetentionDays: Int = 365
     @AppStorage("storage.alertsMaxSizeMB")       private var alertsMaxSizeMB: Int = 100
@@ -208,15 +211,16 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
 
                         // Event firehose — short window, small budget.
-                        // The 1h default reflects that events are firehose
-                        // data with near-zero half-life past correlation.
+                        // 30 min default = 3× the longest sequence-rule
+                        // window (10 min). Floor enforced at 15 min in
+                        // the daemon — slider can't go below that.
                         storageRow(
                             label: String(localized: "settings.events.label", defaultValue: "Event firehose"),
-                            help: String(localized: "settings.events.help", defaultValue: "Last hour of raw activity for live rules. Aggregates carry forward what's worth keeping."),
-                            stepperValue: "\(eventsHotTierHours)h",
-                            stepperBinding: $eventsHotTierHours,
-                            stepperRange: 1...24,
-                            stepperStep: 1,
+                            help: String(localized: "settings.events.help", defaultValue: "Recent raw activity for live rules. Floor 15 min — anything shorter risks dropping events mid-sequence."),
+                            stepperValue: eventsTierLabel(eventsHotTierMinutes),
+                            stepperBinding: $eventsHotTierMinutes,
+                            stepperRange: 15...1440,
+                            stepperStep: 15,
                             sizeBinding: $eventsMaxSizeMB,
                             sizeRange: 100...2000,
                             sizeStep: 100,
@@ -264,7 +268,7 @@ struct SettingsView: View {
                         )
                     }
                     .padding(8)
-                    .onChange(of: eventsHotTierHours)    { _ in syncStorageOverrides() }
+                    .onChange(of: eventsHotTierMinutes) { _ in syncStorageOverrides() }
                     .onChange(of: eventsMaxSizeMB)       { _ in syncStorageOverrides() }
                     .onChange(of: alertsRetentionDays)   { _ in syncStorageOverrides() }
                     .onChange(of: alertsMaxSizeMB)       { _ in syncStorageOverrides() }
@@ -1069,7 +1073,7 @@ struct SettingsView: View {
 
         let payload: [String: Any] = [
             "storage": [
-                "eventsHotTierHours":    eventsHotTierHours,
+                "eventsHotTierMinutes":  eventsHotTierMinutes,
                 "eventsMaxSizeMB":       eventsMaxSizeMB,
                 "alertsRetentionDays":   alertsRetentionDays,
                 "alertsMaxSizeMB":       alertsMaxSizeMB,
@@ -1322,26 +1326,41 @@ struct SettingsView: View {
     private func migrateLegacyStorageKeys() {
         let defaults = UserDefaults.standard
 
-        // If a legacy retentionDays exists AND the new alerts/campaigns
-        // keys are still at default (365), apply the legacy value.
         if let legacyRetention = defaults.object(forKey: "retentionDays") as? Int {
             if alertsRetentionDays == 365 && campaignsRetentionDays == 365 {
                 alertsRetentionDays    = max(30, min(legacyRetention, 1095))
                 campaignsRetentionDays = max(30, min(legacyRetention, 1095))
             }
-            // Don't remove the legacy key — keep it for safety. Nothing reads it.
         }
 
-        // Same shape for the legacy size cap.
         if let legacyCap = defaults.object(forKey: "maxDatabaseSizeMB") as? Int {
             if eventsMaxSizeMB == 200 {
                 eventsMaxSizeMB = max(100, min(legacyCap, 2000))
             }
         }
 
+        // v1.8.0-rc4 → rc5: eventsHotTierHours folded onto
+        // eventsHotTierMinutes (× 60). Apply once on first appear so a
+        // user who set the slider during rc-testing doesn't lose their
+        // choice.
+        if let legacyHours = defaults.object(forKey: "storage.eventsHotTierHours") as? Int {
+            if eventsHotTierMinutes == 30 {
+                eventsHotTierMinutes = max(15, min(legacyHours * 60, 1440))
+            }
+        }
+
         // Push the (possibly migrated) values to user_overrides.json so
         // the daemon's overlay reader sees them on the next SIGHUP / boot.
         syncStorageOverrides()
+    }
+
+    /// Format the events hot-tier as "30m" / "2h" / "24h" depending on
+    /// magnitude. Pure UX cosmetic — the underlying value is always
+    /// minutes.
+    private func eventsTierLabel(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes)m" }
+        if minutes % 60 == 0 { return "\(minutes / 60)h" }
+        return "\(minutes / 60)h \(minutes % 60)m"
     }
 
     private var databasePath: String {

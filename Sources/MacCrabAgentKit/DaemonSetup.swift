@@ -1197,9 +1197,14 @@ enum DaemonSetup {
         // Apply v1.8.0 per-tier storage budgets. DaemonTimers reads each
         // knob live so a SIGHUP-driven config reload is honored on the
         // next sweep without a daemon restart. Floors clamp hostile
-        // values: 1h floor on retention, 50 MB floor on caps.
+        // values:
+        //   - eventsHotTierMinutes: 15 min minimum. The longest sequence
+        //     rule (ransomware_kill_chain.yml) needs a 10-min window;
+        //     anything shorter risks dropping events mid-sequence.
+        //   - retention days: 1 day minimum
+        //   - size caps: 50 MB minimum
         var storage = config.storage
-        storage.eventsHotTierHours    = max(1, storage.eventsHotTierHours)
+        storage.eventsHotTierMinutes  = max(15, storage.eventsHotTierMinutes)
         storage.eventsMaxSizeMB       = max(50, storage.eventsMaxSizeMB)
         storage.aggregateDays         = max(1, storage.aggregateDays)
         storage.alertsRetentionDays   = max(1, storage.alertsRetentionDays)
