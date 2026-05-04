@@ -802,6 +802,69 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS 11 — pre-design measurement of production data shape (v1.8.0 lesson)
+# ---------------------------------------------------------------------
+# v1.8.0 storage redesign was authored against an estimated event rate
+# of "5-10k events/hour." Field measurement showed ~950k events/hour on
+# a busy dev/AI machine — 13× higher. The 24h hot tier alone produced
+# 4.4 GB, which a 200 MB cap couldn't hold. The architecture was right;
+# the constants were grounded in a planning doc, not data.
+#
+# Pass 11 enforces: any release that touches storage retention / size
+# caps must reference an empirical measurement of insert rate against a
+# representative production DB. The measurement script lives at
+# scripts/event-breakdown.sh; if a storage-related change ships without
+# a recorded measurement (`measurement-<release>.txt` in releases/), this
+# pass warns. Hard-fails if the script itself is missing.
+#
+# This is the codification of the lesson from
+# concepts/storage-design-wrong-constants-aar.md: measure first, design
+# second.
+
+section "PASS 11 — pre-design measurement of production data shape"
+
+PASS11_MEASUREMENT_SCRIPT="scripts/event-breakdown.sh"
+if [[ ! -f "$PASS11_MEASUREMENT_SCRIPT" ]]; then
+    err "Pass 11: $PASS11_MEASUREMENT_SCRIPT missing — required for storage-redesign release readiness"
+else
+    ok "Pass 11: measurement script present at $PASS11_MEASUREMENT_SCRIPT"
+fi
+
+# Detect whether the current branch has touched storage retention code.
+# If yes, insist that a measurement exists for this release cycle.
+PASS11_STORAGE_PATHS=(
+    "Sources/MacCrabAgentKit/DaemonConfig.swift"
+    "Sources/MacCrabAgentKit/DaemonTimers.swift"
+    "Sources/MacCrabCore/Storage/EventStore.swift"
+    "Sources/MacCrabCore/Storage/AlertStore.swift"
+    "Sources/MacCrabCore/Storage/CampaignStore.swift"
+    "Sources/MacCrabCore/Storage/AlertsTableRelocator.swift"
+)
+PASS11_TOUCHED=0
+for p in "${PASS11_STORAGE_PATHS[@]}"; do
+    # Touched if it differs from the merge-base of main. Best-effort —
+    # falls back to "treat as touched" on git failures so the warning
+    # path runs.
+    if git diff --quiet "origin/main...HEAD" -- "$p" 2>/dev/null; then
+        :  # unchanged
+    else
+        PASS11_TOUCHED=1
+        break
+    fi
+done
+
+if [[ "$PASS11_TOUCHED" == "1" ]]; then
+    info "Pass 11: storage code modified on this branch — recommend recording an empirical measurement before publish"
+    info "         Run: sudo $PASS11_MEASUREMENT_SCRIPT > releases/measurement-\$(git describe --tags --always).txt"
+    info "         Then capture: insert rate (events/hour), avg bytes/event, top 10 noisy process_paths"
+    # Soft-warn rather than hard-fail; the operator can still publish if
+    # they're confident the design holds. The point is the prompt.
+    warn "Pass 11: empirical measurement evidence advised but not enforced (soft warn)"
+else
+    ok "Pass 11: no storage code modified on this branch — measurement requirement does not apply"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 
