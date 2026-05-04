@@ -809,6 +809,11 @@ final class AppState: ObservableObject {
     /// Computed by SecurityScorer on first load and refreshed every 5 minutes.
     @Published var securityScore: Int = 0
     @Published var securityGrade: String = ""
+    /// v1.8.0-rc7: per-factor breakdown so the Overview tab can explain
+    /// the grade on hover (which checks earned how many points, what's
+    /// dragging the score down). Populated alongside score / grade in
+    /// the same SecurityScorer.calculate() pass.
+    @Published var securityFactors: [SecurityScorer.Factor] = []
 
     // MARK: Private
 
@@ -1883,6 +1888,7 @@ final class AppState: ObservableObject {
             let result = await SecurityScorer().calculate()
             securityScore = result.totalScore
             securityGrade = result.grade
+            securityFactors = result.factors
             lastSecurityScoreUpdate = now
         }
     }

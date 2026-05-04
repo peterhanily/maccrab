@@ -6,6 +6,7 @@
 // recent alerts, and system health at a glance.
 
 import SwiftUI
+import MacCrabCore
 
 struct OverviewDashboard: View {
     @ObservedObject var appState: AppState
@@ -14,6 +15,10 @@ struct OverviewDashboard: View {
     @AppStorage("prevention.dnsSinkhole") private var dnsSinkholeEnabled = false
     @AppStorage("prevention.networkBlocker") private var networkBlockerEnabled = false
     @AppStorage("prevention.persistenceGuard") private var persistenceGuardEnabled = false
+
+    /// v1.8.0-rc7: drives the hover popover on the Security StatCard
+    /// that breaks down how the grade was calculated.
+    @State private var showSecurityBreakdown = false
 
     // Severity + status colors sourced from MacCrabTheme so the dashboard
     // tracks the site's palette automatically and adapts to the system
@@ -252,6 +257,16 @@ struct OverviewDashboard: View {
                         StatCard(title: "Events/sec", value: "\(appState.eventsPerSecond)", icon: "waveform.path.ecg", color: .green)
                         StatCard(title: "Connected", value: appState.isConnected ? "Yes" : "No", icon: appState.isConnected ? "checkmark.circle" : "xmark.circle", color: appState.isConnected ? .green : .red)
                         StatCard(title: "Security", value: appState.securityGrade.isEmpty ? "\u{2014}" : appState.securityGrade, icon: "shield.checkered", color: appState.securityGrade.isEmpty ? .secondary : appState.securityScore >= 80 ? .green : appState.securityScore >= 60 ? .orange : .red)
+                            .onHover { hovering in
+                                showSecurityBreakdown = hovering && !appState.securityFactors.isEmpty
+                            }
+                            .popover(isPresented: $showSecurityBreakdown, arrowEdge: .bottom) {
+                                SecurityScoreBreakdown(
+                                    score: appState.securityScore,
+                                    grade: appState.securityGrade,
+                                    factors: appState.securityFactors
+                                )
+                            }
                     }
                     .padding(.horizontal)
 
@@ -443,6 +458,148 @@ struct StatCard: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title): \(value)")
+    }
+}
+
+// MARK: - Security Score Breakdown (v1.8.0-rc7)
+
+/// Hover popover that explains how the Overview Security grade was
+/// calculated. Shows each scoring factor grouped by category with
+/// points-earned-of-max, the pass/warn/fail status, and the detail line
+/// from SecurityScorer. Renders in a compact ~400×500pt popover.
+struct SecurityScoreBreakdown: View {
+    let score: Int
+    let grade: String
+    let factors: [SecurityScorer.Factor]
+
+    private var totalEarned: Int { factors.reduce(0) { $0 + $1.score } }
+    private var totalMax: Int { factors.reduce(0) { $0 + $1.maxScore } }
+
+    /// Group factors by their category field (system / runtime / hygiene).
+    /// Order is preserved by enumerating distinct categories in their
+    /// first-seen order — matches the SecurityScorer.calculate() pass order.
+    private var categories: [(name: String, earned: Int, max: Int, items: [SecurityScorer.Factor])] {
+        var seen: [String] = []
+        var byCategory: [String: [SecurityScorer.Factor]] = [:]
+        for f in factors {
+            if byCategory[f.category] == nil { seen.append(f.category) }
+            byCategory[f.category, default: []].append(f)
+        }
+        return seen.map { cat in
+            let items = byCategory[cat] ?? []
+            return (
+                name: cat.capitalized,
+                earned: items.reduce(0) { $0 + $1.score },
+                max: items.reduce(0) { $0 + $1.maxScore },
+                items: items
+            )
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Header — total score + grade
+            HStack(alignment: .firstTextBaseline) {
+                Text("Security Score")
+                    .font(.headline)
+                Spacer()
+                Text("\(totalEarned)/\(totalMax) · \(grade)")
+                    .font(.system(.headline, design: .rounded, weight: .bold))
+                    .foregroundColor(scoreColor)
+            }
+
+            Divider()
+
+            // One section per category
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(categories, id: \.name) { cat in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(cat.name)
+                                    .font(.subheadline.bold())
+                                Spacer()
+                                Text("\(cat.earned)/\(cat.max)")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            ForEach(cat.items, id: \.name) { factor in
+                                factorRow(factor)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Text("Updates every 5 minutes. Higher is better.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(14)
+        .frame(width: 380, height: 460)
+    }
+
+    @ViewBuilder
+    private func factorRow(_ factor: SecurityScorer.Factor) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: statusIcon(factor.status))
+                .foregroundColor(statusColor(factor.status))
+                .frame(width: 14)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(factor.name).font(.caption)
+                Text(factor.detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 4)
+            // Show as "+N/M" for earned points, "−(M−N)/M" for deducted.
+            Text(pointsLabel(factor))
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(pointsColor(factor))
+        }
+    }
+
+    private var scoreColor: Color {
+        if totalMax == 0 { return .secondary }
+        let pct = Double(totalEarned) / Double(totalMax)
+        if pct >= 0.8 { return .green }
+        if pct >= 0.6 { return .orange }
+        return .red
+    }
+
+    private func statusIcon(_ status: String) -> String {
+        switch status {
+        case "pass":  return "checkmark.circle.fill"
+        case "warn":  return "exclamationmark.triangle.fill"
+        case "fail":  return "xmark.octagon.fill"
+        default:      return "circle"
+        }
+    }
+
+    private func statusColor(_ status: String) -> Color {
+        switch status {
+        case "pass":  return .green
+        case "warn":  return .orange
+        case "fail":  return .red
+        default:      return .secondary
+        }
+    }
+
+    /// "+8/8" when full, "+3/8" when partial, "0/8" when nothing earned.
+    private func pointsLabel(_ f: SecurityScorer.Factor) -> String {
+        if f.score == f.maxScore { return "+\(f.score)/\(f.maxScore)" }
+        if f.score == 0 { return "0/\(f.maxScore)" }
+        return "+\(f.score)/\(f.maxScore)"
+    }
+
+    private func pointsColor(_ f: SecurityScorer.Factor) -> Color {
+        if f.score == f.maxScore { return .green }
+        if f.score == 0 { return .red }
+        return .orange
     }
 }
 
