@@ -242,6 +242,13 @@ public actor CrossProcessCorrelator {
         // is the right answer.
         "/private/tmp/claude-",
         "/private/var/folders/",                    // macOS per-user TemporaryItems / DerivedData
+        // v1.8.0 polish: SwiftPM build output. `swift build` + the
+        // bundle-app.sh chain (codesign, cp, install_name_tool, rm
+        // against .build/<triple>/{debug,release}/<App>.app/Contents/MacOS/<bin>)
+        // looks indistinguishable from a 4-process file-tampering chain
+        // to the correlator. If the file path contains `/.build/`, it's
+        // an SPM build artifact — the cross-process signal is noise.
+        "/.build/",
     ]
 
     /// Network destinations that are never interesting.

@@ -347,6 +347,39 @@ struct OverviewDashboard: View {
                     }
                     .padding(.horizontal)
 
+                    // === Activity Timeline (24h) ===
+                    // Severity-stacked alert volume by hour with campaign-
+                    // fire markers overlaid. Adds the time dimension that
+                    // the StatCards above collapse — same numbers, but
+                    // bucketed so spikes stand out.
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Activity (last 24 hours)")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                Spacer()
+                                if !timelineCampaignHours.isEmpty {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "flag.fill")
+                                            .font(.caption2)
+                                            .foregroundColor(.purple)
+                                        Text("\(timelineCampaignHours.count) campaign hour\(timelineCampaignHours.count == 1 ? "" : "s")")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            AlertTimelineHistogram(
+                                bins: timelineBins,
+                                campaignHours: timelineCampaignHours,
+                                granularity: .hour
+                            )
+                        }
+                        .padding(4)
+                    }
+                    .padding(.horizontal)
+
                     Spacer()
                 }
                 .padding(.top)
@@ -371,6 +404,16 @@ struct OverviewDashboard: View {
     }
     private var lowCount: Int {
         appState.dashboardAlerts.filter { $0.severity == .low && !isEffectivelySuppressed($0) }.count
+    }
+
+    // MARK: - Activity timeline derived state
+
+    private var timelineBins: [SeverityTimelineBin] {
+        AlertTimelineHistogram.hourlyBins(from: appState.dashboardAlerts)
+    }
+
+    private var timelineCampaignHours: [Date] {
+        AlertTimelineHistogram.campaignHours(from: appState.dashboardAlerts)
     }
 }
 

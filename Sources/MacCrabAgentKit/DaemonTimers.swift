@@ -784,10 +784,47 @@ func runAdaptiveRollupSweep(
         }
     }
 
+    // Single VACUUM at the end of the sweep to actually reclaim the
+    // pages freed by the prune steps. Without this, DELETE marks pages
+    // free for future reuse but the file size on disk stays at the
+    // high-water mark — so the adaptive logic above sees the file as
+    // still over target on every subsequent tick and keeps tightening
+    // pointlessly. Matches the v1.6.13 legacy design ("prune everything
+    // first, then VACUUM once at the end").
+    //
+    // Skipped if no rows were pruned (no freed pages to reclaim) or if
+    // free disk is too tight (VACUUM rebuilds into a parallel temp
+    // file ≈ DB size; needs at least 1.3× headroom). On skip we also
+    // run a wal_checkpoint(TRUNCATE) so any drained pages migrate from
+    // the WAL into the main file — a cheap partial cleanup.
+    if totalPruned > 0 {
+        let dbSizeBeforeVacuum = measureDatabaseFootprintMB(dbPath: dbPath)
+        let freeMB = freeDiskMB(forPath: dbPath)
+        if freeMB >= Int(Double(dbSizeBeforeVacuum) * 1.3) {
+            do {
+                try await eventStore.vacuum()
+            } catch {
+                logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
+            }
+        } else {
+            logger.warning("Tier-rollup: skipping VACUUM (free disk \(freeMB) MB < 1.3× DB size \(dbSizeBeforeVacuum) MB) — running checkpoint(TRUNCATE) instead")
+            await eventStore.walCheckpoint()
+        }
+    }
+
     let endMB = measureDatabaseFootprintMB(dbPath: dbPath)
     if startSizeMB != endMB || totalPruned > 0 {
         logger.notice("Tier-rollup sweep complete: DB \(startSizeMB) MB → \(endMB) MB, pruned \(totalPruned) events total.")
     }
+}
+
+/// Free disk space at the volume containing `path`, in megabytes.
+/// Returns 0 on stat failure (caller treats 0 as "not enough headroom").
+private func freeDiskMB(forPath path: String) -> Int {
+    var stat = statvfs()
+    guard statvfs((path as NSString).utf8String, &stat) == 0 else { return 0 }
+    let bytes = UInt64(stat.f_bavail) * UInt64(stat.f_frsize)
+    return Int(bytes / 1_000_000)
 }
 
 // MARK: - On-demand sweep entry point (v1.6.14)

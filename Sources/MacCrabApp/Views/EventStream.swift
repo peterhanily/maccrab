@@ -295,11 +295,29 @@ struct EventStream: View {
             // Toggled by the toolbar chart icon; off by default so existing
             // users see today's familiar layout until they opt in.
             if showHistogram {
+                // v1.8.0 polish: granularity tracks the selected time
+                // range so the chart never collapses to a single bin.
+                //   Last Hour  → 60 minute-bins
+                //   Last 24h   → 24 hour-bins
+                //   Last 7d    → 7 day-bins (aggregate mode handles the data side)
+                //   All Time   → days when in aggregate mode, hours otherwise
+                let now = Date()
+                let span = timeRange.seconds ?? 86400
+                let hotGranularity: HistogramGranularity = {
+                    switch timeRange {
+                    case .lastHour: return .minute
+                    case .last24h:  return .hour
+                    case .last7d:   return .day
+                    case .all:      return .hour
+                    }
+                }()
+                let dailySpanDays = max(1, Int((timeRange.seconds ?? (7 * 86400)) / 86400))
                 EventTimeHistogram(
                     bins: isAggregateMode
-                        ? EventTimeHistogram.dailyBins(from: aggregateRows)
-                        : EventTimeHistogram.hourlyBins(from: filteredCache),
-                    unitLabel: isAggregateMode ? "Day" : "Hour"
+                        ? EventTimeHistogram.dailyBins(from: aggregateRows, endingAt: now, spanDays: dailySpanDays)
+                        : EventTimeHistogram.bins(from: filteredCache, granularity: hotGranularity, endingAt: now, spanSeconds: span),
+                    unitLabel: isAggregateMode ? "Day" : (hotGranularity == .minute ? "Minute" : (hotGranularity == .day ? "Day" : "Hour")),
+                    granularity: isAggregateMode ? .day : hotGranularity
                 )
                 Divider()
             }

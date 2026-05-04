@@ -23,15 +23,30 @@ struct EventTimeBin: Identifiable {
     let count: Int
 }
 
+/// Granularity hint for axis formatting + bin width.
+///   - minute: HH:mm ticks, 1-minute bin width (Last Hour view)
+///   - hour:   HH:mm ticks, 1-hour bin width (Last 24h view)
+///   - day:    MMM-d ticks, 1-day bin width (Last 7d / aggregate view)
+enum HistogramGranularity {
+    case minute, hour, day
+}
+
 /// Hourly histogram of event volume across the currently displayed range.
 /// Caller computes the bins; this view only renders. Empty state is a
 /// 32-pt-tall transparent placeholder so removing it doesn't shift the
 /// table layout when the user toggles the histogram off.
 struct EventTimeHistogram: View {
     let bins: [EventTimeBin]
-    /// "Hour" or "Day" — used in the axis label so a 7-day-range chart
-    /// labels the X axis "Day" instead of "Hour".
+    /// "Hour" or "Day" — used in the chart's accessibility label.
     let unitLabel: String
+    /// Granularity controls X-axis formatting (HH:mm vs MMM-d).
+    let granularity: HistogramGranularity
+
+    init(bins: [EventTimeBin], unitLabel: String, granularity: HistogramGranularity = .hour) {
+        self.bins = bins
+        self.unitLabel = unitLabel
+        self.granularity = granularity
+    }
 
     var body: some View {
         if bins.isEmpty {
@@ -47,7 +62,25 @@ struct EventTimeHistogram: View {
             .chartYAxis {
                 AxisMarks(position: .leading, values: .automatic(desiredCount: 3))
             }
-            .frame(height: 90)
+            // Explicit X-axis: without this, a single populated bin
+            // collapses the axis to one tick. Backfilled bins (see
+            // hourlyBins) ensure the domain spans the full range; this
+            // formats the ticks across that domain.
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 6)) { value in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel {
+                        if let d = value.as(Date.self) {
+                            switch granularity {
+                            case .minute, .hour: Text(d, format: .dateTime.hour().minute())
+                            case .day:           Text(d, format: .dateTime.month(.abbreviated).day())
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(height: 130)
             .padding(.horizontal)
             .padding(.vertical, 4)
         }
@@ -57,31 +90,72 @@ struct EventTimeHistogram: View {
 // MARK: - Bin computation helpers
 
 extension EventTimeHistogram {
-    /// Hourly bins from a loaded event list (hot-tier path). Empty input
-    /// returns empty bins; SwiftUI Charts handles the empty-domain case.
-    static func hourlyBins(from events: [EventViewModel]) -> [EventTimeBin] {
-        guard !events.isEmpty else { return [] }
+    /// Bin width + truncation parameters for a given granularity. Kept
+    /// as one place so the truncation idiom (date-from-components) and
+    /// the step size stay in sync.
+    private static func binParams(_ g: HistogramGranularity)
+        -> (components: Set<Calendar.Component>, step: TimeInterval) {
+        switch g {
+        case .minute: return ([.year, .month, .day, .hour, .minute], 60)
+        case .hour:   return ([.year, .month, .day, .hour], 3600)
+        case .day:    return ([.year, .month, .day], 86400)
+        }
+    }
+
+    /// Bin events at the requested granularity over the given window.
+    /// Backfills 0-count bins so the X-axis always renders multiple
+    /// positions, even with a short / sparse data window.
+    static func bins(
+        from events: [EventViewModel],
+        granularity: HistogramGranularity,
+        endingAt: Date = Date(),
+        spanSeconds: TimeInterval
+    ) -> [EventTimeBin] {
         let cal = Calendar(identifier: .gregorian)
+        let (comps, step) = binParams(granularity)
         var counts: [Date: Int] = [:]
+
+        // Count actual events.
         for event in events {
-            // Truncate to the hour so all events in the same hour land in
-            // the same bin. components+date round-trip is the canonical
-            // "floor to hour" idiom.
-            let comps = cal.dateComponents([.year, .month, .day, .hour], from: event.timestamp)
-            if let bucket = cal.date(from: comps) {
+            let bucketComps = cal.dateComponents(comps, from: event.timestamp)
+            if let bucket = cal.date(from: bucketComps) {
                 counts[bucket, default: 0] += 1
             }
         }
+
+        // Backfill the full window. `default: 0` never overwrites a
+        // populated key.
+        let startComps = cal.dateComponents(comps, from: endingAt.addingTimeInterval(-spanSeconds))
+        let startBin = cal.date(from: startComps) ?? endingAt.addingTimeInterval(-spanSeconds)
+        var t = startBin
+        while t <= endingAt {
+            counts[t, default: 0] = counts[t] ?? 0
+            t = t.addingTimeInterval(step)
+        }
+
         return counts
             .map { EventTimeBin(id: $0.key, date: $0.key, count: $0.value) }
             .sorted { $0.date < $1.date }
     }
 
-    /// Daily bins from aggregate rows (warm-tier path). Day strings are
-    /// already grouped per-day; we just sum across categories within each
-    /// day so the chart shows total volume.
-    static func dailyBins(from aggregates: [EventStore.AggregateRow]) -> [EventTimeBin] {
-        guard !aggregates.isEmpty else { return [] }
+    /// Back-compat shim. Existing callers can keep calling `hourlyBins`;
+    /// new callers should prefer `bins(from:granularity:...)`.
+    static func hourlyBins(
+        from events: [EventViewModel],
+        endingAt: Date = Date(),
+        spanSeconds: TimeInterval? = nil
+    ) -> [EventTimeBin] {
+        bins(from: events, granularity: .hour, endingAt: endingAt, spanSeconds: spanSeconds ?? 86400)
+    }
+
+    /// Daily bins from aggregate rows (warm-tier path). When `spanDays`
+    /// is non-nil, fills 0-count bins for every day in the window so
+    /// the X-axis renders consistently for short ranges.
+    static func dailyBins(
+        from aggregates: [EventStore.AggregateRow],
+        endingAt: Date = Date(),
+        spanDays: Int? = nil
+    ) -> [EventTimeBin] {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.timeZone = TimeZone(identifier: "UTC")
@@ -92,6 +166,21 @@ extension EventTimeHistogram {
             guard let day = formatter.date(from: agg.day) else { continue }
             counts[day, default: 0] += agg.count
         }
+
+        if let days = spanDays, days > 0 {
+            // Floor "endingAt" to its UTC day so the bin keys align
+            // with the YYYY-MM-DD strings returned from the aggregate.
+            let utc = TimeZone(identifier: "UTC")!
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = utc
+            let endDay = cal.startOfDay(for: endingAt)
+            for offset in 0..<days {
+                if let day = cal.date(byAdding: .day, value: -offset, to: endDay) {
+                    counts[day, default: 0] = counts[day] ?? 0
+                }
+            }
+        }
+
         return counts
             .map { EventTimeBin(id: $0.key, date: $0.key, count: $0.value) }
             .sorted { $0.date < $1.date }
