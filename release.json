@@ -1,0 +1,16 @@
+{
+  "version": "1.8.0",
+  "release_date": "2026-05-04T14:33:12Z",
+  "rules": 425,
+  "tests": 979,
+  "test_suites": 197,
+  "dmg": {
+    "filename": "MacCrab-v1.8.0.dmg",
+    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.8.0/MacCrab-v1.8.0.dmg",
+    "sha256": "1d38a26b15c9868e74abec7d965d7c7b748dd9b54b742f6b47aa89418e90e731",
+    "size_bytes": 35801415
+  },
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.8.0",
+  "appcast_url": "https://maccrab.com/appcast.xml",
+  "min_macos": "13.0"
+}

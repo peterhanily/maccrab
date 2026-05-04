@@ -1,6 +1,6 @@
 # MacCrab
 
-**Real-time threat detection for macOS -- no cloud, no SIEM, no telemetry.**
+**Open, local-first macOS detection and investigation — for developers, researchers, and Mac security practitioners.**
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
@@ -21,6 +21,8 @@
 > [CHANGELOG.md](CHANGELOG.md) for what's shipped recently.
 
 MacCrab is an on-device security engine that monitors your Mac in real time using Apple's Endpoint Security framework, a library of Sigma-compatible detection rules, behavioral scoring, and temporal sequence analysis. Everything runs locally as a native Endpoint Security System Extension with a SwiftUI menubar dashboard -- no cloud console, no vendor lock-in, no data leaving your machine. Think of it as what Sysmon + Sigma + a lightweight SIEM provides on Windows, but native to macOS.
+
+**Positioning:** MacCrab is a research, investigation, and power-user tool. It is not a drop-in replacement for a commercial managed EDR — fleet management, 24/7 SOC response, and vendor-curated detection-content pipelines are out of scope. If you want endpoint visibility you can read, modify, and audit yourself, that's what MacCrab is for.
 
 **Who it's for:** Security researchers, developers who want endpoint visibility, macOS administrators, privacy-conscious users, and anyone who wants to know what's actually happening on their machine **and is OK running alpha software.**
 

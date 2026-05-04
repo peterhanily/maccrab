@@ -404,7 +404,43 @@ echo ""
 echo "  DMG: $DMG_PATH"
 echo "  Size: $(du -h "$DMG_PATH" | cut -f1)"
 echo "  Binaries: universal (arm64 + x86_64)"
-echo "  Rules: $(find "$STAGING_DIR/compiled_rules" -name "*.json" | wc -l | tr -d ' ')"
+RULE_COUNT=$(find "$STAGING_DIR/compiled_rules" -name "*.json" | wc -l | tr -d ' ')
+echo "  Rules: $RULE_COUNT"
+echo ""
+
+# v1.8.1: write release.json with version + rule + test counts so the
+# website can fetch authoritative metadata instead of being hand-edited.
+# Eliminates the version-drift class of bug that the v1.8.0 external
+# review caught (website still showed 1.7.12 / 929 tests).
+RELEASE_JSON="$PROJECT_DIR/release.json"
+DMG_SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
+DMG_SIZE_BYTES=$(stat -f%z "$DMG_PATH" 2>/dev/null || stat -c%s "$DMG_PATH")
+# `set -e` + grep returning 1 on no match would abort the script; route
+# through `|| true` so a missing test pattern doesn't kill the build.
+TEST_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Test\|^    @Test' {} + 2>/dev/null | wc -l | tr -d ' ' || true)
+SUITE_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Suite' {} + 2>/dev/null | wc -l | tr -d ' ' || true)
+TEST_COUNT="${TEST_COUNT:-0}"
+SUITE_COUNT="${SUITE_COUNT:-0}"
+RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+cat > "$RELEASE_JSON" <<RELEASE_EOF
+{
+  "version": "$VERSION",
+  "release_date": "$RELEASE_DATE",
+  "rules": $RULE_COUNT,
+  "tests": $TEST_COUNT,
+  "test_suites": $SUITE_COUNT,
+  "dmg": {
+    "filename": "MacCrab-v${VERSION}.dmg",
+    "url": "https://github.com/peterhanily/maccrab/releases/download/v${VERSION}/MacCrab-v${VERSION}.dmg",
+    "sha256": "$DMG_SHA",
+    "size_bytes": $DMG_SIZE_BYTES
+  },
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v${VERSION}",
+  "appcast_url": "https://maccrab.com/appcast.xml",
+  "min_macos": "13.0"
+}
+RELEASE_EOF
+echo "  release.json written → $RELEASE_JSON"
 echo ""
 
 rm -rf "$STAGING_DIR"
