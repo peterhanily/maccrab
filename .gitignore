@@ -55,6 +55,12 @@ events.jsonl
 *.mobileprovision
 *.provisionprofile
 
+# Signed MDM mobileconfig profiles (the .template form is committed for
+# operators to customize; the signed output carries CMS payloads we never
+# commit). Negate-pattern leaves the template tracked.
+*.mobileconfig
+!*.mobileconfig.template
+
 # Certificates and private keys in every format we're likely to see
 *.cer
 *.crt
