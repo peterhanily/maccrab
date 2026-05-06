@@ -1,14 +1,14 @@
 {
   "version": "1.9.0",
-  "release_date": "2026-05-06T20:00:00Z",
-  "rules": 427,
+  "release_date": "2026-05-06T21:28:34Z",
+  "rules": 428,
   "tests": 1117,
   "test_suites": 230,
   "dmg": {
     "filename": "MacCrab-v1.9.0.dmg",
     "url": "https://github.com/peterhanily/maccrab/releases/download/v1.9.0/MacCrab-v1.9.0.dmg",
-    "sha256": "TBD-FILLED-BY-build-release.sh",
-    "size_bytes": 0
+    "sha256": "a831f3e0e2d4bb9bdc4ab965c1c3f9b330de0e9f40fd239017b6e8573ab4848a",
+    "size_bytes": 38217104
   },
   "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.9.0",
   "appcast_url": "https://maccrab.com/appcast.xml",

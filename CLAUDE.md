@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (929 tests in 189 suites)
+swift test                     # Unit tests (1117 tests in 230 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -57,7 +57,7 @@ Sources/MacCrabCore/
   Utilities/      LockedCounter, PowerGate (battery/thermal gating), shared primitives
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            427 Sigma-compatible YAML detection rules (17 tactic directories)
+Rules/            428 Sigma-compatible YAML detection rules (17 tactic directories)
   sequences/      38 multi-step sequence rules
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
