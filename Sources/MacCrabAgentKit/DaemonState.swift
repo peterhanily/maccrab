@@ -69,6 +69,25 @@ final class DaemonState {
     let mcpAttributor: MCPAttributor
     let mcpBaseline: MCPBaselineService
 
+    // MARK: - Agent trace registry (v1.9 PR-2)
+    //
+    // Optional so a daemon binary running with `MACCRAB_AGENT_TRACES`
+    // unset (default) doesn't allocate or schedule the consumer Task.
+    // Set by DaemonSetup post-construction via `installTraceRegistry`,
+    // mirroring how `var collector: ESCollector?` is wired (see line ~91).
+    var traceRegistry: TraceRegistry?
+
+    // MARK: - OTLP receiver + trace store (v1.9 PR-4)
+    //
+    // Both optional and post-construction-set. Allocated when
+    // `MACCRAB_OTLP_RECEIVER=1` is in the daemon env. The receiver
+    // listens on 127.0.0.1:4318, the trace store persists ingested
+    // spans into `<supportDir>/traces.db`. PR-5 will wire a Settings
+    // toggle that SIGHUPs the daemon to start/stop the receiver
+    // dynamically; PR-4 ships env-var-only auto-start.
+    var traceStore: TraceStore?
+    var otlpReceiver: OTLPReceiver?
+
     // MARK: - Collector registry (v1.7.2)
     let collectorRegistry: CollectorRegistry
 

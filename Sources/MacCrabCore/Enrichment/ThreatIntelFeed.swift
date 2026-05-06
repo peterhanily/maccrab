@@ -6,11 +6,22 @@
 // against known-bad hashes, IPs, and domains.
 //
 // v1.6.17: every IOC now carries metadata (source feed, first-seen,
-// malware family, tags). Feeds switched from the small "_recent" /
-// "_recommended" endpoints to the full CSV exports — yields ~50–200×
-// more coverage per category and the per-IOC context analysts asked
-// for. Per-category caps + age-based eviction keep the cache from
-// growing unbounded across 4-hour refresh cycles.
+// malware family, tags). Feeds switched from the small `_recent` /
+// `_recommended` per-row endpoints to the CSV exports — yields
+// ~10–100× more coverage per category and the per-IOC context
+// analysts asked for. Per-category caps + age-based eviction keep
+// the cache from growing unbounded across 4-hour refresh cycles.
+//
+// Endpoint choice (clarified in v1.9 Phase-5.4 audit):
+//   * URLhaus      → `csv_online/` — rolling window of currently-live
+//                    threats (~50K entries; goes stale fast, hence
+//                    the 4-hour refresh cadence).
+//   * Feodo        → `ipblocklist.csv` — currently-active C2 IPs.
+//   * MalwareBazaar → `export/csv/recent/` — last-N-days of samples.
+//                    The `csv/full/` historical export exists too
+//                    (multi-GB) but is overkill for live detection;
+//                    the `recent` window matches the analyst use
+//                    case (catch what's hot, age out via maxAge).
 
 import Foundation
 import os.log
@@ -18,9 +29,9 @@ import os.log
 /// Manages threat intelligence feeds and IOC lookups.
 ///
 /// Supported feeds:
-/// - abuse.ch URLhaus (malicious URLs/domains, full CSV with malware family + tags)
-/// - abuse.ch MalwareBazaar (malicious file hashes, full CSV with file_type + signature + tags)
-/// - abuse.ch Feodo Tracker (C2 IP addresses, full CSV with first_seen + malware family)
+/// - abuse.ch URLhaus (malicious URLs/domains; `csv_online/` rolling window)
+/// - abuse.ch MalwareBazaar (malicious file hashes; `csv/recent/` rolling window)
+/// - abuse.ch Feodo Tracker (C2 IP addresses; `ipblocklist.csv` active-only)
 /// - Custom IOC lists (user-provided)
 public actor ThreatIntelFeed {
 
@@ -80,6 +91,38 @@ public actor ThreatIntelFeed {
 
     /// Directory for cached feed data.
     private let cacheDir: String
+
+    /// v1.9 Phase-5.2 (TI-H1): multi-tenant platforms whose bare host
+    /// must NOT be inserted as a domain IOC — and whose suffix MUST
+    /// NOT trigger a domain-suffix-match in `isDomainMalicious`.
+    /// Conservative hard-coded list; full Public Suffix List
+    /// integration is a v2.0 task. New entries: add when URLhaus
+    /// starts emitting URLs hosted on a new shared platform that
+    /// would otherwise produce a blanket FP.
+    private static let multiTenantPlatforms: Set<String> = [
+        "pages.dev",
+        "web.app",
+        "firebaseapp.com",
+        "vercel.app",
+        "netlify.app",
+        "github.io",
+        "gitlab.io",
+        "herokuapp.com",
+        "replit.app",
+        "repl.co",
+        "glitch.me",
+        "r2.dev",
+        "surge.sh",
+        "000webhostapp.com",
+        "pythonanywhere.com",
+        "cloudfront.net",
+        "azurewebsites.net",
+        "appspot.com",
+    ]
+
+    fileprivate static func isMultiTenantPlatformHost(_ host: String) -> Bool {
+        multiTenantPlatforms.contains(host)
+    }
 
     /// Update interval (default: 4 hours).
     private let updateInterval: TimeInterval
@@ -153,6 +196,14 @@ public actor ThreatIntelFeed {
             // Load cached data first (instant, no network)
             await loadCachedFeeds()
 
+            // v1.9 Phase-5.7 (TI-M7): wire the operator's drop-in
+            // *.hashes.txt / *.ips.txt / *.domains.txt files at boot.
+            // Pre-fix loadCustomIOCFiles() existed but was never
+            // called, so any operator who placed files in the cache
+            // dir got no behaviour. Custom IOCs are pinned through
+            // the age-eviction (source == "Custom" survives).
+            loadCustomIOCFiles()
+
             await updateAllFeeds()
 
             // Schedule periodic updates
@@ -187,21 +238,34 @@ public actor ThreatIntelFeed {
     }
 
     /// Check if a domain is known-malicious.
+    /// v1.9 Phase-5.2 (TI-H1): the suffix walk that follows the
+    /// exact-match check skips known multi-tenant platform suffixes
+    /// (`pages.dev`, `vercel.app`, etc.) so a single bad
+    /// `attacker.pages.dev` IOC doesn't blanket-flag every legitimate
+    /// site under the same platform.
     public func isDomainMalicious(_ domain: String) -> Bool {
         let lower = domain.lowercased()
         if domainRecords[lower] != nil { return true }
         let parts = lower.split(separator: ".")
         for i in 1..<parts.count {
             let parent = parts[i...].joined(separator: ".")
+            if Self.isMultiTenantPlatformHost(parent) { continue }
             if domainRecords[parent] != nil { return true }
         }
         return false
     }
 
     /// Check a URL against known-malicious URLs.
+    /// v1.9 Phase-5.3 (TI-H2): anchored match. Pre-fix used
+    /// `lower.contains($0)` which would FP on innocuous URLs that
+    /// share a substring with any short feed entry. The IOC URL must
+    /// either equal the queried URL exactly OR be a true prefix.
     public func isURLMalicious(_ url: String) -> Bool {
         let lower = url.lowercased()
-        return urlRecords.keys.contains { lower.contains($0) }
+        if urlRecords[lower] != nil { return true }
+        return urlRecords.keys.contains { ioc in
+            lower.hasPrefix(ioc)
+        }
     }
 
     /// Lookup the metadata record for an IOC value (any category).
@@ -214,7 +278,10 @@ public actor ThreatIntelFeed {
     public func recordForDomain(_ domain: String) -> IOCRecord? { domainRecords[domain.lowercased()] }
     public func recordForURL(_ url: String) -> IOCRecord? {
         let lower = url.lowercased()
-        return urlRecords.first(where: { lower.contains($0.key) })?.value
+        // v1.9 Phase-5.3 (TI-H2): anchored — exact match first, then
+        // prefix. Mirrors isURLMalicious's anchored semantics.
+        if let direct = urlRecords[lower] { return direct }
+        return urlRecords.first(where: { lower.hasPrefix($0.key) })?.value
     }
 
     /// Get statistics about loaded IOCs.
@@ -259,6 +326,23 @@ public actor ThreatIntelFeed {
             perFeedLastUpdate: cache.perFeedLastUpdate ?? [:],
             perFeedLastError: cache.perFeedLastError ?? [:]
         )
+    }
+
+    /// v1.9 Phase-5.6 (TI-M5): which feeds haven't refreshed in
+    /// `staleMultiplier × updateInterval` (default 2×). Returns
+    /// (feedName, lastSuccess) pairs. Empty when everything is
+    /// fresh OR when no feeds have run yet (cold start).
+    public func staleFeeds(staleMultiplier: Double = 2.0) -> [(String, Date)] {
+        let threshold = Date().addingTimeInterval(-(updateInterval * staleMultiplier))
+        let knownFeeds = ["URLhaus", "MalwareBazaar", "Feodo"]
+        var stale: [(String, Date)] = []
+        for feed in knownFeeds {
+            guard let last = perFeedLastUpdate[feed] else { continue }
+            if last < threshold {
+                stale.append((feed, last))
+            }
+        }
+        return stale
     }
 
     private static func readCache(at cacheDir: String) -> CacheData? {
@@ -566,7 +650,19 @@ public actor ThreatIntelFeed {
             urlRecords[urlValue] = urlRec
 
             // Derive parent host as a domain entry.
+            // v1.9 Phase-5.2 (TI-H1): refuse to insert when the host
+            // IS itself a multi-tenant platform (e.g. URLhaus
+            // emitting a takedown URL whose host is bare `pages.dev`).
+            // The exact-match check still fires on full subdomains
+            // like `attacker.pages.dev`; the suffix walk in
+            // `isDomainMalicious` is bounded against the same
+            // platform set so a hostile feed entry can't blanket-flag
+            // siblings.
             if let parsed = URL(string: cols[2]), let host = parsed.host?.lowercased(), !host.isEmpty {
+                if Self.isMultiTenantPlatformHost(host) {
+                    logger.info("URLhaus: skipped platform-suffix host \(host, privacy: .public)")
+                    continue
+                }
                 let dRec = IOCRecord(
                     value: host, source: "URLhaus",
                     firstSeen: firstSeen, lastSeenInFeed: now,
@@ -675,8 +771,21 @@ public actor ThreatIntelFeed {
     private nonisolated func fetchLines(url urlString: String, feedName: String? = nil) async -> [String]? {
         guard let url = URL(string: urlString) else { return nil }
 
+        // v1.9 Phase-5.5 (TI-M4): abuse.ch Auth-Key support. When the
+        // operator sets MACCRAB_ABUSECH_AUTH_KEY in the daemon's env,
+        // forward it as the `Auth-Key` header on every feed fetch.
+        // This raises the rate-limit ceiling for fleet deployments
+        // sharing a single egress IP. Empty / unset env → no header.
+        var request = URLRequest(url: url)
+        if let authKey = Foundation.ProcessInfo.processInfo
+            .environment["MACCRAB_ABUSECH_AUTH_KEY"],
+            !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "Auth-Key")
+        }
+        request.setValue("MacCrab/1.9", forHTTPHeaderField: "User-Agent")
+
         do {
-            let (data, response) = try await SecureURLSession.shared.data(from: url)
+            let (data, response) = try await SecureURLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 if let feedName {
                     await self.recordFeedError(feedName, reason: "HTTP \(http.statusCode)")

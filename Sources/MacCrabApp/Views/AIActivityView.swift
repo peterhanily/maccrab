@@ -131,12 +131,28 @@ struct AIActivityView: View {
                             .padding(8)
                     }
 
-                    // Activity by AI tool — shows which tool generated alerts
+                    // Activity by AI tool — alerts aggregated across ALL
+                    // sessions, not just the timeline-view's selected
+                    // session. v1.9 PR-5 hotfix: the previous label
+                    // ("Activity by AI Tool") implied this section
+                    // followed the timeline's session selection; it
+                    // doesn't. Renaming to remove the ambiguity rather
+                    // than threading the selected-pid through, since
+                    // operators want both views: per-session detail
+                    // (timeline) AND per-tool roll-up (this section).
                     if !alertsByTool.isEmpty {
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("Activity by AI Tool")
-                                    .font(.headline)
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(String(localized: "aiGuard.alertsByToolTitle",
+                                                 defaultValue: "Alerts by AI Tool"))
+                                        .font(.headline)
+                                    Text(String(localized: "aiGuard.alertsByToolScope",
+                                                 defaultValue: "(across all sessions)"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                }
 
                                 ForEach(alertsByTool, id: \.tool) { entry in
                                     HStack(spacing: 10) {
@@ -173,47 +189,10 @@ struct AIActivityView: View {
                         }
                     }
 
-                    // What's monitored
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(String(localized: "aiGuard.whatMonitors", defaultValue: "What AI Guard Monitors"))
-                                .font(.headline)
-
-                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                                MonitorItem(icon: "terminal",                  title: "Shell Spawning",       desc: "Every shell process spawned by AI tools")
-                                MonitorItem(icon: "lock.open",                 title: "Credential Access",    desc: "SSH keys, .env, AWS, tokens, keychains")
-                                MonitorItem(icon: "folder.badge.questionmark", title: "Project Boundary",     desc: "File writes outside project directory")
-                                MonitorItem(icon: "shippingbox",               title: "Package Installs",     desc: "npm, pip, cargo, brew from AI context")
-                                MonitorItem(icon: "arrow.up.arrow.down",       title: "Privilege Escalation", desc: "sudo and setuid from AI processes")
-                                MonitorItem(icon: "network",                   title: "Network Activity",     desc: "Outbound connections from AI children")
-                                MonitorItem(icon: "doc.text.magnifyingglass",  title: "Prompt Injection",     desc: "Forensicate.ai scanning of commands")
-                                MonitorItem(icon: "clock.arrow.circlepath",    title: "Persistence",          desc: "LaunchAgents, cron, login items")
-                            }
-                        }
-                        .padding(8)
-                    }
-
-                    // Supported tools
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(String(localized: "aiGuard.supportedTools", defaultValue: "Supported AI Coding Tools"))
-                                .font(.headline)
-
-                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                                ToolBadge(name: "Claude Code", icon: "🤖")
-                                ToolBadge(name: "Codex",       icon: "⚡")
-                                ToolBadge(name: "OpenClaw",    icon: "🦞")
-                                ToolBadge(name: "Cursor",      icon: "🖱️")
-                                ToolBadge(name: "Aider",       icon: "🔧")
-                                ToolBadge(name: "Copilot",     icon: "✈️")
-                                ToolBadge(name: "Continue",    icon: "▶️")
-                                ToolBadge(name: "Windsurf",    icon: "🏄")
-                            }
-                        }
-                        .padding(8)
-                    }
-
-                    // MCP self-protection tip — shown when there are no alerts
+                    // MCP self-protection tip — shown when there are no alerts.
+                    // Promoted above the docs disclosure so the empty-state
+                    // reassurance is the first thing operators see, not
+                    // the reference material.
                     if activeAIAlerts.isEmpty {
                         GroupBox {
                             HStack(spacing: 12) {
@@ -269,35 +248,101 @@ struct AIActivityView: View {
                         }
                     }
 
-                    // Credential fence info
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(String(localized: "aiGuard.credentialFenceTitle", defaultValue: "Credential Fence — Protected Paths"))
-                                .font(.headline)
-                            Text(String(localized: "aiGuard.credentialFenceDesc", defaultValue: "AI tools will trigger CRITICAL alerts if they access any of these:"))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
-                                ForEach(CredentialFence.allPatterns.prefix(16), id: \.0) { pattern, _ in
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "lock.fill")
-                                            .font(.caption2)
-                                            .foregroundColor(.orange)
-                                            .accessibilityHidden(true)
-                                        Text(pattern)
-                                            .font(.system(.caption2, design: .monospaced))
-                                        Spacer()
-                                    }
-                                }
-                            }
-                        }
-                        .padding(8)
-                    }
+                    // v1.9 PR-5 hotfix: collapse the three reference
+                    // sections (What AI Guard Monitors / Supported AI
+                    // Tools / Credential Fence) into a single
+                    // disclosure. Pre-fix they consumed most of the
+                    // page below the live data and pushed actionable
+                    // content off-screen. The disclosure starts
+                    // collapsed; click to expand for first-time-visit
+                    // orientation, then collapse again so the page
+                    // stays focused on alerts and timeline state.
+                    aboutAIGuard
                 }
                 .padding()
             }
         }
+    }
+
+    /// Collapsed-by-default reference panel covering "what is AI Guard".
+    /// Replaces three separate GroupBoxes that previously sprawled at
+    /// the bottom of the page.
+    private var aboutAIGuard: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 16) {
+                // What AI Guard monitors
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(localized: "aiGuard.whatMonitors",
+                                 defaultValue: "What AI Guard Monitors"))
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                        MonitorItem(icon: "terminal",                  title: "Shell Spawning",       desc: "Every shell process spawned by AI tools")
+                        MonitorItem(icon: "lock.open",                 title: "Credential Access",    desc: "SSH keys, .env, AWS, tokens, keychains")
+                        MonitorItem(icon: "folder.badge.questionmark", title: "Project Boundary",     desc: "File writes outside project directory")
+                        MonitorItem(icon: "shippingbox",               title: "Package Installs",     desc: "npm, pip, cargo, brew from AI context")
+                        MonitorItem(icon: "arrow.up.arrow.down",       title: "Privilege Escalation", desc: "sudo and setuid from AI processes")
+                        MonitorItem(icon: "network",                   title: "Network Activity",     desc: "Outbound connections from AI children")
+                        MonitorItem(icon: "doc.text.magnifyingglass",  title: "Prompt Injection",     desc: "Forensicate.ai scanning of commands")
+                        MonitorItem(icon: "clock.arrow.circlepath",    title: "Persistence",          desc: "LaunchAgents, cron, login items")
+                    }
+                }
+                Divider()
+
+                // Supported tools
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(localized: "aiGuard.supportedTools",
+                                 defaultValue: "Supported AI Coding Tools"))
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                        ToolBadge(name: "Claude Code", icon: "🤖")
+                        ToolBadge(name: "Codex",       icon: "⚡")
+                        ToolBadge(name: "OpenClaw",    icon: "🦞")
+                        ToolBadge(name: "Cursor",      icon: "🖱️")
+                        ToolBadge(name: "Aider",       icon: "🔧")
+                        ToolBadge(name: "Copilot",     icon: "✈️")
+                        ToolBadge(name: "Continue",    icon: "▶️")
+                        ToolBadge(name: "Windsurf",    icon: "🏄")
+                    }
+                }
+                Divider()
+
+                // Credential fence info
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(localized: "aiGuard.credentialFenceTitle",
+                                 defaultValue: "Credential Fence — Protected Paths"))
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    Text(String(localized: "aiGuard.credentialFenceDesc",
+                                 defaultValue: "AI tools will trigger CRITICAL alerts if they access any of these:"))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                        ForEach(CredentialFence.allPatterns.prefix(16), id: \.0) { pattern, _ in
+                            HStack(spacing: 4) {
+                                Image(systemName: "lock.fill")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                                    .accessibilityHidden(true)
+                                Text(pattern)
+                                    .font(.system(.caption2, design: .monospaced))
+                                Spacer()
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            Label(
+                String(localized: "aiGuard.aboutLabel",
+                        defaultValue: "About AI Guard — what's monitored, supported tools, credential fence"),
+                systemImage: "info.circle"
+            )
+            .font(.subheadline)
+        }
+        .padding(8)
     }
 }
 

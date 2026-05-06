@@ -93,6 +93,77 @@ extension MacCrabCtl {
             print("                 Run: make compile-rules")
         }
 
+        // ── Agent Traces (v1.9 PR-4) ──────────────────────────────────────
+        // The trace store lives in `traces.db` next to events.db, but
+        // the user-vs-system support-dir resolution in maccrabDataDir()
+        // is keyed on events.db modification time — a stale
+        // /Library/Application Support/MacCrab/events.db from a prior
+        // root run can win even when the current daemon is writing to
+        // ~/Library/.../traces.db. So we probe BOTH paths
+        // independently and surface whichever has data.
+        let userSupport = (FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path)
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let candidatePaths = Array(Set([
+            supportDir + "/traces.db",
+            userSupport + "/traces.db",
+        ]))
+        var anyTraceLine = false
+        for tracesPath in candidatePaths {
+            guard FileManager.default.fileExists(atPath: tracesPath) else { continue }
+            do {
+                let traceStore = try TraceStore(path: tracesPath)
+                let spanCount = (try? await traceStore.count()) ?? 0
+                if spanCount > 0 {
+                    print("Agent Traces:    \(spanCount) span(s) ingested  (\(tracesPath))")
+                    anyTraceLine = true
+                }
+            } catch {
+                print("Agent Traces:    (error reading \(tracesPath): \(error))")
+                anyTraceLine = true
+            }
+        }
+        // Quality metric line — Plan v3 review #11 fixed label format.
+        // v1.9 PR-5 audit (B3): rated counts now live in
+        // attribution_overrides.db at the user-writable path; total
+        // count of machine-attributed events comes from events.db.
+        // Probe both at user + system paths.
+        let candidateDirs = Array(Set([supportDir, userSupport]))
+        var total = 0
+        for dir in candidateDirs {
+            guard FileManager.default.fileExists(atPath: dir + "/events.db") else { continue }
+            if let es = try? EventStore(directory: dir),
+               let n = try? await es.eventCountWithMachineAttribution() {
+                total = max(total, n)
+            }
+        }
+        for dir in candidateDirs {
+            guard FileManager.default.fileExists(atPath: dir + "/attribution_overrides.db") else { continue }
+            if let store = try? AttributionOverrideStore(directory: dir),
+               let stats = try? await store.stats(totalEventsWithMachineAttribution: total),
+               (stats.ratedCount > 0 || total > 0) {
+                print("                 \(stats.formattedAccuracyLine)")
+                anyTraceLine = true
+                break
+            }
+        }
+        // Even with no overrides, surface the total if non-zero.
+        if !anyTraceLine, total > 0 {
+            let zero = AttributionOverrideStats(
+                ratedCount: 0, confirmedCount: 0,
+                wrongToolCount: 0, noAgentCount: 0, unknownVerdictCount: 0,
+                totalEventsWithMachineAttribution: total
+            )
+            print("                 \(zero.formattedAccuracyLine)")
+            anyTraceLine = true
+        }
+        if !anyTraceLine {
+            if isDaemonRunning() {
+                print("Agent Traces:    Disabled (set MACCRAB_AGENT_TRACES=1 + MACCRAB_OTLP_RECEIVER=1 to enable)")
+            }
+        }
+
         // ── Suppressions ──────────────────────────────────────────────────
         let suppressFile = (supportDir as NSString).appendingPathComponent("suppressions.json")
         if let data = try? Data(contentsOf: URL(fileURLWithPath: suppressFile)),

@@ -154,8 +154,12 @@ extension MacCrabCtl {
     }
 
     static func printVersion() {
-        // LOCALIZE: "MacCrab Detection Engine v1.3.4"
-        print("MacCrab Detection Engine v1.5.1")
+        // v1.9.0: dynamic version via MacCrabVersion. Bundle.main
+        // resolves to the .app bundle when maccrabctl is invoked from
+        // inside MacCrab.app; falls back to the build-time string for
+        // the bare-binary path (Homebrew install, swift run).
+        // LOCALIZE: "MacCrab Detection Engine vX.Y.Z"
+        print("MacCrab Detection Engine v\(MacCrabVersion.current)")
         // LOCALIZE: "License: Apache 2.0 (code), DRL 1.1 (rules)"
         print("License: Apache 2.0 (code), DRL 1.1 (rules)")
         print("https://github.com/maccrab-detection/maccrab")

@@ -153,3 +153,31 @@ func argsFromExecMessage(_ message: UnsafePointer<es_message_t>) -> [String] {
         return args
     }
 }
+
+// MARK: - Exec Environment Extraction (TRACEPARENT/TRACESTATE only)
+
+/// v1.9 Agent Traces — bounded scan of an exec event's environment block
+/// for W3C trace context.
+///
+/// IMPORTANT INVARIANT: this function does NOT return the env block. It
+/// inspects only `TRACEPARENT` and `TRACESTATE`, parses the former under
+/// strict v00 rules via `TraceExtractor.parseTraceparent`, and returns a
+/// `TraceContext` with no other env data attached. The env block itself is
+/// never copied, persisted, logged, or sent to LLMs.
+///
+/// Bound: at most `TraceExtractor.maxEnvVarsScanned` entries OR
+/// `TraceExtractor.maxEnvBytesScanned` cumulative bytes, whichever first.
+/// Protects the exec hot path from pathologically-large envs (Xcode
+/// toolchains, dense Node spawns).
+///
+/// Returns nil if no valid TRACEPARENT was present within the scan bounds.
+func traceContextFromExecMessage(_ message: UnsafePointer<es_message_t>) -> TraceContext? {
+    return withUnsafePointer(to: message.pointee.event.exec) { execEvent in
+        let envCount = es_exec_env_count(execEvent)
+        guard envCount > 0 else { return nil }
+        return TraceExtractor.scanEnv(count: Int(envCount)) { i in
+            let token = es_exec_env(execEvent, UInt32(i))
+            return esStringToSwift(token)
+        }
+    }
+}

@@ -940,11 +940,19 @@ private func freeDiskMB(forPath path: String) -> Int {
 /// Settings, send SIGHUP, and see the DB shrink in seconds instead
 /// of waiting up to an hour for the next tick. Reads cap + target
 /// from `state` so the freshly-reloaded `DaemonConfig` is honored.
-func enforceDatabaseSizeCapNow(state: DaemonState) async {
+///
+/// v1.9.0 (audit Stab-M1): returns `true` when the sweep actually
+/// ran, `false` when it was skipped because another sweep was
+/// already in progress (`EventStore.beginSizeCapPrune` returned
+/// false). Callers (SIGUSR2 handler) use the return value to avoid
+/// overwriting the running sweep's pending status snapshot with a
+/// stale "after" measurement.
+@discardableResult
+func enforceDatabaseSizeCapNow(state: DaemonState) async -> Bool {
     let maxSizeMB = max(50, state.storage.eventsMaxSizeMB)
     let targetSizeMB = Int(Double(maxSizeMB) * 0.8)
     let dbFilePath = state.supportDir + "/events.db"
-    await enforceDatabaseSizeCap(
+    return await enforceDatabaseSizeCap(
         dbPath: dbFilePath,
         maxSizeMB: maxSizeMB,
         targetSizeMB: targetSizeMB,
@@ -983,12 +991,15 @@ private func enforceDatabaseSizeCap(
     maxSizeMB: Int,
     targetSizeMB: Int,
     eventStore: EventStore
-) async {
+) async -> Bool {
     // Reentrancy: if another sweep is already running (hourly timer
-    // + on-demand invocation can race), exit cleanly.
+    // + on-demand invocation can race), exit cleanly. v1.9.0
+    // (audit Stab-M1): return false so the SIGUSR2 caller can skip
+    // the status-snapshot write — pre-fix the second SIGUSR2 within
+    // ~2 s of the first wrote a stale `bytesAfter` mid-sweep.
     guard await eventStore.beginSizeCapPrune() else {
         logger.info("Size-cap enforcer: another sweep already active, skipping")
-        return
+        return false
     }
     defer { Task { await eventStore.endSizeCapPrune() } }
 
@@ -1013,8 +1024,10 @@ private func enforceDatabaseSizeCap(
 
     let initialMB = currentSizeMB()
     guard initialMB > maxSizeMB else {
-        // Quiet no-op. Normal hourly tick on a well-sized DB.
-        return
+        // Quiet no-op. Normal hourly tick on a well-sized DB. We did
+        // acquire the lock — that counts as "ran" for SIGUSR2's
+        // purposes (the dashboard sees the under-cap measurement).
+        return true
     }
 
     logger.warning("Size-cap enforcer armed: DB \(initialMB) MB exceeds cap \(maxSizeMB) MB; target \(targetSizeMB) MB.")
@@ -1053,7 +1066,7 @@ private func enforceDatabaseSizeCap(
         logger.warning("Size-cap phase 2: skipping VACUUM — need \(needMB) MB free, have \(freeMB) MB. File size unchanged; will retry next tick.")
         let endMB = currentSizeMB()
         logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), vacuum: skipped)")
-        return
+        return true
     }
 
     // Checkpoint the WAL first so VACUUM sees all committed pages
@@ -1065,7 +1078,7 @@ private func enforceDatabaseSizeCap(
         logger.error("Size-cap phase 2: VACUUM failed (\(error.localizedDescription)). File size likely unchanged; will retry next tick.")
         let endMB = currentSizeMB()
         logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), vacuum: failed)")
-        return
+        return true
     }
 
     // Second checkpoint drains any WAL left by the VACUUM itself.
@@ -1073,6 +1086,7 @@ private func enforceDatabaseSizeCap(
 
     let finalMB = currentSizeMB()
     logger.notice("Size-cap sweep complete: \(initialMB) MB → \(finalMB) MB (rows pruned: \(pruned), vacuum: success, checkpoint_before_drained: \(checkpointBefore))")
+    return true
 }
 
 /// Probe whether this sysext process currently has Full Disk Access.

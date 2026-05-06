@@ -1,0 +1,22 @@
+Vendored from: https://github.com/open-telemetry/opentelemetry-proto
+Pinned commit: v1.5.0  (release tag, October 2024)
+SHA: 60dc7bdc7ba6a6fde5b3e3c5a9ff85b96cd5c6f4   (annotated tag → commit)
+
+Why pinned: this is security-critical infrastructure. SwiftProtobuf-generated
+code from a moving HEAD could shift on any upstream churn; pinning to the
+release tag means our wire-format contract is locked.
+
+How to upgrade:
+  1. Bump the SHA above.
+  2. Replace the .proto files under vendor/opentelemetry-proto/opentelemetry/
+     with the upstream copies at the new commit.
+  3. Run scripts/regenerate-otlp-proto.sh on a machine with protoc + the
+     SwiftProtobuf protoc plugin installed (Homebrew: `brew install protobuf
+     swift-protobuf`).
+  4. Inspect the regenerated Sources/MacCrabCore/Network/Generated/*.pb.swift
+     diff carefully — wire-incompatible upstream changes are rare but possible.
+  5. Re-run the golden-fixture protobuf round-trip test
+     (Tests/MacCrabCoreTests/OTLPReceiverTests.swift).
+  6. Update RELEASE_NOTES with the version bump.
+
+License: Apache 2.0 (see LICENSE in this directory).

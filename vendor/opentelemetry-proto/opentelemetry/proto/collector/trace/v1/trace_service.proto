@@ -1,0 +1,48 @@
+// Copyright 2019, OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+//
+// Vendored excerpt — only the messages required by MacCrab's OTLP/HTTP
+// receiver. Full upstream definition lives at:
+//   https://github.com/open-telemetry/opentelemetry-proto/blob/main/
+//     opentelemetry/proto/collector/trace/v1/trace_service.proto
+//
+// Pinned commit: see ../../../../../../COMMIT.txt
+
+syntax = "proto3";
+
+package opentelemetry.proto.collector.trace.v1;
+
+import "opentelemetry/proto/trace/v1/trace.proto";
+
+option java_multiple_files = true;
+option java_package = "io.opentelemetry.proto.collector.trace.v1";
+option java_outer_classname = "TraceServiceProto";
+option go_package = "go.opentelemetry.io/proto/otlp/collector/trace/v1";
+
+// Service that can be used to push spans between one Application instrumented
+// with OpenTelemetry and a collector, or between a collector and a central
+// collector (in this case spans are sent/received to/from multiple Applications).
+service TraceService {
+  // For performance reasons, it is recommended to keep this RPC
+  // alive for the entire life of the application.
+  rpc Export(ExportTraceServiceRequest) returns (ExportTraceServiceResponse) {}
+}
+
+message ExportTraceServiceRequest {
+  // An array of ResourceSpans.
+  // For data coming from a single resource this array will typically contain
+  // one element. Intermediary nodes that receive data from multiple origins
+  // typically batch the data before forwarding further and in that case this
+  // array will contain multiple elements.
+  repeated opentelemetry.proto.trace.v1.ResourceSpans resource_spans = 1;
+}
+
+message ExportTraceServiceResponse {
+  // The details of a partially successful export request.
+  ExportTracePartialSuccess partial_success = 1;
+}
+
+message ExportTracePartialSuccess {
+  int64 rejected_spans = 1;
+  string error_message = 2;
+}

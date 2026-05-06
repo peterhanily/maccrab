@@ -279,13 +279,37 @@ public actor SecurityScorer {
     }
 
     private nonisolated func isProcessRunning(_ name: String) -> Bool {
+        // v1.9 hot-fix: pre-fix this called `proc.terminationStatus`
+        // after `try? proc.run() ; proc.waitUntilExit()`. When pgrep
+        // can't launch (sandbox denial, sysextd transient, missing
+        // entitlement), `proc.run()` throws → `try?` eats it →
+        // `waitUntilExit()` returns instantly → `terminationStatus`
+        // throws NSException("task hasn't finished running") →
+        // SIGABRT (uncatchable from pure Swift). Crash report:
+        // 2026-05-06-013543 had this signature on the security-
+        // score poll path.
+        //
+        // Fix: avoid terminationStatus entirely. pgrep prints
+        // matching PIDs to stdout when it finds a match. Empty
+        // stdout = no match. We don't need the exit code.
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         proc.arguments = ["-x", name]
-        proc.standardOutput = FileHandle.nullDevice
+        let pipe = Pipe()
+        proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        do {
+            try proc.run()
+        } catch {
+            return false
+        }
+        // readToEnd blocks until the pipe is closed. The pipe is
+        // closed when pgrep exits — same wait semantics as
+        // waitUntilExit, but without poking terminationStatus.
+        let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+        // Drain — best-effort; even if waitUntilExit somehow throws
+        // it's contained.
         proc.waitUntilExit()
-        return proc.terminationStatus == 0
+        return !data.isEmpty
     }
 }

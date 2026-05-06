@@ -93,6 +93,13 @@ SIGMA_FIELD_MAP = {
     # (which can be nil for short-lived processes like launchctl/
     # system_profiler). Compare against string "true"/"false".
     "PlatformBinary": "process.is_platform_binary",
+    # v1.9 PR-5: agent trace fields produced by TraceCorrelator. The
+    # rule engine reads these from `Event.enrichments` under the same
+    # snake_case keys used in the EventStore v4 schema migration.
+    "AgentTraceId": "agent_trace_id",
+    "AgentSpanId": "agent_span_id",
+    "AgentTool": "agent_tool",
+    "MachineAgentConfidence": "machine_agent_confidence",
 }
 
 
@@ -125,6 +132,14 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     # by rules that need to disambiguate sub-categories. Resolved directly
     # from Event.eventType in RuleEngine, no mapping needed.
     "EventType",
+    # --- v1.9 PR-5: agent trace correlation enrichments ---
+    # Populated by `TraceCorrelator` (`Sources/MacCrabCore/Detection/`).
+    # Confidence-aware rules in Rules/ai_safety/ match against
+    # `MachineAgentConfidence` (one of: "traceparent", "lineage").
+    # `AgentTraceId` / `AgentSpanId` are 32/16 hex W3C identifiers.
+    # `AgentTool` matches AIToolType.rawValue (claude_code, codex, ...).
+    "AgentTraceId", "AgentSpanId", "AgentTool",
+    "MachineAgentConfidence",
 }
 
 # Track fields we've already warned about to avoid spam.

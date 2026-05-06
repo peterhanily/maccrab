@@ -517,12 +517,23 @@ enum DaemonSetup {
         await usbMonitor.start()
         print("USB device monitor active")
 
-        // Database encryption -- AES-256 field encryption, key in Keychain
-        let dbEncryption = DatabaseEncryption(
-            enabled: Foundation.ProcessInfo.processInfo.environment["MACCRAB_ENCRYPT_DB"] == "1"
-        )
+        // Database encryption -- AES-256 field encryption, key in Keychain.
+        // v1.9.0 (audit Sec-H2): default ON to match the dashboard's
+        // unconditional `enabled: true` and the release-notes claim of
+        // "AES-GCM at rest". Pre-fix, the daemon gated on
+        // `MACCRAB_ENCRYPT_DB=="1"`, so unless the operator set the env
+        // var the daemon wrote plaintext while the dashboard's decrypt
+        // path passed it through (no `ENC2:` prefix → no-op). The
+        // claim was conditionally true; now it's unconditional.
+        // `MACCRAB_ENCRYPT_DB=0` remains as an explicit escape hatch
+        // for tests and bisects.
+        let encryptDbEnv = Foundation.ProcessInfo.processInfo.environment["MACCRAB_ENCRYPT_DB"]
+        let dbEncryptionEnabled = (encryptDbEnv != "0")
+        let dbEncryption = DatabaseEncryption(enabled: dbEncryptionEnabled)
         if dbEncryption.isEnabled {
-            print("Database encryption: active (AES-256, key in Keychain)")
+            print("Database encryption: active (AES-GCM, key in Keychain)")
+        } else {
+            print("Database encryption: disabled via MACCRAB_ENCRYPT_DB=0")
         }
 
         // Report generator -- HTML incident reports
@@ -1213,7 +1224,182 @@ enum DaemonSetup {
         storage.campaignsMaxSizeMB    = max(50, storage.campaignsMaxSizeMB)
         state.storage = storage
 
+        // v1.9 Agent Traces (PR-2): if the operator opted in via
+        // MACCRAB_AGENT_TRACES=1, allocate a TraceRegistry and spawn
+        // the consumer Task that drains ESCollector.traceBindings into
+        // it. The collector emits bind/evict signals only when the
+        // same env var is set, so an unconfigured daemon pays nothing.
+        if ESCollector.isAgentTracesEnabled {
+            let registry = TraceRegistry()
+            state.traceRegistry = registry
+            if let collector = collector {
+                let bindings = collector.traceBindings
+                Task.detached(priority: .utility) { [weak registry] in
+                    for await signal in bindings {
+                        guard let registry else { return }
+                        switch signal.kind {
+                        case let .bind(identity, context, agentTool):
+                            await registry.bind(
+                                TraceRegistry.Binding(
+                                    identity: identity,
+                                    context: context,
+                                    agentTool: agentTool,
+                                    boundAt: signal.timestamp
+                                )
+                            )
+                        case let .evict(pid):
+                            await registry.evict(pid: pid)
+                        }
+                    }
+                }
+            }
+        }
+
+        // v1.9 PR-4: optional OTLP receiver + TraceStore. Allocated only
+        // when both feature flags are present. The receiver listens on
+        // 127.0.0.1:4318 and writes ingested spans into traces.db.
+        // Bind failure surfaces via os.log .error and the receiver
+        // remains nil — the rest of the daemon keeps running. PR-5
+        // wires a Settings-driven start/stop; PR-4 is env-only.
+        // v1.9 Phase-3.4: receiver enable now comes from EITHER the
+        // env var (legacy) OR the user's agent_traces_config.json.
+        // SIGHUP triggers a reload via SignalHandlers.
+        let otlpEnvFlag = Foundation.ProcessInfo.processInfo
+            .environment["MACCRAB_OTLP_RECEIVER"] == "1"
+        let cfg = AgentTracesConfigStore.loadEffective()
+        let otlpEnabled = otlpEnvFlag || cfg.receiverEnabled
+
+        if ESCollector.isAgentTracesEnabled, otlpEnabled {
+            do {
+                // v1.9 Phase-2.3: pass the daemon's DatabaseEncryption
+                // through so attributes_json is encrypted at rest with
+                // the same shared key as events.db / alerts.db.
+                let traceStore = try TraceStore(
+                    directory: supportDir,
+                    encryption: dbEncryption
+                )
+                state.traceStore = traceStore
+                let receiver = OTLPReceiver(
+                    port: cfg.port,
+                    traceStore: traceStore
+                )
+                try await receiver.start()
+                state.otlpReceiver = receiver
+                AgentTracesStatusStore.write(
+                    AgentTracesStatus(running: true, port: cfg.port),
+                    to: supportDir
+                )
+                Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
+                    .notice("OTLPReceiver started on 127.0.0.1:\(cfg.port, privacy: .public) — traces.db at \(supportDir, privacy: .public)/traces.db")
+                print("[agent-traces] OTLPReceiver listening on 127.0.0.1:\(cfg.port) — traces.db at \(supportDir)/traces.db")
+            } catch {
+                Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
+                    .error("OTLPReceiver failed to start: \(String(describing: error), privacy: .public)")
+                print("[agent-traces] OTLPReceiver FAILED to start: \(error)")
+                AgentTracesStatusStore.write(
+                    AgentTracesStatus(
+                        running: false,
+                        port: cfg.port,
+                        lastError: "\(error)",
+                        lastErrorAt: Date()
+                    ),
+                    to: supportDir
+                )
+                state.traceStore = nil
+            }
+        } else if cfg.receiverEnabled || otlpEnvFlag {
+            // Operator wanted it on but agent-traces master flag is off.
+            // Surface the disagreement.
+            AgentTracesStatusStore.write(
+                AgentTracesStatus(
+                    running: false,
+                    port: cfg.port,
+                    lastError: "Receiver enabled but MACCRAB_AGENT_TRACES is not set",
+                    lastErrorAt: Date()
+                ),
+                to: supportDir
+            )
+        } else {
+            // Neither config nor env asks for it — record stopped.
+            AgentTracesStatusStore.write(
+                AgentTracesStatus(running: false, port: cfg.port),
+                to: supportDir
+            )
+        }
+
         return state
+    }
+
+    // MARK: - Phase-3.4: SIGHUP receiver lifecycle
+
+    /// Apply the latest agent_traces_config.json to a running daemon.
+    /// Called from SignalHandlers' SIGHUP handler. Idempotent: a
+    /// no-op transition (already-running with the same port) does
+    /// nothing.
+    public static func applyAgentTracesConfig(
+        state: DaemonState,
+        supportDir: String,
+        dbEncryption: DatabaseEncryption
+    ) async {
+        let cfg = AgentTracesConfigStore.loadEffective()
+        let envFlag = Foundation.ProcessInfo.processInfo
+            .environment["MACCRAB_OTLP_RECEIVER"] == "1"
+        let shouldRun = ESCollector.isAgentTracesEnabled && (cfg.receiverEnabled || envFlag)
+        let logger = Logger(subsystem: "com.maccrab.agentkit", category: "agent-traces")
+
+        // Already running — stop and restart only if port changed.
+        if let existing = state.otlpReceiver {
+            let existingPort = await existing.currentPort()
+            if !shouldRun {
+                await existing.stop()
+                state.otlpReceiver = nil
+                state.traceStore = nil
+                AgentTracesStatusStore.write(
+                    AgentTracesStatus(running: false, port: existingPort),
+                    to: supportDir
+                )
+                logger.notice("OTLPReceiver stopped via SIGHUP reload")
+                print("[agent-traces] OTLPReceiver stopped (SIGHUP)")
+                return
+            }
+            if existingPort == cfg.port {
+                return // no change
+            }
+            await existing.stop()
+            state.otlpReceiver = nil
+            // fall through to start on new port
+        }
+
+        guard shouldRun else { return }
+        do {
+            let traceStore = try TraceStore(
+                directory: supportDir,
+                encryption: dbEncryption
+            )
+            state.traceStore = traceStore
+            let receiver = OTLPReceiver(port: cfg.port, traceStore: traceStore)
+            try await receiver.start()
+            state.otlpReceiver = receiver
+            AgentTracesStatusStore.write(
+                AgentTracesStatus(running: true, port: cfg.port),
+                to: supportDir
+            )
+            logger.notice("OTLPReceiver started via SIGHUP on 127.0.0.1:\(cfg.port, privacy: .public)")
+            print("[agent-traces] OTLPReceiver started (SIGHUP) on 127.0.0.1:\(cfg.port)")
+        } catch {
+            AgentTracesStatusStore.write(
+                AgentTracesStatus(
+                    running: false,
+                    port: cfg.port,
+                    lastError: "\(error)",
+                    lastErrorAt: Date()
+                ),
+                to: supportDir
+            )
+            logger.error("OTLPReceiver SIGHUP start failed: \(String(describing: error), privacy: .public)")
+            print("[agent-traces] OTLPReceiver SIGHUP start FAILED: \(error)")
+            state.traceStore = nil
+        }
     }
 
     // MARK: - Phase 7 output factory

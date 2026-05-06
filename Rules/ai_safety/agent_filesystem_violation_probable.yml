@@ -1,0 +1,52 @@
+title: Agent Wrote To Privileged Path (Lineage Attribution)
+id: d1a2b3c4-2051-4000-a000-000000002051
+status: stable
+description: >
+    A process whose machine attribution is lineage-only (an ancestor
+    binary matches a known AI tool, but no TRACEPARENT was inherited)
+    wrote a file under a privileged macOS persistence or credential
+    location. Lower confidence than the traceparent variant — lineage
+    can mis-attribute when an agent shell is the parent of an unrelated
+    user command — so this rule fires at medium severity. Pair with the
+    high-confidence rule (`agent_filesystem_violation_high_conf`) for
+    triage prioritisation.
+author: MacCrab Community
+date: 2026/05/05
+references:
+    - docs/AGENT_TRACES.md
+tags:
+    - attack.persistence
+    - attack.t1543.001
+    - attack.t1543.004
+    - attack.credential_access
+    - attack.t1555.001
+    - maccrab.agent_traces
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_lineage:
+        MachineAgentConfidence: 'lineage'
+    selection_persistence:
+        TargetFilename|contains:
+            - '/Library/LaunchDaemons/'
+            - '/Library/LaunchAgents/'
+            - '/Library/StartupItems/'
+        FileAction: 'create'
+    selection_user_persistence:
+        TargetFilename|contains:
+            - '/Library/LaunchAgents/'
+            - '/.config/launchd/'
+        FileAction: 'create'
+    selection_credentials:
+        TargetFilename|contains:
+            - '/.ssh/'
+            - '/Library/Keychains/'
+        FileAction: 'create'
+    condition: selection_lineage and (selection_persistence or selection_user_persistence or selection_credentials)
+falsepositives:
+    - User-launched terminal command that happens to descend from an AI
+      tool's editor process
+    - Operator-approved persistence install (review the originating
+      tool session in Agent Traces)
+level: medium

@@ -182,8 +182,11 @@ public struct ModuleStatus: Sendable {
               category: "output", maturity: .experimental,
               summary: "SFTP alert log shipping."),
         .init(id: "otlp-output", name: "OpenTelemetry (OTLP) output",
-              category: "output", maturity: .experimental,
-              summary: "OTLP HTTP/JSON span export. New in v1.8.0."),
+              category: "output", maturity: .stable,
+              summary: "OTLP HTTP/JSON span export. Promoted to stable in v1.9.0 alongside the receiver."),
+        .init(id: "agent-traces-receiver", name: "Agent Traces (OTLP receiver + lineage)",
+              category: "ai", maturity: .stable,
+              summary: "Loopback OTLP receiver + W3C TRACEPARENT correlation between AI-agent activity and kernel events. New in v1.9.0."),
 
         // ─── Prevention (default-off discipline) ────────────────────
         .init(id: "response-engine", name: "Response action engine",

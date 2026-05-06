@@ -10,6 +10,8 @@ enum SignalHandlers {
         let sigTermSource: DispatchSourceSignal
         let sigIntSource: DispatchSourceSignal
         let sigUsr1Source: DispatchSourceSignal
+        /// v1.9 hot-fix: manual events.db size-cap sweep on demand.
+        let sigUsr2Source: DispatchSourceSignal
     }
 
     static func install(state: DaemonState, supervisor: MonitorSupervisor) -> Handles {
@@ -126,6 +128,17 @@ enum SignalHandlers {
                             print("[SIGHUP] Response action reload failed: \(error)")
                         }
                     }
+
+                    // v1.9 Phase-3.4: pick up dashboard-written
+                    // agent_traces_config.json so the operator's
+                    // toggle takes effect without a daemon restart.
+                    // Idempotent: same-port enabled→enabled is a
+                    // no-op. Port change stops + restarts.
+                    await DaemonSetup.applyAgentTracesConfig(
+                        state: state,
+                        supportDir: state.supportDir,
+                        dbEncryption: state.dbEncryption
+                    )
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }
@@ -145,6 +158,12 @@ enum SignalHandlers {
             logger.info("MacCrab daemon shutting down...")
             print("\nShutting down MacCrab daemon...")
             Task {
+                // v1.9 PR-5: drain the OTLP receiver first so the
+                // NWListener is closed before launchd respawns the
+                // daemon. Avoids leaving the kernel socket in
+                // TIME_WAIT, which would make the next start fail to
+                // bind 4318. Cheap (no new actor hops) and idempotent.
+                await state.otlpReceiver?.stop()
                 await supervisor.shutdown(deadline: 3.0)
                 exit(0)
             }
@@ -183,11 +202,51 @@ enum SignalHandlers {
         }
         sigUsr1Source.resume()
 
+        // v1.9 hot-fix: SIGUSR2 triggers immediate enforcement of the
+        // events.db size cap. Workaround for hosts where the
+        // periodic enforcer hasn't been keeping up (regression class
+        // first seen on the v1.8.0 sysext: 5GB+ events.db growing
+        // unchecked). Dashboard's "Reduce events.db now" button in
+        // Settings sends this signal and reads the status snapshot.
+        let sigUsr2Source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        signal(SIGUSR2, SIG_IGN)
+        sigUsr2Source.setEventHandler {
+            print("[SIGUSR2] Manual events.db size-cap sweep requested by dashboard")
+            Task {
+                let beforeBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
+                let started = Date()
+                let didRun = await enforceDatabaseSizeCapNow(state: state)
+                // v1.9.0 (audit Stab-M1): only persist a status
+                // snapshot when WE actually ran the sweep. Pre-fix,
+                // a second SIGUSR2 within ~2 s of the first would
+                // hit the reentrancy guard, then still write its own
+                // (stale) `bytesAfter` measurement on top of the
+                // running sweep's pending state. Now the running
+                // sweep's own final write wins.
+                if didRun {
+                    let afterBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
+                    let status = StorageFlushStatus(
+                        inProgress: false,
+                        lastRunAt: started,
+                        bytesBefore: beforeBytes,
+                        bytesAfter: afterBytes,
+                        note: nil
+                    )
+                    StorageFlushStatus.write(status, to: state.supportDir)
+                    print("[SIGUSR2] events.db sweep done: \(beforeBytes / 1_000_000) MB → \(afterBytes / 1_000_000) MB")
+                } else {
+                    print("[SIGUSR2] events.db sweep skipped — another sweep is already in progress; preserving its pending status")
+                }
+            }
+        }
+        sigUsr2Source.resume()
+
         return Handles(
             sigHupSource: sigHupSource,
             sigTermSource: sigTermSource,
             sigIntSource: sigIntSource,
-            sigUsr1Source: sigUsr1Source
+            sigUsr1Source: sigUsr1Source,
+            sigUsr2Source: sigUsr2Source
         )
     }
 }

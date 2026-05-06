@@ -3,6 +3,109 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] — Unreleased
+
+The Agent Traces release. W3C TRACEPARENT correlation between AI
+coding-agent activity and macOS kernel events, plus a sustained
+audit-fix pass: dynamic version sourcing, sysext deactivate state
+machine, span-identity sanitisation, per-store dashboard cache TTLs,
+threat-intel multi-tenant suffix guard, "awaiting daemon" timeout, and
+a deeper pre-release audit pipeline. Full notes: `RELEASE_NOTES/v1.9.0.md`.
+
+### Added
+- Loopback OTLP/HTTP receiver on `127.0.0.1:4318` with body-cap +
+  slow-loris deadline + connection-count cap. Default-off.
+- `traces.db` SQLite store with column-level AES-GCM encryption on
+  `attributes_json`, sharing the keychain key with `events.db` /
+  `alerts.db`.
+- Agent Traces dashboard panel: trace list, span hierarchy with
+  parent-depth indent, pretty-printed attributes JSON, in-panel
+  receiver toggle with status pill (running / stopped / awaiting /
+  failed), reattribute thumbs UI, and "Show in Agent Traces"
+  cross-link from alert detail.
+- Three new `ai_safety` rules: agent filesystem-violation (high-conf +
+  probable) and agent TRACEPARENT credential-access.
+- `Settings → Manual event prune`: SIGUSR2-driven on-demand events.db
+  size-cap sweep, complementing the hourly enforcer.
+- `Settings → System Extension`: clean removal via
+  `OSSystemExtensionRequest.deactivationRequest`, no SIP-disable
+  required, with a confirmation sheet so misclicks don't unregister
+  a working sysext.
+- `Sources/MacCrabCore/MacCrabVersion.swift` — single source of
+  truth for runtime version strings. Replaces four hardcoded
+  literals across StartupBanner, DaemonBootstrap, maccrabctl,
+  OTLPOutput.
+- `pre-release-audit.sh` Pass 12-15 — traces.db single-opener,
+  env-block secret-leak prevention, enrichment-key↔enricher coverage,
+  TraceStore + DatabaseEncryption pairing.
+
+### Changed
+- Database column-level encryption is now ON by default for the
+  daemon. The `MACCRAB_ENCRYPT_DB=0` escape hatch remains for tests.
+- OTLP outbound `service.version` and User-Agent now read
+  `MacCrabVersion.current` instead of the v1.8.0 hardcoded literal.
+- Threat intel: explicit multi-tenant platform suffix guard
+  (`pages.dev`, `vercel.app`, `firebaseapp.com`, etc.) so a single
+  malicious URL doesn't blanket-flag the host. Anchored URL match
+  (exact OR `hasPrefix`). Optional `MACCRAB_ABUSECH_AUTH_KEY` env
+  raises feed rate-limit ceiling.
+- AppState dashboard cache: per-store mtime TTLs so a probe of one
+  DB no longer suppresses the others' freshness check for 30 s.
+- Span identity fields (`service.name`, `span.name`,
+  `gen_ai.provider.name`, `gen_ai.system`) now pass through the
+  attribute sanitiser before persistence — matches the wire-boundary
+  sanitisation guarantee for `attributes_json`.
+- `traceStoreOrNil()` picks the dir with the freshest `traces.db`
+  mtime instead of the first readable one — consistent with the
+  eventStore / alertStore probe.
+- `OTLPReceiver`: 64-connection concurrent cap; new connections past
+  the cap close immediately with HTTP 503.
+- `ConnectionBuffer` deinit defensively cancels its slow-loris timer
+  to satisfy `DispatchSourceTimer.cancel()`-before-dealloc invariant.
+- Sanitiser entropy fallback no longer splits on `/`, so URL paths
+  and absolute filesystem paths with high-entropy session IDs aren't
+  over-redacted.
+- `SignalHandlers` SIGUSR2: `enforceDatabaseSizeCapNow` now reports
+  whether the prune ran or was skipped (reentrancy); the status
+  snapshot is written only on a real run.
+- `AppState.requestStorageFlush` safety auto-clear extended from
+  90 s → 180 s (multi-GB DBs on slow disks can outrun the prior
+  window).
+- Dashboard "Awaiting daemon" pill now flips to a red "Daemon not
+  responding" state after 30 s with a hover-help describing the
+  recovery steps (start the daemon / re-activate the sysext).
+- AI Activity timeline session label uses ICU pluralisation via
+  `String(localized:defaultValue:)` instead of manual `s.count == 1
+  ? "" : "s"`.
+
+### Fixed
+- `Xcode/project.yml` CFBundleVersion / CFBundleShortVersionString
+  bumped to 1.9.0 (was 1.7.5; would have shipped a stale Info.plist
+  on the next xcodegen).
+- `DaemonBootstrap.writeStartupMarker` no longer hardcodes
+  `version: "1.7.12"`. Reads `MacCrabVersion.current`.
+- `maccrabctl --version` reports the current build (was `v1.5.1`).
+- StartupBanner version-line padding now computes against the actual
+  cell width (42 chars), so the closing `║` doesn't shift on launch
+  regardless of the version-string length.
+- `SystemExtensionManager` deactivation result now maps to
+  `.notActivated` instead of `.activated` — the badge no longer says
+  "Active" right after the user removes the extension.
+- `SettingsView` sysext failed-state badge gains a `.help(...)`
+  tooltip with the full error string (the truncated visible label
+  is now informative, not opaque).
+- Storage-flush row shows "Last run: never" on first install instead
+  of an empty caption.
+- `pre-release-audit.sh` Pass 15 grep no longer matches zero call
+  sites: rewritten to use a 5-line awk window so multi-line
+  `TraceStore(directory: …, encryption: …)` constructions are seen.
+- README.md tests-passing badge bumped to 1106; version badge bumped
+  to 1.9.0. `release.json` test count corrected to 1106.
+- `docs/AGENT_TRACES.md` enabling section updated — receiver now
+  starts from the dashboard toggle in v1.9.0, not "v1.9.1+".
+- `CLAUDE.md` rule count line now says 389 single-event + 38 sequence
+  rules (was the v1.5-era "382").
+
 ## [1.8.1] — 2026-05-04
 
 External-review-driven trust hardening. AES-GCM authenticated DB

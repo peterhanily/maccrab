@@ -838,10 +838,109 @@ final class AppState: ObservableObject {
     /// guaranteeing suppression state is never overwritten by a DB reload.
     @Published var suppressedIDs: Set<String> = []
 
-    /// Cached DB connections — avoid reopening on every poll cycle
+    /// Cached DB connections — avoid reopening on every poll cycle.
+    /// v1.9.0 (audit Stab-H4): each store has its OWN `lastChecked`
+    /// timestamp. Pre-fix the three stores shared a single
+    /// `dbLastChecked` field — after any one was probed, the others
+    /// skipped their freshness check for 30 s and could keep serving
+    /// a stale handle pinned to the wrong dir.
     private var cachedAlertStore: AlertStore?
     private var cachedEventStore: EventStore?
-    private var dbLastChecked: Date = .distantPast
+    private var cachedTraceStore: TraceStore?
+    /// v1.9 PR-5 audit (B3): the dashboard owns attribution_overrides.db
+    /// at the user-writable support path. Daemon reads it for stats.
+    private var cachedOverrideStore: AttributionOverrideStore?
+    private var alertDbLastChecked: Date = .distantPast
+    private var eventDbLastChecked: Date = .distantPast
+    private var traceDbLastChecked: Date = .distantPast
+    /// Path the trace store was opened against. When the mtime probe
+    /// resolves a different path (user-dir flipped to system-dir or
+    /// vice versa) we drop the cache so the next call rebuilds.
+    private var cachedTraceStorePath: String?
+
+    // MARK: - v1.9 PR-4: Agent traces dashboard surface
+
+    /// Recent trace IDs seen in `traces.db`, sorted by most-recent activity
+    /// first. Empty when the feature isn't enabled or no spans have been
+    /// ingested yet.
+    @Published var recentTraceIds: [String] = []
+    /// Spans for the currently-selected trace. Refreshed on selection
+    /// change in AgentTracesView; cleared when nothing is selected.
+    @Published var selectedTraceSpans: [SpanRecord] = []
+    /// Currently-selected trace_id, or nil when the trace list shows no
+    /// detail pane.
+    @Published var selectedTraceId: String?
+    /// Aggregate stats for the dashboard's reattribute-quality metric.
+    /// Always reflects the current EventStore snapshot.
+    @Published var attributionStats: AttributionOverrideStats = AttributionOverrideStats(
+        ratedCount: 0, confirmedCount: 0,
+        wrongToolCount: 0, noAgentCount: 0, unknownVerdictCount: 0,
+        totalEventsWithMachineAttribution: 0
+    )
+
+    // v1.9 audit Phase-1.7: mtime-skip state for refreshAgentTraces.
+    // Pre-fix the comment promised mtime-skip but unconditionally
+    // queried both stores every 5 s tick. Now we re-poll only when
+    // traces.db, events.db, or attribution_overrides.db have been
+    // re-written since the last successful poll. Pattern mirrors
+    // refreshStorageHealth / refreshRuleTamper.
+    private var lastTracesDbMtime: Date?
+    private var lastEventsDbMtimeForAgent: Date?
+    private var lastOverridesDbMtime: Date?
+
+    /// Cross-view navigation request. Set by alert detail's "Show in
+    /// Agent Traces" button; observed by `MainView` to switch the
+    /// sidebar selection AND set `selectedTraceId`. Cleared after the
+    /// view consumes it. Decoupled from a hard NavigationLink because
+    /// SidebarSection isn't reachable from AlertDashboard's call site.
+    @Published var requestedTraceFocus: String?
+
+    // MARK: - v1.9 Phase-3: agent-traces receiver toggle
+
+    /// Operator-controlled toggle. When changed, AppState writes the
+    /// config file and SIGHUPs the daemon so the receiver lifecycle
+    /// matches. Initialised from disk so a UI restart preserves the
+    /// last setting.
+    @Published var agentTracesReceiverEnabled: Bool = AgentTracesConfigStore.read(
+        from: NSHomeDirectory() + "/Library/Application Support/MacCrab/" + AgentTracesConfigStore.filename
+    )?.receiverEnabled ?? false
+
+    /// Daemon-published receiver health snapshot. Polled on the
+    /// regular refresh tick.
+    @Published var agentTracesStatus: AgentTracesStatus?
+
+    /// Wall-clock time of the most recent toggle-on event (or AppState
+    /// init when the toggle was already on at launch). The view uses
+    /// `now - this` to decide when to flip "Awaiting daemon" (orange)
+    /// → "Daemon not responding" (red). Nil when the toggle is off.
+    /// v1.9.0 (audit UX-H5).
+    @Published var agentTracesEnableRequestedAt: Date?
+
+    /// Threshold after which the dashboard considers the daemon
+    /// non-responsive. 30 s comfortably covers the worst-case
+    /// SIGHUP-debounce + signal-deliver + status-write round-trip
+    /// (typically <2 s).
+    public static let agentTracesAwaitingTimeoutSeconds: Double = 30.0
+
+    /// Daemon-published last-flush status. Refreshed by
+    /// `refreshStorageFlushStatus` on the same tick that
+    /// `refreshAgentTracesStatus` runs.
+    @Published var storageFlushStatus: StorageFlushStatus?
+
+    /// Whether the dashboard is mid-flush (signal sent, awaiting the
+    /// daemon's status write to come back).
+    @Published var storageFlushInFlight: Bool = false
+
+    /// Current events.db on-disk footprint (db + wal + shm), in bytes.
+    /// Updated alongside storage flush status. Surfaces in Settings
+    /// so the operator can see whether the sweep actually reclaimed
+    /// space.
+    @Published var eventsDbBytes: UInt64 = 0
+
+    /// Pending debounced sync task — cancelled and rescheduled on
+    /// every toggle change so a flick on/off/on doesn't write three
+    /// configs in 50 ms.
+    private var pendingAgentTracesSync: Task<Void, Never>?
 
     /// Resolve the MacCrab data directory.
     /// Prefers the system dir (root daemon) when its DB exists and is newer
@@ -905,6 +1004,13 @@ final class AppState: ObservableObject {
         startPolling()
         loadSuppressPatterns()
         loadSuppressedIDs()
+        // v1.9.0 (audit UX-H5): if the receiver was already toggled
+        // on at launch (config from disk), treat the dashboard's
+        // open as the "request" so the awaiting-daemon pill has a
+        // timeout even on cold start.
+        if agentTracesReceiverEnabled {
+            agentTracesEnableRequestedAt = Date()
+        }
         Task { await refresh() }
     }
 
@@ -934,22 +1040,439 @@ final class AppState: ObservableObject {
 
     /// Get or create cached alert store.
     /// Reopens every 30 seconds to pick up new WAL data from the daemon.
+    /// v1.9 hot-fix: same path-probe widening as eventStore() — pick
+    /// whichever alerts.db has the freshest mtime so we don't pin to
+    /// a stale system-dir copy left over by a prior sysext install.
+    /// v1.9.0 (audit Stab-H4): per-store TTL.
     private func alertStore() throws -> AlertStore {
         if let store = cachedAlertStore,
-           Date().timeIntervalSince(dbLastChecked) < 30 { return store }
-        let store = try AlertStore(directory: dataDir)
+           Date().timeIntervalSince(alertDbLastChecked) < 30 { return store }
+        let userDir = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+        let candidates = Array(Set([dataDir, userDir, systemDir]))
+        let chosen: String = candidates
+            .map { (dir: String) -> (String, Date) in
+                let mtime = (try? FileManager.default
+                    .attributesOfItem(atPath: dir + "/alerts.db"))?[.modificationDate] as? Date
+                return (dir, mtime ?? .distantPast)
+            }
+            .max(by: { $0.1 < $1.1 })?.0
+            ?? dataDir
+        let store = try AlertStore(directory: chosen)
         cachedAlertStore = store
-        dbLastChecked = Date()
+        alertDbLastChecked = Date()
         return store
     }
 
-    /// Get or create cached event store
+    /// Get or create cached event store.
+    ///
+    /// v1.9 hot-fix: probe both system + user paths and use whichever
+    /// `events.db` was modified most RECENTLY at call time, not at
+    /// AppState init time. Pre-fix `dataDir` was a `let` computed
+    /// once at init (the user kept opening the app while events.db
+    /// at /Library/.../events.db was a stale 5GB blob from a prior
+    /// v1.8.x sysext, so the dashboard pinned to system-dir while
+    /// the running non-root daemon wrote to user-dir → no events
+    /// visible). Same shape as the traces.db fix.
     private func eventStore() throws -> EventStore {
         if let store = cachedEventStore,
-           Date().timeIntervalSince(dbLastChecked) < 30 { return store }
-        let store = try EventStore(directory: dataDir)
+           Date().timeIntervalSince(eventDbLastChecked) < 30 { return store }
+        let userDir = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+        let candidates = Array(Set([dataDir, userDir, systemDir]))
+        // Pick the directory whose events.db was modified most
+        // recently. Empty dirs / missing files yield distantPast
+        // and lose to any concrete file.
+        let chosen: String = candidates
+            .map { (dir: String) -> (String, Date) in
+                let mtime = (try? FileManager.default
+                    .attributesOfItem(atPath: dir + "/events.db"))?[.modificationDate] as? Date
+                return (dir, mtime ?? .distantPast)
+            }
+            .max(by: { $0.1 < $1.1 })?.0
+            ?? dataDir
+        let store = try EventStore(directory: chosen)
         cachedEventStore = store
+        eventDbLastChecked = Date()
         return store
+    }
+
+    /// v1.9 Phase-2.3: shared DatabaseEncryption. Looks up the same
+    /// keychain item as the daemon (v1.8.1 access-groups make this
+    /// cross-bundle), so attributes_json encrypted by the daemon
+    /// decrypts cleanly here. Lazy + cached.
+    private var cachedDbEncryption: DatabaseEncryption?
+    private func dbEncryption() -> DatabaseEncryption {
+        if let e = cachedDbEncryption { return e }
+        let e = DatabaseEncryption(enabled: true)
+        cachedDbEncryption = e
+        return e
+    }
+
+    /// v1.9 PR-5 audit (B3): override store always lives at the
+    /// **user-writable** support path so the dashboard can record
+    /// verdicts without sudo. (events.db is root-owned 0640 in
+    /// production installs; the dashboard's prepare-fallback opened
+    /// read-only there and silently swallowed write failures.)
+    private func overrideStore() throws -> AttributionOverrideStore {
+        if let s = cachedOverrideStore { return s }
+        let userDir = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let store = try AttributionOverrideStore(directory: userDir)
+        cachedOverrideStore = store
+        return store
+    }
+
+    /// Get or create cached trace store. Returns nil (and a logged
+    /// warning) when traces.db doesn't exist — that's the steady state
+    /// for daemons running without the OTLP receiver enabled.
+    ///
+    /// PR-4 (post-ship hotfix): probe BOTH the resolved `dataDir`
+    /// (events.db wins by mtime) AND the user dir independently —
+    /// `traces.db` may live in a different dir than `events.db` when a
+    /// stale root-owned events.db at /Library/... is keeping `dataDir`
+    /// pinned to the system path while the running non-root daemon
+    /// writes traces.db to the user dir. Same shape as the
+    /// maccrabctl StatusCommand fix.
+    ///
+    /// v1.9.0 (audit Stab-M5): pick the dir with the freshest
+    /// `traces.db` mtime, NOT the first-readable one. Matches
+    /// `eventStore()` / `alertStore()`. Pre-fix asymmetry meant a
+    /// stale traces.db at the system path could pin the dashboard to
+    /// the wrong file when both existed.
+    ///
+    /// v1.9.0 (audit Stab-H4): per-store TTL. The cache also drops
+    /// when the resolved path changes (user-dir/system-dir flip) so a
+    /// stale handle never wins after a daemon restart.
+    private func traceStoreOrNil() -> TraceStore? {
+        let userDir = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let candidates = Array(Set([
+            dataDir + "/traces.db",
+            userDir + "/traces.db",
+        ]))
+        let chosenPath: String? = candidates
+            .compactMap { (path: String) -> (String, Date)? in
+                guard FileManager.default.isReadableFile(atPath: path),
+                      let mtime = (try? FileManager.default
+                          .attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                else { return nil }
+                return (path, mtime)
+            }
+            .max(by: { $0.1 < $1.1 })?.0
+        guard let path = chosenPath else { return nil }
+
+        // Cache hit: same path AND under TTL.
+        if let store = cachedTraceStore,
+           cachedTraceStorePath == path,
+           Date().timeIntervalSince(traceDbLastChecked) < 30 {
+            return store
+        }
+
+        // Path flip or expired TTL — rebuild. Pass the shared
+        // encryption instance so the dashboard can decrypt
+        // attributes_json written by the daemon.
+        let store = try? TraceStore(path: path, encryption: dbEncryption())
+        cachedTraceStore = store
+        cachedTraceStorePath = path
+        traceDbLastChecked = Date()
+        return store
+    }
+
+    // MARK: - PR-4: trace queries surfaced for AgentTracesView
+
+    /// Refresh `recentTraceIds` + `attributionStats` from disk.
+    /// v1.9 audit Phase-1.7: real mtime-skip across all three sources.
+    /// Pre-fix the comment claimed the pattern but the code re-queried
+    /// every poll. Now: if none of {traces.db, events.db,
+    /// attribution_overrides.db} has changed since last successful
+    /// read, skip the SQLite roundtrips entirely.
+    @MainActor
+    func refreshAgentTraces(limit: Int = 200, force: Bool = false) async {
+        let userDir = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+
+        // Resolve the most recent mtime across user + system paths for
+        // each file (whichever side wrote last is the one we care about).
+        func newestMtime(for filename: String) -> Date? {
+            let paths = [dataDir + "/" + filename, userDir + "/" + filename]
+            let mtimes = paths.compactMap {
+                (try? FileManager.default.attributesOfItem(atPath: $0)[.modificationDate]) as? Date
+            }
+            return mtimes.max()
+        }
+
+        let tracesMtime = newestMtime(for: "traces.db")
+        let eventsMtime = newestMtime(for: "events.db")
+        let overridesMtime = newestMtime(for: "attribution_overrides.db")
+
+        // Skip when nothing changed AND we have at least one prior good read.
+        if !force,
+           let _ = lastEventsDbMtimeForAgent ?? lastTracesDbMtime ?? lastOverridesDbMtime,
+           tracesMtime == lastTracesDbMtime,
+           eventsMtime == lastEventsDbMtimeForAgent,
+           overridesMtime == lastOverridesDbMtime {
+            return
+        }
+
+        // v1.9 PR-5 audit (B3): stats roll up from TWO sources — the
+        // dashboard's user-writable override store (verdict counts)
+        // and the daemon's events.db (total events with machine
+        // attribution).
+        var total = 0
+        if let es = try? eventStore() {
+            total = (try? await es.eventCountWithMachineAttribution()) ?? 0
+        }
+        if let overrides = try? overrideStore() {
+            if let stats = try? await overrides.stats(totalEventsWithMachineAttribution: total) {
+                self.attributionStats = stats
+            }
+        }
+        if let store = traceStoreOrNil() {
+            if let ids = try? await store.recentTraceIds(limit: limit) {
+                self.recentTraceIds = ids
+            }
+        } else {
+            self.recentTraceIds = []
+        }
+
+        lastTracesDbMtime = tracesMtime
+        lastEventsDbMtimeForAgent = eventsMtime
+        lastOverridesDbMtime = overridesMtime
+    }
+
+    /// Load all spans for a given trace into `selectedTraceSpans`. Sets
+    /// `selectedTraceId` so the detail pane re-renders when the user
+    /// clicks a different row.
+    @MainActor
+    func loadTrace(_ traceId: String) async {
+        self.selectedTraceId = traceId
+        guard let store = traceStoreOrNil() else {
+            self.selectedTraceSpans = []
+            return
+        }
+        if let spans = try? await store.spansForTrace(traceId) {
+            self.selectedTraceSpans = spans
+        } else {
+            self.selectedTraceSpans = []
+        }
+    }
+
+    /// Persist a reattribute verdict for a given event. Refreshes
+    /// `attributionStats` afterwards so the metric updates live.
+    /// v1.9 PR-5 audit (B3): writes go through the dashboard's
+    /// user-writable AttributionOverrideStore so root-owned events.db
+    /// no longer silently fails the click.
+    @MainActor
+    func recordAttributionOverride(
+        eventId: String,
+        machineConfidence: String?,
+        verdict: AttributionOverride.Verdict,
+        note: String?
+    ) async {
+        guard let overrides = try? overrideStore() else {
+            Logger(subsystem: "com.maccrab.app", category: "agent-traces")
+                .error("recordAttributionOverride: override store unavailable")
+            return
+        }
+        let now = Date()
+        let override = AttributionOverride(
+            eventId: eventId,
+            machineConfidence: machineConfidence,
+            verdict: verdict,
+            userNote: note,
+            createdAt: now,
+            updatedAt: now
+        )
+        do {
+            try await overrides.record(override)
+            // Force-refresh: the override write just bumped
+            // attribution_overrides.db's mtime but the mtime-skip
+            // pattern would only catch it on the next tick if we
+            // happened to be milliseconds slow. `force: true` makes
+            // the dashboard reflect the verdict instantly.
+            await refreshAgentTraces(force: true)
+        } catch {
+            Logger(subsystem: "com.maccrab.app", category: "agent-traces")
+                .error("recordAttributionOverride failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Read the operator verdict for a given event id. Returns nil when
+    /// none has been recorded yet.
+    func attributionOverride(for eventId: String) async -> AttributionOverride? {
+        guard let overrides = try? overrideStore() else { return nil }
+        return try? await overrides.fetch(eventId: eventId)
+    }
+
+    // MARK: - v1.9 Phase-3: receiver toggle sync
+
+    /// Debounced wrapper for `syncAgentTracesConfig`. 500 ms debounce
+    /// matches the webhook-config sync pattern.
+    @MainActor
+    func scheduleAgentTracesSync() {
+        // v1.9.0 (audit UX-H5): record (or clear) the request
+        // timestamp synchronously at the toggle moment — debounce
+        // delay shouldn't push the awaiting-pill timeout out by half
+        // a second.
+        if agentTracesReceiverEnabled {
+            agentTracesEnableRequestedAt = Date()
+        } else {
+            agentTracesEnableRequestedAt = nil
+        }
+
+        pendingAgentTracesSync?.cancel()
+        pendingAgentTracesSync = Task {
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self.syncAgentTracesConfig() }
+        }
+    }
+
+    /// Write the operator's agent-traces config to the user-home path
+    /// and SIGHUP the daemon so it reloads + starts/stops the
+    /// receiver. Mirrors syncWebhookConfig.
+    @MainActor
+    func syncAgentTracesConfig() {
+        let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let path = configDir + "/" + AgentTracesConfigStore.filename
+        let cfg = AgentTracesConfig(
+            receiverEnabled: agentTracesReceiverEnabled,
+            port: 4318
+        )
+        guard AgentTracesConfigStore.write(cfg, to: path) else { return }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-HUP", "com.maccrab.agent"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        try? task.run()
+        // Also SIGHUP the dev maccrabd binary, which uses a different
+        // process name. Best-effort.
+        let task2 = Process()
+        task2.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task2.arguments = ["-HUP", "maccrabd"]
+        task2.standardOutput = Pipe()
+        task2.standardError = Pipe()
+        try? task2.run()
+    }
+
+    /// Trigger an immediate events.db size-cap sweep on the daemon.
+    /// Sends BOTH SIGUSR2 (the v1.9 dedicated handler) and SIGHUP
+    /// (which the v1.6.14+ enforcer also reacts to) to maximise
+    /// reach — older sysext binaries that pre-date the SIGUSR2
+    /// handler will still respond to SIGHUP. Targets both
+    /// `com.maccrab.agent` (sysext) and `maccrabd` (dev daemon).
+    /// Sets `storageFlushInFlight` so the UI can show a spinner; the
+    /// status JSON the daemon writes when done flips it back off.
+    @MainActor
+    func requestStorageFlush() {
+        storageFlushInFlight = true
+        // Order matters: SIGUSR2 first (clean dedicated path), then
+        // SIGHUP (catches older sysexts). On the v1.9 daemon both
+        // fire; on a v1.8.x sysext SIGUSR2 is a no-op + SIGHUP wins.
+        for sig in ["-USR2", "-HUP"] {
+            for processName in ["com.maccrab.agent", "maccrabd"] {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                task.arguments = [sig, processName]
+                task.standardOutput = Pipe()
+                task.standardError = Pipe()
+                try? task.run()
+            }
+        }
+        // Auto-clear the in-flight flag after 180 s in case the daemon
+        // doesn't write a status JSON (e.g. an older sysext that
+        // honored SIGHUP but doesn't know to write our status file,
+        // or the daemon is dead). v1.9.0 (audit Stab-M12) extended
+        // from 90 s → 180 s: multi-GB DBs on slow disks have been
+        // observed to take 60-120 s for the prune+VACUUM phase, and
+        // the prior 90 s window flipped the button back active while
+        // the daemon was still working — letting the operator click
+        // again and double-fire the size-cap sweep.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000_000)
+            await MainActor.run {
+                self?.storageFlushInFlight = false
+            }
+        }
+    }
+
+    /// Pull the latest flush snapshot from disk. Returns false if no
+    /// snapshot file exists yet (daemon hasn't run a sweep on this
+    /// install). Updates `storageFlushStatus`, `eventsDbBytes`, and
+    /// clears `storageFlushInFlight` if the snapshot is fresher than
+    /// when we last sent SIGUSR2.
+    @MainActor
+    func refreshStorageFlushStatus() {
+        let userDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+        let candidates = Array(Set([systemDir, userDir]))
+
+        // Newest snapshot wins (across user + system dirs, mirroring
+        // the eventStore() path probe).
+        var newest: StorageFlushStatus?
+        for dir in candidates {
+            if let s = StorageFlushStatus.read(from: dir),
+               (newest == nil || (s.lastRunAt ?? .distantPast) > (newest!.lastRunAt ?? .distantPast)) {
+                newest = s
+            }
+        }
+        if newest != storageFlushStatus {
+            storageFlushStatus = newest
+            if newest?.inProgress == false {
+                storageFlushInFlight = false
+            }
+        }
+
+        // Refresh on-disk footprint so the Settings UI can display
+        // current size next to "Reduce now".
+        var maxBytes: UInt64 = 0
+        for dir in candidates {
+            let bytes = StorageFlushStatus.fileSize(at: dir + "/events.db")
+            if bytes > maxBytes { maxBytes = bytes }
+        }
+        if maxBytes != eventsDbBytes {
+            eventsDbBytes = maxBytes
+        }
+    }
+
+    /// Pull the daemon-published status snapshot. Polled on the
+    /// regular refresh tick alongside refreshAgentTraces.
+    @MainActor
+    func refreshAgentTracesStatus() {
+        // Probe both system and user dirs (the running daemon may be
+        // root-deployed sysext or non-root dev build).
+        let userDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+        let candidates = [systemDir, userDir]
+        var newest: AgentTracesStatus?
+        for dir in candidates {
+            if let s = AgentTracesStatusStore.read(from: dir),
+               (newest == nil || s.updatedAt > newest!.updatedAt) {
+                newest = s
+            }
+        }
+        if newest != agentTracesStatus {
+            agentTracesStatus = newest
+        }
     }
 
     // MARK: Public interface

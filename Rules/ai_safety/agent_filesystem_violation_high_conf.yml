@@ -1,0 +1,52 @@
+title: Agent Wrote To Privileged Path (High Confidence)
+id: d1a2b3c4-2050-4000-a000-000000002050
+status: stable
+description: >
+    A process whose machine attribution is high-confidence (TRACEPARENT
+    inherited from an OTel-emitting AI agent) wrote a file under a
+    privileged macOS persistence or credential location. This is the
+    canonical case the W3C-trace-context correlation pathway exists to
+    catch: the kernel event is bound to a specific agent interaction by
+    cryptographic-grade trace IDs, so the alert can answer "which prompt
+    caused this?" rather than just "a process did this."
+author: MacCrab Community
+date: 2026/05/05
+references:
+    - https://code.claude.com/docs/en/monitoring-usage
+    - https://www.w3.org/TR/trace-context/
+    - docs/AGENT_TRACES.md
+tags:
+    - attack.persistence
+    - attack.t1543.001
+    - attack.t1543.004
+    - attack.credential_access
+    - attack.t1555.001
+    - maccrab.agent_traces
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_traceparent:
+        MachineAgentConfidence: 'traceparent'
+    selection_persistence:
+        TargetFilename|contains:
+            - '/Library/LaunchDaemons/'
+            - '/Library/LaunchAgents/'
+            - '/Library/StartupItems/'
+        FileAction: 'create'
+    selection_user_persistence:
+        TargetFilename|contains:
+            - '/Library/LaunchAgents/'
+            - '/.config/launchd/'
+        FileAction: 'create'
+    selection_credentials:
+        TargetFilename|contains:
+            - '/.ssh/'
+            - '/Library/Keychains/'
+        FileAction: 'create'
+    condition: selection_traceparent and (selection_persistence or selection_user_persistence or selection_credentials)
+falsepositives:
+    - Operator-approved agent task that explicitly installs a launch item
+      (rare; would be visible in the originating tool span)
+    - Manual key rotation that happens to be running under an agent shell
+level: high

@@ -1,0 +1,97 @@
+// Copyright 2019, OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+//
+// Vendored excerpt. Full upstream definition:
+//   https://github.com/open-telemetry/opentelemetry-proto/blob/main/
+//     opentelemetry/proto/trace/v1/trace.proto
+
+syntax = "proto3";
+
+package opentelemetry.proto.trace.v1;
+
+import "opentelemetry/proto/common/v1/common.proto";
+import "opentelemetry/proto/resource/v1/resource.proto";
+
+option java_multiple_files = true;
+option java_package = "io.opentelemetry.proto.trace.v1";
+option java_outer_classname = "TraceProto";
+option go_package = "go.opentelemetry.io/proto/otlp/trace/v1";
+
+message TracesData {
+  repeated ResourceSpans resource_spans = 1;
+}
+
+message ResourceSpans {
+  reserved 1000;
+  opentelemetry.proto.resource.v1.Resource resource = 1;
+  repeated ScopeSpans scope_spans = 2;
+  string schema_url = 3;
+}
+
+message ScopeSpans {
+  opentelemetry.proto.common.v1.InstrumentationScope scope = 1;
+  repeated Span spans = 2;
+  string schema_url = 3;
+}
+
+message Span {
+  reserved 3;
+  bytes trace_id = 1;
+  bytes span_id = 2;
+  string trace_state = 3 [deprecated = true];
+  bytes parent_span_id = 4;
+  fixed32 flags = 16;
+  string name = 5;
+
+  enum SpanKind {
+    SPAN_KIND_UNSPECIFIED = 0;
+    SPAN_KIND_INTERNAL = 1;
+    SPAN_KIND_SERVER = 2;
+    SPAN_KIND_CLIENT = 3;
+    SPAN_KIND_PRODUCER = 4;
+    SPAN_KIND_CONSUMER = 5;
+  }
+  SpanKind kind = 6;
+
+  fixed64 start_time_unix_nano = 7;
+  fixed64 end_time_unix_nano = 8;
+
+  repeated opentelemetry.proto.common.v1.KeyValue attributes = 9;
+  uint32 dropped_attributes_count = 10;
+
+  repeated Event events = 11;
+  uint32 dropped_events_count = 12;
+
+  repeated Link links = 13;
+  uint32 dropped_links_count = 14;
+
+  Status status = 15;
+
+  message Event {
+    fixed64 time_unix_nano = 1;
+    string name = 2;
+    repeated opentelemetry.proto.common.v1.KeyValue attributes = 3;
+    uint32 dropped_attributes_count = 4;
+  }
+
+  message Link {
+    bytes trace_id = 1;
+    bytes span_id = 2;
+    string trace_state = 3;
+    repeated opentelemetry.proto.common.v1.KeyValue attributes = 4;
+    uint32 dropped_attributes_count = 5;
+    fixed32 flags = 6;
+  }
+}
+
+message Status {
+  reserved 1;
+  string message = 2;
+
+  enum StatusCode {
+    STATUS_CODE_UNSET = 0;
+    STATUS_CODE_OK = 1;
+    STATUS_CODE_ERROR = 2;
+  }
+  StatusCode code = 3;
+}

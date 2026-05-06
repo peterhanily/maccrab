@@ -165,26 +165,152 @@ struct AIActivityTimelineView: View {
         .onChange(of: effectiveSelectedPid) { _ in searchText = "" }
     }
 
+    /// v1.9 PR-5 hotfix: replace the previous horizontal chip strip
+    /// (which silently truncated long session lists off-screen and
+    /// did not respond to horizontal scrolling) with a Menu-style
+    /// Picker. Works for any session count: 1 session is one row,
+    /// 50 sessions is one row + a scrolling dropdown.
+    ///
+    /// The dropdown is sorted newest-first so the most recent session
+    /// is always at the top. The currently-selected session's metadata
+    /// (tool / pid / started / event count / alert count) renders
+    /// inline as a detail bar under the menu so the operator can see
+    /// the session's properties without expanding the dropdown.
     private var sessionPicker: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                // v1.8.0 polish: sort by lastActivity descending so the
-                // most recently-active session sits leftmost. Pre-fix
-                // the order was the daemon-snapshot order, which made
-                // it ambiguous which session came first.
-                ForEach(sortedSessions, id: \.aiPid) { session in
-                    Button {
-                        selectedPid = session.aiPid
-                    } label: {
-                        SessionChip(
-                            session: session,
-                            selected: session.aiPid == effectiveSelectedPid
-                        )
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(String(localized: "aiTimeline.sessionLabel",
+                             defaultValue: "Session"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker(
+                    selection: Binding(
+                        get: { effectiveSelectedPid ?? 0 },
+                        set: { selectedPid = $0 == 0 ? nil : $0 }
+                    ),
+                    label: EmptyView()
+                ) {
+                    ForEach(sortedSessions, id: \.aiPid) { session in
+                        Text(menuLabel(for: session))
+                            .tag(session.aiPid)
                     }
-                    .buttonStyle(.plain)
                 }
+                .pickerStyle(.menu)
+                .frame(maxWidth: 360)
+
+                Spacer()
+
+                // v1.9 PR-5 audit (UX-B1): manual singular/plural pick.
+                // String(localized:defaultValue:) does NOT do plural
+                // resolution from the runtime-interpolated default —
+                // the default returns verbatim, so "1 session(s)" was
+                // showing up.
+                Text(sessionCountLabel(sortedSessions.count))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let s = selectedSession {
+                sessionDetailBar(s)
             }
         }
+    }
+
+    /// v1.9 PR-5 audit (UX-B1): explicit pluralisation. Doesn't try
+    /// to be locale-perfect — uses an English-style singular/plural
+    /// pick. Bundles can override "aiTimeline.sessionCount.one" /
+    /// ".many" via Localizable.strings if needed.
+    /// v1.9 Phase-4.4: surface the alert-bearing-session count so an
+    /// operator can decide whether to expand the dropdown without
+    /// having to click. Pre-fix the at-a-glance "which session has
+    /// alerts" signal was lost when we switched from chip strip to
+    /// menu picker.
+    private func sessionCountLabel(_ n: Int) -> String {
+        let withAlerts = sortedSessions.filter { $0.kindCounts.alerts > 0 }.count
+        let alertSuffix: String
+        if withAlerts > 0 {
+            alertSuffix = String(format: String(localized: "aiTimeline.sessionCount.alertsSuffix",
+                                                 defaultValue: " · %lld with alert(s)"), withAlerts)
+        } else {
+            alertSuffix = ""
+        }
+        if n == 1 {
+            return String(localized: "aiTimeline.sessionCount.one",
+                           defaultValue: "1 session · newest first")
+                + alertSuffix
+        }
+        return String(format: String(localized: "aiTimeline.sessionCount.many",
+                                      defaultValue: "%lld sessions · newest first"), n)
+            + alertSuffix
+    }
+
+    /// One-line label for the dropdown row. Includes tool + pid + a
+    /// relative timestamp so picking a session is unambiguous even
+    /// when several share a tool.
+    private func menuLabel(for session: AgentSessionSnapshot) -> String {
+        let tool = session.toolType.displayName
+        let started = session.startTime.formatted(.relative(presentation: .numeric))
+        return "\(tool)  ·  pid \(session.aiPid)  ·  started \(started)  ·  \(session.eventCount) ev"
+    }
+
+    /// v1.9.0 (audit UX-M8): localisable, pluralised. Bundles can
+    /// override `aiTimeline.eventsCount.one` / `.many` to provide
+    /// language-correct forms.
+    private func eventsCountLabel(_ n: Int) -> String {
+        if n == 1 {
+            return String(localized: "aiTimeline.eventsCount.one",
+                           defaultValue: "1 event")
+        }
+        return String(format: String(localized: "aiTimeline.eventsCount.many",
+                                      defaultValue: "%lld events"), n)
+    }
+
+    private func alertsCountLabel(_ n: Int) -> String {
+        if n == 1 {
+            return String(localized: "aiTimeline.alertsCount.one",
+                           defaultValue: "1 alert")
+        }
+        return String(format: String(localized: "aiTimeline.alertsCount.many",
+                                      defaultValue: "%lld alerts"), n)
+    }
+
+    /// Inline metadata strip under the dropdown so the operator sees
+    /// the selected session's stats at a glance without re-opening
+    /// the menu.
+    @ViewBuilder
+    private func sessionDetailBar(_ s: AgentSessionSnapshot) -> some View {
+        HStack(spacing: 12) {
+            Label(s.toolType.displayName, systemImage: "person.crop.circle")
+                .font(.caption)
+            Text("pid \(s.aiPid)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            // v1.9.0 (audit UX-M8): localised. Pre-fix used
+            // `Text(verbatim:)` (untranslatable) and manual
+            // `s.count == 1 ? "" : "s"` pluralisation (English-only).
+            Text(String(format: String(localized: "aiTimeline.detailStarted",
+                                        defaultValue: "started %@"),
+                        s.startTime.formatted(.relative(presentation: .numeric))))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(eventsCountLabel(s.eventCount))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if s.kindCounts.alerts > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(alertsCountLabel(s.kindCounts.alerts))
+                }
+                .font(.caption)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private var sortedSessions: [AgentSessionSnapshot] {

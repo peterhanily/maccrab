@@ -90,6 +90,55 @@ enum EventLoop {
                     enrichedEvent.enrichments["ai_tool_child"] = "true"
                     if let dir = projectDir { enrichedEvent.enrichments["ai_project_dir"] = dir }
 
+                    // v1.9 Agent Traces (PR-2): correlate kernel event back
+                    // to its originating agent interaction. Two-pass:
+                    // direct TRACEPARENT (high confidence) then lineage
+                    // fallback (medium confidence). No-op when the
+                    // feature flag is off (traceRegistry == nil).
+                    //
+                    // Runs alongside MCP attribution rather than instead
+                    // of — both attribution lenses are independent and a
+                    // single event can carry both sets of enrichments.
+                    if let traceRegistry = state.traceRegistry {
+                        // Build a ProcessIdentity from the enriched ProcessInfo
+                        // shape we already have. PR-2 uses a best-effort
+                        // identity here — pidversion/audit_token live in the
+                        // ESCollector bind path, so the lookup matches by pid
+                        // and pathHash. Confirmed by the PID-recycle pin test:
+                        // a recycled pid with a different pathHash will be
+                        // treated as a miss.
+                        let lookupIdentity = ProcessIdentity(
+                            auditIdentity: AuditIdentity(
+                                auid: 0, euid: aiProc.userId, egid: 0,
+                                ruid: aiProc.userId, rgid: 0,
+                                pid: aiProc.pid, pidversion: 0, asid: 0
+                            ),
+                            pathHash: ProcessIdentity.fnv1a64(aiProc.executable),
+                            pid: aiProc.pid,
+                            startTime: UInt64(aiProc.startTime.timeIntervalSince1970)
+                        )
+                        if let correlation = await TraceCorrelator.correlate(
+                            identity: lookupIdentity,
+                            ancestors: aiProc.ancestors,
+                            registry: traceRegistry,
+                            ancestorIdentityResolver: { ancestor in
+                                ProcessIdentity(
+                                    auditIdentity: AuditIdentity(
+                                        auid: 0, euid: 0, egid: 0,
+                                        ruid: 0, rgid: 0,
+                                        pid: ancestor.pid, pidversion: 0, asid: 0
+                                    ),
+                                    pathHash: ProcessIdentity.fnv1a64(ancestor.executable),
+                                    pid: ancestor.pid,
+                                    startTime: 0
+                                )
+                            },
+                            aiToolForPath: { path in state.aiRegistry.isAITool(executablePath: path) }
+                        ) {
+                            TraceCorrelator.apply(correlation, to: &enrichedEvent)
+                        }
+                    }
+
                     // v1.7.0: MCP attribution. Walk ancestry to identify
                     // whether one of them is a configured MCP server for
                     // this AI tool; tag the event and feed the baseline.

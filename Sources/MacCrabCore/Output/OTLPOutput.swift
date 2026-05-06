@@ -186,7 +186,7 @@ public actor OTLPOutput: Output {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("MacCrab/1.8.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
         if let apiKey {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
@@ -222,14 +222,14 @@ public actor OTLPOutput: Output {
                 "resource": [
                     "attributes": [
                         otelAttribute(key: "service.name", value: serviceName),
-                        otelAttribute(key: "service.version", value: "1.8.0"),
+                        otelAttribute(key: "service.version", value: MacCrabVersion.current),
                         otelAttribute(key: "host.name", value: hostName),
                     ]
                 ],
                 "scopeLogs": [[
                     "scope": [
                         "name": "com.maccrab.detection",
-                        "version": "1.8.0",
+                        "version": MacCrabVersion.current,
                     ],
                     "logRecords": logRecords,
                 ]],

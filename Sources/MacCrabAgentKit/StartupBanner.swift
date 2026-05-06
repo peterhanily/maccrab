@@ -4,6 +4,17 @@ import os.log
 
 /// Prints the startup banner with system status summary.
 enum StartupBanner {
+
+    /// Inner width of each banner row between the two `║` chars.
+    /// All three middle rows (lines 24/25/26 of the print block below)
+    /// must sum to exactly this many code points or the box-drawing
+    /// alignment slips.
+    private static let bannerInnerWidth = 42
+
+    /// Visual left-indent for the version line. Roughly centres the
+    /// short `v1.9.0` token under the longer engine-name lines above.
+    private static let versionLinePrefix = "     "
+
     static func print(state: DaemonState) async {
         let singleRuleCount = await state.ruleEngine.ruleCount
         let seqRuleCount = await state.sequenceEngine.ruleCount
@@ -11,12 +22,28 @@ enum StartupBanner {
         let esHealth = await state.esHealthMonitor.currentStatus()
         let scannerStatus = await state.injectionScanner.isAvailable ? "active" : "unavailable (pip install forensicate)"
 
+        // v1.9.0 fix: read version via MacCrabVersion (Info.plist when
+        // present, build-time fallback otherwise) and compute padding
+        // against the actual banner cell width so a long or short
+        // version string never shifts the right edge. Pre-fix the
+        // padding was hardcoded to 32 chars but the cell is 42, so
+        // the closing ║ jumped 5 columns left on every launch.
+        let bannerVersion = "v\(MacCrabVersion.current)"
+        let padCount = max(
+            0,
+            Self.bannerInnerWidth - Self.versionLinePrefix.count - bannerVersion.count
+        )
+        let versionLine =
+            Self.versionLinePrefix
+            + bannerVersion
+            + String(repeating: " ", count: padCount)
+
         Swift.print("""
 
         \u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}
         \u{2551}         MacCrab Detection Engine         \u{2551}
         \u{2551}       Local-First macOS Security         \u{2551}
-        \u{2551}                  v1.3.4                   \u{2551}
+        \u{2551}\(versionLine)\u{2551}
         \u{255A}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255D}
 
         Status: Active

@@ -150,7 +150,7 @@ struct MacCrabApp: App {
 
         // Settings window (Cmd+,).
         Settings {
-            SettingsView(appState: appState)
+            SettingsView(appState: appState, sysextManager: sysextManager)
         }
     }
 

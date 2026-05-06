@@ -93,9 +93,12 @@ public enum DaemonBootstrap {
         // write. The dashboard reads `sysext_started.json` mtime to
         // confirm the binary actually launched (vs. sysextd-stuck "I
         // think I activated it but the process never started").
+        // v1.9.0: source the version from MacCrabVersion.current so the
+        // marker doesn't drift behind the bundle on every release —
+        // pre-fix the literal had bit-rotted from v1.7.12 → present.
         DaemonSetup.writeStartupMarker(
             supportDir: "/Library/Application Support/MacCrab",
-            version: "1.7.12"
+            version: MacCrabVersion.current
         )
         let handles = await prepare(printBanner: printBanner)
         // Keep the handles alive for the lifetime of the event loop.

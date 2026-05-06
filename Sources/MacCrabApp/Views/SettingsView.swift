@@ -13,6 +13,13 @@ import os.log
 
 struct SettingsView: View {
     @ObservedObject var appState: AppState
+    /// v1.9 hot-fix: sysext manager passed in so the "Remove System
+    /// Extension" button in the recovery group can submit an
+    /// OSSystemExtensionRequest.deactivationRequest. Useful when an
+    /// older sysext version is misbehaving (the v1.8.x size-cap
+    /// regression class) and the operator needs a clean uninstall
+    /// path that doesn't require disabling SIP.
+    @ObservedObject var sysextManager: SystemExtensionManager
     @AppStorage("alertNotifications") var alertNotifications: Bool = true
     // v1.8.0: default raised to "critical" so a fresh install only
     // notifies on the most serious detections. Existing installs retain
@@ -46,6 +53,10 @@ struct SettingsView: View {
 
     @AppStorage("retentionWindowDays") private var retentionWindowDays: Int = 30
     @State private var retentionConfirmShown: Bool = false
+    /// v1.9.0 (audit UX-H6): in-app confirmation before submitting
+    /// the deactivation request to the OS. macOS shows its own modal
+    /// after submit; the dashboard ack guards against pure misclicks.
+    @State private var sysextRemoveConfirmShown: Bool = false
 
     // LLM settings (provider selection + URLs persist to UserDefaults; API
     // keys live in the Keychain via SecretsStore — see `llmAPIKey` below).
@@ -275,6 +286,31 @@ struct SettingsView: View {
                     .onChange(of: campaignsRetentionDays) { _ in syncStorageOverrides() }
                     .onChange(of: campaignsMaxSizeMB)    { _ in syncStorageOverrides() }
                     .onAppear { migrateLegacyStorageKeys() }
+                }
+
+                // v1.9 hot-fix: manual events.db flush. Workaround
+                // for the v1.8.x size-cap regression where the
+                // hourly enforcer hasn't kept up. Sends SIGUSR2 to
+                // the daemon, which runs the size-cap sweep + VACUUM
+                // immediately and writes a status snapshot. Surfaces
+                // the current footprint and last-run timestamp.
+                GroupBox(String(localized: "settings.flushTitle",
+                                 defaultValue: "Manual event prune")) {
+                    flushNowControls
+                }
+
+                // v1.9 hot-fix: clean removal path for the system
+                // extension. Apple gates `systemextensionsctl
+                // uninstall` behind SIP-disabled, so operators on
+                // SIP-enabled Macs (the default) couldn't easily
+                // remove a misbehaving sysext from the CLI. Calling
+                // OSSystemExtensionRequest.deactivationRequest from
+                // the host app is the supported alternative —
+                // surfaces a system-modal approval dialog and
+                // unregisters cleanly.
+                GroupBox(String(localized: "settings.sysextRecoveryTitle",
+                                 defaultValue: "System Extension")) {
+                    sysextRecoveryControls
                 }
 
                 GroupBox(String(localized: "settings.uiRefresh", defaultValue: "UI Refresh")) {
@@ -1241,6 +1277,202 @@ struct SettingsView: View {
     // MARK: - Private
 
     /// v1.8.0: per-DB-file size lookup. Splitting alerts and campaigns
+    /// v1.9 hot-fix: manual events.db prune button + status. Sends
+    /// SIGUSR2 to the daemon (which runs the size-cap enforcer +
+    /// VACUUM and writes a status snapshot). Refreshes the snapshot
+    /// on appear so the values are current when the user opens the
+    /// pane. Auto-refreshes every 2 s while a flush is in flight so
+    /// the operator gets live feedback as the daemon works.
+    @ViewBuilder
+    private var flushNowControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "settings.flushBody",
+                                 defaultValue: "Run the events.db size-cap sweep + VACUUM right now. Useful when the file has grown well past the configured cap (recovery from the v1.8.x size-cap regression)."))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        // Use the same path-resolution as the storage
+                        // rows above (mtime-newer wins) so this number
+                        // and "Events" row's "Current" stay consistent.
+                        Text(String(localized: "settings.flushCurrentSize",
+                                     defaultValue: "Current size: \(currentSize(databaseFile: "events.db"))"))
+                            .font(.caption)
+                        Text(String(localized: "settings.flushPath",
+                                     defaultValue: "(\((databasePathForFile("events.db") as NSString).deletingLastPathComponent))"))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if let last = appState.storageFlushStatus?.lastRunAt {
+                            Text(String(localized: "settings.flushLastRun",
+                                         defaultValue: "Last run \(last.formatted(.relative(presentation: .numeric)))"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            // v1.9.0 (audit UX-M7): explicit empty
+                            // state. Pre-fix the row was just blank
+                            // on first install, leaving the user with
+                            // no signal whether the feature had ever
+                            // been exercised.
+                            Text(String(localized: "settings.flushLastRunNever",
+                                         defaultValue: "Last run: never"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let status = appState.storageFlushStatus,
+                       status.bytesBefore > 0 {
+                        let before = ByteCountFormatter.string(
+                            fromByteCount: Int64(status.bytesBefore), countStyle: .file)
+                        let after = ByteCountFormatter.string(
+                            fromByteCount: Int64(status.bytesAfter), countStyle: .file)
+                        Text(String(localized: "settings.flushDelta",
+                                     defaultValue: "Last sweep: \(before) → \(after)"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Button {
+                    appState.requestStorageFlush()
+                } label: {
+                    if appState.storageFlushInFlight {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text(String(localized: "settings.flushRunning",
+                                         defaultValue: "Reducing…"))
+                        }
+                    } else {
+                        Label(
+                            String(localized: "settings.flushButton",
+                                    defaultValue: "Reduce events.db now"),
+                            systemImage: "trash.slash"
+                        )
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .disabled(appState.storageFlushInFlight)
+            }
+        }
+        .padding(8)
+        .task { appState.refreshStorageFlushStatus() }
+        // While a flush is in flight, poll the snapshot every 2 s so
+        // the UI shows the daemon's response as soon as it lands.
+        .onChange(of: appState.storageFlushInFlight) { inFlight in
+            guard inFlight else { return }
+            Task {
+                while await MainActor.run(body: { appState.storageFlushInFlight }) {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await MainActor.run { appState.refreshStorageFlushStatus() }
+                }
+            }
+        }
+    }
+
+    /// v1.9 hot-fix: sysext deactivate button + status. Submits an
+    /// OSSystemExtensionRequest.deactivationRequest via the existing
+    /// SystemExtensionManager. macOS shows a system-modal approval
+    /// dialog. State binds the button label so the user gets clear
+    /// feedback through the activate→approve→deactivate cycle.
+    @ViewBuilder
+    private var sysextRecoveryControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "settings.sysextBody",
+                         defaultValue: "Remove the installed Endpoint Security extension. Use when an older version is causing issues (size-cap regression, repeated crashes, sysext zombies). System Settings will prompt for approval; on success the extension is unregistered and won't respawn."))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                statusBadge
+                Spacer()
+                Button {
+                    // v1.9.0 (audit UX-H6): in-app confirmation
+                    // dialog. macOS will also show its own system
+                    // modal AFTER the request submits, but a misclick
+                    // can already kick off the OS flow without a
+                    // recoverable dashboard signal — the operator
+                    // explicitly acks the destructive action here
+                    // first.
+                    sysextRemoveConfirmShown = true
+                } label: {
+                    Label(
+                        String(localized: "settings.sysextDeactivate",
+                                defaultValue: "Remove System Extension"),
+                        systemImage: "trash"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .disabled(sysextManager.state == .activating)
+                .confirmationDialog(
+                    String(localized: "settings.sysextRemoveTitle",
+                            defaultValue: "Remove the MacCrab Endpoint Security extension?"),
+                    isPresented: $sysextRemoveConfirmShown,
+                    titleVisibility: .visible
+                ) {
+                    Button(
+                        String(localized: "settings.sysextRemoveConfirm",
+                                defaultValue: "Remove"),
+                        role: .destructive
+                    ) {
+                        sysextManager.deactivate()
+                    }
+                    Button(
+                        String(localized: "settings.sysextRemoveCancel",
+                                defaultValue: "Cancel"),
+                        role: .cancel
+                    ) { }
+                } message: {
+                    Text(String(
+                        localized: "settings.sysextRemoveBody",
+                        defaultValue: "Detection coverage will stop until you re-install. macOS will show its own approval dialog after this; cancel there if you change your mind."
+                    ))
+                }
+            }
+        }
+        .padding(8)
+    }
+
+    private var statusBadge: some View {
+        let (label, color, fullDetail) = sysextStatusLabelAndColor()
+        return HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(label).font(.caption).lineLimit(1).truncationMode(.tail)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Capsule().fill(color.opacity(0.1)))
+        // v1.9.0 (audit UX-H6): hover help carrying the full state
+        // detail so the truncated `Failed: O...` label stops being
+        // a dead end. `fullDetail` falls back to `label` when the
+        // state has nothing extra to show — the help is still
+        // useful as a tooltip on narrow sidebars.
+        .help(fullDetail ?? label)
+    }
+
+    private func sysextStatusLabelAndColor() -> (String, Color, String?) {
+        switch sysextManager.state {
+        case .unknown:
+            return (String(localized: "settings.sysextStateUnknown", defaultValue: "Status unknown"), .secondary, nil)
+        case .notActivated:
+            return (String(localized: "settings.sysextStateNotInstalled", defaultValue: "Not installed"), .secondary, nil)
+        case .activating:
+            return (String(localized: "settings.sysextStateActivating", defaultValue: "Working…"), .orange, nil)
+        case .awaitingApproval:
+            return (String(localized: "settings.sysextStateNeedsApproval", defaultValue: "Awaiting approval"), .orange, nil)
+        case .activated:
+            return (String(localized: "settings.sysextStateActive", defaultValue: "Active"), .green, nil)
+        case .failed(let msg):
+            return (
+                String(localized: "settings.sysextStateFailed", defaultValue: "Failed: \(msg)"),
+                .red,
+                String(localized: "settings.sysextStateFailedDetail",
+                        defaultValue: "Failed: \(msg)")
+            )
+        }
+    }
+
     /// into their own SQLite files means each tier gets its own current-
     /// size readout in Settings. Reads from whichever path
     /// `databasePathForFile(_:)` resolves to (system if root daemon owns

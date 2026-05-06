@@ -43,6 +43,7 @@ struct MainView: View {
         case packageFreshness = "Package Freshness"
         case aiAnalysis = "AI Analysis"
         case mcpServers = "MCP Servers"
+        case agentTraces = "Agent Traces"
         case integrations = "Integrations"
         // System
         case permissions = "Permissions"
@@ -62,6 +63,13 @@ struct MainView: View {
                     return false
                 }
             case .standard:
+                // v1.9 PR-5 audit (UX-H1): keep `.agentTraces` visible in
+                // Standard mode. Pre-fix it was hidden, but the alert
+                // detail's "Show in Agent Traces" cross-link still set
+                // selectedSection to .agentTraces, dropping Standard
+                // users on a section invisible from the sidebar.
+                // Agent Traces is the headline v1.9 feature — Standard
+                // users triaging an AI-attributed alert need it.
                 switch self {
                 case .rules, .threatIntel, .packageFreshness, .aiAnalysis, .mcpServers, .esHealth:
                     return false
@@ -151,7 +159,7 @@ struct MainView: View {
                     }
                 }
 
-                if groupHasVisibleItems([.threatIntel, .packageFreshness, .aiAnalysis, .integrations]) {
+                if groupHasVisibleItems([.threatIntel, .packageFreshness, .aiAnalysis, .mcpServers, .agentTraces, .integrations]) {
                     Section(String(localized: "sidebar.intelligence", defaultValue: "Intelligence")) {
                         if SidebarSection.threatIntel.visible(in: uiMode) {
                             Label(String(localized: "sidebar.threatIntel", defaultValue: "Threat Intel"), systemImage: "binoculars")
@@ -169,6 +177,10 @@ struct MainView: View {
                         if SidebarSection.mcpServers.visible(in: uiMode) {
                             Label(String(localized: "sidebar.mcpServers", defaultValue: "MCP Servers"), systemImage: "puzzlepiece.extension")
                                 .tag(SidebarSection.mcpServers)
+                        }
+                        if SidebarSection.agentTraces.visible(in: uiMode) {
+                            Label(String(localized: "sidebar.agentTraces", defaultValue: "Agent Traces"), systemImage: "scope")
+                                .tag(SidebarSection.agentTraces)
                         }
                         if SidebarSection.integrations.visible(in: uiMode) {
                             Label(String(localized: "sidebar.integrations", defaultValue: "Integrations"), systemImage: "puzzlepiece.extension")
@@ -222,6 +234,8 @@ struct MainView: View {
                 AIAnalysisView(appState: appState)
             case .mcpServers:
                 MCPActivityView(appState: appState)
+            case .agentTraces:
+                AgentTracesView(appState: appState)
             case .integrations:
                 IntegrationsView(appState: appState)
             case .permissions:
@@ -244,6 +258,22 @@ struct MainView: View {
         // narrow-window adaptation.
         .navigationSplitViewStyle(.prominentDetail)
         .frame(minWidth: 1100, minHeight: 600)
+        // v1.9 PR-5: cross-view navigation hook. Alert detail's "Show in
+        // Agent Traces" button writes the trace_id into AppState, and
+        // we react here by switching the sidebar to the Agent Traces
+        // section and loading the requested trace's spans. Done as a
+        // single hop rather than via NavigationLink so the alert detail
+        // call site doesn't have to know about SidebarSection's
+        // existence.
+        .onChange(of: appState.requestedTraceFocus) { newValue in
+            guard let traceId = newValue, !traceId.isEmpty else { return }
+            selectedSection = .agentTraces
+            Task {
+                await appState.refreshAgentTraces()
+                await appState.loadTrace(traceId)
+                appState.requestedTraceFocus = nil
+            }
+        }
         // Note: the zombie-sysext banner (v1.7.5–v1.7.8) was removed.
         // The data is still available via `maccrabctl repair`, which is the
         // right surface for an operator-action recommendation (it can

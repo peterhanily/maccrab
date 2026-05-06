@@ -651,6 +651,21 @@ struct AlertDetailView: View {
                     }
                 }
 
+                // v1.9 PR-4: when the triggering event carries an agent
+                // trace attribution, surface it as its own group with a
+                // "Show originating trace" hop-out + reattribute thumbs.
+                // The thumbs persist into the attribution_overrides table;
+                // the trace_id button cross-links to AgentTracesView.
+                if let event = triggerEvent,
+                   let trace = event.enrichments[TraceCorrelator.EnrichmentKey.traceId]
+                                ?? event.enrichments["agent_trace_id"] {
+                    OriginatingTraceBox(
+                        appState: appState,
+                        event: event,
+                        traceId: trace
+                    )
+                }
+
                 // v1.8.0: surrounding ±60s of activity captured into
                 // alert_evidence at alert-firing time. Survives the 24h hot
                 // tier expiry, so even week-old alerts keep their context.
@@ -1120,6 +1135,233 @@ struct DetailRow: View {
                 .font(.system(.body, design: .monospaced))
                 .textSelection(.enabled)
         }
+    }
+}
+
+// MARK: - OriginatingTraceBox (v1.9 PR-4)
+
+/// Surfaces the agent attribution attached to a triggering event AND lets
+/// the operator record their verdict. Plan v3 review #4: the machine
+/// attribution is immutable; the operator verdict is an overlay rendered
+/// alongside it, never silently replacing the displayed values.
+private struct OriginatingTraceBox: View {
+    let appState: AppState?
+    let event: Event
+    let traceId: String
+
+    @State private var override: AttributionOverride?
+    @State private var noteText: String = ""
+    @State private var showNoteField: Bool = false
+
+    private var machineConfidence: String? {
+        event.enrichments[TraceCorrelator.EnrichmentKey.confidence]
+            ?? event.enrichments["machine_agent_confidence"]
+    }
+
+    private var agentTool: String? {
+        event.enrichments[TraceCorrelator.EnrichmentKey.agentTool]
+            ?? event.enrichments["agent_tool"]
+    }
+
+    private var spanId: String? {
+        event.enrichments[TraceCorrelator.EnrichmentKey.spanId]
+            ?? event.enrichments["agent_span_id"]
+    }
+
+    var body: some View {
+        GroupBox(String(localized: "alertDetail.originatingTrace",
+                         defaultValue: "Originating Agent Trace")) {
+            VStack(alignment: .leading, spacing: 8) {
+                attributionRows
+                showInAgentTracesButton
+                Divider()
+                thumbsRow
+                if showNoteField {
+                    noteField
+                }
+                if let ov = override {
+                    Text(verdictSummary(ov))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(4)
+        }
+        .task(id: event.id) {
+            override = await appState?.attributionOverride(for: event.id.uuidString)
+            noteText = override?.userNote ?? ""
+        }
+    }
+
+    private var showInAgentTracesButton: some View {
+        HStack {
+            Spacer()
+            Button {
+                // v1.9 PR-5 audit (UX-M5): clear first, then assign on
+                // the next runloop tick. SwiftUI's onChange compares
+                // values, so clicking the SAME trace_id twice (e.g.
+                // from two alerts that share a trace) wouldn't fire
+                // the navigation hook without this round-trip.
+                appState?.requestedTraceFocus = nil
+                let target = traceId
+                DispatchQueue.main.async { [weak appState] in
+                    appState?.requestedTraceFocus = target
+                }
+            } label: {
+                Label(
+                    String(localized: "alertDetail.showInAgentTraces",
+                            defaultValue: "Show in Agent Traces"),
+                    systemImage: "scope"
+                )
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
+    private var attributionRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // v1.9 PR-5 audit (UX-H3): make immutability explicit.
+            // Pre-fix the four DetailRows looked identical to the
+            // editable note field below, and the thumbs row asked
+            // "was this correct?" — implying clicks would change
+            // the attribution. They don't: machine attribution is
+            // immutable; the operator verdict is an overlay
+            // recorded separately in attribution_overrides.
+            HStack(spacing: 4) {
+                Image(systemName: "lock.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(String(localized: "alertDetail.machineAttributionLabel",
+                             defaultValue: "Detected by MacCrab — read-only"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            DetailRow(label: String(localized: "alertDetail.traceId", defaultValue: "trace_id"),
+                      value: traceId)
+            if let spanId {
+                DetailRow(label: String(localized: "alertDetail.spanId", defaultValue: "span_id"),
+                          value: spanId)
+            }
+            if let agentTool {
+                DetailRow(label: String(localized: "alertDetail.agentTool", defaultValue: "Agent"),
+                          value: agentTool)
+            }
+            if let machineConfidence {
+                DetailRow(
+                    label: String(localized: "alertDetail.confidence",
+                                  defaultValue: "Machine confidence"),
+                    value: machineConfidence
+                )
+            }
+        }
+    }
+
+    private var thumbsRow: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(String(localized: "alertDetail.reattributePrompt",
+                             defaultValue: "Your verdict (overlay)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(String(localized: "alertDetail.reattributeHint",
+                             defaultValue: "Recorded separately — does not change machine detection."))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            verdictButton(.confirmed,
+                          systemImage: "hand.thumbsup",
+                          tint: .green,
+                          label: String(localized: "alertDetail.confirm", defaultValue: "Confirm"))
+            verdictButton(.wrongTool,
+                          systemImage: "arrow.triangle.swap",
+                          tint: .orange,
+                          label: String(localized: "alertDetail.wrongTool", defaultValue: "Wrong tool"))
+            verdictButton(.noAgent,
+                          systemImage: "hand.thumbsdown",
+                          tint: .red,
+                          label: String(localized: "alertDetail.noAgent", defaultValue: "No agent"))
+            Button {
+                showNoteField.toggle()
+            } label: {
+                Image(systemName: "note.text")
+            }
+            .buttonStyle(.borderless)
+            .help(String(localized: "alertDetail.addNote", defaultValue: "Add a note"))
+        }
+    }
+
+    @ViewBuilder
+    private func verdictButton(
+        _ verdict: AttributionOverride.Verdict,
+        systemImage: String,
+        tint: Color,
+        label: String
+    ) -> some View {
+        // v1.9 Phase-4.1: switch from .iconOnly to .titleAndIcon so
+        // "wrong tool" / "no agent" are self-evident at a glance —
+        // the prior arrow.triangle.swap glyph for "wrong tool" was
+        // unreadable without hovering for the help-tooltip.
+        Button {
+            recordVerdict(verdict)
+        } label: {
+            Label(label, systemImage: systemImage)
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(override?.verdict == verdict ? tint : .secondary)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help(label)
+    }
+
+    private var noteField: some View {
+        HStack {
+            TextField(
+                String(localized: "alertDetail.noteHint",
+                        defaultValue: "Optional note (private; stored locally)"),
+                text: $noteText
+            )
+            .textFieldStyle(.roundedBorder)
+            Button(String(localized: "alertDetail.saveNote", defaultValue: "Save")) {
+                if let v = override?.verdict {
+                    recordVerdict(v)
+                } else {
+                    recordVerdict(.unknown)
+                }
+                showNoteField = false
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private func recordVerdict(_ verdict: AttributionOverride.Verdict) {
+        guard let appState else { return }
+        Task {
+            await appState.recordAttributionOverride(
+                eventId: event.id.uuidString,
+                machineConfidence: machineConfidence,
+                verdict: verdict,
+                note: noteText.isEmpty ? nil : noteText
+            )
+            override = await appState.attributionOverride(for: event.id.uuidString)
+        }
+    }
+
+    private func verdictSummary(_ ov: AttributionOverride) -> String {
+        let label: String
+        switch ov.verdict {
+        case .confirmed: label = "Confirmed"
+        case .wrongTool: label = "Marked wrong tool"
+        case .noAgent:   label = "Marked: no agent involved"
+        case .unknown:   label = "Reviewed (no verdict)"
+        }
+        let when = ov.updatedAt.formatted(.relative(presentation: .named))
+        if let note = ov.userNote, !note.isEmpty {
+            return "\(label) \(when) — \(note)"
+        }
+        return "\(label) \(when)"
     }
 }
 

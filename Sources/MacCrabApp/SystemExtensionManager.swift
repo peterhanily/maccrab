@@ -24,6 +24,16 @@ public enum SystemExtensionState: Equatable, Sendable {
     case failed(String)     // Activation error
 }
 
+/// What the most recent submitted request is trying to achieve. Set
+/// when `activate()` / `deactivate()` submits the request; consumed in
+/// the delegate result handler so a successful deactivation doesn't
+/// flip the badge back to "Active" (the v1.9.0 audit-fix; pre-fix
+/// every `.completed` result was treated as activation).
+public enum SystemExtensionIntent: Sendable {
+    case activate
+    case deactivate
+}
+
 @MainActor
 public final class SystemExtensionManager: NSObject, ObservableObject {
 
@@ -32,6 +42,11 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
 
     @Published public private(set) var state: SystemExtensionState = .unknown
     @Published public private(set) var statusMessage: String = ""
+
+    /// Intent of the in-flight request. Reset to nil after the result
+    /// handler runs. Internal-visibility so tests can drive the state
+    /// machine without going through the OS framework.
+    private(set) var pendingIntent: SystemExtensionIntent?
 
     public override init() {
         super.init()
@@ -42,6 +57,7 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
     /// an older build with the currently-bundled one.
     public func activate() {
         logger.info("Submitting activation request for \(Self.extensionIdentifier, privacy: .public)")
+        pendingIntent = .activate
         state = .activating
         statusMessage = "Requesting extension activation…"
 
@@ -53,11 +69,13 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
         OSSystemExtensionManager.shared.submitRequest(request)
     }
 
-    /// Trigger a deactivation — only useful during development or an
-    /// explicit uninstall flow. The uninstaller also calls
-    /// `systemextensionsctl uninstall <team> com.maccrab.agent`.
+    /// Trigger a deactivation — the dashboard's "Remove System
+    /// Extension" button. macOS shows a system-modal approval dialog;
+    /// the result handler maps `.completed` to `.notActivated` so the
+    /// status pill doesn't lie.
     public func deactivate() {
         logger.info("Submitting deactivation request")
+        pendingIntent = .deactivate
         state = .activating
         statusMessage = "Deactivating extension…"
 
@@ -67,6 +85,50 @@ public final class SystemExtensionManager: NSObject, ObservableObject {
         )
         request.delegate = self
         OSSystemExtensionManager.shared.submitRequest(request)
+    }
+
+    /// Apply a request result against a known intent. Pulled out of
+    /// the delegate callback so tests can verify the intent → state
+    /// mapping without needing a real OSSystemExtensionRequest.
+    /// Visible to the same module so the test target can call it.
+    func applyResult(intent: SystemExtensionIntent, result: OSSystemExtensionRequest.Result) {
+        switch (intent, result) {
+        case (.activate, .completed):
+            state = .activated
+            statusMessage = "Endpoint Security extension is active."
+        case (.deactivate, .completed):
+            state = .notActivated
+            statusMessage = "Endpoint Security extension removed."
+        case (.activate, .willCompleteAfterReboot):
+            state = .awaitingApproval
+            statusMessage = "Extension will finish activating after reboot."
+        case (.deactivate, .willCompleteAfterReboot):
+            state = .awaitingApproval
+            statusMessage = "Extension will finish deactivating after reboot."
+        @unknown default:
+            // Future result cases — follow the intent so the badge at
+            // least reflects what the user just clicked, even if the OS
+            // returned a status we don't yet model.
+            switch intent {
+            case .activate:   state = .activated
+            case .deactivate: state = .notActivated
+            }
+            statusMessage = "Operation completed with status \(result.rawValue)."
+        }
+        pendingIntent = nil
+    }
+
+    /// Apply a request failure against a known intent. Same testable
+    /// shape as `applyResult`.
+    func applyFailure(intent: SystemExtensionIntent, error: Error) {
+        state = .failed(error.localizedDescription)
+        let prefix: String
+        switch intent {
+        case .activate:   prefix = "Activation failed"
+        case .deactivate: prefix = "Deactivation failed"
+        }
+        statusMessage = "\(prefix): \(error.localizedDescription)"
+        pendingIntent = nil
     }
 }
 
@@ -87,10 +149,19 @@ extension SystemExtensionManager: OSSystemExtensionRequestDelegate {
     }
 
     nonisolated public func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        logger.info("Activation needs user approval")
+        logger.info("Request needs user approval")
         Task { @MainActor in
             self.state = .awaitingApproval
-            self.statusMessage = "Approve the extension in System Settings > General > Login Items & Extensions > Endpoint Security Extensions."
+            // Tailor the copy to whether we're activating or
+            // deactivating so the user sees the right next-step.
+            let detail: String
+            switch self.pendingIntent {
+            case .deactivate:
+                detail = "Approve the deactivation in System Settings > General > Login Items & Extensions > Endpoint Security Extensions."
+            default:
+                detail = "Approve the extension in System Settings > General > Login Items & Extensions > Endpoint Security Extensions."
+            }
+            self.statusMessage = detail
         }
     }
 
@@ -98,19 +169,14 @@ extension SystemExtensionManager: OSSystemExtensionRequestDelegate {
         _ request: OSSystemExtensionRequest,
         didFinishWithResult result: OSSystemExtensionRequest.Result
     ) {
-        logger.info("Activation finished: \(String(describing: result), privacy: .public)")
+        logger.info("Request finished: \(String(describing: result), privacy: .public)")
         Task { @MainActor in
-            switch result {
-            case .completed:
-                self.state = .activated
-                self.statusMessage = "Endpoint Security extension is active."
-            case .willCompleteAfterReboot:
-                self.state = .awaitingApproval
-                self.statusMessage = "Extension will finish activating after reboot."
-            @unknown default:
-                self.state = .activated
-                self.statusMessage = "Activation completed with status \(result.rawValue)."
-            }
+            // Default to .activate when the intent was somehow lost
+            // (shouldn't happen; the intent is set synchronously
+            // before submitRequest runs). Backwards-compatible with
+            // the pre-v1.9 single-purpose path.
+            let intent = self.pendingIntent ?? .activate
+            self.applyResult(intent: intent, result: result)
         }
     }
 
@@ -118,10 +184,10 @@ extension SystemExtensionManager: OSSystemExtensionRequestDelegate {
         _ request: OSSystemExtensionRequest,
         didFailWithError error: Error
     ) {
-        logger.error("Activation failed: \(error.localizedDescription, privacy: .public)")
+        logger.error("Request failed: \(error.localizedDescription, privacy: .public)")
         Task { @MainActor in
-            self.state = .failed(error.localizedDescription)
-            self.statusMessage = "Activation failed: \(error.localizedDescription)"
+            let intent = self.pendingIntent ?? .activate
+            self.applyFailure(intent: intent, error: error)
         }
     }
 }

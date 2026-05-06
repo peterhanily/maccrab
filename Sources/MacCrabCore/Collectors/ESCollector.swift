@@ -101,10 +101,34 @@ public final class ESCollector: @unchecked Sendable {
 
     private var client: OpaquePointer?          // es_client_t*
     private var continuation: AsyncStream<Event>.Continuation?
+    private var traceBindingContinuation: AsyncStream<TraceBindingSignal>.Continuation?
     private let logger = Logger(subsystem: "com.maccrab.core", category: "ESCollector")
+
+    /// v1.9 Agent Traces feature flag, read once at type-load. Set
+    /// `MACCRAB_AGENT_TRACES=1` in the daemon's environment to enable
+    /// TRACEPARENT extraction on NOTIFY_EXEC. Default-off so a v1.9
+    /// daemon binary running on an older host stays bit-identical to
+    /// the v1.8.1 wire path until the operator opts in.
+    private static let agentTracesEnabled: Bool =
+        Foundation.ProcessInfo.processInfo.environment["MACCRAB_AGENT_TRACES"] == "1"
+
+    /// v1.9 audit Phase-1.8: shared AIToolRegistry instance reused
+    /// across every NOTIFY_EXEC. AIToolRegistry's init builds a tuple
+    /// of patterns; allocating one per exec at 200-500 events/sec
+    /// adds avoidable allocation pressure on the ES callback queue.
+    fileprivate static let sharedAIRegistry = AIToolRegistry()
+
+    /// Public accessor for the feature flag. Tests and the dashboard
+    /// status panel can read this without touching ProcessInfo themselves.
+    public static var isAgentTracesEnabled: Bool { agentTracesEnabled }
 
     /// The asynchronous stream of normalised events.
     public let events: AsyncStream<Event>
+
+    /// v1.9 side-channel: trace bind/evict signals derived from
+    /// NOTIFY_EXEC env scans and NOTIFY_EXIT events. Empty stream when
+    /// `agentTracesEnabled` is false. EventLoop owns the consumer.
+    public let traceBindings: AsyncStream<TraceBindingSignal>
 
     // MARK: - Subscribed Event Types
 
@@ -167,6 +191,25 @@ public final class ESCollector: @unchecked Sendable {
         }
         self.continuation = capturedContinuation
 
+        // v1.9 trace bindings stream. We always create the stream — its
+        // continuation is captured but only fed when the feature flag
+        // is on, so consumers that don't care can iterate without
+        // observing any items.
+        //
+        // v1.9 PR-5 audit Stability-H1: bound the buffer. Default is
+        // .unbounded which can grow without limit on bursty execve
+        // (package installs, builds, CI runs) if the consumer Task is
+        // delayed. Newest-10K policy mirrors the merged event stream
+        // in DaemonState (which uses 100K — bind/evict signals are
+        // ~10× lower volume than full events, so 10K matches).
+        var capturedTraceContinuation: AsyncStream<TraceBindingSignal>.Continuation!
+        self.traceBindings = AsyncStream<TraceBindingSignal>(
+            bufferingPolicy: .bufferingNewest(10_000)
+        ) { continuation in
+            capturedTraceContinuation = continuation
+        }
+        self.traceBindingContinuation = capturedTraceContinuation
+
         try createClient()
         muteNoisyPaths()
         muteSelf()
@@ -186,6 +229,7 @@ public final class ESCollector: @unchecked Sendable {
         // We need a local to pass into the closure so that `self` is not
         // captured before initialisation completes.
         let continuation = self.continuation!
+        let traceContinuation = self.traceBindingContinuation!
         let logger = self.logger
 
         var newClient: OpaquePointer?   // es_client_t*
@@ -203,6 +247,14 @@ public final class ESCollector: @unchecked Sendable {
             // and any future enrichment that touches Foundation APIs would
             // accumulate. Wrap defensively so the discipline holds.
             autoreleasepool {
+                // v1.9 Agent Traces side-channel. Computed BEFORE normalise so
+                // the env-scan can lift TRACEPARENT off the live es_message_t
+                // before normalise drops the env reference. Cheap no-op when
+                // the feature flag is off.
+                if Self.agentTracesEnabled {
+                    Self.emitTraceSignals(message: message, into: traceContinuation)
+                }
+
                 let event = Self.normalise(message: message)
                 if let event = event {
                     continuation.yield(event)
@@ -291,6 +343,64 @@ public final class ESCollector: @unchecked Sendable {
         }
         continuation?.finish()
         continuation = nil
+        // v1.9.0 (audit Stab-M6): finish the side-channel continuation
+        // too. Pre-fix it was left dangling at SIGTERM teardown — the
+        // consumer Task in DaemonSetup blocked on it forever and was
+        // only cleaned up by `exit(0)`. Symmetric with the main event
+        // stream above.
+        traceBindingContinuation?.finish()
+        traceBindingContinuation = nil
+    }
+
+    // MARK: - v1.9 Agent Traces — side-channel emission
+
+    /// Inspect the live es_message_t for trace-binding-relevant events
+    /// (NOTIFY_EXEC env scan, NOTIFY_EXIT pid eviction) and emit
+    /// `TraceBindingSignal`s onto the side-channel stream.
+    ///
+    /// Runs only when `agentTracesEnabled == true`. Pure side-effect; the
+    /// caller still runs `normalise(...)` immediately after to produce
+    /// the normal Event for the detection pipeline.
+    private static func emitTraceSignals(
+        message: UnsafePointer<es_message_t>,
+        into continuation: AsyncStream<TraceBindingSignal>.Continuation
+    ) {
+        let msg = message.pointee
+        switch msg.event_type {
+        case ES_EVENT_TYPE_NOTIFY_EXEC:
+            // Build the identity from the EXEC's *target* process — that's
+            // the process that just took over via execve, and whose env
+            // we want to inspect. The `msg.process` is the calling
+            // process pre-exec; for execve the post-exec image is in
+            // `msg.event.exec.target`.
+            let target = msg.event.exec.target
+            guard let context = traceContextFromExecMessage(message) else {
+                return
+            }
+            let executablePath = esFileToPath(target.pointee.executable)
+            let identity = ProcessIdentity(from: target, executablePath: executablePath)
+            // Best-effort agent-tool tag from the exec'd binary path. The
+            // registry stores nil tags fine; the correlator can re-derive
+            // at lookup time using the same registry.
+            // v1.9 audit Phase-1.8: reuse a single shared registry instance
+            // instead of allocating one per NOTIFY_EXEC. The previous
+            // `AIToolRegistry()` per call meant ~25 lowercased() string
+            // allocations per exec at 200-500 events/sec sustained.
+            let aiTool = Self.sharedAIRegistry.isAITool(executablePath: executablePath)
+            let signal = TraceBindingSignal(
+                kind: .bind(identity: identity, context: context, agentTool: aiTool)
+            )
+            continuation.yield(signal)
+
+        case ES_EVENT_TYPE_NOTIFY_EXIT:
+            // The exiting process is `msg.process`. EventLoop's consumer
+            // no-ops if no binding exists for this pid.
+            let exitingPid = audit_token_to_pid(msg.process.pointee.audit_token)
+            continuation.yield(TraceBindingSignal(kind: .evict(pid: exitingPid)))
+
+        default:
+            break
+        }
     }
 
     // MARK: - Event Normalisation

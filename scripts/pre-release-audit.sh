@@ -865,6 +865,203 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS 12 — traces.db long-lived connection count (v1.9 PR-3b)
+# ---------------------------------------------------------------------
+# Mirror of Pass 5 for the new `traces.db` file. PR-3a introduced
+# TraceStore as a separate SQLite store; the receiver-to-store wiring
+# in PR-3b is the only authorised long-lived opener. A second long-
+# lived handle would re-introduce the v1.6.22 CampaignStore bug class
+# on a different file. The path-token grep + actor-field grep is the
+# same shape as Pass 5.
+section "PASS 12 — traces.db long-lived connection count"
+
+traces_db_actors=$(grep -rln 'appendingPathComponent("traces.db")' Sources/MacCrabCore/Storage Sources/MacCrabAgentKit \
+    --include='*.swift' 2>/dev/null \
+    | xargs -I {} grep -l 'private var db: OpaquePointer?' {} 2>/dev/null \
+    | sort -u || true)
+traces_db_actor_count=$(echo "$traces_db_actors" | grep -cE '\S' || true)
+
+if [[ "$traces_db_actor_count" -gt 1 ]]; then
+    err "More than 1 actor holds a long-lived traces.db handle (current: $traces_db_actor_count). Mirror of v1.6.22 CampaignStore bug — consolidate into TraceStore:"
+    echo "$traces_db_actors" | sed 's/^/    /' >&2
+elif [[ "$traces_db_actor_count" -eq 0 ]]; then
+    info "Pass 12: no traces.db opener present (v1.9 feature not yet wired in this branch)"
+else
+    ok "traces.db long-lived connection count at audited target (1: TraceStore)"
+fi
+
+# ---------------------------------------------------------------------
+# PASS 13 — env-block secret-leak prevention (v1.9 PR-3b)
+# ---------------------------------------------------------------------
+# The TraceExtractor pathway reads exec env blocks at NOTIFY_EXEC. Per
+# the v1.9 privacy contract, ONLY parsed TRACEPARENT trace_id/span_id
+# values may surface in logs/metrics/persistence. Anything that
+# interpolates `es_exec_env_count`, `es_exec_env`, or any env-derived
+# raw token into `os.log`, `print`, file writes, or LLM prompts is a
+# regression of the secret-leak class.
+#
+# Strict cut: forbid the bare ES env accessor outside the
+# `TraceExtractor` pathway file pair. Anywhere else that needs env
+# access in the future has to land alongside a Pass 13 allowlist
+# entry + a code review.
+section "PASS 13 — env-block secret-leak prevention"
+
+# Allowed callers of `es_exec_env`/`es_exec_env_count`. Adding a new
+# entry requires a comment explaining why the file is allowed to
+# touch the env block — should be rare.
+declare -a PASS13_ALLOWED=(
+    "Sources/MacCrabCore/Collectors/ESHelpers.swift"
+    "Sources/MacCrabCore/AIGuard/TraceExtractor.swift"
+)
+
+pass13_violations=$(grep -rln 'es_exec_env\b\|es_exec_env_count' \
+    Sources/MacCrabCore Sources/MacCrabAgentKit \
+    --include='*.swift' 2>/dev/null | sort -u || true)
+
+pass13_unauthorized=()
+while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    allowed=0
+    for a in "${PASS13_ALLOWED[@]}"; do
+        if [[ "$f" == "$a" ]]; then allowed=1; break; fi
+    done
+    if [[ $allowed -eq 0 ]]; then
+        pass13_unauthorized+=("$f")
+    fi
+done <<< "$pass13_violations"
+
+if [[ ${#pass13_unauthorized[@]} -gt 0 ]]; then
+    err "Pass 13: ${#pass13_unauthorized[@]} unauthorized caller(s) of es_exec_env/_count — env block must only be touched by TraceExtractor:"
+    for f in "${pass13_unauthorized[@]}"; do
+        echo "    $f" >&2
+    done
+else
+    ok "Pass 13: env block accessors confined to authorised TraceExtractor pathway"
+fi
+
+# ---------------------------------------------------------------------
+# PASS 14 — enrichment-key ↔ enricher coverage (v1.9 PR-5)
+# ---------------------------------------------------------------------
+# Closes the wire-the-orphans pattern at the rule-field level. Every
+# enrichment key referenced in compiled YAML rules under Rules/ must
+# have at least one Swift writer somewhere under Sources/. Rules that
+# fire on agent_trace_id when no enricher actually populates that
+# field would always be silently dead — Pass 14 makes that fail at
+# release time.
+#
+# We grep YAML rules for the underscore-cased enrichment keys (the
+# keys that land in `event.enrichments[...]`), then confirm at least
+# one Swift source file writes that key. Swift writers use the form
+# `event.enrichments["<key>"] = ...` or `enrichments[<Constant>]`.
+section "PASS 14 — enrichment-key ↔ enricher coverage"
+
+# v1.9 PR-5 surface. Add new entries here when a rule starts matching
+# on a new enrichment key — the audit then verifies a producer exists.
+declare -a PASS14_KEYS=(
+    "agent_trace_id"
+    "agent_span_id"
+    "agent_tool"
+    "machine_agent_confidence"
+)
+
+pass14_orphans=()
+for key in "${PASS14_KEYS[@]}"; do
+    # Is the key referenced by any rule?
+    if ! grep -rq "${key}" Rules/ --include='*.yml' 2>/dev/null; then
+        # Not used by any rule — fine, don't flag (ungated keys are
+        # acceptable for forward-compat).
+        continue
+    fi
+    # Does anything under Sources/ write the key?
+    if grep -rq "enrichments\[\"${key}\"\]\|EnrichmentKey\.${key}\|\"${key}\":" \
+            Sources/ --include='*.swift' 2>/dev/null; then
+        continue
+    fi
+    pass14_orphans+=("$key")
+done
+
+if [[ ${#pass14_orphans[@]} -gt 0 ]]; then
+    err "Pass 14: ${#pass14_orphans[@]} enrichment key(s) referenced by rules but not produced by any Swift writer:"
+    for k in "${pass14_orphans[@]}"; do
+        echo "    $k" >&2
+    done
+else
+    ok "Pass 14: all rule-referenced enrichment keys have at least one Swift producer"
+fi
+
+# ---------------------------------------------------------------------
+# PASS 15 — TraceStore must be wired with DatabaseEncryption in daemon mode
+# ---------------------------------------------------------------------
+# v1.9.0 ship invariant. Phase-2.2 wired column-level AES-GCM for
+# `attributes_json`. The TraceStore init signature accepts an optional
+# `encryption` param so test paths can pass nil — but daemon-target
+# call sites MUST pass the shared DatabaseEncryption. A future
+# contributor "fixing" a build error by passing nil would silently
+# regress the on-disk encryption story.
+#
+# v1.9.0 audit-of-the-audit: the prior implementation grepped
+# `TraceStore(directory:` on a single line, but every real call site
+# wraps the args across multiple lines (`TraceStore(\n  directory:
+# ..., \n  encryption: ...\n)`), so the grep matched zero lines and
+# the pass was silently green regardless of wiring. Rewritten to:
+#   1. Match the bare constructor token `TraceStore(`.
+#   2. Read a 6-line window for each match.
+#   3. Skip the path-init overload (`TraceStore(path:...)` — used by
+#      tests, doesn't require `encryption:`).
+#   4. Require `directory:` AND `encryption:` in the window for any
+#      remaining match — the daemon-mode shape.
+#   5. Self-test: if zero matches were found in the daemon target at
+#      all, fail loud rather than silently green. That catches the
+#      "Agent Traces wiring vanished" class of regression.
+section "PASS 15 — TraceStore + DatabaseEncryption pairing in daemon mode"
+
+pass15_call_lines=$(grep -rn "TraceStore(" \
+    Sources/MacCrabAgentKit Sources/MacCrabAgent Sources/maccrabd \
+    --include='*.swift' 2>/dev/null || true)
+
+# Self-test: a daemon target with no TraceStore() calls means the
+# Agent Traces wiring is missing. That's a regression — fail loud
+# rather than silently passing.
+pass15_call_count=$(echo "$pass15_call_lines" | grep -cE '\S' || true)
+if [[ "$pass15_call_count" -eq 0 ]]; then
+    err "Pass 15: no TraceStore(...) call found in daemon target — Agent Traces wiring is missing"
+fi
+
+pass15_violations=()
+pass15_directory_init_count=0
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    file="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    snippet="${rest#*:}"
+
+    window=$(awk -v ln="$lineno" 'NR >= ln && NR < ln + 6 { print }' "$file" 2>/dev/null)
+
+    # Skip path-init overload — only the directory-init overload
+    # requires encryption: in daemon mode.
+    if ! echo "$window" | grep -q "directory:"; then
+        continue
+    fi
+
+    pass15_directory_init_count=$((pass15_directory_init_count + 1))
+    if ! echo "$window" | grep -q "encryption:"; then
+        pass15_violations+=("$file:$lineno: $snippet")
+    fi
+done <<< "$pass15_call_lines"
+
+if [[ ${#pass15_violations[@]} -gt 0 ]]; then
+    err "Pass 15: TraceStore(directory:) call(s) in daemon target without encryption:"
+    for v in "${pass15_violations[@]}"; do echo "    $v" >&2; done
+elif [[ "$pass15_directory_init_count" -eq 0 && "$pass15_call_count" -gt 0 ]]; then
+    # Found TraceStore() calls but none looked like the daemon-mode
+    # shape — also a regression-shaped result.
+    err "Pass 15: TraceStore(...) calls present but none use directory: + encryption: shape — daemon wiring may have regressed"
+else
+    ok "Pass 15: every TraceStore(directory:) in the daemon target wires DatabaseEncryption (verified $pass15_directory_init_count call site(s))"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

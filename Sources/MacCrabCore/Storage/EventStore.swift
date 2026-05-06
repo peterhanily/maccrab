@@ -152,6 +152,55 @@ public actor EventStore {
                 "CREATE INDEX IF NOT EXISTS idx_aggregates_day_category ON event_aggregates(day, event_category)",
             ]
         ),
+        // v1.9 Agent Traces (PR-1): additive columns for AI-agent attribution
+        // surfaced via W3C TRACEPARENT propagation and lineage walks. Columns
+        // are nullable; absence means "no agent trace was bound to this event."
+        // The partial index covers only rows with an attached trace_id, which
+        // is a tiny fraction of total events on a typical machine — keeping
+        // the index size proportional to agent activity.
+        //
+        // `machine_agent_confidence` is immutable after the row is written;
+        // user reattribute verdicts (PR-4) live in a separate
+        // `attribution_overlay` table so the original attribution is always
+        // auditable.
+        Migration(
+            version: 4,
+            name: "add_agent_trace_columns",
+            sql: [
+                "ALTER TABLE events ADD COLUMN agent_trace_id TEXT",
+                "ALTER TABLE events ADD COLUMN agent_span_id TEXT",
+                "ALTER TABLE events ADD COLUMN agent_tool TEXT",
+                "ALTER TABLE events ADD COLUMN machine_agent_confidence TEXT",
+                "ALTER TABLE events ADD COLUMN agent_evidence_json TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_events_trace ON events(agent_trace_id) WHERE agent_trace_id IS NOT NULL",
+            ]
+        ),
+        // v1.9 Agent Traces (PR-4): operator-recorded verdict overlay on
+        // top of an event's machine-emitted attribution. Co-located with
+        // events.db so retention coupling can run inside a single
+        // transaction (Pass 12 invariant: every override row has a
+        // matching event row). Single PRIMARY KEY column means a second
+        // verdict for the same event REPLACES the first — single source
+        // of truth per event, simpler quality metric.
+        Migration(
+            version: 5,
+            name: "add_attribution_overrides_table",
+            sql: [
+                """
+                CREATE TABLE IF NOT EXISTS attribution_overrides (
+                    event_id TEXT PRIMARY KEY,
+                    machine_confidence TEXT,
+                    user_verdict TEXT NOT NULL,
+                    user_note TEXT,
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_overrides_verdict ON attribution_overrides(user_verdict)",
+                "CREATE INDEX IF NOT EXISTS idx_overrides_updated ON attribution_overrides(updated_at)",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -279,6 +328,14 @@ public actor EventStore {
         // (mcp_server_name, mcp_server_category, ai_tool_session_id).
         // Pulled from `event.enrichments` at insert time. Nullable —
         // events without MCP attribution leave them nil.
+        // v1.9 PR-5 hotfix (audit B1): added five agent_* columns for
+        // the v4 schema migration. Pre-fix the migration added the
+        // columns but the INSERT never bound them, so every event
+        // wrote NULL into the new fields and the partial index was
+        // permanently empty. TraceCorrelator.flatten() writes these
+        // keys into `event.enrichments`; we project them into columns
+        // here so SQL-side queries (`WHERE agent_trace_id = ?`,
+        // `WHERE agent_tool = 'claude_code'`) actually work.
         let insertSQL = """
             INSERT OR REPLACE INTO events (
                 id, timestamp, event_category, event_type, event_action, severity,
@@ -286,8 +343,10 @@ public actor EventStore {
                 process_ppid, process_signer, process_team_id, process_signing_id,
                 file_path, file_action, network_dest_ip, network_dest_port,
                 tcc_service, tcc_client, raw_json,
-                mcp_server_name, mcp_server_category, ai_tool_session_id
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
+                mcp_server_name, mcp_server_category, ai_tool_session_id,
+                agent_trace_id, agent_span_id, agent_tool,
+                machine_agent_confidence, agent_evidence_json
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -512,6 +571,22 @@ public actor EventStore {
         bindTextOrNull(stmt, index: 23, value: event.enrichments["mcp_server_category"])
         // 24: ai_tool_session_id
         bindTextOrNull(stmt, index: 24, value: event.enrichments["ai_tool_session_id"])
+        // v1.9 schema v4: agent trace correlation columns. Keys live in
+        // `event.enrichments` written by `TraceCorrelator.flatten()`;
+        // we project them into indexed columns so SQL-side queries
+        // (`WHERE agent_trace_id = ?`, `agent_tool = ?`,
+        // `machine_agent_confidence = ?`) and the partial index
+        // `idx_events_trace` actually populate.
+        // 25: agent_trace_id
+        bindTextOrNull(stmt, index: 25, value: event.enrichments[TraceCorrelator.EnrichmentKey.traceId])
+        // 26: agent_span_id
+        bindTextOrNull(stmt, index: 26, value: event.enrichments[TraceCorrelator.EnrichmentKey.spanId])
+        // 27: agent_tool
+        bindTextOrNull(stmt, index: 27, value: event.enrichments[TraceCorrelator.EnrichmentKey.agentTool])
+        // 28: machine_agent_confidence
+        bindTextOrNull(stmt, index: 28, value: event.enrichments[TraceCorrelator.EnrichmentKey.confidence])
+        // 29: agent_evidence_json
+        bindTextOrNull(stmt, index: 29, value: event.enrichments[TraceCorrelator.EnrichmentKey.evidenceJson])
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
@@ -1405,5 +1480,199 @@ public actor EventStore {
             }
         }
         return results
+    }
+
+    // MARK: - v1.9 PR-4: attribution_overrides
+
+    /// Insert or replace an operator verdict for an event. Idempotent on
+    /// `(eventId)`: a second call REPLACES the prior verdict and bumps
+    /// `updated_at`. Documents Plan v3 review #10's "single source of
+    /// truth per event" contract.
+    public func recordAttributionOverride(_ override: AttributionOverride) throws {
+        guard let db else {
+            throw EventStoreError.databaseOpenFailed("db not open")
+        }
+        let sql = """
+            INSERT INTO attribution_overrides (
+                event_id, machine_confidence, user_verdict, user_note,
+                schema_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(event_id) DO UPDATE SET
+                user_verdict = excluded.user_verdict,
+                user_note = excluded.user_note,
+                machine_confidence = excluded.machine_confidence,
+                schema_version = excluded.schema_version,
+                updated_at = excluded.updated_at
+            """
+        var stmt: OpaquePointer?
+        defer { if let s = stmt { sqlite3_finalize(s) } }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw EventStoreError.prepareFailed(msg)
+        }
+        let TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, override.eventId, -1, TRANSIENT)
+        if let mc = override.machineConfidence {
+            sqlite3_bind_text(stmt, 2, mc, -1, TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 2)
+        }
+        sqlite3_bind_text(stmt, 3, override.verdict.rawValue, -1, TRANSIENT)
+        if let note = override.userNote {
+            sqlite3_bind_text(stmt, 4, note, -1, TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 4)
+        }
+        sqlite3_bind_int(stmt, 5, Int32(override.schemaVersion))
+        sqlite3_bind_double(stmt, 6, override.createdAt.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 7, override.updatedAt.timeIntervalSince1970)
+        if sqlite3_step(stmt) != SQLITE_DONE {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw EventStoreError.stepFailed(msg)
+        }
+    }
+
+    /// Look up the operator verdict for a given event, or nil if none.
+    public func attributionOverride(for eventId: String) throws -> AttributionOverride? {
+        guard let db else { return nil }
+        let sql = """
+            SELECT machine_confidence, user_verdict, user_note,
+                   schema_version, created_at, updated_at
+            FROM attribution_overrides
+            WHERE event_id = ?1
+            """
+        var stmt: OpaquePointer?
+        defer { if let s = stmt { sqlite3_finalize(s) } }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw EventStoreError.prepareFailed(msg)
+        }
+        let TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1)!, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, eventId, -1, TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let mc: String? = sqlite3_column_type(stmt, 0) == SQLITE_NULL
+            ? nil
+            : String(cString: sqlite3_column_text(stmt, 0))
+        let verdictRaw = String(cString: sqlite3_column_text(stmt, 1))
+        // Tolerant decode: unknown future verdicts surface as `.unknown`.
+        let verdict = AttributionOverride.Verdict(rawValue: verdictRaw) ?? .unknown
+        let note: String? = sqlite3_column_type(stmt, 2) == SQLITE_NULL
+            ? nil
+            : String(cString: sqlite3_column_text(stmt, 2))
+        let schemaVersion = Int(sqlite3_column_int(stmt, 3))
+        let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
+        let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5))
+        return AttributionOverride(
+            eventId: eventId,
+            machineConfidence: mc,
+            verdict: verdict,
+            userNote: note,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            schemaVersion: schemaVersion
+        )
+    }
+
+    /// Compute aggregate stats. Plan v3 review #11: the metric only makes
+    /// sense in the "rated" frame; callers must use
+    /// `formattedAccuracyLine` to print it.
+    public func attributionOverrideStats() throws -> AttributionOverrideStats {
+        guard let db else {
+            return AttributionOverrideStats(
+                ratedCount: 0, confirmedCount: 0,
+                wrongToolCount: 0, noAgentCount: 0, unknownVerdictCount: 0,
+                totalEventsWithMachineAttribution: 0
+            )
+        }
+        // Per-verdict counts
+        let sql1 = """
+            SELECT user_verdict, COUNT(*)
+            FROM attribution_overrides
+            GROUP BY user_verdict
+            """
+        var stmt: OpaquePointer?
+        defer { if let s = stmt { sqlite3_finalize(s) } }
+        guard sqlite3_prepare_v2(db, sql1, -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw EventStoreError.prepareFailed(msg)
+        }
+        var rated = 0, confirmed = 0, wrongTool = 0, noAgent = 0, unknownVerdict = 0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let verdict = String(cString: sqlite3_column_text(stmt, 0))
+            let count = Int(sqlite3_column_int64(stmt, 1))
+            rated += count
+            switch verdict {
+            case AttributionOverride.Verdict.confirmed.rawValue: confirmed = count
+            case AttributionOverride.Verdict.wrongTool.rawValue: wrongTool = count
+            case AttributionOverride.Verdict.noAgent.rawValue:   noAgent = count
+            case AttributionOverride.Verdict.unknown.rawValue:   unknownVerdict = count
+            default: break
+            }
+        }
+
+        // Total events that received any machine attribution.
+        var totalStmt: OpaquePointer?
+        defer { if let s = totalStmt { sqlite3_finalize(s) } }
+        let sql2 = "SELECT COUNT(*) FROM events WHERE agent_trace_id IS NOT NULL OR agent_tool IS NOT NULL"
+        var total = 0
+        if sqlite3_prepare_v2(db, sql2, -1, &totalStmt, nil) == SQLITE_OK,
+           sqlite3_step(totalStmt) == SQLITE_ROW {
+            total = Int(sqlite3_column_int64(totalStmt, 0))
+        }
+
+        return AttributionOverrideStats(
+            ratedCount: rated,
+            confirmedCount: confirmed,
+            wrongToolCount: wrongTool,
+            noAgentCount: noAgent,
+            unknownVerdictCount: unknownVerdict,
+            totalEventsWithMachineAttribution: total
+        )
+    }
+
+    /// v1.9 PR-5 audit (B3): roll-up surface used by AttributionOverrideStore
+    /// to compute `AttributionOverrideStats`. This is a read-only query
+    /// — works under the dashboard's read-only fallback path on a
+    /// root-owned `events.db`. Counts events that received any machine
+    /// attribution (either via TRACEPARENT or lineage).
+    public func eventCountWithMachineAttribution() throws -> Int {
+        guard let db else { return 0 }
+        var stmt: OpaquePointer?
+        defer { if let s = stmt { sqlite3_finalize(s) } }
+        let sql = "SELECT COUNT(*) FROM events WHERE agent_trace_id IS NOT NULL OR agent_tool IS NOT NULL"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK,
+              sqlite3_step(stmt) == SQLITE_ROW else {
+            return 0
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Sweep override rows whose `event_id` no longer points at a row in
+    /// `events`. Pass 12 invariant: every override row has a matching
+    /// event row, so this is called from the existing retention sweep.
+    /// Returns the number of orphaned rows removed.
+    @discardableResult
+    public func purgeOrphanedAttributionOverrides() throws -> Int {
+        guard let db else { return 0 }
+        // NOTE: a NOT IN subquery is fine here because the overrides
+        // table is small (operator-rated events only) and this runs
+        // alongside the rest of the retention sweep. If overrides ever
+        // grow large enough for this to matter, switch to a LEFT JOIN
+        // delete pattern.
+        let sql = """
+            DELETE FROM attribution_overrides
+            WHERE event_id NOT IN (SELECT id FROM events)
+            """
+        var changes = 0
+        var stmt: OpaquePointer?
+        defer { if let s = stmt { sqlite3_finalize(s) } }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw EventStoreError.prepareFailed(msg)
+        }
+        if sqlite3_step(stmt) == SQLITE_DONE {
+            changes = Int(sqlite3_changes(db))
+        }
+        return changes
     }
 }
