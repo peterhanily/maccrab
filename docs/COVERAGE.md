@@ -10,12 +10,12 @@ ATT&CK technique tags from each rule's `tags:` block.
 
 | Metric | Count |
 |---|---|
-| Rules total | **424** |
-| Status: stable | 93 |
+| Rules total | **427** |
+| Status: stable | 96 |
 | Status: experimental | 331 |
 | Severity: critical | 77 |
-| Severity: high | 207 |
-| Severity: medium | 118 |
+| Severity: high | 209 |
+| Severity: medium | 119 |
 | Severity: low | 21 |
 | Severity: informational | 1 |
 | Distinct MITRE ATT&CK techniques covered | 154 |
@@ -33,10 +33,13 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 
 ## By tactic
 
-### AI Safety (MacCrab-specific) (22 rules)
+### AI Safety (MacCrab-specific) (25 rules)
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
+| `agent_filesystem_violation_high_conf.yml`<br/>Agent Wrote To Privileged Path (High Confidence) | stable | high | T1543.001 T1543.004 T1555.001 |
+| `agent_filesystem_violation_probable.yml`<br/>Agent Wrote To Privileged Path (Lineage Attribution) | stable | medium | T1543.001 T1543.004 T1555.001 |
+| `agent_traceparent_credential_access.yml`<br/>Agent Read Credential Material (Traceparent-Bound) | stable | high | T1552.001 T1552.004 T1555 |
 | `agent_writes_outside_project_to_dotfiles.yml`<br/>AI Coding Tool Writes to Shell Dotfile Outside Project | experimental | high | T1546.004 |
 | `ai_tool_data_exfiltration.yml`<br/>AI Tool Child Process Uploads Data to Non-Standard Destination | experimental | critical | T1041 T1048.003 T1071.001 |
 | `ai_tool_downloads_script.yml`<br/>AI Coding Tool Downloads and Executes Script | stable | high | T1059.004 |
