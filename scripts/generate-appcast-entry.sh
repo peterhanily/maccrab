@@ -9,13 +9,16 @@
 #   scripts/generate-appcast-entry.sh \
 #       --dmg /path/to/MacCrab-1.3.5.dmg \
 #       --version 1.3.5 \
-#       [--sparkle-bin ~/Tools/Sparkle-2.6.4/bin] \
+#       [--sparkle-bin <dir-with-sign_update>] \
 #       [--release-notes-md path/to/notes.md] \
 #     > /tmp/item.xml
 #
 # Prereqs:
 #   - DMG is already signed with Developer ID + notarized + stapled
-#   - Sparkle's sign_update is on disk (default: ~/Tools/Sparkle-2.6.4/bin/)
+#   - Sparkle's sign_update is on disk; auto-detected across
+#     ~/Tools/bin, ~/Tools/Sparkle/bin, ~/Tools/Sparkle-2.6.4/bin,
+#     ~/Tools/Sparkle-2*/bin, /usr/local/bin, /opt/homebrew/bin.
+#     Override with --sparkle-bin or the SPARKLE_BIN env var.
 #   - The matching private key lives in the login Keychain
 #     (put there by `generate_keys` — see TROUBLESHOOTING.md)
 #
@@ -28,7 +31,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DMG=""
 VERSION=""
-SPARKLE_BIN="${HOME}/Tools/Sparkle-2.6.4/bin"
+SPARKLE_BIN="${SPARKLE_BIN:-}"   # env var override wins over auto-detect
 RELEASE_NOTES_MD=""
 FEED_URL="https://maccrab.com/appcast.xml"
 DOWNLOAD_BASE="https://github.com/peterhanily/maccrab/releases/download"
@@ -45,11 +48,41 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Auto-detect sign_update across a handful of well-known install
+# layouts. Pre-fix the script hardcoded `~/Tools/Sparkle-2.6.4/bin`,
+# which matched only the version-numbered tarball extract. After
+# rolling Sparkle bumps, operators inevitably keep the tool at a
+# version-agnostic path like `~/Tools/bin/` — the hardcoded default
+# then silently failed at the very end of `release.sh` step 6.
+# Try the env var / flag first, then any layout where `sign_update`
+# is executable. Stops at the first hit. v1.10.0 audit fix.
+if [[ -z "$SPARKLE_BIN" ]]; then
+    for candidate in \
+        "${HOME}/Tools/bin" \
+        "${HOME}/Tools/Sparkle/bin" \
+        "${HOME}/Tools/Sparkle-2.6.4/bin" \
+        "${HOME}/Tools/Sparkle-2"*"/bin" \
+        "/usr/local/bin" \
+        "/opt/homebrew/bin"
+    do
+        # Glob expansion above can leave a literal Sparkle-2*/bin if
+        # there are no matches — guard against that with `-x`.
+        if [[ -x "$candidate/sign_update" ]]; then
+            SPARKLE_BIN="$candidate"
+            break
+        fi
+    done
+fi
+
 [[ -n "$DMG"     ]] || { echo "ERROR: --dmg required" >&2; exit 2; }
 [[ -n "$VERSION" ]] || { echo "ERROR: --version required" >&2; exit 2; }
 [[ -f "$DMG"     ]] || { echo "ERROR: DMG not found: $DMG" >&2; exit 1; }
-[[ -x "$SPARKLE_BIN/sign_update" ]] || {
-    echo "ERROR: sign_update not found at $SPARKLE_BIN/sign_update" >&2
+[[ -n "$SPARKLE_BIN" && -x "$SPARKLE_BIN/sign_update" ]] || {
+    echo "ERROR: sign_update not found." >&2
+    echo "       Searched: ~/Tools/bin, ~/Tools/Sparkle/bin,"  >&2
+    echo "                 ~/Tools/Sparkle-2.6.4/bin, ~/Tools/Sparkle-2*/bin," >&2
+    echo "                 /usr/local/bin, /opt/homebrew/bin." >&2
+    echo "       Override with --sparkle-bin <dir> or export SPARKLE_BIN." >&2
     echo "       Download Sparkle from https://github.com/sparkle-project/Sparkle/releases" >&2
     exit 1
 }
