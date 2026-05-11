@@ -29,7 +29,7 @@ extension MacCrabCtl {
                 print("\(time) [\(action)] \(proc) → \(detail)")
             }
         } catch {
-            print("Error reading events: \(error)")
+            print("Error reading events: \(error)"); exit(1)
         }
     }
 
@@ -61,7 +61,7 @@ extension MacCrabCtl {
             print("  Total events:     \(totalCount)")
             print("  Events (last 24h): \(last24h.count)")
         } catch {
-            print("Error reading stats: \(error)")
+            print("Error reading stats: \(error)"); exit(1)
         }
     }
 }

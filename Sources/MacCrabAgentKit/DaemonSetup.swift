@@ -296,11 +296,15 @@ enum DaemonSetup {
         // — empirically 17% of event volume on field-measured hardware.
         // Operator-extended patterns from daemon_config can be merged in
         // here in a follow-up; the default alone closes the biggest gap.
-        Task {
-            await eventStore.setInsertFilter(
-                EventInsertFilter.defaultFilter(supportDir: supportDir)
-            )
-        }
+        //
+        // v1.10.0: this used to be a fire-and-forget Task — collectors
+        // could (and did) start before the filter was in place, so
+        // the first hundreds of events on every daemon startup
+        // bypassed the filter. Await the actor call before any
+        // collector is constructed below.
+        await eventStore.setInsertFilter(
+            EventInsertFilter.defaultFilter(supportDir: supportDir)
+        )
 
         // ProcessHasher populates SHA-256 + CDHash on exec/fork events so
         // downstream rules and exports can match against threat-intel hashes.
@@ -446,6 +450,55 @@ enum DaemonSetup {
             campaignStore = nil
         }
 
+        // v1.10.0 TraceGraph wiring. Pre-fix the materializer + rolling
+        // graph + event bridge shipped compiled but were never
+        // instantiated by the daemon — only `maccrabctl trace demo`
+        // produced traces. Now every Event flowing through the
+        // EventLoop gets fed to the bridge, which materializes a Trace
+        // when AnchorDetector decides the event is anchor-worthy.
+        // Non-fatal on store failure (the rest of the daemon keeps
+        // running without trace materialization).
+        // v1.10.0 audit fix: build DatabaseEncryption here so it can
+        // be passed into SQLiteCausalGraphStore. Pre-fix the store
+        // was instantiated without the encryption param, and the
+        // canonical `dbEncryption` was only constructed ~130 lines
+        // below — tracegraph.db's `attributes_json`, `evidence_json`,
+        // `summary_json`, `attack_json`, `policy_snapshot_json`
+        // were written plaintext on disk despite the v1.9
+        // "AES-GCM at rest" invariant. The canonical `dbEncryption`
+        // below uses the same env-var gate so behaviour is identical;
+        // this early instance just gates plumbing for stores that
+        // need it before the canonical construction site.
+        let earlyEncryptDbEnv = Foundation.ProcessInfo.processInfo.environment["MACCRAB_ENCRYPT_DB"]
+        let earlyDbEncryption = DatabaseEncryption(enabled: earlyEncryptDbEnv != "0")
+
+        let causalGraphBridge: EventToRollingCausalGraphBridge?
+        // Hoisted out of the do-block so the daily retention timer in
+        // DaemonTimers can call prune / size-cap on the same store.
+        let causalStoreOuter: SQLiteCausalGraphStore?
+        do {
+            let causalStore = try await SQLiteCausalGraphStore(
+                databasePath: supportDir + "/tracegraph.db",
+                encryption: earlyDbEncryption
+            )
+            let materializer = TraceMaterializer(
+                store: causalStore,
+                daemonVersion: MacCrabVersion.current,
+                rulesetVersion: MacCrabVersion.current
+            )
+            let rollingGraph = RollingCausalGraph(
+                store: causalStore,
+                materializer: materializer
+            )
+            causalGraphBridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+            causalStoreOuter = causalStore
+            logger.info("TraceGraph materializer wired — events will now anchor traces in tracegraph.db")
+        } catch {
+            logger.warning("TraceGraph init failed: \(error.localizedDescription) — trace materialization disabled this run")
+            causalGraphBridge = nil
+            causalStoreOuter = nil
+        }
+
         // Load response action config if it exists
         let actionConfigPath = supportDir + "/actions.json"
         if FileManager.default.fileExists(atPath: actionConfigPath) {
@@ -494,11 +547,22 @@ enum DaemonSetup {
         // collectors that can be quiet for hours during normal idle
         // (USB hotplug, browser extension install, etc.).
         let collectorRegistry = CollectorRegistry()
+        // ESCollector + NetworkCollector tick at fixed cadence so
+        // they're genuinely non-event-driven — a missed tick is real
+        // evidence of stall.
         await collectorRegistry.register(name: "ESCollector", expectedIntervalSeconds: 5, eventDriven: false)
-        await collectorRegistry.register(name: "UnifiedLogCollector", expectedIntervalSeconds: 30, eventDriven: false)
         await collectorRegistry.register(name: "NetworkCollector", expectedIntervalSeconds: 10, eventDriven: false)
-        await collectorRegistry.register(name: "DNSCollector", expectedIntervalSeconds: 30, eventDriven: false)
-        await collectorRegistry.register(name: "FSEventsCollector", expectedIntervalSeconds: 30, eventDriven: false)
+        // UnifiedLog / DNS (BPF) / FSEvents / SystemPolicy are real-
+        // time event-driven streams that genuinely sit silent on a
+        // quiet machine for minutes at a time. Pre-fix all four were
+        // registered with `eventDriven: false`, which forced
+        // `healthy=false` whenever `lastTick == nil` — so they
+        // appeared "Stalled" in the dashboard the entire time their
+        // event loops were running normally and just hadn't seen a
+        // matching kernel event yet. v1.10.0 audit fix.
+        await collectorRegistry.register(name: "UnifiedLogCollector", expectedIntervalSeconds: 30, eventDriven: true)
+        await collectorRegistry.register(name: "DNSCollector", expectedIntervalSeconds: 30, eventDriven: true)
+        await collectorRegistry.register(name: "FSEventsCollector", expectedIntervalSeconds: 30, eventDriven: true)
         await collectorRegistry.register(name: "TCCMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "EDRMonitor", expectedIntervalSeconds: 120, eventDriven: true)
         await collectorRegistry.register(name: "USBMonitor", expectedIntervalSeconds: 10, eventDriven: true)
@@ -506,11 +570,29 @@ enum DaemonSetup {
         await collectorRegistry.register(name: "UltrasonicMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "RootkitDetector", expectedIntervalSeconds: 120, eventDriven: true)
         await collectorRegistry.register(name: "EventTapMonitor", expectedIntervalSeconds: 60, eventDriven: true)
-        await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: 300, eventDriven: false)
+        await collectorRegistry.register(name: "SystemPolicyMonitor", expectedIntervalSeconds: 300, eventDriven: true)
         await collectorRegistry.register(name: "BrowserExtensionMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "MCPMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         await collectorRegistry.register(name: "TEMPESTMonitor", expectedIntervalSeconds: 60, eventDriven: true)
         print("Collector registry initialized — 16 collectors tracked")
+
+        // Trust substrate -- ECDSA P-256 keypair for trace-bundle
+        // signing. v1.10.0 audit fix: daemon was never instantiating
+        // this, so the keypair only got generated lazily when an
+        // operator ran `maccrabctl trace export` for the first time.
+        // The dashboard's "Trust substrate: Not generated" badge sat
+        // permanently red on a fresh sysext install. Now: bootstrap
+        // here so `<dataDir>/keys/trace-signing.pub` is on disk by
+        // the time the heartbeat first paints the System tab.
+        let keysDir = URL(fileURLWithPath: supportDir + "/keys/")
+        let trustStorage = FilesystemTrustSubstrateStorage(baseDirectory: keysDir)
+        let trustSubstrate = TrustSubstrate(storage: trustStorage)
+        do {
+            _ = try await trustSubstrate.publicKey()
+            print("Trust substrate: keypair available")
+        } catch {
+            print("Trust substrate: bootstrap failed — \(error). Trace-bundle signing will lazily retry on first export.")
+        }
 
         // USB device monitor -- detects mass storage, HID keyboard emulation
         let usbMonitor = USBMonitor(pollInterval: config.usbPollInterval)
@@ -1190,6 +1272,8 @@ enum DaemonSetup {
             campaignDetector: campaignDetector,
             campaignStore: campaignStore,
             ruleGenerator: ruleGenerator,
+            causalGraphBridge: causalGraphBridge,
+            causalStore: causalStoreOuter,
             packageChecker: packageChecker,
             notarizationChecker: notarizationChecker,
             gitSecurityMonitor: gitSecurityMonitor,

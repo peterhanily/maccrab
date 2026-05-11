@@ -205,6 +205,51 @@ struct MacCrabCtl {
                 dbPathOverride = args[d + 1]
             }
             await runRollup(olderThanHours: hours, dbPathOverride: dbPathOverride)
+        case "trace":
+            await dispatchTrace(args: Array(args.dropFirst(2)))
+        case "debug":
+            await dispatchDebug(args: Array(args.dropFirst(2)))
+        case "intel":
+            // Threat-intel maintenance subcommands. Today's only verb
+            // is `refresh`, which sends SIGHUP to the running daemon
+            // (handled by SignalHandlers.swift) — that triggers an
+            // immediate `ThreatIntelFeed.refreshNow` and a rule reload
+            // as a side effect. Used by the dashboard's Refresh button.
+            let sub = args.dropFirst(2).first ?? "refresh"
+            switch sub {
+            case "refresh":
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                proc.arguments = ["-HUP", "com.maccrab.agent"]
+                proc.standardOutput = FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+                try? proc.run()
+                proc.waitUntilExit()
+                if proc.terminationStatus == 0 {
+                    print("Refresh signaled (SIGHUP). Daemon will fetch URLhaus / MalwareBazaar / Feodo within ~5s.")
+                } else {
+                    // Try the dev daemon name as fallback.
+                    let dev = Process()
+                    dev.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                    dev.arguments = ["-HUP", "maccrabd"]
+                    dev.standardOutput = FileHandle.nullDevice
+                    dev.standardError = FileHandle.nullDevice
+                    try? dev.run()
+                    dev.waitUntilExit()
+                    if dev.terminationStatus == 0 {
+                        print("Refresh signaled (SIGHUP) to dev daemon.")
+                    } else {
+                        print("Error: no running MacCrab daemon to signal.")
+                        exit(1)
+                    }
+                }
+            case "help", "-h", "--help":
+                print("usage: maccrabctl intel refresh    — trigger SIGHUP for feed refresh")
+            default:
+                print("Unknown intel subcommand: \(sub)")
+                print("usage: maccrabctl intel refresh")
+                exit(1)
+            }
         case "version":
             printVersion()
         case "help", "-h", "--help":
@@ -214,5 +259,186 @@ struct MacCrabCtl {
             printUsage()
             exit(1)
         }
+    }
+
+    // MARK: - trace dispatch (PR-9)
+
+    static func dispatchTrace(args: [String]) async {
+        guard let sub = args.first else {
+            printTraceUsage()
+            exit(0)
+        }
+        let rest = Array(args.dropFirst())
+        switch sub {
+        case "list":
+            let limit = rest.first.flatMap { Int($0) } ?? 20
+            await traceList(limit: limit)
+        case "show":
+            guard let id = rest.first else { print("Usage: maccrabctl trace show <trace-id>"); exit(1) }
+            await traceShow(id: id)
+        case "explain":
+            guard let id = rest.first else { print("Usage: maccrabctl trace explain <trace-id>"); exit(1) }
+            await traceExplain(id: id)
+        case "graph":
+            guard let id = rest.first else { print("Usage: maccrabctl trace graph <trace-id> [--json]"); exit(1) }
+            let asJson = rest.contains("--json")
+            await traceGraph(id: id, asJson: asJson)
+        case "from-agent":
+            guard let name = rest.first else { print("Usage: maccrabctl trace from-agent <name> [--window N]"); exit(1) }
+            let window = parseWindowArg(rest) ?? 20
+            await traceFromAgent(name: name, windowMinutes: window)
+        case "from-process":
+            guard let pidString = rest.first, let pid = Int32(pidString) else {
+                print("Usage: maccrabctl trace from-process <pid> [--window N]"); exit(1)
+            }
+            let window = parseWindowArg(rest) ?? 20
+            await traceFromProcess(pid: pid, windowMinutes: window)
+        case "from-process-key":
+            guard let key = rest.first else { print("Usage: maccrabctl trace from-process-key <process-key>"); exit(1) }
+            await traceFromProcessKey(key)
+        case "export":
+            guard let id = rest.first else {
+                print("Usage: maccrabctl trace export <trace-id> [--out <dir>] [--include-raw-paths] [--include-hostname]")
+                exit(1)
+            }
+            let includeRawPaths = rest.contains("--include-raw-paths")
+            let includeHostname = rest.contains("--include-hostname")
+            var outURL: URL?
+            if let outIdx = rest.firstIndex(of: "--out"), outIdx + 1 < rest.count {
+                outURL = URL(fileURLWithPath: rest[outIdx + 1])
+            }
+            await traceExport(
+                traceId: id,
+                outputDir: outURL,
+                includeRawPaths: includeRawPaths,
+                includeHostname: includeHostname
+            )
+        case "validate":
+            guard let path = rest.first else { print("Usage: maccrabctl trace validate <bundle>"); exit(1) }
+            await traceValidate(bundlePath: path)
+        case "inspect":
+            guard let path = rest.first else { print("Usage: maccrabctl trace inspect <bundle>"); exit(1) }
+            await traceInspect(bundlePath: path)
+        case "verify":
+            guard let path = rest.first else { print("Usage: maccrabctl trace verify <bundle> [--check-unified-log]"); exit(1) }
+            let checkUnifiedLog = rest.contains("--check-unified-log")
+            await traceVerify(bundlePath: path, checkUnifiedLog: checkUnifiedLog)
+        case "replay":
+            guard let path = rest.first else {
+                print("Usage: maccrabctl trace replay <bundle> [--normalization <version>]"); exit(1)
+            }
+            var normVersion = "1"
+            if let idx = rest.firstIndex(of: "--normalization"), idx + 1 < rest.count {
+                normVersion = rest[idx + 1]
+            }
+            await traceReplay(bundlePath: path, expectedNormalizationVersion: normVersion)
+        case "demo":
+            let scenario = rest.first
+            await traceDemo(scenario: scenario)
+        case "replay-batch":
+            guard let dir = rest.first else {
+                print("Usage: maccrabctl trace replay-batch <dir> [--report <html-path>] [--normalization <version>]"); exit(1)
+            }
+            var normVersion = "1"
+            var reportPath: String? = nil
+            if let idx = rest.firstIndex(of: "--normalization"), idx + 1 < rest.count {
+                normVersion = rest[idx + 1]
+            }
+            if let idx = rest.firstIndex(of: "--report"), idx + 1 < rest.count {
+                reportPath = rest[idx + 1]
+            }
+            await traceReplayBatch(
+                directoryPath: dir,
+                reportPath: reportPath,
+                expectedNormalizationVersion: normVersion
+            )
+        case "to-prov":
+            guard let path = rest.first else { print("Usage: maccrabctl trace to-prov <bundle>"); exit(1) }
+            await traceToProv(bundlePath: path)
+        case "to-otel":
+            guard let path = rest.first else { print("Usage: maccrabctl trace to-otel <bundle>"); exit(1) }
+            await traceToOtel(bundlePath: path)
+        case "help", "-h", "--help":
+            printTraceUsage()
+        default:
+            print("Unknown trace subcommand: \(sub)")
+            printTraceUsage()
+            exit(1)
+        }
+    }
+
+    static func dispatchDebug(args: [String]) async {
+        guard let sub = args.first else {
+            printDebugUsage()
+            exit(0)
+        }
+        let rest = Array(args.dropFirst())
+        switch sub {
+        case "entity-merge":
+            guard let pidString = rest.first, let pid = Int32(pidString) else {
+                print("Usage: maccrabctl debug entity-merge <pid>"); exit(1)
+            }
+            await debugEntityMerge(pid: pid)
+        case "trust-substrate":
+            await debugTrustSubstrate()
+        case "help", "-h", "--help":
+            printDebugUsage()
+        default:
+            print("Unknown debug subcommand: \(sub)")
+            printDebugUsage()
+            exit(1)
+        }
+    }
+
+    private static func parseWindowArg(_ args: [String]) -> Int? {
+        guard let idx = args.firstIndex(of: "--window"), idx + 1 < args.count else { return nil }
+        let raw = args[idx + 1]
+        // Accept "20", "20m", "1h" — minutes is the canonical unit.
+        if raw.hasSuffix("m"), let n = Int(raw.dropLast()) { return n }
+        if raw.hasSuffix("h"), let n = Int(raw.dropLast()) { return n * 60 }
+        return Int(raw)
+    }
+
+    static func printTraceUsage() {
+        print("""
+        maccrabctl trace - TraceGraph commands (v1.10.0)
+
+        Investigation:
+          trace list [N]                           List recent traces (default 20)
+          trace show <trace-id>                    Show trace details + members
+          trace explain <trace-id>                 Print structured explanation
+          trace graph <trace-id> [--json]          Print entities + edges
+          trace from-agent <name> [--window 20m]   Find traces involving an agent
+          trace from-process <pid> [--window 20m]  Find traces involving a pid
+          trace from-process-key <key>             Find traces involving a processKey
+          trace demo [scenario]                    Materialize a synthetic demo trace into tracegraph.db
+                                                   (no daemon required; scenario: fixture1 | persistence | list)
+
+        Bundle pipeline (.maccrabtrace files):
+          trace export <trace-id> [--out <dir>] [--include-raw-paths] [--include-hostname]
+                                                   Export trace as a .maccrabtrace bundle
+          trace validate <bundle>                  Structural conformance check (exits 0,1,5,7,9,10)
+          trace inspect <bundle>                   Print manifest + stats
+          trace verify <bundle> [--check-unified-log]
+                                                   Tamper-evidence check (exits 0,2,3,4)
+          trace replay <bundle> [--normalization <version>]
+                                                   Deterministic replay (exits 0,1,6,11)
+          trace replay-batch <dir> [--report <html>] [--normalization <version>]
+                                                   Replay every bundle in a directory; emit HTML report.
+          trace to-prov <bundle>                   Print prov/prov.jsonld
+          trace to-otel <bundle>                   Print otel/spans.json
+
+        Bundle exit codes are stable per §18.9 of the v1.10.0 spec.
+        Bundles may be passed as either a directory or a .tar.gz / .maccrabtrace archive.
+        """)
+    }
+
+    static func printDebugUsage() {
+        print("""
+        maccrabctl debug - TraceGraph debugging helpers
+
+          debug entity-merge <pid>     Show process entities seen for a pid
+          debug trust-substrate        Print TrustSubstrate mode + public key
+        """)
     }
 }

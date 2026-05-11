@@ -185,7 +185,7 @@ public actor MCPMonitor {
         pollTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(self.pollInterval * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(PowerGate.adjustedInterval(base: self.pollInterval) * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self.scanAllConfigs()
             }

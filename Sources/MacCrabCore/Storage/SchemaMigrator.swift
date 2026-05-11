@@ -34,6 +34,7 @@ public enum SchemaMigrationError: Error, LocalizedError {
     case versionReadFailed(String)
     case versionWriteFailed(String)
     case unknownVersion(current: Int, maxAvailable: Int)
+    case quickCheckFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +46,8 @@ public enum SchemaMigrationError: Error, LocalizedError {
             return "Failed to write user_version: \(m)"
         case let .unknownVersion(current, max):
             return "DB user_version=\(current) exceeds latest known v\(max); binary is older than DB."
+        case let .quickCheckFailed(m):
+            return "PRAGMA quick_check failed after migrations: \(m)"
         }
     }
 }
@@ -118,6 +121,50 @@ public enum SchemaMigrator {
             let bump = m.version > current
             try apply(m, db: db, bumpVersion: bump, logger: logger)
         }
+
+        // Post-migration quick_check: catches structure-level corruption
+        // (orphan rowids, broken indexes, malformed pages) that didn't
+        // surface during the migration's writes themselves. Cheap — sub-
+        // second on a 500MB DB. integrity_check is full-scan and is left
+        // for `maccrabctl maintenance check`. v1.10 audit-driven hardening.
+        try quickCheck(db: db, logger: logger)
+    }
+
+    /// Run `PRAGMA quick_check`. Throws `quickCheckFailed` if SQLite reports
+    /// anything other than the literal `ok` row — that's the documented
+    /// SQLite contract. Logs the issues at warn level for diagnostic capture
+    /// before throwing.
+    public static func quickCheck(
+        on db: OpaquePointer,
+        logger: ((String) -> Void)? = nil
+    ) throws {
+        try quickCheck(db: db, logger: logger)
+    }
+
+    private static func quickCheck(
+        db: OpaquePointer,
+        logger: ((String) -> Void)?
+    ) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA quick_check", -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw SchemaMigrationError.quickCheckFailed("prepare failed: \(msg)")
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var issues: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let cstr = sqlite3_column_text(stmt, 0) {
+                let row = String(cString: cstr)
+                if row != "ok" { issues.append(row) }
+            }
+        }
+        if !issues.isEmpty {
+            let summary = issues.prefix(5).joined(separator: "; ")
+            logger?("  quick_check FAILED: \(summary)")
+            throw SchemaMigrationError.quickCheckFailed(summary)
+        }
+        logger?("  quick_check ok")
     }
 
     /// Read the current `PRAGMA user_version`. Returns 0 for a fresh DB.

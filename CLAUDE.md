@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (1117 tests in 230 suites)
+swift test                     # Unit tests (1355 tests in 261 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -34,7 +34,7 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 - **MacCrabAgent** (`Sources/MacCrabAgent/`) -- System Extension executable. Wrapped into `com.maccrab.agent.systemextension` bundle by `scripts/build-release.sh` and activated via `OSSystemExtensionRequest`. Ships in release DMGs
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 7 tools for AI agent integration
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 17 tools for AI agent integration (includes v1.10 trace tools)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -57,17 +57,17 @@ Sources/MacCrabCore/
   Utilities/      LockedCounter, PowerGate (battery/thermal gating), shared primitives
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            428 Sigma-compatible YAML detection rules (17 tactic directories)
+Rules/            427 Sigma-compatible YAML detection rules (19 tactic directories)
   sequences/      38 multi-step sequence rules
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (1117 tests in 230 suites)
+Tests/            Swift Testing unit tests (1355 tests in 261 suites)
 ```
 
 ## Detection Stack (5 tiers)
 
-1. **Rules** -- 389 single-event Sigma-compatible YAML rules compiled to JSON predicates (plus 38 sequence rules). Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
+1. **Rules** -- 389 single-event Sigma-compatible YAML rules compiled to JSON predicates (plus 38 sequence rules across 19 tactic dirs). Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
 3. **Sequences** -- 38 temporal multi-step rules with process lineage correlation, 10K partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.
@@ -192,17 +192,27 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed:**
+**Tools exposed (17):**
 
 | Tool | Purpose |
 |------|---------|
 | `get_alerts` | Query alerts with severity/time/suppression filtering |
+| `get_alert_detail` | Full alert detail incl. LLM investigation + D3FEND mitigations |
+| `cluster_alerts` | Group recent alerts by rule + process fingerprint |
 | `get_events` | Query events with category/search/time filtering |
 | `get_campaigns` | List detected attack campaigns |
+| `suppress_alert` | Suppress false positive alerts (audit-logged) |
+| `suppress_campaign` | Suppress a campaign + all contributing alerts |
+| `get_ai_alerts` | AI Guard alerts (credential / boundary / injection / MCP) |
+| `scan_text` | Scan text for prompt-injection (Forensicate.ai, 87+ rules) |
 | `get_status` | Daemon status, rule count, DB size |
 | `hunt` | Full-text threat hunting across events |
 | `get_security_score` | Security posture (0-100) with factors |
-| `suppress_alert` | Suppress false positive alerts |
+| **`get_traces`** | (v1.10) List recent causal traces from TraceGraph |
+| **`get_trace_detail`** | (v1.10) Full trace with anchor + members + hash chain |
+| **`hunt_trace`** | (v1.10) Substring search across traces |
+| **`verify_bundle`** | (v1.10) Verify a .maccrabtrace bundle (schema, Merkle, signature) |
+| **`trace_from_event`** | (v1.10) Pivot from an event id to its containing trace |
 
 **Registration:** `.mcp.json` at project root configures it for Claude Code. Build with `swift build --target maccrab-mcp`.
 

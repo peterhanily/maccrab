@@ -27,8 +27,43 @@ enum TimeRange: String, CaseIterable {
 
 struct EventStream: View {
     @ObservedObject var appState: AppState
-    @State private var filterText: String = ""
+    @State private var filterText: String
     @State private var filterCategory: EventCategory? = nil
+
+    /// `initialFilterText` lets a caller pre-populate the FTS filter
+    /// when navigating in via "Investigate in Events" from an alert.
+    /// Without this, the alert→events transition lost the alert's
+    /// process / event-id context entirely; the user had to re-type
+    /// the search term that V2 already had in hand. Default is empty
+    /// so existing direct-mount call sites stay unchanged.
+    /// `firstFilterRun` is true on the very first body→.task(id: filterText)
+    /// fire when initialFilterText is non-empty. Used to skip the
+    /// 300 ms debounce on that first run so the prefilled filter
+    /// lands instantly. After the first run it's set to false and
+    /// subsequent keystroke-driven debounce semantics apply.
+    @State private var firstFilterRun: Bool
+
+    /// Optional centring timestamp set by an "Investigate in Events"
+    /// click on an alert / trace. When non-nil, the EventStream
+    /// query is bounded to `[centerTime ± centerHalfWindowSeconds]`
+    /// so the user lands on events that fired AROUND the alert,
+    /// not just anything matching the filter in the last 24 h. Nil
+    /// for ordinary direct mounts.
+    let initialCenterTime: Date?
+    let centerHalfWindowSeconds: TimeInterval
+
+    init(
+        appState: AppState,
+        initialFilterText: String = "",
+        initialCenterTime: Date? = nil,
+        centerHalfWindowSeconds: TimeInterval = 30 * 60
+    ) {
+        self.appState = appState
+        self._filterText = State(initialValue: initialFilterText)
+        self._firstFilterRun = State(initialValue: !initialFilterText.isEmpty)
+        self.initialCenterTime = initialCenterTime
+        self.centerHalfWindowSeconds = centerHalfWindowSeconds
+    }
     @State private var isPaused: Bool = false
     @State private var autoScroll: Bool = true
     @State private var selectedEventID: EventViewModel.ID? = nil
@@ -191,6 +226,24 @@ struct EventStream: View {
     /// (filter:)`, which hits the FTS5 index, and the in-memory pass below
     /// only handles category + time-range — the two filters that don't have
     /// a database-side equivalent and cheap to evaluate locally.
+    /// Compute the [since, until] bounds for `appState.loadEvents`.
+    /// Pre-fix `loadEvents` was called with no time bound; the FTS5
+    /// query happily returned 30-day-old matches when the user
+    /// expected "events around the time the alert fired". Now:
+    /// - If `initialCenterTime` is set (set by Investigate-in-Events
+    ///   from an alert/trace), narrow to centre ± half-window.
+    /// - Otherwise the user's `timeRange` chip drives a [now-window,
+    ///   now] bound; .all returns [.distantPast, .distantFuture].
+    private func computeEventsTimeBounds() -> (since: Date, until: Date) {
+        if let centre = initialCenterTime {
+            let half = centerHalfWindowSeconds
+            return (centre.addingTimeInterval(-half),
+                    centre.addingTimeInterval(half))
+        }
+        let since = timeRange.seconds.map { Date().addingTimeInterval(-$0) } ?? .distantPast
+        return (since, .distantFuture)
+    }
+
     private func recomputeFilter() {
         var results = appState.events
 
@@ -247,7 +300,18 @@ struct EventStream: View {
                     .frame(width: 200)
 
                 Button {
-                    Task { await appState.loadEvents() }
+                    Task {
+                        let bounds = computeEventsTimeBounds()
+                        if filterText.isEmpty {
+                            await appState.loadEvents(since: bounds.since, until: bounds.until)
+                        } else {
+                            await appState.loadEvents(
+                                filter: filterText,
+                                since: bounds.since,
+                                until: bounds.until
+                            )
+                        }
+                    }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -483,19 +547,58 @@ struct EventStream: View {
             .background(.bar)
         }
         .onAppear {
+            // v1.10 fix: when this view mounts with a non-empty
+            // initialFilterText (the "Investigate in Events" path),
+            // immediately mark eventSearchActive so the 10s
+            // incremental poll's prepend can't corrupt the filtered
+            // result, and run a synchronous loadEvents(filter:) so
+            // the user sees filtered rows on FIRST paint instead of
+            // unfiltered rows for ~300 ms then filtered.
+            if !filterText.isEmpty {
+                appState.eventSearchActive = true
+                let bounds = computeEventsTimeBounds()
+                Task {
+                    await appState.loadEvents(
+                        filter: filterText,
+                        since: bounds.since,
+                        until: bounds.until
+                    )
+                }
+            }
             recomputeFilter()
         }
         // v1.8.0: filterText drives a debounced FTS5 fetch. SwiftUI cancels
         // the previous task on every keystroke, so the only one that fires
         // store.search() is the one whose 300ms quiet window elapses. Empty
         // string returns to live mode (regular events query + poll prepend).
+        // First-render bypass: if `firstFilterRun` is true (set by init when
+        // initialFilterText was non-empty), skip the 300 ms debounce so
+        // pre-filled filters land immediately rather than ~300 ms after
+        // the unfiltered firehose flashes through.
         .task(id: filterText) {
-            do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
-            if filterText.isEmpty {
-                await appState.loadEvents()
+            if !firstFilterRun {
+                do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
             } else {
-                await appState.loadEvents(filter: filterText)
+                firstFilterRun = false
             }
+            // Pass the time bounds so the search query honours both
+            // the user's chip selection AND any "Investigate in
+            // Events" center timestamp. Center timestamp wins when
+            // present (a click from a 14:32 alert should narrow to
+            // ±30 min around 14:32 regardless of which chip was
+            // selected); otherwise the chip's window is used.
+            let bounds = computeEventsTimeBounds()
+            if filterText.isEmpty {
+                await appState.loadEvents(since: bounds.since, until: bounds.until)
+            } else {
+                await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until)
+            }
+        }
+        // Re-fetch when the time-range chip changes mid-search.
+        .task(id: timeRange) {
+            guard !filterText.isEmpty else { return }
+            let bounds = computeEventsTimeBounds()
+            await appState.loadEvents(filter: filterText, since: bounds.since, until: bounds.until)
         }
         // v1.8.0: refresh aggregate rows whenever the time range crosses the
         // 24h boundary or the category filter changes. Runs only in aggregate

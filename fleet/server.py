@@ -31,6 +31,21 @@ from typing import Optional
 
 API_KEY = os.environ.get("MACCRAB_FLEET_KEY", "")
 DB_PATH = os.environ.get("MACCRAB_FLEET_DB", "fleet.db")
+ALLOW_ANONYMOUS = os.environ.get("MACCRAB_FLEET_ALLOW_ANONYMOUS", "") == "1"
+
+# Refuse to start without a configured API key. Pre-fix, an empty
+# API_KEY caused verify_auth() to fail-open (return without checking
+# Authorization), so a deploy that forgot to set MACCRAB_FLEET_KEY
+# accepted any caller. Now we require an explicit
+# MACCRAB_FLEET_ALLOW_ANONYMOUS=1 opt-in for unauthenticated mode (dev
+# loopback only) and fail-loud otherwise.
+if not API_KEY and not ALLOW_ANONYMOUS:
+    raise SystemExit(
+        "fleet/server.py: MACCRAB_FLEET_KEY is unset. "
+        "Set the env var to a strong random key, OR set "
+        "MACCRAB_FLEET_ALLOW_ANONYMOUS=1 to explicitly accept "
+        "unauthenticated traffic (development / single-host loopback only)."
+    )
 
 app = FastAPI(title="MacCrab Fleet Collector", version="0.4.0")
 
@@ -121,7 +136,9 @@ def get_db():
 
 def verify_auth(authorization: Optional[str]):
     if not API_KEY:
-        return  # No auth configured
+        # Refuse-start guard at module init keeps this branch
+        # reachable only when ALLOW_ANONYMOUS=1 is explicit.
+        return
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing API key")
     if authorization[7:] != API_KEY:

@@ -247,17 +247,20 @@ public actor AlertStore {
         )
 
         self.databasePath = maccrabDir.appendingPathComponent("alerts.db").path
-        // See EventStore.init for why 0o027/0o640 (not 0o077/0o600): sysext
-        // writes as root, dashboard reads as admin-group user.
-        let oldUmask = umask(0o027)
+        // See EventStore.init for why 0o007/0o660 (not 0o077/0o600 or
+        // 0o027/0o640): sysext writes as root, dashboard runs as the
+        // admin-group user and needs *write* access to suppress alerts.
+        // 0o660 gives the admin-group dashboard the rw it needs without
+        // making DBs world-readable.
+        let oldUmask = umask(0o007)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o640)
-        chmod(databasePath + "-wal", 0o640)
-        chmod(databasePath + "-shm", 0o640)
+        chmod(databasePath, 0o660)
+        chmod(databasePath + "-wal", 0o660)
+        chmod(databasePath + "-shm", 0o660)
     }
 
     /// Creates an `AlertStore` at a custom path (useful for testing).
@@ -603,6 +606,25 @@ public actor AlertStore {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             throw AlertStoreError.stepFailed(msg)
         }
+    }
+
+    /// Permanently delete a single alert by id. Used by the History
+    /// tab's "Delete" action when an operator wants to wipe a
+    /// suppressed-or-resolved alert from the record entirely
+    /// (e.g. accidentally captured PII in the alert body). Audit
+    /// trail of the deletion lives in `dashboard_audit.log`.
+    @discardableResult
+    public func delete(alertId id: String) throws -> Bool {
+        let sql = "DELETE FROM alerts WHERE id = ?1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: id)
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            throw AlertStoreError.stepFailed(msg)
+        }
+        return Int(sqlite3_changes(db)) > 0
     }
 
     /// List `(id, ruleId)` pairs for alerts currently marked suppressed.

@@ -243,16 +243,16 @@ public actor TraceStore {
             [.posixPermissions: 0o755], ofItemAtPath: url.path
         )
         self.databasePath = url.appendingPathComponent("traces.db").path
-        let oldUmask = umask(0o027)
+        let oldUmask = umask(0o007)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
         self.encryption = encryption
-        chmod(databasePath, 0o640)
-        chmod(databasePath + "-wal", 0o640)
-        chmod(databasePath + "-shm", 0o640)
+        chmod(databasePath, 0o660)
+        chmod(databasePath + "-wal", 0o660)
+        chmod(databasePath + "-shm", 0o660)
     }
 
     /// Open at a custom path (used by tests).
@@ -418,5 +418,66 @@ public actor TraceStore {
             return 0
         }
         return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    // MARK: - Retention
+    //
+    // v1.10.0 audit fix: traces.db (introduced in v1.9 for OTLP/HTTP
+    // span ingestion) had no prune/retention. On a developer machine
+    // running Claude Code daily this grew 0.5–2 GB/month indefinitely.
+    // Match EventStore's prune shape so the daily retention sweep
+    // can drive both with the same timer.
+
+    /// Delete every span whose `start_ns` is older than `cutoff`.
+    /// Returns the number of rows removed.
+    @discardableResult
+    public func prune(olderThan cutoff: Date) throws -> Int {
+        guard let db else { throw TraceStoreError.queryFailed("db not open") }
+        let cutoffNs = Int64(cutoff.timeIntervalSince1970 * 1_000_000_000)
+        let sql = "DELETE FROM spans WHERE start_ns < ?1"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw TraceStoreError.queryFailed(msg)
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, cutoffNs)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw TraceStoreError.queryFailed(msg)
+        }
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Drop the oldest `count` spans by `start_ns` ascending. Used as
+    /// the size-cap escape hatch when the daemon's storage enforcer
+    /// notices traces.db has exceeded its budget.
+    @discardableResult
+    public func pruneOldest(count: Int) throws -> Int {
+        guard let db else { throw TraceStoreError.queryFailed("db not open") }
+        guard count > 0 else { return 0 }
+        let sql = """
+            DELETE FROM spans WHERE rowid IN (
+                SELECT rowid FROM spans ORDER BY start_ns ASC LIMIT ?1
+            )
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw TraceStoreError.queryFailed(msg)
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(count))
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw TraceStoreError.queryFailed(msg)
+        }
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Database file size in bytes — used by the storage enforcer.
+    public func databaseSizeBytes() -> Int64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: databasePath)
+        return (attrs?[.size] as? Int64) ?? 0
     }
 }

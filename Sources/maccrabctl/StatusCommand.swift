@@ -195,14 +195,20 @@ extension MacCrabCtl {
     }
 
     static func isDaemonRunning() -> Bool {
-        let pipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-x", "maccrabd"]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
+        // Probe both names: the v1.3+ system extension binary
+        // (`com.maccrab.agent`) is the production engine; `maccrabd` is
+        // the dev-mode standalone daemon used by `swift run maccrabd`.
+        // Either being live means MacCrab is actively monitoring.
+        for name in ["com.maccrab.agent", "maccrabd"] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            process.arguments = ["-x", name]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 { return true }
+        }
+        return false
     }
 }

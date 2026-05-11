@@ -21,11 +21,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.9.0</string>
+	<string>1.10.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.9.0</string>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.utilities</string>
+	<string>1.10.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
@@ -39,23 +37,20 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>MacCrab inspects local network connections made by running processes to surface suspicious outbound patterns. Metadata stays on-device.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>MacCrab monitors for ultrasonic voice-injection attacks (DolphinAttack / NUIT). Audio is processed on-device and never leaves your Mac.</string>
+	<string>MacCrab monitors for ultrasonic voice injection attacks.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSSystemExtensionUsageDescription</key>
 	<string>MacCrab uses an Endpoint Security system extension to detect threats in real time. The extension runs at the kernel event boundary and observes process, file, and network activity on your Mac.</string>
-	<!-- Sparkle auto-update keys. SUPublicEDKey is the EdDSA verification
-	     key for signed appcast entries; losing the matching private key
-	     bricks the update channel for every existing install. -->
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 	<key>SUFeedURL</key>
 	<string>https://maccrab.com/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>de+dzPjBve7LP5qxoE7nR6shThsjubkVasi+i8ehT4E=</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
-	<key>SUAutomaticallyUpdate</key>
-	<false/>
 </dict>
 </plist>

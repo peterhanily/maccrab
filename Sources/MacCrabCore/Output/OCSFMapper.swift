@@ -24,12 +24,16 @@ public enum OCSFMapper {
     /// OCSF schema version embedded in `metadata.version`.
     public static let schemaVersion = "1.3.0"
 
-    /// Product metadata shared by every emitted record.
-    public static let product = OCSFProduct(
-        name: "MacCrab",
-        vendorName: "MacCrab",
-        version: "1.9.0"
-    )
+    /// Product metadata shared by every emitted record. Version comes
+    /// from the runtime `MacCrabVersion` so a release bump never leaves
+    /// OCSF records claiming the old version.
+    public static var product: OCSFProduct {
+        OCSFProduct(
+            name: "MacCrab",
+            vendorName: "MacCrab",
+            version: MacCrabVersion.current
+        )
+    }
 
     /// Map a MacCrab Event to the appropriate OCSF class based on category.
     ///

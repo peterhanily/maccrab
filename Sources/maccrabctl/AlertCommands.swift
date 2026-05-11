@@ -40,7 +40,7 @@ extension MacCrabCtl {
                 print()
             }
         } catch {
-            print("Error reading alerts: \(error)")
+            print("Error reading alerts: \(error)"); exit(1)
         }
     }
 

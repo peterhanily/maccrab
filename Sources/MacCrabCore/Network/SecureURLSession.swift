@@ -167,6 +167,14 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
         // Disable persistent cookies and credential storage for API sessions
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
+        // Match SecureURLSession.shared: drop the URL cache so per-
+        // backend sessions don't each allocate a 10–20 MB disk-backed
+        // cache. The audit flagged "URLSession × 6" as a 10× memory
+        // contributor — the contribution was per-session caches, not
+        // the session objects themselves. Now solved without
+        // consolidating sessions (each backend keeps its own SPKI
+        // delegate).
+        config.urlCache = nil
         return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }
 

@@ -31,8 +31,34 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VERSION="${VERSION:-1.0.0}"
+
+# v1.10.0 audit fix: derive a unique CFBundleVersion (build number)
+# per build so sysextd can tell two builds of the same VERSION apart
+# and actually replaces the cached binary. macOS sysextd compares
+# (team-id, bundle-id, CFBundleShortVersionString, CFBundleVersion)
+# tuples — if all four match, an activation request short-circuits
+# even when the on-disk bundle bytes have changed. Field-observed:
+# rebuilding 1.10.0 with code changes left the OLD binary running
+# because both tuples said `1.10.0/1.10.0`. The build number is
+# `<VERSION>.<unix-time>` so every rebuild is distinct; the
+# user-visible marketing version (CFBundleShortVersionString) stays
+# clean. Caller can override with `BUILD_NUMBER=<custom>` if they
+# need a specific value (e.g. CI build numbers).
+if [ -z "${BUILD_NUMBER:-}" ]; then
+    export BUILD_NUMBER="${VERSION}.$(date +%s)"
+fi
+echo "  CFBundleShortVersionString: $VERSION"
+echo "  CFBundleVersion           : $BUILD_NUMBER"
 BUILD_DIR="$PROJECT_DIR/.build/release"
 STAGING_DIR="/tmp/maccrab-release-$$"
+
+# Clean up the staging dir on any exit path. Without this trap, every
+# failed release run (Sparkle resolve failure, codesign failure,
+# hdiutil failure, notarize timeout) leaks a multi-MB staged dir to
+# /tmp; ten failed runs filled the dev disk before the audit caught
+# this. The trap fires after the rm at line 446 too, so successful
+# runs still pass through cleanly (the dir is already gone).
+trap 'rm -rf "$STAGING_DIR"' EXIT
 
 cd "$PROJECT_DIR"
 
@@ -129,6 +155,27 @@ if [ -f "$ICON_SRC" ]; then
     cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
+# v1.10.0: bundle maccrabctl + maccrab-mcp inside the .app at
+# Contents/Resources/bin/. Pre-fix the dashboard's runMaccrabctl
+# probed Bundle.main first, but the binary was only ever shipped to
+# /usr/local/bin via install.sh. Brew users with v1.5.1's CLI at
+# /opt/homebrew/bin/maccrabctl saw the dashboard call the OLD CLI
+# (no `intel refresh`, no `unsuppress --id`, etc.) — every dashboard
+# action that shells out failed silently with "Unknown command".
+# Now the .app carries the matching CLI and the path probe finds it
+# first.
+mkdir -p "$APP/Contents/Resources/bin"
+if [ -x "$STAGING_DIR/bin/maccrabctl" ]; then
+    cp "$STAGING_DIR/bin/maccrabctl" "$APP/Contents/Resources/bin/maccrabctl"
+    chmod 755 "$APP/Contents/Resources/bin/maccrabctl"
+    echo "    ✓ Bundled maccrabctl into MacCrab.app/Contents/Resources/bin/"
+fi
+if [ -x "$STAGING_DIR/bin/maccrab-mcp" ]; then
+    cp "$STAGING_DIR/bin/maccrab-mcp" "$APP/Contents/Resources/bin/maccrab-mcp"
+    chmod 755 "$APP/Contents/Resources/bin/maccrab-mcp"
+    echo "    ✓ Bundled maccrab-mcp into MacCrab.app/Contents/Resources/bin/"
+fi
+
 cat > "$APP/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -137,7 +184,7 @@ cat > "$APP/Contents/Info.plist" << PLIST
     <key>CFBundleName</key><string>MacCrab</string>
     <key>CFBundleDisplayName</key><string>MacCrab</string>
     <key>CFBundleIdentifier</key><string>com.maccrab.app</string>
-    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>${BUILD_NUMBER:-$VERSION}</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleExecutable</key><string>MacCrab</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -149,6 +196,11 @@ cat > "$APP/Contents/Info.plist" << PLIST
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSystemExtensionUsageDescription</key><string>MacCrab uses an Endpoint Security system extension to detect threats in real time. Approve once in System Settings &gt; General &gt; Login Items &amp; Extensions.</string>
     <key>NSMicrophoneUsageDescription</key><string>MacCrab monitors for ultrasonic voice injection attacks.</string>
+    <key>NSFullDiskAccessUsageDescription</key><string>MacCrab needs Full Disk Access so the detection engine can read TCC state, observe access to protected paths, and detect tamper attempts against its own configuration.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>MacCrab inspects local network connections made by running processes to surface suspicious outbound patterns. Metadata stays on-device.</string>
+    <key>NSHumanReadableCopyright</key><string>© 2026 CaddyLabs. MacCrab is distributed under the Apache 2.0 License.</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <!-- Sparkle 2 auto-update config. SUPublicEDKey is the ed25519
          verification key; losing the matching private key bricks
          updates for every existing install. -->
@@ -179,7 +231,7 @@ cat > "$SYSEXT_BUNDLE/Contents/Info.plist" << PLIST
     <key>CFBundleName</key><string>MacCrabAgent</string>
     <key>CFBundleDisplayName</key><string>MacCrab Endpoint Security Extension</string>
     <key>CFBundleIdentifier</key><string>${AGENT_ID}</string>
-    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>${BUILD_NUMBER:-$VERSION}</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleExecutable</key><string>${AGENT_ID}</string>
     <key>CFBundlePackageType</key><string>SYSX</string>
@@ -334,6 +386,23 @@ if [ -n "$DEVELOPER_ID" ]; then
         install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/MacCrab"
         echo "    ✓ Added @executable_path/../Frameworks rpath"
     fi
+
+    # 4a-bin. Sign the bundled CLI binaries that ride inside the app
+    # at Contents/Resources/bin/. They have no entitlement (just
+    # hardened runtime + Developer ID + timestamp). Without explicit
+    # signing here, --deep on the app-level sign treats them as
+    # ordinary resources and notarization rejects unsigned Mach-Os.
+    for bin in "$APP/Contents/Resources/bin/maccrabctl" \
+               "$APP/Contents/Resources/bin/maccrab-mcp"; do
+        if [ -x "$bin" ]; then
+            codesign --sign "$DEVELOPER_ID" \
+                --identifier "com.maccrab.$(basename "$bin")" \
+                --options runtime \
+                --timestamp \
+                --force \
+                "$bin"
+        fi
+    done
 
     # 4b. App's inner executable. The app needs the
     # system-extension.install entitlement so OSSystemExtensionRequest

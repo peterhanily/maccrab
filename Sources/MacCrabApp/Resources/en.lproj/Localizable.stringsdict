@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Plural rules for MacCrab — sourced from CLDR plural categories.
+  English uses 1 (one) vs everything else (other), but the dict is
+  here so Russian / Polish / Arabic / Welsh / etc. translators can
+  add `few` / `many` / `two` / `zero` variants without touching
+  Swift code. Every count-bearing string in MacCrabApp should resolve
+  through one of these keys via String.localizedStringWithFormat.
+
+  Adding a new pluralised key:
+    1. Add the entry below (English `one` + `other` baseline).
+    2. Translators add per-locale CLDR categories for their bundle.
+    3. Source uses
+         String.localizedStringWithFormat(
+             NSLocalizedString("alerts.suppressedCount", comment: ""), count)
+       to render with the right form.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- "%lld alerts" — used by the suppressions toast count. -->
+    <key>alerts.suppressedCount</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>1 alert</string>
+            <key>other</key>
+            <string>%lld alerts</string>
+        </dict>
+    </dict>
+
+    <!-- "Unsuppressed %lld alerts" — bulk unsuppress toast. -->
+    <key>alerts.unsuppressedCount</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>Lifted 1 alert</string>
+            <key>other</key>
+            <string>Lifted %lld alerts</string>
+        </dict>
+    </dict>
+
+    <!-- "%lld events / sec" — used in Overview KPI card. -->
+    <key>overview.eventsRate</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>1 event/sec</string>
+            <key>other</key>
+            <string>%lld events/sec</string>
+        </dict>
+    </dict>
+
+    <!-- "%lld critical alerts" — Overview legend. -->
+    <key>overview.critical.count</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>1 critical</string>
+            <key>other</key>
+            <string>%lld critical</string>
+        </dict>
+    </dict>
+
+    <key>overview.high.count</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>1 high</string>
+            <key>other</key>
+            <string>%lld high</string>
+        </dict>
+    </dict>
+
+    <!-- Generic "%lld campaign(s)" / "%lld rule(s)" / "%lld item(s)". -->
+    <key>generic.campaign.count</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>1 campaign</string>
+            <key>other</key>
+            <string>%lld campaigns</string>
+        </dict>
+    </dict>
+
+    <key>generic.rule.count</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>1 rule</string>
+            <key>other</key>
+            <string>%lld rules</string>
+        </dict>
+    </dict>
+
+    <key>generic.item.count</key>
+    <dict>
+        <key>NSStringLocalizedFormatKey</key>
+        <string>%#@count@</string>
+        <key>count</key>
+        <dict>
+            <key>NSStringFormatSpecTypeKey</key>
+            <string>NSStringPluralRuleType</string>
+            <key>NSStringFormatValueTypeKey</key>
+            <string>lld</string>
+            <key>one</key>
+            <string>1 item</string>
+            <key>other</key>
+            <string>%lld items</string>
+        </dict>
+    </dict>
+</dict>
+</plist>

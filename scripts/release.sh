@@ -45,7 +45,32 @@ echo "║  MacCrab v$VERSION Release                       "
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
 
-# Step 0: Pre-release check — enforce RELEASE_CHECKLIST.md items so the
+# Step 0a: appcast publishing precondition. v1.10.0-rc audit fix:
+# step 6 below auto-publishes the appcast entry to the site repo
+# when SITE_REPO_TOKEN is set, otherwise soft-fails with a warning.
+# A soft-fail at minute ~12 of the release after the operator has
+# already burnt notarization + DMG time is too late to recover —
+# field-observed multiple times: "everything looked green but
+# existing v1.x users never received the update." Now: refuse to
+# start if the token is missing AND the operator hasn't explicitly
+# opted out via SKIP_APPCAST=1. Catches the gap before any work
+# is wasted.
+if [ -z "${SITE_REPO_TOKEN:-}" ] && [ "${SKIP_APPCAST:-0}" != "1" ]; then
+    echo "ERROR: SITE_REPO_TOKEN env var not set and SKIP_APPCAST != 1." >&2
+    echo "" >&2
+    echo "Without one of these, step 6 (Sparkle appcast publish) will not" >&2
+    echo "run, and existing v1.x users WILL NOT receive v$VERSION via" >&2
+    echo "auto-update — only the brew-upgrade path will deliver the new" >&2
+    echo "version to them." >&2
+    echo "" >&2
+    echo "Either:" >&2
+    echo "  - Add SITE_REPO_TOKEN to ~/.maccrab-release-env (recommended)" >&2
+    echo "  - Or set SKIP_APPCAST=1 to confirm an intentional skip" >&2
+    echo "    (e.g. internal-only / dry-run releases)" >&2
+    exit 1
+fi
+
+# Step 0b: Pre-release check — enforce RELEASE_CHECKLIST.md items so the
 # pipeline refuses to ship out-of-sync versions, stale notes, or broken
 # localizations. Warnings still proceed; hard errors abort.
 echo "Step 0/6: Pre-release check..."
@@ -65,8 +90,18 @@ echo "Step 0b/6: Architectural audit..."
 }
 
 # Step 1: Tests
+#
+# Pre-fix: `swift test 2>&1 | grep "Test run with"` matched both
+# pass AND fail summary lines (Swift Testing prints the same prefix
+# in either case), so the OR-chain only fired when grep matched
+# nothing — i.e., the test runner crashed. Any test-suite failure
+# was silently treated as success and the release shipped broken.
+# Now: capture the swift test exit code FIRST, then report.
 echo "Step 1/6: Running tests..."
-swift test 2>&1 | grep "Test run with" || { echo "Tests failed!"; exit 1; }
+if ! swift test; then
+    echo "Tests failed — fix and re-run release.sh"
+    exit 1
+fi
 
 # Step 2: Rule compilation
 echo "Step 2/6: Compiling rules..."
@@ -124,6 +159,47 @@ else
     echo ""
     echo "  Create release manually at: https://github.com/peterhanily/maccrab/releases/new?tag=v$VERSION"
     echo "  Upload: $ARTIFACTS"
+fi
+
+# Step 6: Publish appcast entry. Pre-fix this script stopped after
+# `gh release create` and the operator had to remember to run
+# generate-appcast-entry.sh + publish-appcast-entry.sh manually. The
+# procedural gap meant several point releases shipped to GitHub but
+# never reached existing users' Sparkle clients. Now: always try.
+# Soft-fail if SITE_REPO_TOKEN is missing (log + skip; release stays
+# successful) or SKIP_APPCAST=1 was passed (CI / manual override).
+if [ "${SKIP_APPCAST:-0}" = "1" ]; then
+    echo ""
+    echo "  Step 6/6: Skipping appcast publish (SKIP_APPCAST=1)"
+elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
+    echo ""
+    echo "Step 6/6: Publishing appcast entry..."
+    SITE_REPO="${SITE_REPO:-peterhanily/maccrab-site}"
+    APPCAST_ITEM=$(mktemp -t maccrab-appcast-item.XXXXXX.xml)
+    if "$SCRIPT_DIR/generate-appcast-entry.sh" \
+            --dmg "$DMG_PATH" --version "$VERSION" \
+            > "$APPCAST_ITEM"; then
+        if SITE_REPO_TOKEN="$SITE_REPO_TOKEN" \
+                "$SCRIPT_DIR/publish-appcast-entry.sh" \
+                --item "$APPCAST_ITEM" \
+                --site-repo "$SITE_REPO" \
+                --version "$VERSION"; then
+            echo "  ✓ Appcast entry published; existing v1.x users will see the update within ~30s"
+        else
+            echo "  ! Appcast publish failed — run 'scripts/publish-appcast-entry.sh --item $APPCAST_ITEM' manually" >&2
+        fi
+    else
+        echo "  ! Appcast generate failed — fix Sparkle sign_update + private key and retry" >&2
+    fi
+    rm -f "$APPCAST_ITEM"
+else
+    echo ""
+    echo "  Step 6/6: Skipping appcast publish."
+    if [ -z "${SITE_REPO_TOKEN:-}" ]; then
+        echo "  → SITE_REPO_TOKEN env var not set. Existing users will NOT receive the update."
+        echo "    To publish: SITE_REPO_TOKEN=<pat> scripts/publish-appcast-entry.sh \\"
+        echo "                  --item <(scripts/generate-appcast-entry.sh --dmg $DMG_PATH --version $VERSION)"
+    fi
 fi
 
 echo ""

@@ -163,6 +163,22 @@ final class DaemonState {
     let campaignStore: CampaignStore?
     let ruleGenerator: RuleGenerator
 
+    // MARK: - TraceGraph
+    /// Per-event causal-graph bridge. nil when SQLiteCausalGraphStore
+    /// init failed (rare — only on disk-full or perms issues). When
+    /// set, the EventLoop feeds every event through this bridge so
+    /// AnchorDetector can materialize traces of interest.
+    let causalGraphBridge: EventToRollingCausalGraphBridge?
+
+    /// Causal-graph store used by TraceMaterializer. Held on
+    /// DaemonState so the daily retention timer in DaemonTimers can
+    /// drive prune + size-cap. Pre-fix the store was scope-locked
+    /// inside DaemonSetup's `do { }` block — only the bridge
+    /// survived, so timers had no way to call pruneTraces /
+    /// pruneOldestTraces / databaseSizeBytes. nil whenever
+    /// SQLiteCausalGraphStore init failed.
+    let causalStore: SQLiteCausalGraphStore?
+
     // MARK: - Package Security
     let packageChecker: PackageFreshnessChecker
     let notarizationChecker: NotarizationChecker
@@ -329,6 +345,8 @@ final class DaemonState {
         campaignDetector: CampaignDetector,
         campaignStore: CampaignStore?,
         ruleGenerator: RuleGenerator,
+        causalGraphBridge: EventToRollingCausalGraphBridge? = nil,
+        causalStore: SQLiteCausalGraphStore? = nil,
         packageChecker: PackageFreshnessChecker,
         notarizationChecker: NotarizationChecker,
         gitSecurityMonitor: GitSecurityMonitor,
@@ -439,6 +457,8 @@ final class DaemonState {
         self.campaignDetector = campaignDetector
         self.campaignStore = campaignStore
         self.ruleGenerator = ruleGenerator
+        self.causalGraphBridge = causalGraphBridge
+        self.causalStore = causalStore
         self.packageChecker = packageChecker
         self.notarizationChecker = notarizationChecker
         self.gitSecurityMonitor = gitSecurityMonitor

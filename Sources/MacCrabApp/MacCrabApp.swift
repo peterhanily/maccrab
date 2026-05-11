@@ -56,7 +56,7 @@ struct MacCrabApp: App {
     var body: some Scene {
         // Main dashboard window — opens on launch.
         WindowGroup("MacCrab Dashboard") {
-            MainView(appState: appState, sysextManager: sysextManager)
+            V2RootView(appState: appState)
                 .frame(minWidth: 950, minHeight: 600)
                 // Tint every native control (buttons, links, toggles,
                 // progress views, sliders) with MacCrab's brand orange,
@@ -334,13 +334,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "🦀 MacCrab", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
 
-        let dashboardItem = NSMenuItem(title: "Show Dashboard", action: #selector(showDashboard), keyEquivalent: "d")
-        dashboardItem.target = self
-        menu.addItem(dashboardItem)
+        // Helper: build a menu item with an SF Symbol leading icon
+        // so every actionable row in the menu has matching visual
+        // weight (the user reported that "Settings..." rendered with
+        // a gear and "Show Dashboard" was naked text — fixed here by
+        // attaching SF Symbol images to all rows).
+        func makeItem(title: String, symbol: String, action: Selector, key: String) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = self
+            if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
+                let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+                item.image = img.withSymbolConfiguration(cfg)
+            }
+            return item
+        }
 
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
+        menu.addItem(makeItem(title: "Show Dashboard",
+                              symbol: "square.grid.2x2",
+                              action: #selector(showDashboard),
+                              key: "d"))
+        menu.addItem(makeItem(title: "Settings…",
+                              symbol: "gearshape",
+                              action: #selector(openSettings),
+                              key: ","))
 
         menu.addItem(NSMenuItem.separator())
 
@@ -349,17 +365,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // SwiftUI's CommandGroup(after: .appInfo), which doesn't render
         // in LSUIElement=true apps; v1.3.8 moves it here where users
         // can actually reach it.
-        let updateItem = NSMenuItem(title: "Check for Updates…",
-                                    action: #selector(checkForUpdates),
-                                    keyEquivalent: "")
-        updateItem.target = self
-        menu.addItem(updateItem)
+        menu.addItem(makeItem(title: "Check for Updates…",
+                              symbol: "arrow.down.circle",
+                              action: #selector(checkForUpdates),
+                              key: ""))
 
         menu.addItem(NSMenuItem.separator())
 
-        let quitItem = NSMenuItem(title: "Quit MacCrab", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
+        menu.addItem(makeItem(title: "Quit MacCrab",
+                              symbol: "power",
+                              action: #selector(quit),
+                              key: "q"))
 
         statusItem?.menu = menu
     }
@@ -403,6 +419,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }, onShowDashboard: { [weak self] in
                 self?.alertPanel?.close()
                 self?.showDashboard()
+                // Tell V2DashboardShell to navigate to this specific alert.
+                // V2 owns its own state via @StateObject, so we cross
+                // module boundaries via NotificationCenter.
+                NotificationCenter.default.post(
+                    name: Notification.Name("maccrab.openAlert"),
+                    object: nil,
+                    userInfo: ["alertId": alert.id]
+                )
             })
 
             let hostingController = NSHostingController(rootView: popoverView)
@@ -625,3 +649,4 @@ extension AlertViewModel {
         return "\(Int(seconds / 3600))h ago"
     }
 }
+

@@ -35,7 +35,7 @@ extension MacCrabCtl {
 
             print("Run 'maccrabctl alerts --severity critical' to see all alerts including vulns.")
         } catch {
-            print("Error reading alerts: \(error)")
+            print("Error reading alerts: \(error)"); exit(1)
         }
     }
 }

@@ -7,6 +7,7 @@
 // Avoids the previous O(n log n) full-dict sort on every overflow.
 
 import Foundation
+import CryptoKit
 
 /// Prevents redundant API calls for repeated identical prompts.
 public actor LLMCache {
@@ -81,12 +82,19 @@ public actor LLMCache {
         }
     }
 
-    /// Generate a cache key from prompt components.
-    public static func cacheKey(system: String, user: String) -> String {
-        var hasher = Hasher()
-        hasher.combine(system)
-        hasher.combine(user)
-        return String(hasher.finalize(), radix: 16)
+    /// Generate a stable, cross-restart cache key from prompt
+    /// components. Pre-fix used Swift's `Hasher` with a random
+    /// per-process seed — every daemon restart invalidated the cache,
+    /// so a host that restarted hourly paid full LLM cost on every
+    /// alert. Now SHA-256 over all inputs that could affect the
+    /// response: system + user + temperature + maxTokens. Same
+    /// prompt at different temperature settings no longer collides.
+    public static func cacheKey(system: String, user: String,
+                                temperature: Double = 0.2,
+                                maxTokens: Int = 2048) -> String {
+        let payload = "\(system)\n\u{1f}\n\(user)\n\u{1f}\n\(temperature)\n\u{1f}\n\(maxTokens)"
+        let digest = SHA256.hash(data: Data(payload.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     public func stats() -> (entries: Int, maxEntries: Int) {

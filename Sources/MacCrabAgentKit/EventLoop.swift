@@ -46,6 +46,14 @@ enum EventLoop {
                 await state.collectorRegistry.recordTick(name: attributedCollector)
             }
 
+            // v1.10.0 perf: notify MCPAttributor of process exits so its
+            // pid→server cache evicts proactively rather than waiting for
+            // its 5K-entry LRU cap to overflow (audit P-W3.8). Cheap —
+            // no-op for events that aren't NOTIFY_EXIT.
+            if event.eventAction == "exit" {
+                await state.mcpAttributor.processExited(pid: event.process.pid)
+            }
+
             // Enrich the event (lineage, code signing)
             var enrichedEvent = await state.enricher.enrich(event)
 
@@ -911,6 +919,16 @@ enum EventLoop {
 
             // Store event
             do { try await state.eventStore.insert(event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordEventError(error) }
+
+            // v1.10.0 TraceGraph ingestion. Bridge handles category/action
+            // mapping internally and returns nil-equivalent for events
+            // that aren't in the causal graph schema. Anchor materialization
+            // happens inside the bridge → rolling graph → materializer
+            // path. Errors are logged inside the bridge and don't block
+            // the rest of the event loop.
+            if let bridge = state.causalGraphBridge {
+                _ = await bridge.process(enrichedEvent)
+            }
 
             // === Detection: 3 layers ===
 

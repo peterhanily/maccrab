@@ -1,0 +1,26 @@
+{
+  "id": "maccrab_agent_associated_shell_writes_to_login_item",
+  "title": "AI-associated shell wrote to a login item",
+  "severity": "high",
+  "type": "graph",
+  "nodes": {
+    "agent": { "type": "ai_agent" },
+    "shell": {
+      "type": "process",
+      "where": {
+        "executable_name": { "in": ["zsh", "bash", "sh", "osascript", "python", "python3", "node"] }
+      }
+    },
+    "login": {
+      "type": "persistence",
+      "where": { "persistence_type": { "in": ["login_item", "launch_agent"] } }
+    }
+  },
+  "edges": [
+    { "from": "agent", "to": "shell", "relation": "associated_with_agent", "min_tier": "strong_inferred" },
+    { "from": "shell", "to": "login", "relation": "created_persistence",   "min_tier": "strong_inferred" }
+  ],
+  "scope": { "common_ancestor": "shell" },
+  "constraints": { "within_seconds": 600, "min_confidence": 0.7 },
+  "attack": ["T1543.001", "T1547"]
+}

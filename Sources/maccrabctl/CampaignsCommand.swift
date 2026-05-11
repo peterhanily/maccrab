@@ -54,7 +54,7 @@ extension MacCrabCtl {
                 print()
             }
         } catch {
-            print("Error reading campaigns: \(error)")
+            print("Error reading campaigns: \(error)"); exit(1)
         }
     }
 

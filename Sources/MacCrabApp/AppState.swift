@@ -1385,9 +1385,41 @@ final class AppState: ObservableObject {
     @MainActor
     func requestStorageFlush() {
         storageFlushInFlight = true
-        // Order matters: SIGUSR2 first (clean dedicated path), then
-        // SIGHUP (catches older sysexts). On the v1.9 daemon both
-        // fire; on a v1.8.x sysext SIGUSR2 is a no-op + SIGHUP wins.
+
+        // v1.10.0 audit fix (second pass): write the marker file to
+        // <supportDir>/inbox/ which the daemon creates with mode
+        // 1777 on boot. The first attempt used /tmp/ but sysextd's
+        // sandbox profile for ES extensions doesn't expose the same
+        // /private/tmp the dashboard sees — sysext's
+        // contentsOfDirectory("/tmp") returned nothing even when a
+        // marker was sitting there. The inbox dir is rooted under
+        // the daemon's known support path so there's no sandbox
+        // translation, and the sticky+world-write bits let either UID
+        // drop a file. We still send the pkill as a fallback for the
+        // dev `swift run maccrabd` path where UIDs match.
+        let inboxDir = "/Library/Application Support/MacCrab/inbox"
+        let userInboxDir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
+        let payload: [String: Any] = [
+            "schema_version": 1,
+            "requested_at_unix": Date().timeIntervalSince1970,
+            "requester": "MacCrabApp dashboard",
+            "requester_pid": getpid()
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) {
+            // Try system inbox first (where the sysext polls). Fall
+            // back to user-home inbox for dev `swift run maccrabd`
+            // installs that write to the user data dir.
+            for dir in [inboxDir, userInboxDir] {
+                try? FileManager.default.createDirectory(
+                    atPath: dir, withIntermediateDirectories: true
+                )
+                let path = "\(dir)/flush-request-\(Int(Date().timeIntervalSince1970))-\(getpid()).json"
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
+        }
+
+        // Fallback signal path — no-op on the sysext (UID mismatch)
+        // but does the right thing on dev `swift run maccrabd`.
         for sig in ["-USR2", "-HUP"] {
             for processName in ["com.maccrab.agent", "maccrabd"] {
                 let task = Process()
@@ -1692,15 +1724,32 @@ final class AppState: ObservableObject {
         }
     }
 
-    func loadEvents(limit: Int = 500, filter: String? = nil) async {
+    func loadEvents(
+        limit: Int = 500,
+        filter: String? = nil,
+        since: Date = .distantPast,
+        until: Date = .distantFuture
+    ) async {
         do {
             let store = try eventStore()
             let raw: [Event]
             let isSearch = filter.map { !$0.isEmpty } ?? false
             if let query = filter, isSearch {
-                raw = try await store.search(text: query, limit: limit)
+                // Pass [since, until] through to FTS5/LIKE so an
+                // "Investigate in Events" navigation can narrow to
+                // the alert's firing window (e.g. ±30 min around the
+                // alert timestamp). Without an upper bound, a search
+                // from an alert 30 days ago still surfaced today's
+                // events that matched the same process — which
+                // wasn't what the user clicked Investigate to see.
+                raw = try await store.search(text: query, since: since, until: until, limit: limit)
             } else {
-                raw = try await store.events(since: Date.distantPast, limit: limit)
+                // EventStore.events doesn't yet take an upper bound;
+                // narrow client-side after the fetch. The result set
+                // for non-search queries is already small (`limit`
+                // capped) so this is fine.
+                let all = try await store.events(since: since, limit: limit)
+                raw = all.filter { $0.timestamp <= until }
             }
             events = raw.map { eventToViewModel($0) }
             // Gate the live poll: while a search is active, the events array

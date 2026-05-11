@@ -57,7 +57,7 @@
 
 /* ── Kill process confirmation ── */
 "action.kill.confirm" = "Kill %@?";
-"action.kill.message" = "This will terminate %@ at %@. This action cannot be undone.";
+"action.kill.message" = "This will terminate %1$@ at %2$@. This action cannot be undone.";
 "action.kill.success" = "Process terminated";
 "action.kill.failure" = "Failed to terminate process";
 
@@ -478,10 +478,21 @@
 
 /* ── Severity Labels ── */
 "severity.informational" = "Informational";
+"severity.info" = "Info";
 "severity.low" = "Low";
 "severity.medium" = "Medium";
 "severity.high" = "High";
 "severity.critical" = "Critical";
+
+/* V2 status-level chips (Healthy / Info / Warning / Critical) — orthogonal
+   to severity. Used for health, trust, and feed-status surfaces that
+   aren't really severity-ranked. The "statusLevel.*" prefix avoids name
+   collision with the legacy "status.connected" / "status.disconnected"
+   connection-state strings above. */
+"statusLevel.healthy"  = "Healthy";
+"statusLevel.info"     = "Info";
+"statusLevel.warning"  = "Warning";
+"statusLevel.critical" = "Critical";
 
 
 /* ── Bundle A + B additions (v1.3.5) ──
@@ -497,8 +508,6 @@
 "alerts.unsuppressedCount" = "Unsuppressed %lld alerts";
 
 /* Destructive-action confirmation messages */
-"action.kill.message" = "This will terminate %1$@ at %2$@. This action cannot be undone.";
-"action.block.message" = "This will block the network destination associated with %@. Applications will no longer be able to reach this endpoint.";
 "action.suppressAll.hint" = "Suppress all alerts matching '%1$@' from '%2$@'";
 "action.kill.hint" = "Terminate %@";
 "action.copyDetails.hint" = "Copies alert details to clipboard";

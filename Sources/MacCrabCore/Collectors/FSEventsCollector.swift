@@ -20,6 +20,8 @@ public actor FSEventsCollector {
     public nonisolated let events: AsyncStream<Event>
     private var continuation: AsyncStream<Event>.Continuation?
     private var stream: FSEventStreamRef?
+    private var runLoop: CFRunLoop?
+    private var contextInfo: UnsafeMutableRawPointer?
     private var isRunning = false
 
     /// Directories to watch for security-relevant file changes.
@@ -62,8 +64,14 @@ public actor FSEventsCollector {
         let continuation = self.continuation!
         let logger = self.logger
 
-        // FSEventStream must be created and scheduled on a specific thread
-        DispatchQueue.global(qos: .utility).async {
+        // FSEventStream must be created and scheduled on a specific thread.
+        // We hop back to the actor after creation to record stream + run
+        // loop refs on `self`, so stop() can release the resources rather
+        // than leaking them. Pre-fix the locals were trapped inside this
+        // closure and `self.stream` stayed nil — stop() short-circuited
+        // and the FSEventStream + dispatch worker thread + Unmanaged
+        // context all leaked for the daemon's lifetime.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let pathsCF = paths as CFArray
 
             var context = FSEventStreamContext()
@@ -89,17 +97,42 @@ public actor FSEventsCollector {
                 )
             ) else {
                 logger.error("FSEvents: failed to create event stream")
+                Unmanaged<FSEventsCallbackInfo>.fromOpaque(info).release()
                 return
             }
 
-            FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+            guard let runLoop = CFRunLoopGetCurrent() else {
+                logger.error("FSEvents: CFRunLoopGetCurrent returned nil")
+                FSEventStreamRelease(stream)
+                Unmanaged<FSEventsCallbackInfo>.fromOpaque(info).release()
+                return
+            }
+            FSEventStreamScheduleWithRunLoop(stream, runLoop, CFRunLoopMode.defaultMode.rawValue)
             FSEventStreamStart(stream)
+
+            // Hop back to the actor to record the refs so stop() can
+            // release them. Sendable across the boundary: stream/runLoop
+            // are CF refs, info is an opaque pointer.
+            let streamSendable = stream
+            let runLoopSendable = runLoop
+            Task { [weak self] in
+                await self?.recordStream(streamSendable, runLoop: runLoopSendable, info: info)
+            }
 
             logger.info("FSEvents collector active — watching \(paths.count) directories")
 
-            // Run the run loop to receive events
+            // Run the run loop to receive events. Returns when stop()
+            // calls CFRunLoopStop on this loop.
             CFRunLoopRun()
         }
+    }
+
+    private func recordStream(_ stream: FSEventStreamRef,
+                              runLoop: CFRunLoop,
+                              info: UnsafeMutableRawPointer) {
+        self.stream = stream
+        self.runLoop = runLoop
+        self.contextInfo = info
     }
 
     public func stop() {
@@ -109,6 +142,16 @@ public actor FSEventsCollector {
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
             self.stream = nil
+        }
+        if let runLoop = runLoop {
+            // Wakes the dispatch worker out of CFRunLoopRun so the queue
+            // worker thread is returned to the pool.
+            CFRunLoopStop(runLoop)
+            self.runLoop = nil
+        }
+        if let info = contextInfo {
+            Unmanaged<FSEventsCallbackInfo>.fromOpaque(info).release()
+            self.contextInfo = nil
         }
         continuation?.finish()
     }

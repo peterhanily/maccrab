@@ -280,6 +280,47 @@ public actor PackageFreshnessChecker {
             .map { ($0, .homebrew) }
     }
 
+    /// Public installed-version snapshot keyed by `<registry>:<name>`.
+    /// Pre-fix the V2 dashboard had no way to compare an installed
+    /// package's local version against the registry's latest — every
+    /// row read "Up to date" because `installed = latest` in the
+    /// mapping. Now: build a snapshot of versions reported by the
+    /// local package managers in a single pass off-main, and the
+    /// dashboard merges these in by `<registry>:<name>` lookup.
+    public nonisolated func installedVersions() -> [String: String] {
+        var out: [String: String] = [:]
+        if let output = runCommand("/usr/bin/env", args: ["npm", "ls", "-g", "--depth=0", "--json"]),
+           let data = output.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let deps = json["dependencies"] as? [String: Any] {
+            for (name, value) in deps {
+                if let map = value as? [String: Any], let v = map["version"] as? String {
+                    out["npm:\(name)"] = v
+                }
+            }
+        }
+        if let output = runCommand("/usr/bin/env", args: ["pip3", "list", "--format=json", "--user"]),
+           let data = output.data(using: .utf8),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            for entry in arr {
+                if let name = entry["name"] as? String, let v = entry["version"] as? String {
+                    out["pypi:\(name)"] = v
+                }
+            }
+        }
+        if let output = runCommand("/usr/bin/env", args: ["brew", "list", "--formula", "--versions"]) {
+            for line in output.components(separatedBy: "\n") {
+                let parts = line.split(separator: " ", maxSplits: 1)
+                if parts.count == 2 {
+                    out["homebrew:\(String(parts[0]))"] = String(parts[1])
+                        .components(separatedBy: " ").last
+                        ?? String(parts[1])
+                }
+            }
+        }
+        return out
+    }
+
     private nonisolated func runCommand(_ path: String, args: [String]) -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: path)

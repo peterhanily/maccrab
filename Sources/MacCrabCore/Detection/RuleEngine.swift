@@ -491,13 +491,21 @@ public actor RuleEngine {
         let snapshotRegexSeq = regexAccessSeq
         let snapshotRegexCounter = regexAccessCounter
 
-        ruleIndex.removeAll()
-        allRules.removeAll()
-        regexCache.removeAll()
-        regexAccessSeq.removeAll()
-
+        // Pre-fix: cache was wiped BEFORE load. During the (potentially
+        // 100s ms long) loadRules call, concurrent evaluate() calls saw
+        // a cold regex cache and paid recompile cost on the hot path.
+        // Now: keep the existing rules + cache live during the load.
+        // loadRules merges / overrides into ruleIndex + allRules; any
+        // stale regex entries from rules that no longer exist will be
+        // LRU-evicted naturally as the new rules' regexes are accessed.
         let count: Int
         do {
+            // First clear ruleIndex so loadRules rebuilds the per-
+            // category dispatch map from scratch — critical for
+            // correctness if a rule's category changed. allRules is
+            // a separate dict, gets repopulated by loadRules' inserts.
+            ruleIndex.removeAll()
+            allRules.removeAll()
             count = try loadRules(from: directory)
         } catch {
             // Restore previous state — engine must never be left empty.

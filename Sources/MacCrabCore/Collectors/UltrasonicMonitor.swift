@@ -64,7 +64,13 @@ public actor UltrasonicMonitor {
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.analyzeSample()
-                try? await Task.sleep(nanoseconds: UInt64((self?.pollInterval ?? 30) * 1_000_000_000))
+                // Aggressiveness 2.0: ultrasonic capture spins up
+                // AVAudioEngine + FFT every tick — battery class.
+                let interval = PowerGate.adjustedInterval(
+                    base: self?.pollInterval ?? 30,
+                    aggressiveness: 2.0
+                )
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
     }

@@ -35,6 +35,19 @@ struct LineageNode: Sendable {
 
     /// Timestamp when the process exited, or `nil` if still running.
     var exitTime: Date?
+
+    // MARK: v1.10 TraceGraph additions
+    //
+    // Filled in by `setProcessKey(...)` after the v1.9 collector has
+    // recorded the process. v1.9 callers don't set these — they remain
+    // nil and the v1.10 skeleton view is unavailable for those nodes.
+    // This keeps the LineageNode shape additive: existing tests still
+    // pass; v1.10 features only activate when `setProcessKey` is wired
+    // by the v1.10 EntityResolver / RollingCausalGraph layer.
+
+    var processKey: String? = nil
+    var parentProcessKey: String? = nil
+    var signingSummary: ProcessSkeleton.SigningSummary? = nil
 }
 
 // MARK: - ProcessLineage
@@ -67,6 +80,26 @@ public actor ProcessLineage {
 
     /// Reverse index: ppid -> set of child pids, for fast child lookups.
     private var childrenIndex: [pid_t: Set<pid_t>] = [:]
+
+    // MARK: v1.10 TraceGraph promotion buffer
+    //
+    // When a node carrying a `processKey` is evicted (LRU pressure or
+    // retention pruning), its skeleton is captured here so a higher
+    // layer (RollingCausalGraph in PR-8) can drain the buffer and
+    // promote the skeletons into `CompactPersistentLineage` storage.
+    //
+    // The buffer is bounded — under a recycle storm, oldest skeletons
+    // drop first. The drain cadence is the wiring layer's responsibility.
+    //
+    // This satisfies the §6.3.1 invariant "silent ancestry loss is not
+    // allowed": every evicted node with a processKey has its skeleton
+    // captured before discard. There is a brief window between eviction
+    // and the next drain where ancestry queries against `tracegraph.db`
+    // CompactPersistentLineage would miss the skeleton; the rolling
+    // graph in PR-8 keeps the freshly-pending skeletons in its own
+    // local view to cover that window.
+    private var pendingPromotions: [ProcessSkeleton] = []
+    private let pendingPromotionsCap: Int = 1024
 
     // MARK: Initialization
 
@@ -147,12 +180,84 @@ public actor ProcessLineage {
 
     private func removeNode(pid: pid_t) {
         guard let node = nodes.removeValue(forKey: pid) else { return }
+        // v1.10 TraceGraph: capture a skeleton for promotion before
+        // discarding the node, so ancestry doesn't silently disappear
+        // when LRU pressure or pruning evicts a process the rolling
+        // graph still cares about. Only nodes that have been enriched
+        // with a processKey participate; v1.9-only nodes (no processKey)
+        // are evicted as before.
+        if let processKey = node.processKey {
+            let skeleton = ProcessSkeleton(
+                processKey: processKey,
+                pid: node.pid,
+                ppid: node.ppid,
+                startTime: node.startTime,
+                executablePath: node.path,
+                parentProcessKey: node.parentProcessKey,
+                signingSummary: node.signingSummary,
+                firstSeen: node.startTime,
+                lastSeen: node.exitTime ?? node.startTime
+            )
+            pendingPromotions.append(skeleton)
+            if pendingPromotions.count > pendingPromotionsCap {
+                pendingPromotions.removeFirst(pendingPromotions.count - pendingPromotionsCap)
+            }
+        }
         childrenIndex[node.ppid]?.remove(pid)
         if childrenIndex[node.ppid]?.isEmpty == true {
             childrenIndex.removeValue(forKey: node.ppid)
         }
         childrenIndex.removeValue(forKey: pid)
     }
+
+    // MARK: - v1.10 TraceGraph public surface
+
+    /// Attach v1.10 identity fields to an already-recorded process.
+    /// Called by the EntityResolver / RollingCausalGraph layer after
+    /// the v1.9 collector path has called `recordProcess`. Idempotent —
+    /// repeat calls overwrite previous values, which matches the
+    /// "latest observation wins" semantics elsewhere in the lineage.
+    public func setProcessKey(
+        pid: pid_t,
+        processKey: String,
+        parentProcessKey: String? = nil,
+        signingSummary: ProcessSkeleton.SigningSummary? = nil
+    ) {
+        guard nodes[pid] != nil else { return }
+        nodes[pid]?.processKey = processKey
+        nodes[pid]?.parentProcessKey = parentProcessKey
+        nodes[pid]?.signingSummary = signingSummary
+    }
+
+    /// Materialize a `ProcessSkeleton` view for a tracked process, if
+    /// the v1.10 identity fields have been set. Returns nil for nodes
+    /// that have only the v1.9 fields (no processKey).
+    public func skeleton(forPid pid: pid_t) -> ProcessSkeleton? {
+        guard let node = nodes[pid], let processKey = node.processKey else { return nil }
+        return ProcessSkeleton(
+            processKey: processKey,
+            pid: node.pid,
+            ppid: node.ppid,
+            startTime: node.startTime,
+            executablePath: node.path,
+            parentProcessKey: node.parentProcessKey,
+            signingSummary: node.signingSummary,
+            firstSeen: node.startTime,
+            lastSeen: node.exitTime ?? node.startTime
+        )
+    }
+
+    /// Drain the pending-promotion buffer. Returned skeletons should
+    /// be passed to `CompactPersistentLineage.promote(_:)` by the
+    /// caller; the buffer is cleared as a side effect.
+    public func drainPendingPromotions() -> [ProcessSkeleton] {
+        let drained = pendingPromotions
+        pendingPromotions.removeAll(keepingCapacity: true)
+        return drained
+    }
+
+    /// Diagnostic surface for v1.10 wiring tests.
+    public var pendingPromotionCount: Int { pendingPromotions.count }
 
     /// Record that a process has exited.
     ///

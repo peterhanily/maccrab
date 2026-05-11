@@ -22,8 +22,13 @@ public enum LLMSanitizer {
     private static let hostnameRegex = try! NSRegularExpression(
         pattern: #"\b[a-zA-Z][\w\-]*\.(local|internal|corp|lan)\b"#
     )
+    /// Includes RFC 1918 (10/8, 172.16/12, 192.168/16), loopback
+    /// (127/8), link-local (169.254/16), AND RFC 6598 carrier-grade
+    /// NAT (100.64.0.0/10 = 100.64-100.127). Tailscale, mobile
+    /// hotspots, and many corporate VPNs assign in the CGN range; we
+    /// don't want those leaking to cloud LLMs.
     private static let privateIPRegex = try! NSRegularExpression(
-        pattern: #"\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})\b"#
+        pattern: #"\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b"#
     )
     /// IPv6 link-local (`fe80::/10`) and unique-local (`fc00::/7`,
     /// i.e. `fc..` or `fd..`). Matches compressed forms too. Loose on
@@ -74,6 +79,16 @@ public enum LLMSanitizer {
         pattern: #"\b([A-Z][a-z]+[a-z0-9]*-)+(MacBook-Pro|MacBook-Air|Mac-Pro|Mac-mini|Mac-Studio|iMac)\b"#
     )
 
+    /// CDHash values — 40-char hex strings preceded by `cdhash=` /
+    /// `CDHash:` / `cd_hash:`. CDHash maps 1:1 to malware family in
+    /// research datasets (i.e. leaking it tells an LLM exactly which
+    /// known binary the host ran). The leading-keyword anchor avoids
+    /// stripping unrelated 40-char SHA-1 hashes that show up in git
+    /// commit IDs / file integrity reports.
+    private static let cdhashRegex = try! NSRegularExpression(
+        pattern: #"\b(?:cdhash|cd_hash|CDHash)\s*[:=]\s*[A-Fa-f0-9]{40}\b"#
+    )
+
     /// Sanitize a prompt payload for cloud API submission.
     public static func sanitize(_ text: String) -> String {
         // API keys FIRST — `CommandSanitizer` below catches
@@ -91,6 +106,7 @@ public enum LLMSanitizer {
         result = redactPrivateIPs(result)
         result = redactPrivateIPv6(result)
         result = redactEmails(result)
+        result = redactCDHashes(result)
         return result
     }
 
@@ -153,6 +169,13 @@ public enum LLMSanitizer {
         emailRegex.stringByReplacingMatches(
             in: text, range: NSRange(text.startIndex..., in: text),
             withTemplate: "[EMAIL]"
+        )
+    }
+
+    private static func redactCDHashes(_ text: String) -> String {
+        cdhashRegex.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text),
+            withTemplate: "[CDHASH]"
         )
     }
 }

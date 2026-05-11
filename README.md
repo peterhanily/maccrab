@@ -4,8 +4,8 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-1117%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-1.9.0-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Tests](https://img.shields.io/badge/tests-1355%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-1.10.0-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -208,21 +208,27 @@ MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 Build the MCP binary with `swift build --target maccrab-mcp`.
 
-**Available tools (11):**
+**Available tools (17):**
 
 | Tool | Purpose |
 |------|---------|
 | `get_alerts` | Query alerts with severity, time, and suppression filters |
+| `get_alert_detail` | Full detail for one alert: LLM investigation, d3fend techniques, remediation hint |
+| `cluster_alerts` | Group recent alerts by rule + process fingerprint for triage |
 | `get_events` | Search events by category, keyword, or time window |
 | `get_campaigns` | List detected attack campaigns with contributing alerts |
+| `suppress_alert` | Suppress a false-positive alert by ID (audit-logged) |
+| `suppress_campaign` | Suppress a campaign and all its contributing alerts at once |
+| `get_ai_alerts` | AI Guard alerts (credential / boundary / injection / MCP) |
+| `scan_text` | Check untrusted text for prompt injection before your AI tool acts on it |
 | `get_status` | Daemon status, rule count, uptime, database size |
 | `hunt` | Natural-language threat hunting across all stored events |
 | `get_security_score` | Security posture score (0–100) with per-factor breakdown |
-| `suppress_alert` | Suppress a false-positive alert by ID |
-| `get_alert_detail` | Full detail for one alert: LLM investigation, d3fend techniques, remediation hint |
-| `suppress_campaign` | Suppress a campaign and all its contributing alerts at once |
-| `get_ai_alerts` | All AI Guard alerts for the last 24 h (credential, boundary, injection) |
-| `scan_text` | Check untrusted text for prompt injection before your AI tool acts on it |
+| `get_traces` | (v1.10) List recent causal traces from the TraceGraph store |
+| `get_trace_detail` | (v1.10) Full trace with anchor + members + hash chain |
+| `hunt_trace` | (v1.10) Substring search across traces |
+| `verify_bundle` | (v1.10) Verify a `.maccrabtrace` bundle (schema, Merkle, signature) |
+| `trace_from_event` | (v1.10) Pivot from an event id to its containing trace |
 
 **Slash commands** (`.claude/commands/`): `/security-check`, `/threat-hunt <query>`, `/alerts`.
 

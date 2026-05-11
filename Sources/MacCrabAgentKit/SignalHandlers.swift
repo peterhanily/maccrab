@@ -139,6 +139,15 @@ enum SignalHandlers {
                         supportDir: state.supportDir,
                         dbEncryption: state.dbEncryption
                     )
+
+                    // v1.10.0: SIGHUP also triggers a one-shot
+                    // threat-intel refresh. The dashboard's
+                    // "Refresh feeds" button signals SIGHUP via
+                    // maccrabctl rather than waiting on the 4-hour
+                    // auto-refresh cadence.
+                    print("[SIGHUP] Refreshing threat intel feeds…")
+                    await state.threatIntel.refreshNow()
+                    print("[SIGHUP] Threat intel refresh complete")
                 } catch {
                     print("[SIGHUP] ERROR: \(error)")
                 }

@@ -120,6 +120,26 @@ struct AnyCodable: Decodable {
 
 // MARK: - Response Helpers
 
+/// Walk an MCP tool response dict and run every `content[].text` value
+/// through `LLMSanitizer.sanitize`. Other fields pass through untouched
+/// so structured ids (alert UUIDs, campaign ids, trace ids) are not
+/// scrambled — but free-form text the agent will render to the user is
+/// scrubbed of usernames, paths, IPs, hostnames, and credential shapes.
+func sanitizeContent(_ result: Any) -> Any {
+    guard var dict = result as? [String: Any] else { return result }
+    if let content = dict["content"] as? [[String: Any]] {
+        let scrubbed: [[String: Any]] = content.map { block in
+            var b = block
+            if (b["type"] as? String) == "text", let t = b["text"] as? String {
+                b["text"] = LLMSanitizer.sanitize(t)
+            }
+            return b
+        }
+        dict["content"] = scrubbed
+    }
+    return dict
+}
+
 func sendResponse(id: RequestId?, result: Any) {
     var response: [String: Any] = ["jsonrpc": "2.0"]
     if let id = id {
@@ -287,6 +307,64 @@ let tools: [[String: Any]] = [
             ],
         ] as [String: Any],
     ],
+
+    // ─── v1.10 TraceGraph tools ────────────────────────────────────
+    [
+        "name": "get_traces",
+        "description": "List recent causal traces from the v1.10 TraceGraph engine. Each trace is a materialized provenance graph anchored on a critical event (loader spawn, honeyfile read, etc.) with its full process / file / network ancestry. Returns id, title, anchor verdict, severity, status, node + edge counts, and timestamps. Pair with get_trace_detail to drill into one.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "limit": ["type": "integer", "description": "Max traces to return (default 25, max 200)", "default": 25],
+                "status": ["type": "string", "description": "Filter by status: open / closed / suppressed (default: any)"],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_trace_detail",
+        "description": "Fetch one TraceGraph trace by id with its anchor verdict, member entities (process / file / network nodes), and the latest hash-chain entry. Use this after get_traces to inspect what the daemon decided about a specific incident.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "trace_id": ["type": "string", "description": "Trace id (from get_traces)"],
+            ],
+            "required": ["trace_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "hunt_trace",
+        "description": "Substring search across trace titles and anchor verdicts. Returns matching traces with a one-line summary. Useful for an agent investigating a known process or path — pass `query: \"loader\"` or `query: \".aws/credentials\"`.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "Substring to match (case-insensitive)"],
+                "limit": ["type": "integer", "description": "Max matches to return (default 25, max 100)", "default": 25],
+            ],
+            "required": ["query"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "verify_bundle",
+        "description": "Verify a .maccrabtrace bundle file: schema, Merkle root, signature, and replay determinism. Use to confirm a bundle hasn't been tampered with before forwarding it to a SOC or legal hold. Returns per-check pass/fail + the trace id + signing key fingerprint.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": ["type": "string", "description": "Absolute path to the .maccrabtrace bundle"],
+            ],
+            "required": ["path"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "trace_from_event",
+        "description": "Pivot from an event id to the trace that contains it (if any). Returns the trace summary + the event's role within it (anchor / member / external).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "event_id": ["type": "string", "description": "Event id (from get_events)"],
+            ],
+            "required": ["event_id"],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Tool Handlers
@@ -319,6 +397,16 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleScanText(args)
     case "cluster_alerts":
         return await handleClusterAlerts(args)
+    case "get_traces":
+        return await handleGetTraces(args)
+    case "get_trace_detail":
+        return await handleGetTraceDetail(args)
+    case "hunt_trace":
+        return await handleHuntTrace(args)
+    case "verify_bundle":
+        return await handleVerifyBundle(args)
+    case "trace_from_event":
+        return await handleTraceFromEvent(args)
     default:
         return ["content": [["type": "text", "text": "Unknown tool: \(name)"]]]
     }
@@ -877,6 +965,211 @@ func handleScanText(_ args: [String: Any]) async -> Any {
     return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 
+// MARK: - v1.10 TraceGraph handlers
+
+/// Probe likely paths for the tracegraph.db. Same logic as
+/// `resolveDataDir()` for events/alerts but checks both system and
+/// user app-support locations.
+private func resolveTraceGraphPath() -> String {
+    let userDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first?.appendingPathComponent("MacCrab").path
+        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+    let systemDir = "/Library/Application Support/MacCrab"
+    let candidates = [dataDir, userDir, systemDir]
+    let chosen = candidates
+        .map { dir -> (String, Date) in
+            let mtime = (try? FileManager.default
+                .attributesOfItem(atPath: dir + "/tracegraph.db"))?[.modificationDate] as? Date
+            return (dir, mtime ?? .distantPast)
+        }
+        .max { $0.1 < $1.1 }?.0 ?? dataDir
+    return chosen + "/tracegraph.db"
+}
+
+func handleGetTraces(_ args: [String: Any]) async -> Any {
+    let limit = min(max(args["limit"] as? Int ?? 25, 1), 200)
+    let statusFilter = args["status"] as? String
+    do {
+        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        let raw = try await store.listTraces(limit: limit)
+        let traces = statusFilter.map { f in raw.filter { $0.status == f } } ?? raw
+        if traces.isEmpty {
+            return ["content": [["type": "text", "text":
+                "No traces found. Either the daemon hasn't materialized any yet, or the tracegraph.db isn't on this machine. Run `maccrabctl trace demo` to seed a sample."]]]
+        }
+        var lines = ["\(traces.count) trace(s):"]
+        for t in traces {
+            let nodes = (try? await store.loadTrace(id: t.id))?.members.count ?? 0
+            lines.append("")
+            lines.append("[\(t.severity.uppercased())] \(t.title)  (id: \(t.id))")
+            lines.append("  Status:    \(t.status)")
+            lines.append("  Anchor:    \(t.anchorEventId)")
+            lines.append("  Nodes:     \(nodes)")
+            lines.append("  Updated:   \(ISO8601DateFormatter().string(from: t.updatedAt))")
+        }
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    } catch {
+        return ["content": [["type": "text", "text": "Error reading traces: \(error.localizedDescription)"]]]
+    }
+}
+
+func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
+    guard let traceId = args["trace_id"] as? String, !traceId.isEmpty else {
+        return ["content": [["type": "text", "text": "Missing required argument: trace_id"]]]
+    }
+    do {
+        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        guard let pair = try await store.loadTrace(id: traceId) else {
+            return ["content": [["type": "text", "text": "Trace \(traceId) not found."]]]
+        }
+        let (trace, members) = pair
+        let chainEntry = try? await store.latestHashChainEntry(for: traceId)
+        var lines = ["Trace \(trace.id)"]
+        lines.append("═══════════════════════════════════")
+        lines.append("Title:     \(trace.title)")
+        lines.append("Severity:  \(trace.severity)")
+        lines.append("Status:    \(trace.status)")
+        lines.append("Anchor:    \(trace.anchorEventId)")
+        if let root = trace.rootEntityId { lines.append("Root:      \(root)") }
+        lines.append("Created:   \(ISO8601DateFormatter().string(from: trace.createdAt))")
+        lines.append("Updated:   \(ISO8601DateFormatter().string(from: trace.updatedAt))")
+        lines.append("")
+        lines.append("Members (\(members.count)):")
+        for m in members.prefix(50) {
+            let entityLabel = m.entityId ?? (m.edgeId.map { "edge \($0)" } ?? "—")
+            lines.append("  · \(entityLabel) [\(m.role)]")
+        }
+        if members.count > 50 { lines.append("  … +\(members.count - 50) more") }
+        if let entry = chainEntry {
+            lines.append("")
+            lines.append("Latest hash-chain entry:")
+            lines.append("  Sequence:  \(entry.sequenceNumber)")
+            lines.append("  Recorded:  \(ISO8601DateFormatter().string(from: entry.createdAt))")
+            lines.append("  Hash:      \(entry.currentHash.prefix(16))…")
+        }
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    } catch {
+        return ["content": [["type": "text", "text": "Error reading trace: \(error.localizedDescription)"]]]
+    }
+}
+
+func handleHuntTrace(_ args: [String: Any]) async -> Any {
+    guard let query = args["query"] as? String, !query.isEmpty else {
+        return ["content": [["type": "text", "text": "Missing required argument: query"]]]
+    }
+    let limit = min(max(args["limit"] as? Int ?? 25, 1), 100)
+    let q = query.lowercased()
+    do {
+        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        // Pull a wider candidate set then substring-filter; cheap given
+        // typical trace counts.
+        let candidates = try await store.listTraces(limit: 500)
+        let matches = candidates.filter { $0.title.lowercased().contains(q) }
+            .prefix(limit)
+        if matches.isEmpty {
+            return ["content": [["type": "text", "text": "No traces match `\(query)`."]]]
+        }
+        var lines = ["\(matches.count) trace(s) match `\(query)`:"]
+        for t in matches {
+            lines.append("  · [\(t.severity.uppercased())] \(t.title)  (\(t.id))")
+        }
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+    } catch {
+        return ["content": [["type": "text", "text": "Error hunting traces: \(error.localizedDescription)"]]]
+    }
+}
+
+func handleVerifyBundle(_ args: [String: Any]) async -> Any {
+    guard let path = args["path"] as? String, !path.isEmpty else {
+        return ["content": [["type": "text", "text": "Missing required argument: path"]]]
+    }
+    let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    var isDir: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+    guard exists else {
+        return ["content": [["type": "text", "text": "Path not found: \(url.path)"]]]
+    }
+    // For files (assumed .maccrabtrace archives), extract to a tmp
+    // directory before verifying. For directories, verify in place.
+    let bundleDir: URL
+    var tmpDir: URL?
+    if isDir.boolValue {
+        bundleDir = url
+    } else {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-verify-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            p.currentDirectoryURL = tmp
+            p.arguments = ["-xzf", url.path]
+            try p.run(); p.waitUntilExit()
+            guard p.terminationStatus == 0 else {
+                try? FileManager.default.removeItem(at: tmp)
+                return ["content": [["type": "text", "text": "Failed to extract bundle archive: \(url.lastPathComponent)"]]]
+            }
+            let inner = (try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? []
+            bundleDir = inner.count == 1 ? inner[0] : tmp
+            tmpDir = tmp
+        } catch {
+            return ["content": [["type": "text", "text": "Failed to extract bundle archive: \(error.localizedDescription)"]]]
+        }
+    }
+    let outcome = await BundleVerifier.verify(at: bundleDir)
+    if let tmpDir { try? FileManager.default.removeItem(at: tmpDir) }
+    var lines = ["Bundle verification — exit \(outcome.exitCode)"]
+    lines.append("═══════════════════════════════════")
+    lines.append("Path:    \(url.lastPathComponent)")
+    if outcome.exitCode == 0 {
+        lines.append("Result:  ✓ Verified")
+    } else {
+        lines.append("Result:  ✗ Failed")
+        lines.append("Reason:  \(String(describing: outcome.kind))")
+    }
+    if !outcome.messages.isEmpty {
+        lines.append("")
+        for m in outcome.messages.prefix(20) { lines.append("  · \(m)") }
+    }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
+    guard let eventId = args["event_id"] as? String, !eventId.isEmpty else {
+        return ["content": [["type": "text", "text": "Missing required argument: event_id"]]]
+    }
+    do {
+        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        // Scan recent traces and check membership for this event id.
+        // Membership is the canonical link: a trace's membership rows
+        // include event_id when the entity in question contributed an
+        // event of the same id (the daemon writes these at materialise
+        // time).
+        let traces = try await store.listTraces(limit: 200)
+        for trace in traces {
+            guard let pair = try await store.loadTrace(id: trace.id) else { continue }
+            for member in pair.members {
+                if (member.entityId == eventId)
+                    || (member.role == "anchor" && trace.anchorEventId == eventId) {
+                    var lines = ["Event \(eventId) belongs to trace \(trace.id)"]
+                    lines.append("═══════════════════════════════════")
+                    lines.append("Title:    \(trace.title)")
+                    lines.append("Severity: \(trace.severity)")
+                    lines.append("Anchor:   \(trace.anchorEventId)")
+                    lines.append("Role:     \(trace.anchorEventId == eventId ? "anchor" : "member")")
+                    lines.append("Status:   \(trace.status)")
+                    lines.append("Updated:  \(ISO8601DateFormatter().string(from: trace.updatedAt))")
+                    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+                }
+            }
+        }
+        return ["content": [["type": "text", "text":
+            "Event \(eventId) is not a member of any recent trace. Either it pre-dates the trace materialiser's window, or it didn't qualify as a trace anchor / member."]]]
+    } catch {
+        return ["content": [["type": "text", "text": "Error looking up trace: \(error.localizedDescription)"]]]
+    }
+}
+
 // MARK: - Main Loop (stdio JSON-RPC)
 
 let decoder = JSONDecoder()
@@ -927,7 +1220,7 @@ while let line = readLine(strippingNewline: true) {
         sendResponse(id: request.id, result: [
             "protocolVersion": "2024-11-05",
             "capabilities": ["tools": [:] as [String: Any]] as [String: Any],
-            "serverInfo": ["name": "maccrab", "version": "1.0.0"] as [String: Any],
+            "serverInfo": ["name": "maccrab", "version": MacCrabVersion.current] as [String: Any],
         ] as [String: Any])
     case "notifications/initialized":
         break
@@ -954,7 +1247,13 @@ while let line = readLine(strippingNewline: true) {
             }
         }
         sem.wait()
-        sendResponse(id: reqId, result: result)
+        // Sanitize before sending to the MCP client (typically an AI
+        // agent like Claude Code). Without this, raw /Users/<name>/...
+        // paths, private IPs, hostnames, and any leaked API keys flow
+        // straight to the agent every call. README documents
+        // automatic sanitization for cloud LLM calls — this is the
+        // missing half of that promise for MCP responses.
+        sendResponse(id: reqId, result: sanitizeContent(result))
     default:
         sendError(id: request.id, code: -32601, message: "Method not found: \(request.method)")
     }

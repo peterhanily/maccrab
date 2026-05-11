@@ -450,6 +450,24 @@ public actor SuppressionManager {
         }
         let full = line + "\n"
         let url = URL(fileURLWithPath: auditPath)
+
+        // v1.10.0 audit fix: rotate when audit log exceeds 50 MB.
+        // Pre-fix this jsonl was append-only with no cap; on a busy
+        // machine that suppresses hundreds of false positives a day,
+        // it would grow indefinitely. Now: when the file passes 50
+        // MB, atomically rename it to `.1` (overwriting any prior
+        // .1) and start a fresh file. One generation kept; older
+        // entries discarded. Audit retention beyond that should be
+        // exported via the daemon's syslog/SIEM sinks.
+        let maxBytes: UInt64 = 50 * 1024 * 1024
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: auditPath),
+           let size = attrs[.size] as? UInt64, size > maxBytes {
+            let rotated = auditPath + ".1"
+            try? FileManager.default.removeItem(atPath: rotated)
+            try? FileManager.default.moveItem(atPath: auditPath, toPath: rotated)
+            logger.info("suppressions audit rotated at \(size) bytes -> \(rotated)")
+        }
+
         if FileManager.default.fileExists(atPath: auditPath),
            let handle = try? FileHandle(forWritingTo: url) {
             defer { try? handle.close() }

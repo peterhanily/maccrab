@@ -906,12 +906,56 @@ public actor ThreatIntelFeed {
         }
     }
 
+    /// Ingest operator-supplied custom IOC drop files from the threat-intel
+    /// cache dir. Each file is validated before reading: must NOT be a
+    /// symlink (so an attacker who plants a symlink can't redirect us to
+    /// /etc/passwd or similar), must be owned by the same uid as the
+    /// daemon process (so a non-root attacker can't poison the production
+    /// IOC store), and must live directly inside `cacheDir` (no path
+    /// traversal via `..`). On any validation failure we log + skip the
+    /// file rather than fail-open by ingesting it.
     private func loadCustomIOCFiles() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: cacheDir) else { return }
+        let myUID = getuid()
 
         for file in files {
             let path = cacheDir + "/" + file
+
+            let suffixOK = file.hasSuffix(".hashes.txt")
+                || file.hasSuffix(".ips.txt")
+                || file.hasSuffix(".domains.txt")
+            guard suffixOK else { continue }
+
+            // Reject path traversal — file name must be a leaf inside cacheDir.
+            guard !file.contains("/") && !file.contains("..") else {
+                logger.warning("custom IOC: rejecting suspicious filename \(file, privacy: .public)")
+                continue
+            }
+
+            // lstat (not stat) so we see the symlink itself, not its target.
+            guard let attrs = try? fm.attributesOfItem(atPath: path) else {
+                logger.warning("custom IOC: cannot stat \(path, privacy: .public)")
+                continue
+            }
+            if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+                logger.error("custom IOC: refusing to follow symlink \(path, privacy: .public)")
+                continue
+            }
+            if (attrs[.type] as? FileAttributeType) != .typeRegular {
+                logger.warning("custom IOC: \(path, privacy: .public) is not a regular file — skipping")
+                continue
+            }
+            // File ownership must match the daemon's uid OR be root-owned
+            // (sysext runs as root, dev daemon runs as the user). A file
+            // owned by *another* user means somebody else dropped it
+            // there, which we don't trust.
+            let fileUID = (attrs[.ownerAccountID] as? UInt32) ?? UInt32.max
+            if fileUID != myUID && fileUID != 0 {
+                logger.error("custom IOC: \(path, privacy: .public) owned by uid \(fileUID, privacy: .public), expected \(myUID, privacy: .public) or 0 — refusing")
+                continue
+            }
+
             if file.hasSuffix(".hashes.txt") {
                 _ = try? loadCustomFile(path: path, type: .hash)
             } else if file.hasSuffix(".ips.txt") {

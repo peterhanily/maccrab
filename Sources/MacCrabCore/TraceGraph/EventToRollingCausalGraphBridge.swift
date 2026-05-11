@@ -1,0 +1,234 @@
+// EventToRollingCausalGraphBridge.swift
+// MacCrabCore
+//
+// v1.10 TraceGraph (production wiring) — translates v1.9 `Event`
+// into `RollingCausalGraph.NormalizedEventInput` and pumps it through
+// the rolling graph.
+//
+// # Where this gets wired
+//
+// Daemon-side, after `EventEnricher` has finished annotating an
+// event but before `RuleEngine` evaluates it. In `MacCrabAgentKit`'s
+// pipeline orchestration the call is one line:
+//
+//     await bridge.process(event)
+//
+// The bridge is constructed once at daemon startup with the
+// production `RollingCausalGraph` instance.
+//
+// # Notes on processKey
+//
+// Per §10.1 of the v1.10.0 spec, `ProcessIdentity` (and hence
+// `processKey`) requires the kernel-truth `audit_token` +
+// `pidversion` for full anti-recycle correctness. By the time an
+// event reaches this bridge, the audit_token is no longer attached —
+// it was consumed at NOTIFY_EXEC time inside `ESCollector`.
+//
+// For v1.10.0 production wiring, the bridge synthesizes a stable
+// `processKey` from `(pid, startTime_epoch_seconds, executable_path)`
+// — sufficient for non-recycled cases, which is the overwhelming
+// majority of observed processes. Full anti-recycle integration
+// requires `ESCollector` to thread the v1.9 `ProcessIdentity`
+// through to `Event` (a separate small change in v1.9 code that
+// adds an `enrichments["process_key"]` value); the bridge prefers
+// that key when present.
+
+import Foundation
+import CryptoKit
+import os.log
+
+public actor EventToRollingCausalGraphBridge {
+
+    private let rollingGraph: RollingCausalGraph
+    private let logger = Logger(subsystem: "com.maccrab.tracegraph", category: "event-bridge")
+
+    /// Optional override: if the daemon side starts annotating events
+    /// with a real `enrichments["process_key"]` value (sourced from
+    /// `ProcessIdentity` at exec time), set this key so the bridge
+    /// prefers it over the fallback computation.
+    public static let processKeyEnrichmentKey = "process_key"
+    public static let parentProcessKeyEnrichmentKey = "parent_process_key"
+
+    public init(rollingGraph: RollingCausalGraph) {
+        self.rollingGraph = rollingGraph
+    }
+
+    /// Convert a v1.9 `Event` into a `NormalizedEventInput` and ingest.
+    /// Returns the materialized traces (if any) for the daemon's
+    /// downstream alert sink to surface.
+    @discardableResult
+    public func process(_ event: Event) async -> [Trace] {
+        guard let normalized = normalize(event) else {
+            return []
+        }
+        do {
+            return try await rollingGraph.ingest(normalized)
+        } catch {
+            logger.warning("rolling graph ingest failed: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+    }
+
+    // MARK: - Translation
+
+    private func normalize(_ event: Event) -> RollingCausalGraph.NormalizedEventInput? {
+        guard let category = mapCategory(event.eventCategory) else { return nil }
+        guard let action = mapAction(event.eventAction) else { return nil }
+
+        let processObservation = makeProcessObservation(from: event.process, enrichments: event.enrichments)
+
+        let fileObservation: RollingCausalGraph.FileObservation? = {
+            guard let file = event.file else { return nil }
+            // FileInfo doesn't carry sha256 in v1.9 — that lives on
+            // `ProcessInfo.hashes` for the executing process. The
+            // bridge omits sha256 here; downstream enrichment can
+            // attach it via a future `enrichments["file_sha256"]`.
+            return RollingCausalGraph.FileObservation(
+                path: file.path,
+                pathHash: pathHash(file.path),
+                sha256: nil
+            )
+        }()
+
+        let networkObservation: RollingCausalGraph.NetworkObservation? = {
+            guard let net = event.network else { return nil }
+            return RollingCausalGraph.NetworkObservation(
+                host: net.destinationHostname,
+                ip: net.destinationIp.isEmpty ? nil : net.destinationIp,
+                port: Int(net.destinationPort),
+                protocolName: net.transport,
+                reputation: classifyReputation(host: net.destinationHostname, ip: net.destinationIp)
+            )
+        }()
+
+        let agent = makeAgentEnrichment(from: event.enrichments)
+
+        return RollingCausalGraph.NormalizedEventInput(
+            eventId: event.id.uuidString,
+            timestamp: event.timestamp,
+            category: category,
+            action: action,
+            process: processObservation,
+            parentProcess: nil,   // v1.9 Event already carries ancestors[]; the rolling graph derives the parent skeleton from the ProcessLineage actor at the daemon level
+            file: fileObservation,
+            network: networkObservation,
+            agent: agent
+        )
+    }
+
+    private func makeProcessObservation(
+        from info: ProcessInfo,
+        enrichments: [String: String]
+    ) -> RollingCausalGraph.ProcessObservation {
+        let processKey = enrichments[Self.processKeyEnrichmentKey]
+            ?? synthesizeProcessKey(pid: info.pid, startTime: info.startTime, executable: info.executable)
+        let parentProcessKey = enrichments[Self.parentProcessKeyEnrichmentKey]
+        return RollingCausalGraph.ProcessObservation(
+            processKey: processKey,
+            pid: info.pid,
+            ppid: info.ppid,
+            executablePath: info.executable,
+            executableHash: info.hashes?.sha256,
+            isAppleSigned: info.codeSignature?.signerType == .apple,
+            isNotarized: info.codeSignature?.isNotarized ?? false,
+            signingTeamId: info.codeSignature?.teamId,
+            signingIdentifier: info.codeSignature?.signingId,
+            startTime: info.startTime,
+            user: info.userName.isEmpty ? nil : info.userName,
+            parentProcessKey: parentProcessKey
+        )
+    }
+
+    private func makeAgentEnrichment(from enrichments: [String: String]) -> RollingCausalGraph.AgentEnrichment? {
+        // v1.9 TraceCorrelator emits these enrichment keys.
+        guard let traceId = enrichments[TraceCorrelator.EnrichmentKey.traceId] else { return nil }
+        let confidenceRaw = enrichments[TraceCorrelator.EnrichmentKey.confidence] ?? ""
+        // confidence is a categorical string in v1.9 ("traceparent" / "lineage").
+        // Map to the v1.10 numeric scale.
+        let (confidence, method): (Double, AttributionMethod) = {
+            switch confidenceRaw {
+            case "traceparent": return (0.95, .directTraceparent)
+            case "lineage":     return (0.75, .processLineageMatch)
+            default:            return (0.5, .temporalProximity)
+            }
+        }()
+        let agentTool = enrichments[TraceCorrelator.EnrichmentKey.agentTool]
+        let displayName = agentTool?.replacingOccurrences(of: "_", with: " ").capitalized
+            ?? "Unknown AI agent"
+        return RollingCausalGraph.AgentEnrichment(
+            agentName: displayName,
+            agentTool: agentTool,
+            traceId: traceId,
+            spanId: enrichments[TraceCorrelator.EnrichmentKey.spanId],
+            confidence: confidence,
+            attributionMethod: method
+        )
+    }
+
+    // MARK: - Mapping helpers
+
+    private func mapCategory(_ category: EventCategory) -> RollingCausalGraph.NormalizedEventInput.Category? {
+        switch category {
+        case .process:  return .process
+        case .file:     return .file
+        case .network:  return .network
+        case .tcc:      return .tcc
+        default:        return nil
+        }
+    }
+
+    private func mapAction(_ action: String) -> RollingCausalGraph.NormalizedEventInput.Action? {
+        switch action.lowercased() {
+        case "exec":         return .exec
+        case "exit":         return .exit
+        case "create":       return .fileCreate
+        case "write":        return .fileWrite
+        case "read":         return .fileRead
+        case "rename":       return .fileRename
+        case "unlink",
+             "delete":       return .fileDelete
+        case "connect":      return .netConnect
+        case "tcc_grant":    return .tccGrant
+        default:
+            return nil
+        }
+    }
+
+    private func synthesizeProcessKey(pid: Int32, startTime: Date, executable: String) -> String {
+        // Lowercase-hex SHA-256 over (pid, startTime epoch seconds,
+        // executable_path) — sufficient for the non-recycled common
+        // case. Real anti-recycle integration via audit_token +
+        // pidversion lives in the ESCollector wiring increment that
+        // sets the `process_key` enrichment directly.
+        let payload = "\(pid)|\(Int(startTime.timeIntervalSince1970))|\(executable)"
+        return SHA256.hash(data: Data(payload.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func pathHash(_ path: String) -> String {
+        SHA256.hash(data: Data(path.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Tiny reputation heuristic for the bridge's translation step.
+    /// The daemon's full reputation pipeline (threat intel, allowlists,
+    /// etc.) lives downstream — this is a conservative seed value
+    /// that the rolling graph treats as "safe to default" but
+    /// downstream enrichment may upgrade.
+    private func classifyReputation(host: String?, ip: String) -> NetworkReputation {
+        if !ip.isEmpty {
+            if ip.hasPrefix("10.") || ip.hasPrefix("192.168.") || ip.hasPrefix("172.") {
+                return .privateRange
+            }
+            if ip.hasPrefix("127.") || ip == "::1" {
+                return .privateRange
+            }
+        }
+        if let host = host?.lowercased() {
+            if host == "localhost" || host.hasSuffix(".local") {
+                return .privateRange
+            }
+        }
+        return .unknown
+    }
+}

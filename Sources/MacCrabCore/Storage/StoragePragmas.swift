@@ -48,6 +48,15 @@ enum StoragePragmas {
         sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size = \(eventCacheSizeKB)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA mmap_size = \(eventMmapSizeBytes)", nil, nil, nil)
+        // v1.10.0: enable incremental auto-vacuum so the EventStore
+        // retention prune (Sources/MacCrabCore/Storage/EventStore.swift
+        // — `prune(olderThan:)`) can call `PRAGMA incremental_vacuum`
+        // and actually shrink the file. NOTE: takes effect on a fresh
+        // DB; existing DBs need a one-shot `VACUUM` to convert. The
+        // event-store init runs on a fresh DB on first launch; for
+        // upgraded DBs, a manual `maccrabctl maintenance vacuum` does
+        // the conversion.
+        sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
     }
 
     /// Apply AlertStore-specific pragmas to an open handle.

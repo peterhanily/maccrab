@@ -78,7 +78,13 @@ public actor BrowserExtensionMonitor {
             while !Task.isCancelled {
                 await self.scan()
                 let interval = await self.pollInterval
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                // Aggressiveness 2.0: browser-extension scan is a
+                // visibility feature, not time-sensitive. Slower on
+                // battery is fine.
+                let adjusted = PowerGate.adjustedInterval(
+                    base: interval, aggressiveness: 2.0
+                )
+                try? await Task.sleep(nanoseconds: UInt64(adjusted * 1_000_000_000))
             }
         }
     }
@@ -87,6 +93,134 @@ public actor BrowserExtensionMonitor {
         pollTask?.cancel()
         pollTask = nil
         continuation?.finish()
+    }
+
+    // MARK: - Snapshot (dashboard read path)
+
+    /// One-shot snapshot of every browser extension currently
+    /// installed. Used by the V2 dashboard's Detection › Browser
+    /// tab to show the full inventory + per-extension risk
+    /// summary, NOT just first-seen events. Pre-fix the monitor
+    /// only emitted ExtensionEvent on first discovery via the
+    /// AsyncStream — the dashboard had no way to enumerate the
+    /// existing set without restarting the daemon. Now: a static
+    /// `nonisolated` scan re-walks the same browser dirs and
+    /// returns every manifest it can read, with permissions +
+    /// risk classification.
+    public struct ExtensionSnapshot: Sendable, Identifiable {
+        public let id: String              // <browser>:<extensionId>
+        public let browser: String         // "chrome", "firefox", "brave", ...
+        public let extensionId: String
+        public let extensionName: String
+        public let extensionPath: String
+        public let version: String?        // manifest "version", if present
+        public let permissions: [String]
+        public let hostPermissions: [String]
+        public let isDevMode: Bool         // unpacked / loaded-from-disk
+        public let dangerousPermissions: [String]
+        public let riskScore: Int          // 0-100
+    }
+
+    public nonisolated static func snapshot() -> [ExtensionSnapshot] {
+        let home = NSHomeDirectory()
+        var out: [ExtensionSnapshot] = []
+        let chromeLike: [(String, String)] = [
+            ("chrome", "/Library/Application Support/Google/Chrome/Default/Extensions"),
+            ("chrome", "/Library/Application Support/Google/Chrome/Profile 1/Extensions"),
+            ("brave",  "/Library/Application Support/BraveSoftware/Brave-Browser/Default/Extensions"),
+            ("edge",   "/Library/Application Support/Microsoft Edge/Default/Extensions"),
+            ("arc",    "/Library/Application Support/Arc/User Data/Default/Extensions"),
+        ]
+        for (browser, suffix) in chromeLike {
+            scanChromeLikeForSnapshot(at: home + suffix, browser: browser, into: &out)
+        }
+        scanFirefoxForSnapshot(at: home + "/Library/Application Support/Firefox/Profiles", into: &out)
+        return out.sorted {
+            ($0.riskScore, $0.extensionName) > ($1.riskScore, $1.extensionName)
+        }
+    }
+
+    private nonisolated static func scanChromeLikeForSnapshot(
+        at basePath: String, browser: String, into out: inout [ExtensionSnapshot]
+    ) {
+        let fm = FileManager.default
+        guard let extDirs = try? fm.contentsOfDirectory(atPath: basePath) else { return }
+        for extId in extDirs {
+            let extPath = basePath + "/" + extId
+            guard let versions = try? fm.contentsOfDirectory(atPath: extPath) else { continue }
+            // Use the highest semver-ish version dir if multiple.
+            let pickedVersion = versions
+                .sorted(by: >)
+                .first { fm.fileExists(atPath: extPath + "/" + $0 + "/manifest.json") }
+            guard let v = pickedVersion else { continue }
+            let manifestPath = extPath + "/" + v + "/manifest.json"
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+                  let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let name = manifest["name"] as? String ?? "Unknown"
+            let version = manifest["version"] as? String
+            let perms = (manifest["permissions"] as? [String]) ?? []
+            let hostPerms = (manifest["host_permissions"] as? [String]) ?? []
+            let allPerms = perms + hostPerms
+            let dangerous = allPerms.filter { dangerousPermissions.contains($0) }
+            // Heuristic risk score: 30 base for any installed extension,
+            // +10 per dangerous permission, +20 if <all_urls> present,
+            // +20 if nativeMessaging present, +20 if devMode/unpacked.
+            // Capped at 100.
+            var risk = 30 + dangerous.count * 10
+            if allPerms.contains("<all_urls>") { risk += 20 }
+            if allPerms.contains("nativeMessaging") { risk += 20 }
+            // devMode signal: chrome-style extension dirs whose path
+            // contains "Profile" but the manifest has key "key" missing
+            // (unpacked) — best-effort.
+            let isDev = manifest["key"] == nil && extId.count != 32
+            if isDev { risk += 20 }
+            risk = min(risk, 100)
+            out.append(ExtensionSnapshot(
+                id: "\(browser):\(extId)",
+                browser: browser,
+                extensionId: extId,
+                extensionName: name,
+                extensionPath: extPath + "/" + v,
+                version: version,
+                permissions: perms,
+                hostPermissions: hostPerms,
+                isDevMode: isDev,
+                dangerousPermissions: dangerous,
+                riskScore: risk
+            ))
+        }
+    }
+
+    private nonisolated static func scanFirefoxForSnapshot(
+        at profilesPath: String, into out: inout [ExtensionSnapshot]
+    ) {
+        let fm = FileManager.default
+        guard let profiles = try? fm.contentsOfDirectory(atPath: profilesPath) else { return }
+        for profile in profiles {
+            let extPath = profilesPath + "/" + profile + "/extensions"
+            guard let files = try? fm.contentsOfDirectory(atPath: extPath) else { continue }
+            for file in files where file.hasSuffix(".xpi") || !file.contains(".") {
+                let extId = file.replacingOccurrences(of: ".xpi", with: "")
+                out.append(ExtensionSnapshot(
+                    id: "firefox:\(extId)",
+                    browser: "firefox",
+                    extensionId: extId,
+                    extensionName: extId,
+                    extensionPath: extPath + "/" + file,
+                    version: nil,
+                    permissions: [],
+                    hostPermissions: [],
+                    isDevMode: false,
+                    dangerousPermissions: [],
+                    // Without unzipping we can't see permissions; bias
+                    // risk to a neutral middle so the list isn't all
+                    // green just because Firefox extensions are
+                    // opaque to us.
+                    riskScore: 35
+                ))
+            }
+        }
     }
 
     // MARK: - Scanning

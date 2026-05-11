@@ -40,6 +40,17 @@ enum DaemonTimers {
         /// payload. Synchronous dispatch-thread file write of
         /// `heartbeat.json`. Cannot deadlock on actor work.
         let livenessTimer: DispatchSourceTimer
+        /// v1.10.0: daily retention sweeps for the v1.10 stores. Pre-fix
+        /// these were declared as local lets inside start() and went
+        /// out of scope on return — DispatchSourceTimer ARC-deallocates
+        /// without retention, silently breaking pruning. Now retained.
+        let tracegraphPruneTimer: DispatchSourceTimer?
+        let tracesPruneTimer: DispatchSourceTimer?
+        /// v1.10.0: file-based storage-flush request poller. Polls
+        /// /tmp/maccrab-flush-request-*.json every 30 s so the
+        /// dashboard (running as the user) can trigger a sweep on
+        /// the root sysext without needing signal-delivery permission.
+        let flushRequestPoller: DispatchSourceTimer
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
@@ -362,6 +373,81 @@ enum DaemonTimers {
             campaignsPruneTimer = nil
         }
 
+        // v1.10.0 audit fix: tracegraph.db + traces.db both shipped
+        // in v1.9/v1.10 with no retention. On a dev machine running
+        // Claude Code daily this grew several GB / month indefinitely.
+        // Default 90d retention + size cap (250 MB tracegraph, 100 MB
+        // traces). One daily timer drives both stores; size-cap
+        // fallback applies pruneOldest if a 90d cut alone can't fit
+        // the budget.
+        let tracegraphPruneTimer: DispatchSourceTimer?
+        if let causalStore = state.causalStore {
+            let t = DispatchSource.makeTimerSource(queue: .global())
+            t.schedule(deadline: .now() + 3600, repeating: 86400)
+            t.setEventHandler {
+                Task {
+                    let days = 90
+                    let capBytes: Int64 = 250 * 1024 * 1024
+                    let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+                    let pruned = (try? await causalStore.pruneTraces(olderThan: cutoff)) ?? 0
+                    if pruned > 0 {
+                        logger.info("TraceGraph retention sweep: \(pruned) traces older than \(days)d pruned")
+                    }
+                    let size = await causalStore.databaseSizeBytes()
+                    if size > capBytes {
+                        // Drop 10% of trace rows oldest-first; keep
+                        // looping until under cap or zero rows pruned.
+                        for _ in 0..<5 {
+                            let count = (try? await causalStore.traceCount()) ?? 0
+                            let dropTarget = max(50, count / 10)
+                            let dropped = (try? await causalStore.pruneOldestTraces(count: dropTarget)) ?? 0
+                            logger.warning("TraceGraph size cap: pruned \(dropped) oldest traces (\(size / 1024 / 1024) MB > \(capBytes / 1024 / 1024) MB cap)")
+                            if dropped == 0 { break }
+                            let nowSize = await causalStore.databaseSizeBytes()
+                            if nowSize < capBytes { break }
+                        }
+                    }
+                }
+            }
+            t.resume()
+            tracegraphPruneTimer = t
+        } else {
+            tracegraphPruneTimer = nil
+        }
+
+        let tracesPruneTimer: DispatchSourceTimer?
+        if let traceStore = state.traceStore {
+            let t = DispatchSource.makeTimerSource(queue: .global())
+            t.schedule(deadline: .now() + 3600, repeating: 86400)
+            t.setEventHandler {
+                Task {
+                    let days = 90
+                    let capBytes: Int64 = 100 * 1024 * 1024
+                    let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+                    let pruned = (try? await traceStore.prune(olderThan: cutoff)) ?? 0
+                    if pruned > 0 {
+                        logger.info("OTLP traces retention sweep: \(pruned) spans older than \(days)d pruned")
+                    }
+                    let size = await traceStore.databaseSizeBytes()
+                    if size > capBytes {
+                        for _ in 0..<5 {
+                            let count = (try? await traceStore.count()) ?? 0
+                            let dropTarget = max(500, count / 10)
+                            let dropped = (try? await traceStore.pruneOldest(count: dropTarget)) ?? 0
+                            logger.warning("OTLP traces size cap: pruned \(dropped) oldest spans (\(size / 1024 / 1024) MB > \(capBytes / 1024 / 1024) MB cap)")
+                            if dropped == 0 { break }
+                            let nowSize = await traceStore.databaseSizeBytes()
+                            if nowSize < capBytes { break }
+                        }
+                    }
+                }
+            }
+            t.resume()
+            tracesPruneTimer = t
+        } else {
+            tracesPruneTimer = nil
+        }
+
         // v1.8.0 tiered storage with adaptive retention + size-cap fallback.
         //
         // First-cut design assumed ~5-10k events/hour. Field measurement on
@@ -388,8 +474,16 @@ enum DaemonTimers {
         let startupHotMinutes = max(15, state.storage.eventsHotTierMinutes)
         logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, cap=\(startupCapMB) MB, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
 
+        // v1.10.0 audit fix: first sweep at .now() + 60 s instead of
+        // + 900 s. If the user is booting into a sysext that
+        // inherited a 1+ GB events.db from a previous run, waiting
+        // 15 min before the first prune is far too long — most
+        // users assume the daemon isn't working. 60 s gives the rest
+        // of startup time to settle while still firing fast enough
+        // for the user to see "DB shrunk from X to Y" within 1-2
+        // minutes of launching the dashboard.
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
-        sizeCapTimer.schedule(deadline: .now() + 900, repeating: 6 * 3600)
+        sizeCapTimer.schedule(deadline: .now() + 60, repeating: 6 * 3600)
         sizeCapTimer.setEventHandler {
             Task {
                 let capMB = max(100, state.storage.eventsMaxSizeMB)
@@ -554,7 +648,7 @@ enum DaemonTimers {
                     withJSONObject: payload,
                     options: [.sortedKeys]
                 ) else { return }
-                let path = "/Library/Application Support/MacCrab/heartbeat.json"
+                let path = state.supportDir + "/heartbeat.json"
                 let tmp = path + ".tmp"
                 do {
                     try data.write(to: URL(fileURLWithPath: tmp))
@@ -719,7 +813,7 @@ enum DaemonTimers {
             // category counts, collector health, drop counter) for the
             // ES Health panel. If the rich payload stalls, the
             // dashboard's "engine alive" check still works.
-            let path = "/Library/Application Support/MacCrab/heartbeat_rich.json"
+            let path = state.supportDir + "/heartbeat_rich.json"
             // Write via temp + rename so the dashboard never catches a
             // half-written file. Silent on failure — the next 30s tick
             // will try again.
@@ -753,6 +847,65 @@ enum DaemonTimers {
         }
         heartbeatTimer.resume()
 
+        // v1.10.0 audit fix (second pass): flush-request file poller.
+        // First pass tried /tmp/ — sysextd applies a sandbox profile
+        // to endpoint-security extensions by default and /tmp/ isn't
+        // mapped to the same /private/tmp the dashboard sees, so the
+        // sysext's `contentsOfDirectory("/tmp")` returned nothing
+        // even though the dashboard had dropped a marker. Switch to
+        // <supportDir>/inbox/, a directory the daemon creates on
+        // boot with mode 1777 (world-write + sticky bit, sticky
+        // protects against cross-user overwrite while still allowing
+        // the daemon to read+delete). Both UIDs can read+write.
+        let inboxDir = state.supportDir + "/inbox"
+        do {
+            try FileManager.default.createDirectory(
+                atPath: inboxDir, withIntermediateDirectories: true
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o1777], ofItemAtPath: inboxDir
+            )
+        } catch {
+            print("[flush-request] failed to ensure inbox dir at \(inboxDir): \(error.localizedDescription)")
+        }
+
+        let flushRequestPoller = DispatchSource.makeTimerSource(queue: .global())
+        flushRequestPoller.schedule(deadline: .now() + 10, repeating: 30)
+        flushRequestPoller.setEventHandler {
+            Task {
+                let fm = FileManager.default
+                guard let files = try? fm.contentsOfDirectory(atPath: inboxDir),
+                      !files.isEmpty else { return }
+                let requests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
+                guard !requests.isEmpty else { return }
+
+                print("[flush-request] \(requests.count) request file(s) found in \(inboxDir) — running enforceDatabaseSizeCapNow")
+                let beforeBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
+                let started = Date()
+                let didRun = await enforceDatabaseSizeCapNow(state: state)
+                // Drain regardless of didRun. Leaving them would
+                // cause a re-trigger on the next poll.
+                for name in requests {
+                    try? fm.removeItem(atPath: inboxDir + "/" + name)
+                }
+                if didRun {
+                    let afterBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
+                    let status = StorageFlushStatus(
+                        inProgress: false,
+                        lastRunAt: started,
+                        bytesBefore: beforeBytes,
+                        bytesAfter: afterBytes,
+                        note: nil
+                    )
+                    StorageFlushStatus.write(status, to: state.supportDir)
+                    print("[flush-request] sweep done: \(beforeBytes / 1_000_000) MB → \(afterBytes / 1_000_000) MB")
+                } else {
+                    print("[flush-request] sweep skipped — another already in progress")
+                }
+            }
+        }
+        flushRequestPoller.resume()
+
         return Handles(
             forensicTimer: forensicTimer,
             hourlyTimer: hourlyTimer,
@@ -765,7 +918,10 @@ enum DaemonTimers {
             maintenanceTimer: maintenanceTimer,
             feedbackTimer: feedbackTimer,
             heartbeatTimer: heartbeatTimer,
-            livenessTimer: livenessTimer
+            livenessTimer: livenessTimer,
+            tracegraphPruneTimer: tracegraphPruneTimer,
+            tracesPruneTimer: tracesPruneTimer,
+            flushRequestPoller: flushRequestPoller
         )
     }
 }
@@ -887,6 +1043,17 @@ func runAdaptiveRollupSweep(
             let dropTarget = max(10_000, Int(Double(total) * (overFraction + 0.1)))
             let dropped = (try? await eventStore.pruneOldest(count: dropTarget)) ?? 0
             logger.notice("Layer 3 cap: pruned \(dropped) oldest events (target \(dropTarget))")
+            // v1.10.0 audit fix: feed Layer 3's drop count into the
+            // shared totalPruned counter so the VACUUM gate below
+            // ("if totalPruned > 0") fires. Pre-fix Layer 3 deleted
+            // millions of rows but the gate stayed false (because
+            // the adaptive loop hadn't pruned anything — table
+            // already inside hot tier), so VACUUM was skipped and
+            // the file stayed at the high-water mark. Field-
+            // observed: a manual flush at 2.3 GB returned 2.5 GB
+            // afterAfter (the difference being inserts that
+            // accumulated during the no-op-VACUUM sweep window).
+            totalPruned += dropped
         }
     }
 

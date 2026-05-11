@@ -65,7 +65,13 @@ section() { echo; echo "${BOLD}── $* ──${RESET}"; }
 section "Version sync"
 
 # Xcode/project.yml — should have two matching CFBundleVersion entries
-PROJECT_YML_COUNT=$(grep -c "CFBundleVersion: \"$VERSION\"" Xcode/project.yml 2>/dev/null || echo 0)
+# `grep -c` exits 1 when count is 0, so the prior `|| echo 0` form
+# captured BOTH grep's `0` output AND the fallback `0`, yielding a
+# two-line value `"0\n0"` that bash's `[[ -lt ]]` could not parse —
+# the syntax error caused `[[` to exit non-zero, the `else` branch
+# ran, and a stale project.yml shipped green. Capture grep's stdout
+# alone and reset to 0 only if grep itself failed.
+PROJECT_YML_COUNT=$(grep -c "CFBundleVersion: \"$VERSION\"" Xcode/project.yml 2>/dev/null) || PROJECT_YML_COUNT=0
 if [[ "$PROJECT_YML_COUNT" -lt 2 ]]; then
     err "Xcode/project.yml: CFBundleVersion not set to $VERSION in both targets (found $PROJECT_YML_COUNT)"
 else
@@ -75,7 +81,7 @@ fi
 # v1.6.18: also validate CFBundleShortVersionString. The pre-v1.6.18
 # check covered CFBundleVersion only, so the short version drifted to
 # 1.6.4 across 13 releases until a manual audit caught it.
-PROJECT_YML_SHORT_COUNT=$(grep -c "CFBundleShortVersionString: \"$VERSION\"" Xcode/project.yml 2>/dev/null || echo 0)
+PROJECT_YML_SHORT_COUNT=$(grep -c "CFBundleShortVersionString: \"$VERSION\"" Xcode/project.yml 2>/dev/null) || PROJECT_YML_SHORT_COUNT=0
 if [[ "$PROJECT_YML_SHORT_COUNT" -lt 2 ]]; then
     err "Xcode/project.yml: CFBundleShortVersionString not set to $VERSION in both targets (found $PROJECT_YML_SHORT_COUNT)"
 else
@@ -96,6 +102,23 @@ if grep -q "version-${VERSION//./\\.}-" README.md 2>/dev/null; then
     ok "README.md version badge → $VERSION"
 else
     err "README.md version badge doesn't reference $VERSION"
+fi
+
+# MacCrabVersion.fallback parity. Bundle-less binaries (maccrabctl
+# CLI, dev `swift run maccrabd`) report this constant when no
+# CFBundleShortVersionString is reachable. Drift here means OCSF
+# records, fleet telemetry, daemon banners, and version dialogs all
+# claim a different version than the shipped DMG. Audit F49.
+FALLBACK_VER=$(grep -E '^[[:space:]]*public static let fallback:' \
+    Sources/MacCrabCore/MacCrabVersion.swift 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -z "$FALLBACK_VER" ]; then
+    err "MacCrabVersion.fallback: couldn't parse the constant"
+elif [ "$FALLBACK_VER" != "$VERSION" ]; then
+    err "MacCrabVersion.fallback=\"$FALLBACK_VER\" but expected \"$VERSION\""
+else
+    ok "Sources/MacCrabCore/MacCrabVersion.swift → fallback $VERSION"
 fi
 
 # ---------------------------------------------------------------------

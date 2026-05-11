@@ -322,15 +322,31 @@ public final class ESCollector: @unchecked Sendable {
     }
 
     /// Mute events from our own process to avoid feedback loops.
+    /// `argv[0]` is the *invoked* path (relative for sysext bundles —
+    /// e.g. `com.maccrab.agent.systemextension`), but ES requires the
+    /// absolute resolved executable path for `es_mute_path_literal`.
+    /// Use `proc_pidpath` so muteSelf works under the sysext, the dev
+    /// daemon, and any future Sparkle-relaunched binary path.
     private func muteSelf() {
         guard let client = self.client else { return }
 
-        let selfPath = Foundation.ProcessInfo.processInfo.arguments.first ?? CommandLine.arguments.first ?? ""
-        guard !selfPath.isEmpty else { return }
+        var pathBuf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        let len = proc_pidpath(getpid(), &pathBuf, UInt32(pathBuf.count))
+        guard len > 0 else {
+            logger.warning("muteSelf: proc_pidpath returned \(len), errno \(errno) — daemon-self events will reach the pipeline")
+            return
+        }
+        let selfPath = String(cString: pathBuf)
+        guard !selfPath.isEmpty else {
+            logger.warning("muteSelf: empty path from proc_pidpath")
+            return
+        }
 
         let rc = es_mute_path_literal(client, selfPath)
         if rc != ES_RETURN_SUCCESS {
-            logger.warning("Failed to self-mute at path: \(selfPath)")
+            logger.warning("Failed to self-mute at path \(selfPath) (rc=\(rc.rawValue))")
+        } else {
+            logger.info("ESCollector self-muted at \(selfPath)")
         }
     }
 

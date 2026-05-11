@@ -3,7 +3,87 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.9.0] — Unreleased
+## [1.10.0] — 2026-05-10
+
+The dashboard-rewrite release. Replaces the v1 SwiftUI dashboard with
+a workspace-based V2 design (Overview / Alerts / Investigation /
+Intelligence / Protection / System), adds a real visual TraceGraph,
+and ships causal trace analysis end-to-end. Bundles `maccrabctl` and
+`maccrab-mcp` inside `MacCrab.app` so Sparkle in-place updates keep
+the terminal CLI current. Includes a 280+ finding pre-ship audit-fix
+pass across security, performance, scalability, localization, and
+daemon correctness. Full notes: `RELEASE_NOTES/v1.10.0.md`.
+
+### Added
+- **V2 dashboard** — six workspaces with tab strips, multi-select
+  alert triage, bulk-suppress, campaign suppress, suppression viewer
+  with lift-suppression, threat-intel feed refresh button, custom
+  feeds + LLM key reveal-folder shortcuts, package inspector,
+  prevention live data, "Create rule" wizard.
+- **Visual TraceGraph view** — hub-and-spoke layout with the trace
+  anchor at centre, members radiating on concentric rings, edges
+  drawn from anchor, hover-to-highlight, two-ring overflow at >12
+  members, Graph/List toggle for accessibility.
+- **`tracegraph.db`** — new SQLite causal-graph store (entities,
+  edges, trace memberships) with the same column-level AES-GCM
+  encryption + chmod-0o660 + auto-vacuum=incremental as the other
+  stores.
+- **5 new MCP trace tools**: `get_traces`, `get_trace_detail`,
+  `hunt_trace`, `verify_bundle`, `trace_from_event`.
+- **Bundled CLI** — `maccrabctl` and `maccrab-mcp` ship inside
+  `MacCrab.app/Contents/Resources/bin/`. Both Cask postflight and
+  `install.sh` symlink the brew-bin entries to the in-app paths so
+  Sparkle in-place updates keep the terminal CLIs in sync without
+  requiring `brew upgrade maccrab`.
+- **Trace bundle export/verify** — `.maccrabtrace` signed bundles via
+  the new `maccrabctl trace export` / `verify` subcommands; the V2
+  Investigation workspace exposes both.
+
+### Changed
+- **Cask uninstall** now runs `systemextensionsctl uninstall` as an
+  `early_script` (`must_succeed: false`) so sysextd's ledger is
+  cleared before the .app is removed — eliminates the "pending"
+  entry that lingered post-uninstall pre-fix.
+- **`scripts/install.sh`** moved app-install to step 3, CLI symlinks
+  to step 4 — the symlinks now resolve into the just-installed
+  bundle. Apple Silicon detection auto-replaces stale brew-cask
+  symlinks (which pointed at v1.8 binaries inside the Caskroom).
+- **`scripts/uninstall.sh`** rewritten for the v1.3+ sysext model:
+  deactivates via `OSSystemExtensionRequest`, kills app + agent,
+  cleans both `/usr/local/bin/` and `/opt/homebrew/bin/`, optional
+  data-dir + Keychain wipe with safe-by-default prompts.
+- **`Localizable.stringsdict`** — 8 plural rules
+  (alerts.suppressedCount, alerts.unsuppressedCount,
+  overview.eventsRate, overview.high.count, overview.critical.count,
+  generic.{campaign,rule,item}.count) so counts pluralise correctly
+  in CLDR-compliant locales.
+
+### Fixed
+- **`scripts/prerelease-check.sh`** lines 68 / 78: `grep -c | echo 0`
+  produced a two-line `"0\n0"` value when grep found zero matches.
+  Bash's `[[ -lt ]]` couldn't parse it, fell through to the `else
+  ok` branch, and silently shipped stale project.yml versions.
+  Replaced with `cmd || VAR=0` form.
+- **`Casks/maccrab.rb`** postflight: `binary` stanza created a
+  symlink at `$HOMEBREW_PREFIX/bin/maccrabctl` pointing into the
+  caskroom's version-pinned copy. After a Sparkle in-place update,
+  the symlink kept resolving to the old CLI. Postflight now replaces
+  the symlink with one pointing at the in-app CLI, which Sparkle
+  DOES update atomically.
+- **AlertStore phantom fields** — V2 dashboard's "What to do" hint,
+  D3FEND chips, and analyst pills all use `if let / !isEmpty`
+  guards so unpersisted optional fields don't render empty pills.
+  Real schema migration to persist them is a v1.11 follow-up.
+- 280+ findings from the pre-ship audit waves (security, perf,
+  L10n, a11y, daemon correctness). Highlights: TLS 1.2 floor on all
+  outbound HTTP, SPKI pinning available for cloud LLM endpoints,
+  sanitizer extended to OCSF/syslog/SFTP sinks, TraceMaterializer
+  guards against missing entities, post-migration integrity_check
+  per store, atomic heartbeat writes, retention enforcement actually
+  deletes (not just marks), storage cap high-water alert, LLMService
+  priority queue.
+
+## [1.9.0] — 2026-05-06
 
 The Agent Traces release. W3C TRACEPARENT correlation between AI
 coding-agent activity and macOS kernel events, plus a sustained

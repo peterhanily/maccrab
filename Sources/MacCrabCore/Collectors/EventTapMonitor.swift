@@ -73,7 +73,7 @@ public actor EventTapMonitor {
             guard let self else { return }
             while !Task.isCancelled {
                 await self.scan()
-                try? await Task.sleep(nanoseconds: UInt64(self.pollInterval * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(PowerGate.adjustedInterval(base: self.pollInterval) * 1_000_000_000))
             }
         }
     }

@@ -396,23 +396,23 @@ public actor EventStore {
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
 
-        // umask 0o027 ⇒ new SQLite WAL/SHM files get created 0o640 instead
-        // of the world-readable 0o644 that umask 0o022 produced through
-        // v1.3.8. 0o600 would be tighter but breaks the dashboard, which
-        // runs as the user (typically admin-group) and needs read access
-        // to render alerts/events. The directory stays 0o755 so dashboard
-        // can traverse it.
-        let oldUmask = umask(0o027)
+        // umask 0o007 ⇒ new SQLite WAL/SHM files get created 0o660. The
+        // dashboard runs as the admin-group user and needs write access
+        // (suppress, mutate). 0o640 (the v1.3.8 → v1.10.0 default) gave
+        // group-read only, which made bulk-suppress fail with
+        // "database is read only". 0o660 keeps non-admin users locked
+        // out while letting the dashboard mutate without an XPC broker.
+        let oldUmask = umask(0o007)
         let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        // Explicitly tighten any pre-existing files from an old install that
-        // were created under the looser 0o644 default.
-        chmod(databasePath, 0o640)
-        chmod(databasePath + "-wal", 0o640)
-        chmod(databasePath + "-shm", 0o640)
+        // Re-clamp existing files from prior installs that were created
+        // under the older 0o640 default.
+        chmod(databasePath, 0o660)
+        chmod(databasePath + "-wal", 0o660)
+        chmod(databasePath + "-shm", 0o660)
     }
 
     /// Creates an `EventStore` at a custom path (useful for testing).
@@ -470,40 +470,66 @@ public actor EventStore {
         // before persisting to the database.
         let sanitizedCommandLine = CommandSanitizer.sanitize(event.process.commandLine)
 
-        // Build the event with a sanitized process for JSON serialisation.
-        let sanitizedProcess = ProcessInfo(
-            pid: event.process.pid,
-            ppid: event.process.ppid,
-            rpid: event.process.rpid,
-            name: event.process.name,
-            executable: event.process.executable,
-            commandLine: sanitizedCommandLine,
-            args: event.process.args.map { CommandSanitizer.sanitize($0) },
-            workingDirectory: event.process.workingDirectory,
-            userId: event.process.userId,
-            userName: event.process.userName,
-            groupId: event.process.groupId,
-            startTime: event.process.startTime,
-            exitCode: event.process.exitCode,
-            codeSignature: event.process.codeSignature,
-            ancestors: event.process.ancestors,
-            architecture: event.process.architecture,
-            isPlatformBinary: event.process.isPlatformBinary
-        )
-        let sanitizedEvent = Event(
-            id: event.id,
-            timestamp: event.timestamp,
-            eventCategory: event.eventCategory,
-            eventType: event.eventType,
-            eventAction: event.eventAction,
-            process: sanitizedProcess,
-            file: event.file,
-            network: event.network,
-            tcc: event.tcc,
-            enrichments: event.enrichments,
-            severity: event.severity,
-            ruleMatches: event.ruleMatches
-        )
+        // Audit P-CPU-117: this is the largest steady-state allocation
+        // source on a busy host. Short-circuit when sanitization is a
+        // no-op — most events don't contain secrets in their commandline
+        // and don't need the ProcessInfo + Event struct rebuild + their
+        // associated array allocations. Each sanitized arg is also a
+        // fresh String, so the per-arg comparison is cheap.
+        let sanitizedArgs: [String]?
+        if sanitizedCommandLine == event.process.commandLine {
+            // Quick win: if the commandline didn't change, the args
+            // almost certainly didn't either. Skip the per-arg pass.
+            // CommandSanitizer is regex-based on the full string; the
+            // per-arg pass would catch only edge cases where args have
+            // secrets the joined commandline doesn't.
+            sanitizedArgs = nil
+        } else {
+            sanitizedArgs = event.process.args.map { CommandSanitizer.sanitize($0) }
+        }
+
+        // Reuse the original event if nothing was sanitized — skips
+        // ProcessInfo + Event struct copies + ruleMatches/ancestors
+        // array reference rebuilds. ~half the allocations on a quiet
+        // host.
+        let sanitizedEvent: Event
+        if let args = sanitizedArgs {
+            let sanitizedProcess = ProcessInfo(
+                pid: event.process.pid,
+                ppid: event.process.ppid,
+                rpid: event.process.rpid,
+                name: event.process.name,
+                executable: event.process.executable,
+                commandLine: sanitizedCommandLine,
+                args: args,
+                workingDirectory: event.process.workingDirectory,
+                userId: event.process.userId,
+                userName: event.process.userName,
+                groupId: event.process.groupId,
+                startTime: event.process.startTime,
+                exitCode: event.process.exitCode,
+                codeSignature: event.process.codeSignature,
+                ancestors: event.process.ancestors,
+                architecture: event.process.architecture,
+                isPlatformBinary: event.process.isPlatformBinary
+            )
+            sanitizedEvent = Event(
+                id: event.id,
+                timestamp: event.timestamp,
+                eventCategory: event.eventCategory,
+                eventType: event.eventType,
+                eventAction: event.eventAction,
+                process: sanitizedProcess,
+                file: event.file,
+                network: event.network,
+                tcc: event.tcc,
+                enrichments: event.enrichments,
+                severity: event.severity,
+                ruleMatches: event.ruleMatches
+            )
+        } else {
+            sanitizedEvent = event
+        }
 
         let jsonData: Data
         do {
@@ -730,18 +756,78 @@ public actor EventStore {
     ///   - text: The search query (FTS5 syntax supported).
     ///   - limit: Maximum number of results (default 100).
     /// - Returns: Matching events ordered by relevance.
-    public func search(text: String, limit: Int = 100) throws -> [Event] {
-        let sql = """
+    public func search(
+        text: String,
+        since: Date = .distantPast,
+        until: Date = .distantFuture,
+        limit: Int = 100
+    ) throws -> [Event] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let escaped = trimmed.replacingOccurrences(of: "\"", with: "\"\"")
+        let phraseQuery = "\"\(escaped)\""
+        let sinceTs = since.timeIntervalSince1970
+        let untilTs = until.timeIntervalSince1970
+
+        // Strategy 1 — FTS5 MATCH with a quoted-phrase query, bounded
+        // by [since, until]. Pre-fix `search` had neither bound; an
+        // "Investigate in Events" navigation from an alert timestamped
+        // 30 days ago surfaced any matching event ever.  Now: every
+        // strategy applies the same `timestamp BETWEEN since AND until`
+        // predicate, which lets callers narrow to a tight window
+        // around an alert's firing time.
+        let ftsSQL = """
             SELECT e.raw_json
             FROM events e
             JOIN events_fts fts ON e.rowid = fts.rowid
             WHERE events_fts MATCH ?1
-            ORDER BY fts.rank
-            LIMIT ?2
+              AND e.timestamp >= ?2
+              AND e.timestamp <= ?3
+            ORDER BY e.timestamp DESC
+            LIMIT ?4
             """
-        return try queryEvents(sql: sql, bindings: [
-            (1, .text(text)),
-            (2, .int(Int32(limit)))
+
+        if let rows = try? queryEvents(sql: ftsSQL, bindings: [
+            (1, .text(phraseQuery)),
+            (2, .double(sinceTs)),
+            (3, .double(untilTs)),
+            (4, .int(Int32(limit)))
+        ]), !rows.isEmpty {
+            return rows
+        }
+
+        if !trimmed.contains(where: { !$0.isLetter && !$0.isNumber }) {
+            if let rows = try? queryEvents(sql: ftsSQL, bindings: [
+                (1, .text(trimmed)),
+                (2, .double(sinceTs)),
+                (3, .double(untilTs)),
+                (4, .int(Int32(limit)))
+            ]), !rows.isEmpty {
+                return rows
+            }
+        }
+
+        let likePattern = "%" + trimmed.replacingOccurrences(of: "%", with: "\\%")
+                                       .replacingOccurrences(of: "_", with: "\\_") + "%"
+        let likeSQL = """
+            SELECT raw_json FROM events
+            WHERE timestamp >= ?2 AND timestamp <= ?3
+              AND (process_path LIKE ?1 ESCAPE '\\'
+                OR process_name LIKE ?1 ESCAPE '\\'
+                OR process_commandline LIKE ?1 ESCAPE '\\'
+                OR file_path LIKE ?1 ESCAPE '\\'
+                OR network_dest_ip LIKE ?1 ESCAPE '\\'
+                OR tcc_service LIKE ?1 ESCAPE '\\'
+                OR tcc_client LIKE ?1 ESCAPE '\\')
+            ORDER BY timestamp DESC
+            LIMIT ?4
+            """
+        return try queryEvents(sql: likeSQL, bindings: [
+            (1, .text(likePattern)),
+            (2, .double(sinceTs)),
+            (3, .double(untilTs)),
+            (4, .int(Int32(limit)))
         ])
     }
 
@@ -857,6 +943,18 @@ public actor EventStore {
             // Yield to the actor's cooperative executor so concurrent inserts and
             // queries are not starved between batches.
             await Task.yield()
+        }
+
+        // v1.10.0 perf: incremental_vacuum reclaims pages freed by the
+        // prune above. Without this, events.db file grows monotonically
+        // even when the row count is bounded — heavy-event machines
+        // that keep 30 days of data accumulate freelist pages until a
+        // full VACUUM runs (rare). incremental_vacuum is non-blocking
+        // and operates on the already-released pages from this prune.
+        // Cap to 5K pages (~20 MB) per call so we don't stall the
+        // actor on a freshly-pruned giant DB.
+        if totalDeleted > 0, let db {
+            sqlite3_exec(db, "PRAGMA incremental_vacuum(5000)", nil, nil, nil)
         }
 
         return totalDeleted

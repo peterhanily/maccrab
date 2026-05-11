@@ -7,6 +7,7 @@
 // XProtect version, quarantine xattr scanning, BTM persistence inventory.
 
 import Foundation
+import Darwin
 import Security
 import os.log
 
@@ -318,6 +319,19 @@ public actor SystemPolicyMonitor {
         }
     }
 
+    /// Probe for the `com.apple.quarantine` extended attribute on a
+    /// path without shelling out. `getxattr(path, name, nil, 0, 0, 0)`
+    /// returns ≥0 if the attribute exists (the size in bytes), -1 if
+    /// it doesn't or the path is unreadable. We only care about
+    /// presence, not the value.
+    private func hasQuarantineXattr(path: String) -> Bool {
+        path.withCString { pathPtr in
+            "com.apple.quarantine".withCString { namePtr in
+                getxattr(pathPtr, namePtr, nil, 0, 0, 0) >= 0
+            }
+        }
+    }
+
     // MARK: - Quarantine xattr Scanning
 
     private func scanDownloadsForMissingQuarantine() {
@@ -346,9 +360,11 @@ public actor SystemPolicyMonitor {
 
             guard isExecutable || isApp else { continue }
 
-            // Check for quarantine xattr
-            let xattrOutput = runCommand("/usr/bin/xattr", args: ["-l", fullPath])
-            if xattrOutput.contains("com.apple.quarantine") { continue }
+            // Check for quarantine xattr via getxattr(2). Pre-fix this
+            // shelled out to `/usr/bin/xattr -l <path>` per file (~50
+            // items in Downloads × every 5 min = ~14,400 forks/day for
+            // a single syscall's worth of work). Now zero forks.
+            if hasQuarantineXattr(path: fullPath) { continue }
 
             // A validly-signed app with an Apple-rooted anchor is a
             // non-issue: Gatekeeper still evaluates signed code regardless

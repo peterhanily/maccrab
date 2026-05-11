@@ -1,0 +1,21 @@
+{
+  "id": "maccrab_unsigned_download_executes_then_persists",
+  "title": "Unsigned binary from a download path created persistence",
+  "severity": "high",
+  "type": "graph",
+  "nodes": {
+    "proc": {
+      "type": "process",
+      "where": {
+        "is_apple_signed": { "equals_bool": false }
+      }
+    },
+    "persist": { "type": "persistence" }
+  },
+  "edges": [
+    { "from": "proc", "to": "persist", "relation": "created_persistence", "min_tier": "strong_inferred" }
+  ],
+  "scope": { "common_ancestor": "proc" },
+  "constraints": { "within_seconds": 600, "min_confidence": 0.7 },
+  "attack": ["T1543.001", "T1547"]
+}

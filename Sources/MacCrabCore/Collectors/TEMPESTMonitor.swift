@@ -133,7 +133,8 @@ public actor TEMPESTMonitor {
             await self?.checkDisplayState()
 
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64((self?.pollInterval ?? 60) * 1_000_000_000))
+                let interval = PowerGate.adjustedInterval(base: self?.pollInterval ?? 60)
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 await self?.scanSDRDevices()
                 await self?.checkDisplayState()

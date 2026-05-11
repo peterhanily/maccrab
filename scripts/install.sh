@@ -85,8 +85,14 @@ fi
 
 # ─── Step 2: Support dir + rules ─────────────────────────────────────
 info "Creating $SUPPORT_DIR..."
-mkdir -p "$SUPPORT_DIR"/{compiled_rules/sequences,logs}
+mkdir -p "$SUPPORT_DIR"/{compiled_rules/sequences,logs,inbox}
 chmod 755 "$SUPPORT_DIR"
+# v1.10.0 audit fix: inbox/ is the cross-UID IPC drop point for the
+# dashboard's "Reduce events.db now" button. Sticky bit (1777) lets
+# the user-context dashboard write a marker file the root-context
+# sysext picks up + processes, without granting blanket write access
+# to the rest of the support dir.
+chmod 1777 "$SUPPORT_DIR/inbox"
 
 if [ -d "$PROJECT_DIR/compiled_rules" ] && [ "$(find "$PROJECT_DIR/compiled_rules" -name '*.json' 2>/dev/null | head -1)" ]; then
     info "Installing pre-compiled detection rules..."
@@ -108,34 +114,77 @@ find "$SUPPORT_DIR/compiled_rules" -type d -exec chmod 755 {} \;
 RULE_COUNT=$(find "$SUPPORT_DIR/compiled_rules" -name '*.json' | wc -l | tr -d ' ')
 info "Installed $RULE_COUNT compiled rules."
 
-# ─── Step 3: CLI binaries ────────────────────────────────────────────
-BIN_SOURCE=""
-if [ -x "$PROJECT_DIR/bin/maccrabctl" ]; then
-    BIN_SOURCE="$PROJECT_DIR/bin"
-elif [ -x "$PROJECT_DIR/.build/release/maccrabctl" ]; then
-    BIN_SOURCE="$PROJECT_DIR/.build/release"
-fi
-
-if [ -n "$BIN_SOURCE" ]; then
-    info "Installing CLI binaries to $PREFIX/bin..."
-    mkdir -p "$PREFIX/bin"
-    cp -f "$BIN_SOURCE/maccrabctl" "$PREFIX/bin/maccrabctl"
-    chmod 755 "$PREFIX/bin/maccrabctl"
-    if [ -f "$BIN_SOURCE/maccrab-mcp" ]; then
-        cp -f "$BIN_SOURCE/maccrab-mcp" "$PREFIX/bin/maccrab-mcp"
-        chmod 755 "$PREFIX/bin/maccrab-mcp"
-    fi
-else
-    warn "CLI binaries not found (checked bin/ and .build/release/)."
-fi
-
-# ─── Step 4: Install MacCrab.app ─────────────────────────────────────
+# ─── Step 3: Install MacCrab.app (moved before CLI step) ─────────────
+# Order matters: we want to symlink CLIs into the .app's bundled
+# Resources/bin so Sparkle in-place updates keep the terminal CLI
+# current. Pre-fix the script copied loose CLIs to $PREFIX/bin —
+# those copies stayed frozen at install time and went stale after
+# every Sparkle update.
 if [ -d "$PROJECT_DIR/MacCrab.app" ]; then
     info "Installing MacCrab.app to /Applications..."
     rm -rf "/Applications/MacCrab.app"
     cp -R "$PROJECT_DIR/MacCrab.app" "/Applications/MacCrab.app"
     chown -R root:admin "/Applications/MacCrab.app"
     chmod -R go-w "/Applications/MacCrab.app"
+fi
+
+# ─── Step 4: CLI symlinks ────────────────────────────────────────────
+# Prefer symlinks pointing at the in-app CLIs over loose copies,
+# so the user's terminal `maccrabctl` always tracks the running
+# MacCrab.app version (including Sparkle in-place upgrades).
+APP_BIN="/Applications/MacCrab.app/Contents/Resources/bin"
+mkdir -p "$PREFIX/bin"
+
+if [ -x "$APP_BIN/maccrabctl" ]; then
+    info "Linking CLI binaries from $APP_BIN to $PREFIX/bin..."
+    for cli in maccrabctl maccrab-mcp; do
+        if [ -x "$APP_BIN/$cli" ]; then
+            rm -f "$PREFIX/bin/$cli"
+            ln -s "$APP_BIN/$cli" "$PREFIX/bin/$cli"
+        fi
+    done
+else
+    # Fallback: bundled .app didn't include the CLIs (older build,
+    # or the .app wasn't installed). Copy from PROJECT_DIR/bin or
+    # .build/release. These are static copies and won't auto-update.
+    BIN_SOURCE=""
+    if [ -x "$PROJECT_DIR/bin/maccrabctl" ]; then
+        BIN_SOURCE="$PROJECT_DIR/bin"
+    elif [ -x "$PROJECT_DIR/.build/release/maccrabctl" ]; then
+        BIN_SOURCE="$PROJECT_DIR/.build/release"
+    fi
+    if [ -n "$BIN_SOURCE" ]; then
+        warn "MacCrab.app does not contain bundled CLIs — falling back to static copies. These won't auto-update with Sparkle; reinstall after upgrade."
+        cp -f "$BIN_SOURCE/maccrabctl" "$PREFIX/bin/maccrabctl"
+        chmod 755 "$PREFIX/bin/maccrabctl"
+        if [ -f "$BIN_SOURCE/maccrab-mcp" ]; then
+            cp -f "$BIN_SOURCE/maccrab-mcp" "$PREFIX/bin/maccrab-mcp"
+            chmod 755 "$PREFIX/bin/maccrab-mcp"
+        fi
+    else
+        warn "CLI binaries not found (checked $APP_BIN, bin/, and .build/release/)."
+    fi
+fi
+
+# Detect Apple Silicon: $PREFIX defaults to /usr/local but Apple
+# Silicon's $PATH usually has /opt/homebrew/bin first. If a stale
+# brew-cask CLI lives there from an older install, replace it with
+# a symlink to the current in-app CLI so `which maccrabctl` returns
+# a current binary regardless of which $PREFIX we wrote to.
+if [ "$(uname -m)" = "arm64" ] && [ -d "/opt/homebrew/bin" ] && [ -x "$APP_BIN/maccrabctl" ]; then
+    for cli in maccrabctl maccrab-mcp; do
+        if [ -x "$APP_BIN/$cli" ] && [ "/opt/homebrew/bin" != "$PREFIX/bin" ]; then
+            link="/opt/homebrew/bin/$cli"
+            target=$(readlink "$link" 2>/dev/null || echo "")
+            # Replace if missing OR if it's a stale brew-cask path
+            if [ ! -e "$link" ] || [[ "$target" == *"/Caskroom/maccrab/"* ]] || \
+               { [ -f "$link" ] && ! [ -L "$link" ]; }; then
+                rm -f "$link"
+                ln -s "$APP_BIN/$cli" "$link"
+                info "Refreshed stale /opt/homebrew/bin/$cli → in-app CLI"
+            fi
+        fi
+    done
 fi
 
 echo ""

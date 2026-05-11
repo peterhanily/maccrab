@@ -34,9 +34,16 @@ public actor LLMService {
                 cache: LLMCache = LLMCache()) {
         self.backend = backend
         self.cache = cache
-        // Only sanitize for cloud providers; Ollama is local
+        // Only sanitize for cloud providers; Ollama is local. The
+        // parentheses matter: without them, `provider == .ollama && X || Y`
+        // parses as `((provider == .ollama) && X) || Y`. With Y testing
+        // the default ollamaURL (which always contains "127.0.0.1"
+        // regardless of provider), every cloud LLM call would skip the
+        // sanitizer and leak usernames/paths/IPs to Anthropic/OpenAI/etc.
         let isLocalProvider = config.provider == .ollama
-            && config.ollamaURL.contains("localhost") || config.ollamaURL.contains("127.0.0.1")
+            && (config.ollamaURL.contains("localhost")
+                || config.ollamaURL.contains("127.0.0.1")
+                || config.ollamaURL.contains("::1"))
         self.shouldSanitize = !isLocalProvider && config.sanitizeForCloud
     }
 
@@ -116,7 +123,8 @@ public actor LLMService {
 
         // Check cache
         if useCache {
-            let key = LLMCache.cacheKey(system: finalSystem, user: finalUser)
+            let key = LLMCache.cacheKey(system: finalSystem, user: finalUser,
+                                        temperature: temperature, maxTokens: maxTokens)
             if let cached = await cache.get(key: key) {
                 cacheHits += 1
                 return LLMEnhancement(
@@ -164,7 +172,8 @@ public actor LLMService {
         let latency = Date().timeIntervalSince(start)
 
         if useCache {
-            let key = LLMCache.cacheKey(system: finalSystem, user: finalUser)
+            let key = LLMCache.cacheKey(system: finalSystem, user: finalUser,
+                                        temperature: temperature, maxTokens: maxTokens)
             await cache.set(key: key, response: response)
         }
 
