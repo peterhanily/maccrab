@@ -3,6 +3,33 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.1] — 2026-05-11
+
+Hotfix release. Dashboard suppress / unsuppress / delete actions and
+campaign suppress all silently failed on every notarized release install
+since v1.3 because the System Extension owns alerts.db as root and the
+dashboard runs as the user — the direct SQLite writes hit
+`SQLITE_READONLY`. The error toast pointed at `maccrabctl alerts
+suppress <id>` and `sudo open MacCrab.app`, neither of which works.
+
+Fix: route mutations through the existing
+`/Library/Application Support/MacCrab/inbox/` file-IPC channel that v1.10
+introduced for the "Reduce events.db now" button. The sysext poller now
+recognizes `suppress-alert-*.json`, `unsuppress-alert-*.json`,
+`delete-alert-*.json`, and `suppress-campaign-*.json` request files
+(JSON `{"id":"<uuid>"}` payloads). Poll interval drops 30 s → 5 s so
+suppress clicks feel interactive. The campaign-suppress fan-out moves
+server-side — one inbox file per campaign instead of N.
+
+Also: auto-generates the README rule-count table from the YAML tree
+(`make readme-coverage`, wired into `release.sh` step 2b) so README
+never ships stale tactic counts; ships `RELEASE_PROCESS.md` documenting
+the operator-side signing / notarization / Sparkle appcast pipeline;
+fixes `Package.swift` tail comment to reflect the xcodegen-based build
+model; credits AgentSight (arXiv:2508.02736) in README acknowledgments.
+
+Full notes: `RELEASE_NOTES/v1.10.1.md`.
+
 ## [1.10.0] — 2026-05-10
 
 The dashboard-rewrite release. Replaces the v1 SwiftUI dashboard with

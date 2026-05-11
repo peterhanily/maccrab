@@ -100,8 +100,21 @@ let package = Package(
     ]
 )
 
-// Note: MacCrabApp (SwiftUI status bar app) is built as a separate
-// Xcode project since it requires an app bundle, Info.plist, entitlements,
-// and code signing that Swift Package Manager doesn't handle well.
-// See Sources/MacCrabApp/ for the app source.
-// Build with: xcodebuild -project MacCrab.xcodeproj -scheme MacCrabApp
+// Note: two targets are deliberately NOT in this Package.swift:
+//
+//  - MacCrabApp (SwiftUI menubar dashboard) — needs an app bundle,
+//    Info.plist, entitlements, and Developer ID code signing that
+//    SPM doesn't express.
+//  - MacCrabAgent (Endpoint Security system extension) — needs the
+//    .systemextension bundle layout, the ES client entitlement, and
+//    the same Developer ID signing flow.
+//
+// Both live in `Xcode/project.yml` and are generated via xcodegen:
+//
+//   cd Xcode && xcodegen   # regenerates MacCrab.xcodeproj (gitignored)
+//
+// The release flow runs `swift build -c release` for the SPM
+// products (MacCrabCore, maccrabctl, maccrab-mcp, maccrabd) plus
+// `xcodebuild` against the xcodegen-produced project for the bundled
+// .app + sysext, then signs + notarizes the resulting DMG. End-to-
+// end pipeline: see RELEASE_PROCESS.md.

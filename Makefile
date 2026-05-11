@@ -97,6 +97,13 @@ coverage-doc:
 	@python3 scripts/generate-coverage-doc.py > docs/COVERAGE.md
 	@echo "✓ docs/COVERAGE.md regenerated ($$(wc -l < docs/COVERAGE.md | tr -d ' ') lines)"
 
+# v1.10.1: regenerate the rule-count table inside README.md between
+# <!-- COVERAGE-START --> / <!-- COVERAGE-END --> markers. The release
+# script runs this before tagging so README never ships stale numbers.
+# Run by hand when you add/remove rules outside a release cycle.
+readme-coverage:
+	@python3 scripts/coverage_matrix.py --update-readme README.md Rules/
+
 # ─── Install (system-wide, requires sudo) ─────────────────────────────
 
 install: release

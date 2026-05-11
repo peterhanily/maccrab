@@ -20,6 +20,8 @@ page to start from.
 | Sparkle appcast feed | `https://maccrab.com/appcast.xml` |
 | Sparkle EdDSA public key | First 8 chars: `de+dzPjB`. Full key in `Xcode/Resources/MacCrabApp-Info.plist` under `SUPublicEDKey`. |
 | GitHub release page | `https://github.com/peterhanily/maccrab/releases` |
+| Homebrew tap | `peterhanily/maccrab` — install with `brew tap peterhanily/maccrab https://github.com/peterhanily/maccrab && brew install --cask maccrab` |
+| Security contact | `maccrab@peterhanily.com` (see `SECURITY.md`) |
 
 ## Verifying a downloaded DMG
 
@@ -34,7 +36,7 @@ Each release's checksum is published in two places:
   checksum is included in the release commit that bumps the cask)
 
 ```bash
-shasum -a 256 ~/Downloads/MacCrab-v1.9.0.dmg
+shasum -a 256 ~/Downloads/MacCrab-v1.10.0.dmg
 # Compare to the value in Casks/maccrab.rb on main
 ```
 
@@ -46,7 +48,7 @@ Apple's `codesign` confirms the DMG was signed by Peter Hanily's
 Developer ID and hasn't been mutated since signing:
 
 ```bash
-codesign -dvv ~/Downloads/MacCrab-v1.9.0.dmg
+codesign -dvv ~/Downloads/MacCrab-v1.10.0.dmg
 ```
 
 Expected fragments in the output:
@@ -59,7 +61,7 @@ Apple's notarization confirms the binary passed Apple's malware scan and
 the ticket has been stapled to the DMG:
 
 ```bash
-spctl -a -t open --context context:primary-signature ~/Downloads/MacCrab-v1.9.0.dmg
+spctl -a -t open --context context:primary-signature ~/Downloads/MacCrab-v1.10.0.dmg
 ```
 
 Expected: `accepted` and `source=Notarized Developer ID`.
@@ -67,7 +69,7 @@ Expected: `accepted` and `source=Notarized Developer ID`.
 To verify the staple itself:
 
 ```bash
-xcrun stapler validate ~/Downloads/MacCrab-v1.9.0.dmg
+xcrun stapler validate ~/Downloads/MacCrab-v1.10.0.dmg
 ```
 
 Expected: `The validate action worked!`.
@@ -77,8 +79,8 @@ Expected: `The validate action worked!`.
 After mounting the DMG, repeat steps 2 + 3 against the `.app` bundle:
 
 ```bash
-codesign -dvv "/Volumes/MacCrab v1.9.0/MacCrab.app"
-spctl -a -t exec -vv "/Volumes/MacCrab v1.9.0/MacCrab.app"
+codesign -dvv "/Volumes/MacCrab v1.10.0/MacCrab.app"
+spctl -a -t exec -vv "/Volumes/MacCrab v1.10.0/MacCrab.app"
 ```
 
 The System Extension nested inside the app

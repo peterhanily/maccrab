@@ -107,6 +107,18 @@ fi
 echo "Step 2/6: Compiling rules..."
 python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir .build/compiled_rules 2>&1 | tail -1
 
+# Step 2b: Regenerate README rule-count table + docs/COVERAGE.md so
+# they match the YAML tree being released. v1.10 shipped with stale
+# numbers in the README's hand-written coverage paragraph; auto-gen
+# closes that drift window.
+echo "Step 2b/6: Regenerating coverage docs..."
+python3 scripts/coverage_matrix.py --update-readme README.md Rules/
+python3 scripts/generate-coverage-doc.py > docs/COVERAGE.md
+if ! git diff --quiet -- README.md docs/COVERAGE.md; then
+    echo "  README.md / docs/COVERAGE.md changed — staging diff for the release commit"
+    git add README.md docs/COVERAGE.md
+fi
+
 # Step 3: Build DMG
 echo "Step 3/5: Building DMG..."
 VERSION="$VERSION" ./scripts/build-release.sh

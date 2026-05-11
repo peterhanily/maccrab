@@ -46,11 +46,13 @@ enum DaemonTimers {
         /// without retention, silently breaking pruning. Now retained.
         let tracegraphPruneTimer: DispatchSourceTimer?
         let tracesPruneTimer: DispatchSourceTimer?
-        /// v1.10.0: file-based storage-flush request poller. Polls
-        /// /tmp/maccrab-flush-request-*.json every 30 s so the
-        /// dashboard (running as the user) can trigger a sweep on
-        /// the root sysext without needing signal-delivery permission.
-        let flushRequestPoller: DispatchSourceTimer
+        /// v1.10.0: file-based IPC poller. Polls
+        /// /Library/Application Support/MacCrab/inbox/*.json every 5 s
+        /// so the dashboard (running as the user) can request mutations
+        /// on a root-owned DB without needing signal-delivery permission.
+        /// Handles: flush-request-*, suppress-alert-*, unsuppress-alert-*,
+        /// delete-alert-*, suppress-campaign-* (v1.10.1).
+        let inboxPoller: DispatchSourceTimer
     }
 
     static func start(state: DaemonState, eventCount: @escaping () -> UInt64, alertCount: @escaping () -> UInt64, startTime: Date) -> Handles {
@@ -847,16 +849,22 @@ enum DaemonTimers {
         }
         heartbeatTimer.resume()
 
-        // v1.10.0 audit fix (second pass): flush-request file poller.
-        // First pass tried /tmp/ — sysextd applies a sandbox profile
-        // to endpoint-security extensions by default and /tmp/ isn't
-        // mapped to the same /private/tmp the dashboard sees, so the
-        // sysext's `contentsOfDirectory("/tmp")` returned nothing
-        // even though the dashboard had dropped a marker. Switch to
-        // <supportDir>/inbox/, a directory the daemon creates on
-        // boot with mode 1777 (world-write + sticky bit, sticky
-        // protects against cross-user overwrite while still allowing
-        // the daemon to read+delete). Both UIDs can read+write.
+        // v1.10.0 audit fix: file-based IPC for dashboard → root sysext.
+        // The dashboard runs as the logged-in user; the sysext owns
+        // alerts.db / events.db / campaigns.db as root 0600. Mutations
+        // (suppress, unsuppress, delete, flush) can't be issued directly
+        // from the dashboard because:
+        //   - direct DB write fails with SQLITE_READONLY
+        //   - POSIX signals from user → root sysext return EPERM
+        //   - /tmp doesn't share namespace between user and the sysext
+        //     sandbox (first attempt in v1.10.0)
+        // Solution: <supportDir>/inbox/ mode 1777 (world-write + sticky;
+        // sticky prevents cross-user file deletion). The sysext (this
+        // poller, running as root) drains the dir every 5 s.
+        //
+        // v1.10.1 extended the file types accepted beyond flush requests
+        // — alert suppress/unsuppress/delete + campaign suppress all
+        // route through this same channel.
         let inboxDir = state.supportDir + "/inbox"
         do {
             try FileManager.default.createDirectory(
@@ -866,45 +874,38 @@ enum DaemonTimers {
                 [.posixPermissions: 0o1777], ofItemAtPath: inboxDir
             )
         } catch {
-            print("[flush-request] failed to ensure inbox dir at \(inboxDir): \(error.localizedDescription)")
+            print("[inbox] failed to ensure inbox dir at \(inboxDir): \(error.localizedDescription)")
         }
 
-        let flushRequestPoller = DispatchSource.makeTimerSource(queue: .global())
-        flushRequestPoller.schedule(deadline: .now() + 10, repeating: 30)
-        flushRequestPoller.setEventHandler {
+        let inboxPoller = DispatchSource.makeTimerSource(queue: .global())
+        // 5 s tick: a directory listing of an empty dir is cheap, and
+        // dashboard users expect a suppress click to settle quickly.
+        // The original 30 s value was sized for flush requests only,
+        // which are infrequent and slow to run anyway. Alert mutations
+        // are interactive — keep them snappy.
+        inboxPoller.schedule(deadline: .now() + 5, repeating: 5)
+        inboxPoller.setEventHandler {
             Task {
                 let fm = FileManager.default
                 guard let files = try? fm.contentsOfDirectory(atPath: inboxDir),
                       !files.isEmpty else { return }
-                let requests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
-                guard !requests.isEmpty else { return }
 
-                print("[flush-request] \(requests.count) request file(s) found in \(inboxDir) — running enforceDatabaseSizeCapNow")
-                let beforeBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
-                let started = Date()
-                let didRun = await enforceDatabaseSizeCapNow(state: state)
-                // Drain regardless of didRun. Leaving them would
-                // cause a re-trigger on the next poll.
-                for name in requests {
-                    try? fm.removeItem(atPath: inboxDir + "/" + name)
-                }
-                if didRun {
-                    let afterBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
-                    let status = StorageFlushStatus(
-                        inProgress: false,
-                        lastRunAt: started,
-                        bytesBefore: beforeBytes,
-                        bytesAfter: afterBytes,
-                        note: nil
-                    )
-                    StorageFlushStatus.write(status, to: state.supportDir)
-                    print("[flush-request] sweep done: \(beforeBytes / 1_000_000) MB → \(afterBytes / 1_000_000) MB")
-                } else {
-                    print("[flush-request] sweep skipped — another already in progress")
-                }
+                // Partition by request type so we drain in a defined order
+                // (mutations first, flush last — flush can take seconds).
+                let suppressAlertReqs = files.filter { $0.hasPrefix("suppress-alert-") && $0.hasSuffix(".json") }
+                let unsuppressAlertReqs = files.filter { $0.hasPrefix("unsuppress-alert-") && $0.hasSuffix(".json") }
+                let deleteAlertReqs = files.filter { $0.hasPrefix("delete-alert-") && $0.hasSuffix(".json") }
+                let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
+                let flushRequests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
+
+                await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
+                await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
+                await handleDeleteAlertRequests(deleteAlertReqs, inboxDir: inboxDir, state: state)
+                await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
+                await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
             }
         }
-        flushRequestPoller.resume()
+        inboxPoller.resume()
 
         return Handles(
             forensicTimer: forensicTimer,
@@ -921,8 +922,176 @@ enum DaemonTimers {
             livenessTimer: livenessTimer,
             tracegraphPruneTimer: tracegraphPruneTimer,
             tracesPruneTimer: tracesPruneTimer,
-            flushRequestPoller: flushRequestPoller
+            inboxPoller: inboxPoller
         )
+    }
+
+    // MARK: - Inbox request handlers (v1.10.1)
+    //
+    // Each request file is a JSON object with a single `id` field,
+    // optionally accompanied by `reason` for audit-log context. The
+    // handler reads it, applies the mutation through the appropriate
+    // store, then removes the file (always — leaving it would
+    // re-trigger on the next 5 s tick). Failures are logged but
+    // don't block subsequent requests in the same tick.
+
+    private static func handleFlushRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        print("[inbox] flush: \(names.count) request(s) — running enforceDatabaseSizeCapNow")
+        let beforeBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
+        let started = Date()
+        let didRun = await enforceDatabaseSizeCapNow(state: state)
+        for name in names {
+            try? fm.removeItem(atPath: inboxDir + "/" + name)
+        }
+        if didRun {
+            let afterBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
+            let status = StorageFlushStatus(
+                inProgress: false, lastRunAt: started,
+                bytesBefore: beforeBytes, bytesAfter: afterBytes, note: nil
+            )
+            StorageFlushStatus.write(status, to: state.supportDir)
+            print("[inbox] flush sweep done: \(beforeBytes / 1_000_000) MB → \(afterBytes / 1_000_000) MB")
+        } else {
+            print("[inbox] flush sweep skipped — another already in progress")
+        }
+    }
+
+    private static func handleSuppressAlertRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] suppress-alert \(name): malformed payload (expected {\"id\":\"…\"})")
+                continue
+            }
+            let uid = requestOwnerUID(at: path)
+            do {
+                try await state.alertStore.suppress(alertId: id)
+                print("[inbox] suppress-alert id=\(id) uid=\(uid) ok")
+            } catch {
+                print("[inbox] suppress-alert id=\(id) uid=\(uid) failed: \(error)")
+            }
+        }
+    }
+
+    private static func handleUnsuppressAlertRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] unsuppress-alert \(name): malformed payload")
+                continue
+            }
+            let uid = requestOwnerUID(at: path)
+            do {
+                try await state.alertStore.unsuppress(alertId: id)
+                print("[inbox] unsuppress-alert id=\(id) uid=\(uid) ok")
+            } catch {
+                print("[inbox] unsuppress-alert id=\(id) uid=\(uid) failed: \(error)")
+            }
+        }
+    }
+
+    private static func handleDeleteAlertRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] delete-alert \(name): malformed payload")
+                continue
+            }
+            let uid = requestOwnerUID(at: path)
+            do {
+                let removed = try await state.alertStore.delete(alertId: id)
+                print("[inbox] delete-alert id=\(id) uid=\(uid) removed=\(removed)")
+            } catch {
+                print("[inbox] delete-alert id=\(id) uid=\(uid) failed: \(error)")
+            }
+        }
+    }
+
+    private static func handleSuppressCampaignRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            guard let id = readIdRequest(at: path) else {
+                print("[inbox] suppress-campaign \(name): malformed payload")
+                continue
+            }
+            let uid = requestOwnerUID(at: path)
+            // Suppress the campaign-as-alert row (campaigns have a
+            // `maccrab.campaign.*` rule_id and live alongside regular
+            // alerts in alerts.db). Best-effort — pre-v1.8 campaigns
+            // exist only in campaigns.db and have no alerts.db row.
+            try? await state.alertStore.suppress(alertId: id)
+
+            // Fan out: every alert whose campaignId matches this
+            // campaign also gets suppressed. The dashboard used to
+            // do this loop itself; moving it server-side means one
+            // round trip instead of N over file IPC.
+            var fanOut = 0
+            do {
+                let alerts = try await state.alertStore.alerts(
+                    since: Date.distantPast,
+                    severity: nil, suppressed: false, limit: 10_000
+                )
+                for a in alerts where a.campaignId == id {
+                    do {
+                        try await state.alertStore.suppress(alertId: a.id)
+                        fanOut += 1
+                    } catch {
+                        // One bad row shouldn't abort the rest.
+                        print("[inbox] suppress-campaign fan-out id=\(a.id) failed: \(error)")
+                    }
+                }
+            } catch {
+                print("[inbox] suppress-campaign contributors lookup failed: \(error)")
+            }
+
+            // Flip the persistent campaigns.db row so the dashboard's
+            // campaigns list reflects suppressed state across restarts.
+            if let cs = state.campaignStore {
+                try? await cs.setSuppressed(id: id, true)
+            }
+            print("[inbox] suppress-campaign id=\(id) uid=\(uid) fanOut=\(fanOut)")
+        }
+    }
+
+    /// Read a `{"id":"…"}` request file. Returns nil for missing /
+    /// malformed / empty-id payloads so the caller can log + skip.
+    private static func readIdRequest(at path: String) -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = json["id"] as? String,
+              !id.isEmpty
+        else { return nil }
+        return id
+    }
+
+    /// Stat the request file to get the UID of whoever dropped it.
+    /// We log it but don't gate on it — the inbox dir is 1777 by
+    /// design, and on a single-user Mac the uid is just the logged-in
+    /// user. On a multi-user Mac, audit can spot cross-user requests.
+    private static func requestOwnerUID(at path: String) -> Int {
+        var st = stat()
+        if stat(path, &st) == 0 { return Int(st.st_uid) }
+        return -1
     }
 }
 

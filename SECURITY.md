@@ -104,3 +104,15 @@ MacCrab does **not** protect against:
 - State-modifying operations (suppress_alert) are audit-logged
 - Input validation on all parameters (length limits, format checks)
 - Parse errors return generic messages (no request body leakage)
+
+### Release & Distribution Chain
+
+How MacCrab releases reach end-users is itself part of the trust
+boundary — see `RELEASE_PROCESS.md` for the full operator-side
+pipeline.
+
+- Each release DMG is signed with **Developer ID Application: Peter Hanily (`79S425CW99`)**, notarized by Apple, and the notarization ticket is stapled to the DMG before publication.
+- Sparkle auto-updates are gated by an **EdDSA signature** over the DMG bytes. The matching public key (`de+dzPjB…`) is embedded in every shipped `MacCrabApp` Info.plist under `SUPublicEDKey`. A swapped DMG fails verification BEFORE unpacking.
+- The appcast XML is hosted at `https://maccrab.com/appcast.xml` (Cloudflare Pages, source repo `peterhanily/maccrab-site`).
+- End-user verification — `shasum`, `codesign -dvv`, `spctl -a`, `xcrun stapler validate` — is documented step-by-step in `docs/TRUST.md`.
+- Key custody, rollback procedures, and the operator's release preconditions are documented in `RELEASE_PROCESS.md`. Reviewers evaluating the supply-chain posture should start there.

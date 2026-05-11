@@ -472,6 +472,10 @@ public final class V2LiveDataProvider: V2DataProvider {
             try await alertStore.suppress(alertId: id)
             return true
         } catch {
+            if isReadOnlyError(error), queueInboxMutation(prefix: "suppress-alert", id: id) {
+                lastErrorDescription = nil
+                return true
+            }
             lastErrorDescription = describeMutationError(error)
             return false
         }
@@ -486,6 +490,10 @@ public final class V2LiveDataProvider: V2DataProvider {
             try await alertStore.unsuppress(alertId: id)
             return true
         } catch {
+            if isReadOnlyError(error), queueInboxMutation(prefix: "unsuppress-alert", id: id) {
+                lastErrorDescription = nil
+                return true
+            }
             lastErrorDescription = describeMutationError(error)
             return false
         }
@@ -499,6 +507,13 @@ public final class V2LiveDataProvider: V2DataProvider {
         do {
             return try await alertStore.delete(alertId: id)
         } catch {
+            if isReadOnlyError(error), queueInboxMutation(prefix: "delete-alert", id: id) {
+                lastErrorDescription = nil
+                // Return true to flip UI optimistically — the daemon
+                // applies the delete within ~5 s. The row will simply
+                // be gone on the next alerts() refresh.
+                return true
+            }
             lastErrorDescription = describeMutationError(error)
             return false
         }
@@ -510,27 +525,46 @@ public final class V2LiveDataProvider: V2DataProvider {
             return 0
         }
         var count = 0
-        for id in ids {
+        for (idx, id) in ids.enumerated() {
             do {
                 try await alertStore.suppress(alertId: id)
                 count += 1
             } catch {
+                if isReadOnlyError(error) {
+                    // First read-only error → switch the rest of the
+                    // batch (including the failing id) to IPC. If the
+                    // first id is read-only every subsequent one will
+                    // be too — no point trying each one.
+                    var queued = 0
+                    for rem in ids[idx...] {
+                        if queueInboxMutation(prefix: "suppress-alert", id: rem) {
+                            queued += 1
+                        }
+                    }
+                    lastErrorDescription = queued == 0
+                        ? describeMutationError(error)
+                        : nil
+                    return count + queued
+                }
                 lastErrorDescription = describeMutationError(error)
-                // First read-only error = abort the loop. Repeating
-                // for every id would just spam the same error.
-                if isReadOnlyError(error) { break }
             }
         }
         return count
     }
 
-    /// Suppress a campaign + every contributing alert. The campaign
-    /// itself is stored as an alert with rule_id `maccrab.campaign.*`,
-    /// so suppressing it requires hitting BOTH the alert-side row
-    /// (so the campaign card greys out) AND every alert with
-    /// `campaignId == id` (so the contributors stop firing). The
-    /// CampaignStore.Record is also flipped to suppressed so the
-    /// dashboard's campaigns list reflects state across restarts.
+    /// Suppress a campaign + every contributing alert.
+    ///
+    /// The campaign itself is stored as an alert with rule_id
+    /// `maccrab.campaign.*`, so suppressing it requires hitting BOTH
+    /// the alert-side row (so the campaign card greys out) AND every
+    /// alert with `campaignId == id` (so the contributors stop firing).
+    /// The CampaignStore row is also flipped so the dashboard's
+    /// campaigns list reflects state across restarts.
+    ///
+    /// In dev (user-owned DB), the loop runs client-side. In release
+    /// (root-owned DB), we drop a single `suppress-campaign-*` request
+    /// and let the daemon do the fan-out — one round-trip over file
+    /// IPC instead of N.
     public func suppressCampaign(id: String) async -> Int {
         guard let alertStore else {
             lastErrorDescription = "no alert store"
@@ -544,9 +578,13 @@ public final class V2LiveDataProvider: V2DataProvider {
             try await alertStore.suppress(alertId: id)
             count += 1
         } catch {
-            // Read-only DB — give up early; subsequent calls would
-            // re-error anyway.
             if isReadOnlyError(error) {
+                if queueInboxMutation(prefix: "suppress-campaign", id: id) {
+                    lastErrorDescription = nil
+                    // Daemon does the fan-out + the campaigns.db flip.
+                    // Return 1 so the caller knows the request landed.
+                    return 1
+                }
                 lastErrorDescription = describeMutationError(error)
                 return 0
             }
@@ -583,6 +621,55 @@ public final class V2LiveDataProvider: V2DataProvider {
             }
         }
         return count
+    }
+
+    /// Drop a JSON mutation request into <dataDir>/inbox/ for the
+    /// root daemon to pick up. Files are named `<prefix>-<id>.json` so
+    /// re-clicking a suppress button coalesces into one file (idempotent).
+    /// The daemon polls every 5 s; UI flips optimistically and the
+    /// next 5 s refresh tick observes the actual flipped row.
+    ///
+    /// Pre-v1.10.1, mutations against a root-owned alerts.db just
+    /// failed with SQLITE_READONLY and the user was told to "use
+    /// `maccrabctl alerts suppress`" — a subcommand that does not
+    /// exist. This is the real fix.
+    private func queueInboxMutation(prefix: String, id: String) -> Bool {
+        guard let dir = dataDir else { return false }
+        let inboxDir = dir + "/inbox"
+        let fm = FileManager.default
+        // The daemon creates the inbox dir at boot with mode 1777, so
+        // typically it exists. If we got here on a fresh install whose
+        // sysext hasn't booted yet, try to create it ourselves (will
+        // succeed in dev, fail under <Library/Application Support>
+        // without elevation — in which case the request can't ship).
+        if !fm.fileExists(atPath: inboxDir) {
+            try? fm.createDirectory(
+                atPath: inboxDir, withIntermediateDirectories: true
+            )
+        }
+        // Sanitize the id for use as a filename. Alert ids are UUIDs
+        // in practice but defense-in-depth in case a future id format
+        // contains path separators.
+        let safeId = id.replacingOccurrences(of: "/", with: "_")
+                       .replacingOccurrences(of: "..", with: "_")
+        let path = inboxDir + "/\(prefix)-\(safeId).json"
+        let payload: [String: Any] = [
+            "id": id,
+            "queuedAt": ISO8601DateFormatter().string(from: Date()),
+            "source": "MacCrabApp"
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return false
+        }
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch {
+            // If the inbox dir doesn't exist + we couldn't create it,
+            // we end up here. Surface in lastErrorDescription so the
+            // UI can show something more useful than silent failure.
+            return false
+        }
     }
 
     /// Trigger a one-shot refresh of all threat-intel feeds. Shells out
@@ -737,9 +824,13 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     private func describeMutationError(_ error: Error) -> String {
         if isReadOnlyError(error) {
-            return "Database is read-only. The daemon owns this file as root, so the dashboard can't mutate it directly. Use `maccrabctl alerts suppress <id>` instead, or run the dashboard with elevated privileges."
+            // We only land here when the IPC fallback ALSO failed —
+            // i.e. the inbox dir doesn't exist or isn't writable.
+            // Likely cause: fresh install where the sysext hasn't
+            // booted, or a corrupted Application Support tree.
+            return "Could not apply mutation: alerts.db is read-only and the daemon's IPC inbox at `/Library/Application Support/MacCrab/inbox/` isn't writable. Restart the daemon (re-open MacCrab.app and reactivate the System Extension) to re-create the inbox directory."
         }
-        return "suppress: \(error)"
+        return "mutation failed: \(error)"
     }
 
     // MARK: - Path probing
