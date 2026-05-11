@@ -104,7 +104,7 @@ Once running, MacCrab gives you:
 
 ## Privacy
 
-MacCrab has **zero telemetry** and no phone-home behavior. All data is collected and stored locally in SQLite. Nothing leaves your machine unless you explicitly enable an optional feature (LLM backends, threat intel feeds, or fleet telemetry) -- and when you do, usernames, private IPs, hostnames, and credentials are automatically redacted before transmission.
+MacCrab has **zero telemetry** and no phone-home behavior. All data is collected and stored locally in SQLite. Nothing leaves your machine unless you explicitly enable an optional feature (LLM backends, threat intel feeds, or fleet telemetry) -- and when you do, the outbound path enforces a **TLS 1.2 floor**, supports **optional SPKI certificate pinning** per provider, and runs every payload through `LLMSanitizer` which redacts API keys, user paths, hostnames + computer names, RFC1918 / link-local / loopback IPs (v4 + v6), email addresses, and CDHashes before transmission. The full sanitiser scope is documented under [Detection Stack → LLM Reasoning Backends](#detection-stack).
 
 Read the full [Privacy Policy](PRIVACY.md).
 
@@ -352,9 +352,41 @@ Monitors AI coding tool processes for unsafe behavior. Identifies Claude Code, C
 </details>
 
 <details>
+<summary><strong>Agent Traces — intent ↔ effect correlation (click to expand)</strong></summary>
+
+Agent Traces (v1.9, expanded in v1.10) closes the gap between what an AI coding agent *said* it was doing (its LLM prompts, tool calls, and OpenTelemetry spans) and what its child processes *actually* did at the kernel level (Endpoint Security exec / file / network events).
+
+This brings AgentSight-style correlation ([arXiv:2508.02736](https://arxiv.org/abs/2508.02736), which implements the idea on Linux via eBPF) to macOS via the Endpoint Security framework plus a built-in OTLP receiver.
+
+**How it works:**
+
+1. **TRACEPARENT in process env** — when an AI coding tool spawns a child, MacCrab's ES collector reads the `TRACEPARENT` W3C trace-context value from the exec env block. The trace ID binds every descendant process to the originating LLM turn.
+2. **Loopback OTLP receiver** — MacCrab listens on `127.0.0.1:4318` (the OTel-canonical OTLP/HTTP port) for spans emitted by the AI tool's instrumentation. Loopback only — never routable from off-host. Off by default; enable from **Settings → Agent Traces** in the dashboard, or set `receiverEnabled: true` in `<supportDir>/agent_traces_config.json`.
+3. **Span sanitisation** — incoming OTLP spans pass through `OTLPAttributeSanitizer` before storage: prompt text, file paths, command output, and any value matching a credential / API-key shape gets redacted. Span IDs + structural attributes survive so correlation still works.
+4. **Causal graph storage** — spans + bound kernel events land in `tracegraph.db` (SQLite, AES-GCM column-level encryption, `0o660`). Each trace gets a Merkle root over its members for tamper-evident export.
+5. **Investigation surface** — the dashboard's Investigation → TraceGraph workspace renders the trace as a hub-and-spoke graph (anchor in centre, members on a ring); each member shows what kernel side-effect ran under that span. The `maccrabctl trace export` CLI emits a signed `.maccrabtrace` bundle that `verify_bundle` (MCP) or `maccrabctl trace verify` can re-check offline.
+
+**Five MCP tools** (`get_traces`, `get_trace_detail`, `hunt_trace`, `verify_bundle`, `trace_from_event`) let an AI assistant pivot from any single event back to its containing trace and the agent turn that produced it.
+
+</details>
+
+<details>
 <summary><strong>LLM Reasoning Backends (click to expand)</strong></summary>
 
-MacCrab integrates pluggable LLM backends for threat hunting, investigation summaries, and adaptive rule generation. All features degrade gracefully when no backend is configured. Cloud providers receive automatic privacy sanitization (usernames, private IPs, and hostnames are redacted before transmission).
+MacCrab integrates pluggable LLM backends for threat hunting, investigation summaries, and adaptive rule generation. All features degrade gracefully when no backend is configured.
+
+**Outbound traffic posture** — every cloud-LLM request goes through `SecureURLSession`, which enforces a **TLS 1.2 minimum** floor and, when the provider has known SPKI pins configured, optional **certificate pinning** against SHA-256 SPKI hashes of the leaf or intermediate cert. Strict pinning is opt-in via `MACCRAB_TLS_PINNING=strict`; without it the system trust chain still applies and TLS 1.2 enforcement remains on for every provider.
+
+**Sanitiser scope** — `LLMSanitizer.sanitize(_:)` runs before any payload leaves the box and redacts:
+
+- **API keys / bearer tokens** — Anthropic (`sk-ant-…`), OpenAI (`sk-…`), Stripe-style (`pk_…`/`sk_…`), generic high-entropy 32–64 char tokens, `Bearer <token>` headers
+- **User paths** — `/Users/<name>/…` → `/Users/<redacted>/…`; same for `~`-form paths
+- **Computer + host names** — local `gethostname()` value + any `*.local` / `*.lan` reference
+- **Private IPs** — IPv4 RFC1918 (`10.*`, `172.16-31.*`, `192.168.*`) + link-local + loopback; IPv6 ULA (`fc00::/7`) + link-local (`fe80::/10`)
+- **Email addresses** — RFC-5322 shape
+- **CDHashes** — 40-char hex strings (over-redacts but preferred to leaking process identity)
+
+The sanitiser runs even for the local Ollama backend — defense-in-depth in case a future config error routes a "local" model through a proxy.
 
 | Backend | Config | Use case |
 |---------|--------|----------|
@@ -536,6 +568,23 @@ Additional views: Settings > AI Backend (LLM provider configuration), Response A
 ---
 
 ## What's New
+
+<details>
+<summary><strong>v1.10 — workspace dashboard, visual TraceGraph, Agent Traces, hardened mutation IPC (2026-05)</strong></summary>
+
+The v1.10 line replaces the v1 SwiftUI dashboard with a workspace-based V2 design (Overview / Alerts / Investigation / Intelligence / Protection / System), ships a real visual TraceGraph, and folds in 280+ pre-ship audit-fix findings across security, performance, scalability, localization, and daemon correctness.
+
+- **v1.10.1** — Hotfix for a regression that affected every notarized install since v1.3: dashboard suppress / unsuppress / delete actions and campaign suppress all silently failed because the sysext owns `alerts.db` as root while the dashboard runs as the user (`SQLITE_READONLY`). The error toast pointed at `maccrabctl alerts suppress <id>` (not a real subcommand) and `sudo open MacCrab.app` (LaunchServices ignores it). Fix routes mutations through the existing `/Library/Application Support/MacCrab/inbox/` file-IPC channel — sysext poller now drains `suppress-alert-*.json`, `unsuppress-alert-*.json`, `delete-alert-*.json`, and `suppress-campaign-*.json` request files. Poll interval drops 30 s → 5 s for interactive feel. Campaign-suppress fan-out moves server-side. README rule-count table now auto-generates from the YAML tree (`make readme-coverage`). New `RELEASE_PROCESS.md` documents the operator-side signing / notarization / Sparkle pipeline.
+- **v1.10.0** — V2 dashboard with six workspaces, multi-select alert triage, bulk-suppress, campaign suppress, suppressions viewer with lift-suppression, threat-intel feed refresh, custom feed + LLM key reveal-folder shortcuts. Visual TraceGraph view (hub-and-spoke layout with anchor at centre + members on concentric rings). New `tracegraph.db` (SQLite causal-graph store with the same column-level AES-GCM encryption as the other stores). Five new MCP trace tools (`get_traces`, `get_trace_detail`, `hunt_trace`, `verify_bundle`, `trace_from_event`). `.maccrabtrace` signed bundle export/verify via `maccrabctl trace`. CLIs (`maccrabctl`, `maccrab-mcp`) now bundle inside `MacCrab.app` so Sparkle in-place updates keep the terminal CLIs current.
+
+</details>
+
+<details>
+<summary><strong>v1.9 — Agent Traces (intent ↔ effect correlation), loopback OTLP receiver (2026-05)</strong></summary>
+
+v1.9 introduced Agent Traces — the AgentSight-inspired feature that correlates an AI coding agent's stated intent (LLM prompts, tool calls, OTel spans) against the kernel-level effects (ES exec / file / network events) its child processes actually produce on the host. AgentSight ([arXiv:2508.02736](https://arxiv.org/abs/2508.02736)) implements this on Linux via eBPF; MacCrab brings the idea to macOS via Endpoint Security plus a loopback OTLP receiver on `127.0.0.1:4318`. W3C `TRACEPARENT` propagation through the exec env block binds every descendant process to the originating LLM turn. The bundled 26-finding pre-ship audit-fix pass tightened the sysext's resource accounting and prune cadences.
+
+</details>
 
 <details>
 <summary><strong>v1.7 — operator self-service, observability, hot-fix discipline (2026-04)</strong></summary>
