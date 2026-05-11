@@ -204,6 +204,22 @@ elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
         echo "  ! Appcast generate failed — fix Sparkle sign_update + private key and retry" >&2
     fi
     rm -f "$APPCAST_ITEM"
+
+    # Step 6b: Push the freshly built release.json into the site repo.
+    # publish-release-json.sh has existed since v1.8 (created exactly
+    # to fix a class of v1.7.12 / 929-tests post-release drift bug) but
+    # was never wired into release.sh, so https://maccrab.com/release.json
+    # silently lagged the actual release every cycle. v1.10.1 closed
+    # that gap by adding this step. The site's JSON-LD softwareVersion +
+    # the JS-rendered version pill both read this file.
+    echo ""
+    echo "Step 6b: Publishing release.json to site..."
+    if SITE_REPO_TOKEN="$SITE_REPO_TOKEN" SITE_REPO="$SITE_REPO" \
+            "$SCRIPT_DIR/publish-release-json.sh"; then
+        echo "  ✓ release.json published; maccrab.com version pill will refresh on next page load"
+    else
+        echo "  ! release.json publish failed — run 'scripts/publish-release-json.sh' manually" >&2
+    fi
 else
     echo ""
     echo "  Step 6/6: Skipping appcast publish."
@@ -211,6 +227,8 @@ else
         echo "  → SITE_REPO_TOKEN env var not set. Existing users will NOT receive the update."
         echo "    To publish: SITE_REPO_TOKEN=<pat> scripts/publish-appcast-entry.sh \\"
         echo "                  --item <(scripts/generate-appcast-entry.sh --dmg $DMG_PATH --version $VERSION)"
+        echo "    Also remember: SITE_REPO_TOKEN=<pat> scripts/publish-release-json.sh"
+        echo "                  (so maccrab.com/release.json stops lagging the release)"
     fi
 fi
 
