@@ -683,6 +683,54 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     }
 
     public func listTraces(limit: Int) async throws -> [Trace] {
+        try await listTraces(limit: limit, status: nil)
+    }
+
+    /// v1.11.1 (audit perf MEDIUM): status-filtered listTraces. Pushes
+    /// the filter into SQL — pre-fix `handleGetTraces` did
+    /// `raw.filter { $0.status == f }` AFTER the limit, so a caller
+    /// asking for `limit:25 status:open` could get fewer than 25
+    /// results when more existed.
+    public func listTraces(limit: Int, status: String?) async throws -> [Trace] {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        let baseSelect = """
+        SELECT id, title, anchor_event_id, root_entity_id, severity, confidence,
+               status, created_at, updated_at, summary_json, attack_json,
+               evidence_bundle_status, daemon_version, ruleset_version,
+               policy_id, policy_version, policy_sha256, policy_snapshot_json,
+               trace_signing_key_mode, replay_scope, attribution_override_policy
+          FROM traces
+        """
+        let sql: String
+        if status != nil {
+            sql = baseSelect + " WHERE status = ? ORDER BY created_at DESC LIMIT ?"
+        } else {
+            sql = baseSelect + " ORDER BY created_at DESC LIMIT ?"
+        }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        if let status {
+            sqlite3_bind_text(stmt, 1, status, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 2, Int32(limit))
+        } else {
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+        }
+        var out: [Trace] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(try decodeTraceRow(stmt!))
+        }
+        return out
+    }
+
+    /// v1.11.1 (audit perf LOW): SQL-side title substring search.
+    /// Pre-fix `hunt_trace` listed up to 500 candidates then
+    /// substring-filtered in Swift; pushing to SQL `LIKE` lets the
+    /// query planner use an index when present and skips
+    /// deserialization for non-matches.
+    public func huntTraces(query: String, limit: Int) async throws -> [Trace] {
         guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
         let sql = """
         SELECT id, title, anchor_event_id, root_entity_id, severity, confidence,
@@ -691,7 +739,8 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                policy_id, policy_version, policy_sha256, policy_snapshot_json,
                trace_signing_key_mode, replay_scope, attribution_override_policy
           FROM traces
-         ORDER BY created_at DESC
+         WHERE LOWER(title) LIKE ?
+         ORDER BY updated_at DESC
          LIMIT ?
         """
         var stmt: OpaquePointer?
@@ -699,12 +748,69 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(limit))
+        let pattern = "%\(query.lowercased())%"
+        sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
         var out: [Trace] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             out.append(try decodeTraceRow(stmt!))
         }
         return out
+    }
+
+    /// v1.11.1 (audit perf HIGH): O(1) member count by trace id. Pre-fix
+    /// `handleGetTraces` called `loadTrace` per row just to read
+    /// `members.count` — that's 2 SQL queries + full member-array
+    /// deserialization for a one-line list endpoint. Up to 400 SQL
+    /// queries on a 200-trace listing.
+    public func memberCount(traceId: String) async throws -> Int {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        let sql = "SELECT COUNT(*) FROM trace_membership WHERE trace_id = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, traceId, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// v1.11.1 (audit perf HIGH): "which trace contains this entity"
+    /// in O(1) instead of O(traces × members). Used by MCP
+    /// `trace_from_event` which previously listed 200 traces and
+    /// linearly scanned each one's members.
+    ///
+    /// Returns the most recently-updated trace whose membership table
+    /// references the entity, OR whose anchor event id matches.
+    public func traceContaining(entityId: String) async throws -> Trace? {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        let sql = """
+        SELECT t.id, t.title, t.anchor_event_id, t.root_entity_id, t.severity, t.confidence,
+               t.status, t.created_at, t.updated_at, t.summary_json, t.attack_json,
+               t.evidence_bundle_status, t.daemon_version, t.ruleset_version,
+               t.policy_id, t.policy_version, t.policy_sha256, t.policy_snapshot_json,
+               t.trace_signing_key_mode, t.replay_scope, t.attribution_override_policy
+          FROM traces t
+         WHERE t.id IN (
+                 SELECT trace_id FROM trace_membership WHERE entity_id = ?
+                 UNION
+                 SELECT id FROM traces WHERE anchor_event_id = ?
+               )
+         ORDER BY t.updated_at DESC
+         LIMIT 1
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, entityId, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, entityId, -1, SQLITE_TRANSIENT)
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            return try decodeTraceRow(stmt!)
+        }
+        return nil
     }
 
     // MARK: - Rule hits / replay / chain

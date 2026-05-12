@@ -398,17 +398,26 @@ declare -a SNAPSHOT_PAIRS=(
     "Sources/MacCrabCore/AIGuard/MCPBehavioralBaseline.swift:BaselineSnapshot:MCPBaselineService.readSnapshot"
 )
 
+if [[ ${#SNAPSHOT_PAIRS[@]} -eq 0 ]]; then
+    err "PASS 6: SNAPSHOT_PAIRS is empty — pass would silent-green. Add the curated daemon-snapshot list."
+fi
+
+pass6_errors_before=$ERRORS
 for entry in "${SNAPSHOT_PAIRS[@]}"; do
     file="${entry%%:*}"
     rest="${entry#*:}"
     typename="${rest%%:*}"
     token="${rest##*:}"
+    # Curated entries — a missing file or renamed type means the audit
+    # is stale, not that the bug class went away. v1.10.2: promote
+    # warn → err so the pass actually fails, mirroring Pass 15's
+    # "fail loud if zero matches" discipline (v1.9.0 AAR finding).
     if [[ ! -f "$file" ]]; then
-        warn "PASS 6: $file missing — snapshot list out of date"
+        err "PASS 6: $file missing — snapshot list out of date (refresh SNAPSHOT_PAIRS)"
         continue
     fi
     if ! grep -q "public struct $typename" "$file"; then
-        warn "PASS 6: $typename not found in $file (renamed?)"
+        err "PASS 6: $typename not found in $file (renamed? refresh SNAPSHOT_PAIRS)"
         continue
     fi
     consumer_count=$(grep -rE "$token\b" Sources/MacCrabApp \
@@ -419,7 +428,7 @@ for entry in "${SNAPSHOT_PAIRS[@]}"; do
     fi
 done
 
-if [[ $ERRORS -eq 0 ]]; then
+if [[ $ERRORS -eq $pass6_errors_before ]]; then
     ok "Daemon snapshot types all have at least one MacCrabApp consumer"
 fi
 
@@ -885,7 +894,11 @@ if [[ "$traces_db_actor_count" -gt 1 ]]; then
     err "More than 1 actor holds a long-lived traces.db handle (current: $traces_db_actor_count). Mirror of v1.6.22 CampaignStore bug — consolidate into TraceStore:"
     echo "$traces_db_actors" | sed 's/^/    /' >&2
 elif [[ "$traces_db_actor_count" -eq 0 ]]; then
-    info "Pass 12: no traces.db opener present (v1.9 feature not yet wired in this branch)"
+    # v1.10.2: previously `info` — silent-green. Agent Traces shipped
+    # in v1.9.0 and TraceStore is a load-bearing dep of TraceMaterializer
+    # (DaemonSetup.swift:484-498). Zero matches now means the type was
+    # renamed or the daemon target was reorganized — failed wire-up.
+    err "Pass 12: no traces.db opener present. TraceStore is required from v1.9.0 onward — find via 'rg \"actor TraceStore\" Sources/'."
 else
     ok "traces.db long-lived connection count at audited target (1: TraceStore)"
 fi
@@ -958,34 +971,80 @@ section "PASS 14 — enrichment-key ↔ enricher coverage"
 # v1.9 PR-5 surface. Add new entries here when a rule starts matching
 # on a new enrichment key — the audit then verifies a producer exists.
 declare -a PASS14_KEYS=(
-    "agent_trace_id"
-    "agent_span_id"
-    "agent_tool"
+    # v1.10.2: Pass 14's contract is "every key listed here must be
+    # referenced by ≥1 rule (snake_case OR Sigma CamelCase) AND
+    # produced by ≥1 Swift writer". Keys that are info-only analyst
+    # context (`agent_trace_id`, `agent_span_id`, `agent_tool` — these
+    # are surfaced in alert detail / TraceStore columns but are NOT
+    # rule predicates) don't fit the contract; including them caused
+    # spurious failures. They remain validated by Pass 7 (panel
+    # richness audit) and the V2 alert-inspector tests.
     "machine_agent_confidence"
 )
 
+if [[ ${#PASS14_KEYS[@]} -eq 0 ]]; then
+    err "Pass 14: PASS14_KEYS is empty — pass would silent-green. Add curated enrichment keys."
+fi
+
+# v1.10.2: Sigma rules use CamelCase field names (MachineAgentConfidence,
+# AgentTraceId, etc.) which the rule compiler maps to snake_case
+# enrichment keys via SIGMA_FIELD_MAP in Compiler/compile_rules.py.
+# Pass 14 needs to recognize either form when checking rule references,
+# else snake-case-only greps silent-green even when Sigma mappings exist.
+snake_to_camel() {
+    local out=""
+    local part
+    IFS='_' read -ra parts <<< "$1"
+    for part in "${parts[@]}"; do
+        out+="$(printf '%s' "$part" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+    done
+    printf '%s' "$out"
+}
+
 pass14_orphans=()
+pass14_unreferenced=()
 for key in "${PASS14_KEYS[@]}"; do
-    # Is the key referenced by any rule?
-    if ! grep -rq "${key}" Rules/ --include='*.yml' 2>/dev/null; then
-        # Not used by any rule — fine, don't flag (ungated keys are
-        # acceptable for forward-compat).
+    key_camel=$(snake_to_camel "$key")
+    # Is the key referenced by any rule, in either snake_case OR Sigma
+    # CamelCase form?
+    if ! grep -rqE "${key}|${key_camel}" Rules/ --include='*.yml' 2>/dev/null; then
+        # v1.10.2: previously `continue` — silent-green for typoed keys.
+        # The PASS14_KEYS list is curated against the v1.9 enrichment
+        # contract; an entry that no rule references (in either form) is
+        # either a typo in the script OR a rule we forgot to ship.
+        pass14_unreferenced+=("$key")
         continue
     fi
-    # Does anything under Sources/ write the key?
-    if grep -rq "enrichments\[\"${key}\"\]\|EnrichmentKey\.${key}\|\"${key}\":" \
+    # Does anything under Sources/ write or reference the key?
+    # v1.10.2: previously matched only the JSON-style enrichments-dict
+    # access patterns, which missed v1.9 Agent Traces enrichments that
+    # land as SQL columns (`machine_agent_confidence` in events.db) and
+    # as Swift constants (`public static let confidence =
+    # "machine_agent_confidence"`). Broaden to: any quoted occurrence
+    # in Swift, OR the legacy enrichments-dict / EnrichmentKey
+    # patterns. Either form (snake_case or CamelCase) counts.
+    if grep -rqE "enrichments\[\"${key}\"\]|EnrichmentKey\.${key}|\"${key}\"|\"${key_camel}\"" \
             Sources/ --include='*.swift' 2>/dev/null; then
         continue
     fi
     pass14_orphans+=("$key")
 done
 
+if [[ ${#pass14_unreferenced[@]} -gt 0 ]]; then
+    err "Pass 14: ${#pass14_unreferenced[@]} curated key(s) NOT referenced by any rule (typo in PASS14_KEYS or missing rule):"
+    for k in "${pass14_unreferenced[@]}"; do
+        echo "    $k" >&2
+    done
+fi
+
 if [[ ${#pass14_orphans[@]} -gt 0 ]]; then
     err "Pass 14: ${#pass14_orphans[@]} enrichment key(s) referenced by rules but not produced by any Swift writer:"
     for k in "${pass14_orphans[@]}"; do
         echo "    $k" >&2
     done
-else
+fi
+
+if [[ ${#pass14_unreferenced[@]} -eq 0 && ${#pass14_orphans[@]} -eq 0 ]]; then
     ok "Pass 14: all rule-referenced enrichment keys have at least one Swift producer"
 fi
 

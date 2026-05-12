@@ -59,6 +59,10 @@ compile-rules:
 	@python3 Compiler/compile_rules.py \
 		--input-dir Rules/ \
 		--output-dir $(RULES_DIR) 2>&1 | tail -1
+	@# v1.11.1: compile any YAML graph rules to their JSON siblings
+	@# under Rules/graph/. JSON is canonical; YAML is convenience.
+	@python3 Compiler/compile_graph_rules.py \
+		--input-dir Rules/graph --output-dir Rules/graph 2>&1 | tail -1
 	@mkdir -p "$(HOME)/Library/Application Support/MacCrab/compiled_rules/sequences"
 	@cp -f $(RULES_DIR)/*.json "$(HOME)/Library/Application Support/MacCrab/compiled_rules/" 2>/dev/null || true
 	@cp -f $(RULES_DIR)/sequences/*.json "$(HOME)/Library/Application Support/MacCrab/compiled_rules/sequences/" 2>/dev/null || true

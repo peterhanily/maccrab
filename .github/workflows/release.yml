@@ -114,33 +114,40 @@ jobs:
           cp README.md LICENSE CONTRIBUTING.md dist/maccrab/
           cd dist && tar czf maccrab-${{ github.ref_name }}-macos-arm64.tar.gz maccrab/
 
-      - name: Update Homebrew formula version and SHA256
+      - name: Update Homebrew cask version and SHA256
         run: |
           DMG_PATH=$(ls .build/MacCrab-v*.dmg 2>/dev/null | head -1)
           CLEAN_VERSION="${VERSION#v}"
-          if [ -n "$DMG_PATH" ]; then
-            SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
-            echo "DMG SHA256: $SHA"
-            # Update version
-            sed -i '' "s/version \".*\"/version \"$CLEAN_VERSION\"/" homebrew/maccrab.rb
-            # Update sha256 (replace :no_check or existing hash)
-            sed -i '' "s/sha256 .*/sha256 \"$SHA\"/" homebrew/maccrab.rb
-            echo "Updated homebrew/maccrab.rb to v$CLEAN_VERSION (sha256: $SHA)"
-            cat homebrew/maccrab.rb | head -3
-          else
-            echo "No DMG found — skipping Homebrew update"
+          if [ -z "$DMG_PATH" ]; then
+            echo "No DMG found — Homebrew update step needs the built artifact" >&2
+            exit 1
           fi
+          SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
+          echo "DMG SHA256: $SHA"
+          # v1.10.2 fix (audit BLOCKER): bump BOTH cask files. Pre-fix the
+          # workflow only updated homebrew/maccrab.rb; Casks/maccrab.rb is
+          # the canonical file Homebrew reads via the tap, and the two had
+          # drifted by 40+ lines. Same shape as the v1.6.5→v1.6.13 9-stale-
+          # release issue that release.sh fixed locally — CI hadn't caught up.
+          for FORMULA in Casks/maccrab.rb homebrew/maccrab.rb; do
+            sed -i '' "s/version \".*\"/version \"$CLEAN_VERSION\"/" "$FORMULA"
+            sed -i '' "s/sha256 .*/sha256 \"$SHA\"/" "$FORMULA"
+            echo "Updated $FORMULA to v$CLEAN_VERSION (sha256: $SHA)"
+          done
 
-      - name: Commit Homebrew formula update
+      - name: Commit Homebrew cask update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet homebrew/maccrab.rb; then
-            echo "No Homebrew formula changes to commit"
+          if git diff --quiet Casks/maccrab.rb homebrew/maccrab.rb; then
+            echo "No cask changes to commit"
           else
-            git add homebrew/maccrab.rb
-            git commit -m "chore: update Homebrew formula to ${VERSION#v}"
-            git push origin HEAD:main || echo "Could not push formula update — manual update needed"
+            git add Casks/maccrab.rb homebrew/maccrab.rb
+            git commit -m "chore: update Homebrew cask to ${VERSION#v}"
+            # v1.10.2: removed the silent `|| echo "..."` swallow so a push
+            # failure surfaces as a workflow failure rather than going to
+            # logs only.
+            git push origin HEAD:main
           fi
 
       - name: Create Release

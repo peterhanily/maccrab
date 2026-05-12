@@ -73,6 +73,15 @@ enum SignalHandlers {
                     // by the dashboard) takes effect without a daemon
                     // restart. v1.8.0 expanded this from a single (cap, ret)
                     // pair to per-tier {events, alerts, campaigns} budgets.
+                    // v1.11.0: reload OS-notification config so the
+                    // SettingsView toggle/picker takes effect on the
+                    // next notification without a daemon restart.
+                    let notifConfig = loadAlertNotificationConfig(supportDir: state.supportDir)
+                    let resolved: Severity = notifConfig.enabled
+                        ? notifConfig.minSeverity : .critical
+                    await state.notifier.setMinimumSeverity(resolved)
+                    print("[SIGHUP] Alert-notification config reloaded: enabled=\(notifConfig.enabled), minSeverity=\(notifConfig.minSeverity.rawValue)")
+
                     let freshConfig = DaemonConfig.load(from: state.supportDir)
                     let old = state.storage
                     var newStorage = freshConfig.storage

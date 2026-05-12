@@ -272,6 +272,35 @@ public actor TraceStore {
 
     // MARK: - API
 
+    /// Batch-insert spans inside a single transaction.
+    ///
+    /// v1.11.1 (audit perf HIGH): pre-fix `OTLPReceiver` called
+    /// `insertSpan` per span inside the request handler. WAL mode means
+    /// each INSERT is its own implicit COMMIT + fsync — at 500-1000
+    /// spans per OTLP request that's 500-1000 fsyncs / request body.
+    /// Wrapping the loop in `BEGIN; ...; COMMIT;` collapses to a single
+    /// COMMIT + fsync. Returns (succeeded, failed) counts so the
+    /// receiver can keep the per-span error metric accurate.
+    @discardableResult
+    public func insertSpans(_ records: [SpanRecord]) throws -> (succeeded: Int, failed: Int) {
+        guard !records.isEmpty else { return (0, 0) }
+        guard let db else { throw TraceStoreError.queryFailed("db not open") }
+        var succeeded = 0
+        var failed = 0
+        sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
+        for record in records {
+            do {
+                try insertSpan(record)
+                succeeded += 1
+            } catch {
+                failed += 1
+                // Don't let one bad span abort the whole batch.
+            }
+        }
+        sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        return (succeeded, failed)
+    }
+
     /// Insert (or replace) a single sanitised span.
     /// Caller must have already run the receiver-side sanitiser over
     /// `record.attributesJson`.

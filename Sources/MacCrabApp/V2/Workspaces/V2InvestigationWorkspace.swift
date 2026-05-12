@@ -355,7 +355,11 @@ struct V2InvestigationWorkspace: View {
                                 .foregroundStyle(V2Theme.mutedText)
                         }
                         Spacer()
-                        Image(systemName: "chevron.right")
+                        // v1.11.0 (audit UX MEDIUM): use .forward variant
+                        // so the chevron mirrors under RTL locales
+                        // (Arabic, Hebrew). The .right variant is
+                        // direction-locked and looks broken in RTL.
+                        Image(systemName: "chevron.forward")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(V2Theme.mutedText)
                     }
@@ -1448,13 +1452,26 @@ struct V2InvestigationWorkspace: View {
                             .truncationMode(.middle)
                     }
                     HStack(spacing: 8) {
-                        Label("\(trace.nodeCount)n", systemImage: "circle.dotted")
-                            .font(V2Theme.meta())
-                            .foregroundStyle(V2Theme.mutedText)
-                        Label("\(trace.edgeCount)e", systemImage: "arrow.up.right.circle")
-                            .font(V2Theme.meta())
-                            .foregroundStyle(V2Theme.mutedText)
-                        Text("•").foregroundStyle(V2Theme.tertiaryText)
+                        // v1.11.0 (audit functionality MEDIUM): only render
+                        // node/edge counts when populated. `toV2Trace`
+                        // hardcodes both to 0 because the list view doesn't
+                        // run a per-trace `loadTrace` round-trip — the
+                        // detail view does. Until counts are persisted on
+                        // the Trace row at materialization time, hide them
+                        // rather than render a misleading "0n / 0e" badge.
+                        if trace.nodeCount > 0 {
+                            Label("\(trace.nodeCount)n", systemImage: "circle.dotted")
+                                .font(V2Theme.meta())
+                                .foregroundStyle(V2Theme.mutedText)
+                        }
+                        if trace.edgeCount > 0 {
+                            Label("\(trace.edgeCount)e", systemImage: "arrow.up.right.circle")
+                                .font(V2Theme.meta())
+                                .foregroundStyle(V2Theme.mutedText)
+                        }
+                        if trace.nodeCount > 0 || trace.edgeCount > 0 {
+                            Text("•").foregroundStyle(V2Theme.tertiaryText)
+                        }
                         Text("updated \(V2TimeFormat.relative(trace.lastUpdated))")
                             .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.mutedText)
@@ -1614,8 +1631,15 @@ struct V2InvestigationWorkspace: View {
             }
             HStack(spacing: 8) {
                 V2StatusChip(trace.severityHint.label, kind: trace.severityHint.chipKind)
-                V2StatusChip("\(trace.nodeCount) nodes", kind: .neutral)
-                V2StatusChip("\(trace.edgeCount) edges", kind: .neutral)
+                // v1.11.0 (audit functionality MEDIUM): same gate as the
+                // list view above — only render counts when actually
+                // populated to avoid misleading "0 nodes / 0 edges" chips.
+                if trace.nodeCount > 0 {
+                    V2StatusChip("\(trace.nodeCount) nodes", kind: .neutral)
+                }
+                if trace.edgeCount > 0 {
+                    V2StatusChip("\(trace.edgeCount) edges", kind: .neutral)
+                }
             }
             V2InspectorSection("Anchor verdict") {
                 Text(trace.anchorVerdict)

@@ -36,7 +36,7 @@ public actor ReplayEngine {
         "RateLimiter",
     ]
 
-    public static let engineVersion = "1.10.0"
+    public static var engineVersion: String { MacCrabVersion.current }
 
     private let replayer: RulesetReplayer
     private let engineVersion: String

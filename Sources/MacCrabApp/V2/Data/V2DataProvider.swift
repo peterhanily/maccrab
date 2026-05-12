@@ -46,6 +46,11 @@ public protocol V2DataProvider: AnyObject {
     func packages() async -> [V2MockPackage]
     func extensions() async -> [V2MockExtension]
 
+    /// v1.11.1 (M2 backlog): operator-configured external sinks
+    /// (webhooks, SIEM endpoints, file outputs, object stores).
+    /// Empty when no daemon_config.json / notifications.json exists.
+    func integrations() async -> [V2MockIntegration]
+
     /// Optional rich heartbeat written by the daemon. Returns nil if
     /// the heartbeat file is missing (daemon not running) or stale
     /// (>5 minutes old).
@@ -190,4 +195,7 @@ extension V2DataProvider {
     public func events() async -> [V2MockEvent]      { await events(limit: 200) }
     public func campaigns() async -> [V2MockCampaign] { await campaigns(limit: 50) }
     public func traces() async -> [V2MockTrace]      { await traces(limit: 50) }
+    /// Default integrations to empty — keeps `V2MockDataProvider`
+    /// from needing a no-op override.
+    public func integrations() async -> [V2MockIntegration] { [] }
 }

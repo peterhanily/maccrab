@@ -2,6 +2,7 @@ import Foundation
 import MacCrabCore
 import SQLite3
 import os.log
+import SystemConfiguration
 
 // v1.7.3 added a HeartbeatInFlight class that wrapped the heartbeat
 // body in an outer overlap guard. Combined with serial `await` of
@@ -571,6 +572,19 @@ enum DaemonTimers {
                     logger.info("Allowlist sweep expired \(expired.count) suppression(s)")
                 }
                 await state.deduplicator.prunePrcessedDismissals()
+                // v1.11.1 (audit scalability HIGH): drain ProcessLineage's
+                // pendingPromotions buffer so under PID-recycle storms
+                // skeleton records aren't silently truncated by the
+                // 1024-cap removeFirst at evictLRUProcess(). v1.11.1
+                // surfaces them as a count + log; v1.11.2+ will forward
+                // to CompactPersistentLineage / SQLiteCausalGraphStore
+                // per the §6.3.1 invariant ("silent ancestry loss is not
+                // allowed"). Currently the surfaced count is enough to
+                // observe whether the cap is actively saturated.
+                let drained = await state.enricher.lineage.drainPendingPromotions()
+                if !drained.isEmpty {
+                    logger.info("ProcessLineage maintenance drain: \(drained.count) skeleton(s) released from pendingPromotions cap")
+                }
             }
         }
         maintenanceTimer.resume()
@@ -886,6 +900,19 @@ enum DaemonTimers {
         inboxPoller.schedule(deadline: .now() + 5, repeating: 5)
         inboxPoller.setEventHandler {
             Task {
+                // v1.11.0 (audit stability HIGH): skip this tick if a
+                // previous Task is still draining (campaign suppress
+                // fan-out can take tens of seconds at 5-10K alerts).
+                // Without the guard, parallel Tasks raced for the same
+                // request files + doubled DB write load.
+                let acquired: Bool = state.inboxPollerLock.withLock { inFlight in
+                    if inFlight { return false }
+                    inFlight = true
+                    return true
+                }
+                guard acquired else { return }
+                defer { state.inboxPollerLock.withLock { $0 = false } }
+
                 let fm = FileManager.default
                 guard let files = try? fm.contentsOfDirectory(atPath: inboxDir),
                       !files.isEmpty else { return }
@@ -972,11 +999,18 @@ enum DaemonTimers {
                 continue
             }
             let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] suppress-alert id=\(id) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "suppress-alert", id: id, uid: uid, result: "rejected_uid")
+                continue
+            }
             do {
                 try await state.alertStore.suppress(alertId: id)
                 print("[inbox] suppress-alert id=\(id) uid=\(uid) ok")
+                auditLogInbox(state: state, prefix: "suppress-alert", id: id, uid: uid, result: "ok")
             } catch {
                 print("[inbox] suppress-alert id=\(id) uid=\(uid) failed: \(error)")
+                auditLogInbox(state: state, prefix: "suppress-alert", id: id, uid: uid, result: "failed:\(error)")
             }
         }
     }
@@ -993,11 +1027,18 @@ enum DaemonTimers {
                 continue
             }
             let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] unsuppress-alert id=\(id) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "unsuppress-alert", id: id, uid: uid, result: "rejected_uid")
+                continue
+            }
             do {
                 try await state.alertStore.unsuppress(alertId: id)
                 print("[inbox] unsuppress-alert id=\(id) uid=\(uid) ok")
+                auditLogInbox(state: state, prefix: "unsuppress-alert", id: id, uid: uid, result: "ok")
             } catch {
                 print("[inbox] unsuppress-alert id=\(id) uid=\(uid) failed: \(error)")
+                auditLogInbox(state: state, prefix: "unsuppress-alert", id: id, uid: uid, result: "failed:\(error)")
             }
         }
     }
@@ -1014,11 +1055,18 @@ enum DaemonTimers {
                 continue
             }
             let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] delete-alert id=\(id) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "rejected_uid")
+                continue
+            }
             do {
                 let removed = try await state.alertStore.delete(alertId: id)
                 print("[inbox] delete-alert id=\(id) uid=\(uid) removed=\(removed)")
+                auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "removed=\(removed)")
             } catch {
                 print("[inbox] delete-alert id=\(id) uid=\(uid) failed: \(error)")
+                auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "failed:\(error)")
             }
         }
     }
@@ -1035,6 +1083,11 @@ enum DaemonTimers {
                 continue
             }
             let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] suppress-campaign id=\(id) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "suppress-campaign", id: id, uid: uid, result: "rejected_uid")
+                continue
+            }
             // Suppress the campaign-as-alert row (campaigns have a
             // `maccrab.campaign.*` rule_id and live alongside regular
             // alerts in alerts.db). Best-effort — pre-v1.8 campaigns
@@ -1070,6 +1123,7 @@ enum DaemonTimers {
                 try? await cs.setSuppressed(id: id, true)
             }
             print("[inbox] suppress-campaign id=\(id) uid=\(uid) fanOut=\(fanOut)")
+            auditLogInbox(state: state, prefix: "suppress-campaign", id: id, uid: uid, result: "ok fanOut=\(fanOut)")
         }
     }
 
@@ -1085,13 +1139,72 @@ enum DaemonTimers {
     }
 
     /// Stat the request file to get the UID of whoever dropped it.
-    /// We log it but don't gate on it — the inbox dir is 1777 by
-    /// design, and on a single-user Mac the uid is just the logged-in
-    /// user. On a multi-user Mac, audit can spot cross-user requests.
+    /// Used by `isAuthorizedInboxRequest(uid:)` below. Returns -1 on
+    /// stat failure — that value never satisfies the gate.
     private static func requestOwnerUID(at path: String) -> Int {
         var st = stat()
         if stat(path, &st) == 0 { return Int(st.st_uid) }
         return -1
+    }
+
+    /// Returns the UID of the user logged in at the macOS GUI console.
+    /// `loginwindow` (or nil result) means no user is logged in — e.g.
+    /// during early boot. Returns nil in that case so the gate falls
+    /// back to root-only.
+    private static func consoleUserUID() -> uid_t? {
+        var uid: uid_t = 0
+        var gid: gid_t = 0
+        let store = SCDynamicStoreCreate(nil, "MacCrabInboxGate" as CFString, nil, nil)
+        guard let user = SCDynamicStoreCopyConsoleUser(store, &uid, &gid) else { return nil }
+        let userStr = user as String
+        if userStr.isEmpty || userStr == "loginwindow" { return nil }
+        return uid
+    }
+
+    /// v1.10.2 (audit BLOCKER): the inbox dir at
+    /// `/Library/Application Support/MacCrab/inbox/` is mode 1777 so
+    /// any local user can drop request files. Without a UID gate at
+    /// the handler level, a logged-in standard / guest / kiosk user
+    /// could blind the EDR by suppressing or deleting alerts (or
+    /// fan-out-suppressing whole campaigns). We accept requests only
+    /// from:
+    ///   - root (uid 0): launchd / sudo flows + the daemon itself
+    ///   - the GUI console user: the human at the keyboard, who is
+    ///     also the user running MacCrab.app
+    /// Anything else is rejected and audit-logged.
+    private static func isAuthorizedInboxRequest(uid: Int) -> Bool {
+        if uid < 0 { return false }                  // stat failed
+        if uid == 0 { return true }                  // root
+        if let console = consoleUserUID(), Int(console) == uid { return true }
+        return false
+    }
+
+    /// Append a single line to the inbox audit log. Format is
+    /// space-separated `key=value` pairs, ISO 8601 timestamp first.
+    /// The MCP path uses a similar `dashboard_audit.log` in
+    /// `<supportDir>` — keep them in the same file so operators have
+    /// a single tail target for "who changed alert state".
+    nonisolated(unsafe) private static let _inboxAuditFmt: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static func auditLogInbox(
+        state: DaemonState, prefix: String, id: String, uid: Int, result: String
+    ) {
+        let logPath = state.supportDir + "/dashboard_audit.log"
+        let line = "\(_inboxAuditFmt.string(from: Date())) source=inbox prefix=\(prefix) id=\(id) uid=\(uid) result=\(result)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: logPath)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            // First-time write (file doesn't exist yet).
+            try? data.write(to: url, options: .atomic)
+        }
     }
 }
 

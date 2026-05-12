@@ -410,11 +410,236 @@ public final class V2LiveDataProvider: V2DataProvider {
         }.value
     }
 
-    // No backing implementation yet — return empty so the workspace
-    // shows an honest empty state. Demo data is gone in v1.10.0.
-    public func collectors() async -> [V2MockCollector]    { [] }
-    public func permissions() async -> [V2MockPermission]  { [] }
-    public func packages() async -> [V2MockPackage]        { [] }
+    // v1.11.0: collectors + permissions wired from existing daemon
+    // snapshots (heartbeat_rich.json + tcc_snapshot.json). Packages
+    // remains empty pending the v1.11.x PackageScanner; integrations
+    // remains empty pending DaemonConfig integration list exposure.
+
+    public func collectors() async -> [V2MockCollector] {
+        // Reuse the heartbeat the System workspace already reads.
+        // Each collector entry: name, eventCount, healthy, lastTickUnix.
+        // Map to V2MockCollector — throughput is best-effort
+        // (eventCount / uptime), errors not yet tracked in heartbeat.
+        guard let snap = V2HeartbeatSnapshot.readFreshest() else { return [] }
+        let uptimeSeconds = max(snap.uptimeSeconds, 1)
+        return snap.collectors.map { c -> V2MockCollector in
+            V2MockCollector(
+                id: c.name,
+                name: c.name,
+                status: c.healthy ? .healthy : .warning,
+                throughput: Double(c.eventCount) / Double(uptimeSeconds),
+                lag: c.lastTick.map { Date().timeIntervalSince($0) } ?? 0,
+                errors: 0,
+                lastEvent: c.lastTick ?? Date.distantPast
+            )
+        }
+    }
+
+    public func permissions() async -> [V2MockPermission] {
+        // The daemon writes <supportDir>/tcc_snapshot.json on each
+        // TCCMonitor change; readSnapshot decodes it.
+        guard let dir = dataDir else { return [] }
+        let path = dir + "/tcc_snapshot.json"
+        guard let snap = TCCMonitor.readSnapshot(at: path) else { return [] }
+        return snap.entries.map { e -> V2MockPermission in
+            V2MockPermission(
+                id: "\(e.service)|\(e.client)",
+                service: prettyTCCService(e.service),
+                granted: e.authValue == 2,                          // 2 = allowed
+                required: Self.requiredTCCServices.contains(e.service), // FDA + ES are load-bearing
+                description: "\(e.client) (\(authValueLabel(e.authValue)))"
+            )
+        }
+    }
+
+    private static let requiredTCCServices: Set<String> = [
+        "kTCCServiceSystemPolicyAllFiles",  // Full Disk Access
+        "kTCCServiceEndpointSecurityClient",
+    ]
+
+    private nonisolated func prettyTCCService(_ raw: String) -> String {
+        // Strip the kTCCService prefix; insert spaces ahead of capitals
+        // for a readable label ("Full Disk Access" instead of
+        // "SystemPolicyAllFiles").
+        let stripped = raw.hasPrefix("kTCCService")
+            ? String(raw.dropFirst("kTCCService".count))
+            : raw
+        var out = ""
+        for ch in stripped {
+            if ch.isUppercase && !out.isEmpty { out.append(" ") }
+            out.append(ch)
+        }
+        // A few hand-tuned overrides for the common services so they
+        // match Apple's UI labels rather than the raw enum spelling.
+        switch raw {
+        case "kTCCServiceSystemPolicyAllFiles": return "Full Disk Access"
+        case "kTCCServiceScreenCapture":        return "Screen Recording"
+        case "kTCCServiceListenEvent":          return "Input Monitoring"
+        case "kTCCServicePostEvent":            return "Accessibility"
+        case "kTCCServiceMicrophone":           return "Microphone"
+        case "kTCCServiceCamera":               return "Camera"
+        case "kTCCServiceContactsFull":         return "Contacts"
+        case "kTCCServiceCalendar":             return "Calendar"
+        case "kTCCServicePhotos":               return "Photos"
+        case "kTCCServiceLocation":             return "Location Services"
+        default: return out
+        }
+    }
+
+    private nonisolated func authValueLabel(_ v: Int) -> String {
+        switch v {
+        case 0: return "denied"
+        case 2: return "allowed"
+        default: return "unknown"
+        }
+    }
+
+    public func packages() async -> [V2MockPackage] {
+        // v1.11.1 (M2 backlog): wired to PackageScanner. brew + npm +
+        // pip3 inventory; per-instance 5-min cache so the 5-s
+        // dashboard refresh doesn't re-shell each tick. Latest-version
+        // + vulnCount stay at placeholder defaults — registry API
+        // wiring is a v1.11.x follow-up.
+        let infos = await Self.packageScanner.scan()
+        return infos.map { info in
+            V2MockPackage(
+                id: info.id,
+                name: info.name,
+                installed: info.installedVersion,
+                latest: info.latestVersion,
+                manager: info.manager,
+                vulnCount: info.vulnCount,
+                staleness: info.stalenessSeconds
+            )
+        }
+    }
+
+    /// Shared across V2LiveDataProvider instances so the 5-min cache
+    /// doesn't reset on every dashboard reconnect.
+    private static let packageScanner = PackageScanner()
+
+    public func integrations() async -> [V2MockIntegration] {
+        // v1.11.1 (M2 backlog): read the daemon's configured external
+        // sinks from on-disk JSON. Three files contribute:
+        //
+        //   daemon_config.json.outputs[]  → file / splunk / elastic /
+        //                                    datadog / wazuh / s3 / sftp
+        //   notifications.json            → slack / teams / discord /
+        //                                    pagerduty webhooks (v1.6.19)
+        //   alert_notifications.json      → OS notification severity gate
+        //                                    (v1.11.0 wire-the-orphans)
+        //
+        // Status stays at "configured" until per-sink health reporting
+        // lands; for v1.11.1 the panel simply surfaces what's wired so
+        // operators can confirm their config reached the daemon.
+        guard let dir = dataDir else { return [] }
+        var out: [V2MockIntegration] = []
+
+        // daemon_config.json outputs[]
+        let dcPath = dir + "/daemon_config.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: dcPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let outputs = json["outputs"] as? [[String: Any]] {
+            for (idx, entry) in outputs.enumerated() {
+                let type = (entry["type"] as? String) ?? "unknown"
+                let detail: String = {
+                    switch type {
+                    case "file":         return (entry["path"] as? String) ?? "—"
+                    case "splunk_hec":   return (entry["url"] as? String) ?? "—"
+                    case "elastic_bulk": return (entry["url"] as? String) ?? "—"
+                    case "datadog_logs": return (entry["url"] as? String) ?? "—"
+                    case "wazuh_api":    return (entry["url"] as? String) ?? "—"
+                    case "s3":           return [(entry["bucket"] as? String).map { "s3://\($0)" }, entry["region"] as? String].compactMap { $0 }.joined(separator: " · ")
+                    case "sftp":         return [(entry["user"] as? String), (entry["host"] as? String)].compactMap { $0 }.joined(separator: "@")
+                    case "otlp":         return (entry["url"] as? String) ?? "—"
+                    default:             return "—"
+                    }
+                }()
+                let kind: String = {
+                    switch type {
+                    case "file":      return "file"
+                    case "s3", "sftp": return "object-store"
+                    case "otlp":      return "telemetry"
+                    default:          return "siem"
+                    }
+                }()
+                let name: String = {
+                    switch type {
+                    case "splunk_hec":   return "Splunk HEC"
+                    case "elastic_bulk": return "Elasticsearch Bulk"
+                    case "datadog_logs": return "Datadog Logs"
+                    case "wazuh_api":    return "Wazuh API"
+                    case "s3":           return "S3 / object store"
+                    case "sftp":         return "SFTP"
+                    case "file":         return "File output"
+                    case "otlp":         return "OTLP"
+                    default:             return type
+                    }
+                }()
+                out.append(V2MockIntegration(
+                    id: "output:\(type):\(idx)",
+                    name: name,
+                    kind: kind,
+                    status: .info,    // "configured" — per-sink health is v1.11.x
+                    detail: detail
+                ))
+            }
+        }
+
+        // notifications.json webhooks
+        let notifPath = dir + "/notifications.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: notifPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let slack = json["slack"] as? [String: Any], let url = slack["webhookURL"] as? String, !url.isEmpty {
+                out.append(V2MockIntegration(
+                    id: "webhook:slack", name: "Slack", kind: "webhook",
+                    status: .info, detail: redactedWebhookURL(url)
+                ))
+            }
+            if let teams = json["teams"] as? [String: Any], let url = teams["webhookURL"] as? String, !url.isEmpty {
+                out.append(V2MockIntegration(
+                    id: "webhook:teams", name: "Microsoft Teams", kind: "webhook",
+                    status: .info, detail: redactedWebhookURL(url)
+                ))
+            }
+            if let discord = json["discord"] as? [String: Any], let url = discord["webhookURL"] as? String, !url.isEmpty {
+                out.append(V2MockIntegration(
+                    id: "webhook:discord", name: "Discord", kind: "webhook",
+                    status: .info, detail: redactedWebhookURL(url)
+                ))
+            }
+            if let pd = json["pagerduty"] as? [String: Any], let key = pd["routingKey"] as? String, !key.isEmpty {
+                out.append(V2MockIntegration(
+                    id: "webhook:pagerduty", name: "PagerDuty", kind: "webhook",
+                    status: .info, detail: "routing key configured"
+                ))
+            }
+        }
+
+        // alert_notifications.json — OS notification gate (v1.11.0)
+        let alertNotifPath = dir + "/alert_notifications.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: alertNotifPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let enabled = json["enabled"] as? Bool ?? true
+            let sev = json["min_severity"] as? String ?? "high"
+            out.append(V2MockIntegration(
+                id: "notification:macos",
+                name: "macOS notifications",
+                kind: "notification",
+                status: enabled ? .info : .warning,
+                detail: enabled ? "min severity: \(sev)" : "disabled"
+            ))
+        }
+
+        return out
+    }
+
+    /// Hide the path / token portion of a webhook URL so the integration
+    /// panel doesn't leak secrets when the dashboard is screenshotted.
+    private nonisolated func redactedWebhookURL(_ url: String) -> String {
+        guard let comps = URLComponents(string: url), let host = comps.host else { return "configured" }
+        return "https://\(host)/…"
+    }
 
     public func extensions() async -> [V2MockExtension] {
         // Off-main: BrowserExtensionMonitor.snapshot does ~5
@@ -877,7 +1102,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
     }
 
-    nonisolated private static func toV2Alert(_ a: Alert) -> V2MockAlert {
+    nonisolated internal static func toV2Alert(_ a: Alert) -> V2MockAlert {
         let mitre = a.mitreTechniquesList
         // Process-side metadata (pid/parent/user) isn't stored on Alert
         // — only on the originating Event. Surface defaults here and
@@ -915,7 +1140,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         )
     }
 
-    nonisolated private static func toV2Event(_ e: Event) -> V2MockEvent {
+    nonisolated internal static func toV2Event(_ e: Event) -> V2MockEvent {
         let detail: String = {
             if let n = e.network { return "\(n.transport) \(n.destinationIp):\(n.destinationPort)" }
             if let f = e.file    { return "\(f.action.rawValue) \(f.path)" }
@@ -932,7 +1157,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         )
     }
 
-    nonisolated private static func toV2Campaign(_ r: CampaignStore.Record) -> V2MockCampaign {
+    nonisolated internal static func toV2Campaign(_ r: CampaignStore.Record) -> V2MockCampaign {
         return V2MockCampaign(
             id: r.id,
             name: r.title,
@@ -947,7 +1172,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         )
     }
 
-    nonisolated private static func toV2Trace(_ t: Trace) -> V2MockTrace {
+    nonisolated internal static func toV2Trace(_ t: Trace) -> V2MockTrace {
         return V2MockTrace(
             id: t.id,
             title: t.title,

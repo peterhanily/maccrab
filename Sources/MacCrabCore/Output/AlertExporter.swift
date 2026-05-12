@@ -11,6 +11,13 @@ import os.log
 public actor AlertExporter {
     private let logger = Logger(subsystem: "com.maccrab.output", category: "alert-exporter")
 
+    // v1.11.1 (audit perf LOW): hoist ISO8601DateFormatter — every
+    // export-format method (SARIF, CEF, LEEF, CSV, JSON, STIX, OCSF)
+    // was instantiating a fresh formatter per call. ~0.5 ms each ×
+    // 6 formats × N alerts = real CPU at scale. The formatter is
+    // stateless once configured, safe to share.
+    nonisolated(unsafe) private static let isoFormatter = ISO8601DateFormatter()
+
     // MARK: - Types
 
     public enum ExportFormat: String, Sendable, CaseIterable {
@@ -198,7 +205,7 @@ public actor AlertExporter {
     // MARK: - JSON
 
     private func exportJSON(_ alerts: [ExportableAlert]) -> String {
-        let df = ISO8601DateFormatter()
+        let df = Self.isoFormatter
         let dicts = alerts.map { a -> [String: Any] in
             [
                 "id": a.id,
@@ -256,7 +263,7 @@ public actor AlertExporter {
 
     private func exportCSV(_ alerts: [ExportableAlert]) -> String {
         var csv = "id,timestamp,severity,rule_id,rule_title,process_name,process_path,mitre_techniques,description\n"
-        let df = ISO8601DateFormatter()
+        let df = Self.isoFormatter
         for a in alerts {
             let fields = [
                 a.id,
@@ -277,7 +284,7 @@ public actor AlertExporter {
     // MARK: - SARIF (Static Analysis Results Interchange Format v2.1.0)
 
     private func exportSARIF(_ alerts: [ExportableAlert]) -> String {
-        let df = ISO8601DateFormatter()
+        let df = Self.isoFormatter
 
         let results = alerts.map { a -> [String: Any] in
             let level: String
@@ -324,7 +331,7 @@ public actor AlertExporter {
                 "tool": [
                     "driver": [
                         "name": "MacCrab",
-                        "version": "1.0.0",
+                        "version": MacCrabVersion.current,
                         "informationUri": "https://github.com/peterhanily/maccrab",
                         "rules": rules,
                     ] as [String: Any]
@@ -345,7 +352,7 @@ public actor AlertExporter {
     // MARK: - CEF (Common Event Format — ArcSight)
 
     private func exportCEF(_ alerts: [ExportableAlert]) -> String {
-        let df = ISO8601DateFormatter()
+        let df = Self.isoFormatter
         return alerts.map { a in
             let severity: Int
             switch a.severity.lowercased() {
@@ -371,7 +378,7 @@ public actor AlertExporter {
     // MARK: - LEEF (Log Event Extended Format — QRadar)
 
     private func exportLEEF(_ alerts: [ExportableAlert]) -> String {
-        let df = ISO8601DateFormatter()
+        let df = Self.isoFormatter
         return alerts.map { a in
             let severity: String
             switch a.severity.lowercased() {
@@ -396,7 +403,7 @@ public actor AlertExporter {
     // MARK: - STIX 2.1
 
     private func exportSTIX(_ alerts: [ExportableAlert]) -> String {
-        let df = ISO8601DateFormatter()
+        let df = Self.isoFormatter
         let objects = alerts.map { a -> [String: Any] in
             [
                 "type": "sighting",

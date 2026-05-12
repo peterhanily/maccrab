@@ -52,6 +52,10 @@ enum MonitorTasks {
                         print("[FS] \(match.ruleName) | \(enriched.file?.path ?? "?")")
                     }
                 }
+                // v1.11.1 (audit BLOCKER 2 secondary): cooperative
+                // yield drains the autorelease pool per iteration —
+                // same EventLoop fix shape, lower volume.
+                await Task.yield()
             }
         }
 
@@ -83,6 +87,7 @@ enum MonitorTasks {
                     path: tapInfo.processPath
                 )
                 print("[CRIT] Event tap keylogger: \(tapInfo.processName) (PID \(tapInfo.tappingPID))")
+                await Task.yield()
             }
         }
 
@@ -131,6 +136,7 @@ enum MonitorTasks {
 
                 let severityIcon = policyEvent.severity == .critical ? "[CRIT]" : "[HIGH]"
                 print("\(severityIcon) System policy: \(policyEvent.type.rawValue) -- \(policyEvent.description.prefix(100))")
+                await Task.yield()
             }
         }
 
@@ -164,6 +170,7 @@ enum MonitorTasks {
                     )
                 }
                 print("[MCP] \(mcpEvent.eventType.rawValue): \(mcpEvent.serverName) -- \(mcpEvent.reason)")
+                await Task.yield()
             }
         }
 
@@ -200,6 +207,7 @@ enum MonitorTasks {
                         await state.notifier.notify(alert: alert)
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                await Task.yield()
             }
         }
 
@@ -264,6 +272,7 @@ enum MonitorTasks {
                     await state.notifier.notify(alert: alert)
                 }
                 print("[USB] \(usbEvent.isConnected ? "+" : "-") \(usbEvent.vendorName) \(usbEvent.productName)\(usbEvent.isMassStorage ? " [MASS STORAGE]" : "")")
+                await Task.yield()
             }
         }
 
@@ -286,6 +295,7 @@ enum MonitorTasks {
                     do { _ = try await state.alertSink.submit(alert: alert) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     print("[CLIP] Sensitive data detected on clipboard")
                 }
+                await Task.yield()
             }
         }
 
@@ -315,6 +325,7 @@ enum MonitorTasks {
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[EXT] \(extEvent.browser): \(extEvent.extensionName)\(extEvent.isSuspicious ? " [SUSPICIOUS]" : "")")
+                await Task.yield()
             }
         }
 
@@ -338,6 +349,7 @@ enum MonitorTasks {
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[ULTRASONIC] \(usEvent.attackType.rawValue) at \(String(format: "%.0f", usEvent.peakFrequencyHz)) Hz!")
+                await Task.yield()
             }
         }
 
@@ -361,6 +373,7 @@ enum MonitorTasks {
                     }
                 } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 print("[ROOTKIT] Hidden process: PID \(hidden.pid) (\(hidden.source))")
+                await Task.yield()
             }
         }
 
@@ -420,6 +433,7 @@ enum MonitorTasks {
                         }
                     }
                 }
+                await Task.yield()
             }
         }
 
@@ -490,6 +504,7 @@ enum MonitorTasks {
                         }
                     }
                 }
+                await Task.yield()
             }
         }
 
@@ -568,6 +583,7 @@ enum MonitorTasks {
                         }
                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
+                await Task.yield()
             }
         }
     }

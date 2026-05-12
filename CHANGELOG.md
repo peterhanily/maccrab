@@ -3,6 +3,326 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-05-12
+
+Feature release combined with a sustained audit-fix pass. A six-domain
+pre-release audit (security / stability / performance / functionality /
+scalability+UX-L10n / ship-readiness) on the v1.10.1 baseline surfaced
+8 BLOCKERs + 24 HIGHs + 25 MEDIUMs + 22 LOWs (79 findings total).
+v1.11.0 closes every BLOCKER, the high-impact HIGHs, the wire-the-orphans
+HIGHs (alertNotifications + inbox poller reentrancy), the bulk of the
+MEDIUMs, AND ships the deferred v1.10.x backlog: M2 live data wiring
+across collectors / permissions / packages / integrations, AlertStore
+phantom-field schema migration, force-directed TraceGraph canvas, YAML
+compilation for graph rules, `maccrabctl trace replay --compare-rules`,
+and sidebar consolidation.
+
+### Security
+
+- **Inbox file-IPC now gates on UID** (BLOCKER) — the v1.10.1 hotfix
+  introduced `/Library/Application Support/MacCrab/inbox/` mode `1777`
+  with handlers for `suppress-alert-*` / `unsuppress-alert-*` /
+  `delete-alert-*` / `suppress-campaign-*`. The handlers logged the
+  request UID but did not gate on it, so any local user on a multi-user
+  / kiosk / compromised-guest Mac could blind the EDR. Each handler now
+  rejects requests whose owning UID is not root or the GUI console
+  user (`SCDynamicStoreCopyConsoleUser`); rejections + outcomes are
+  written to `<supportDir>/dashboard_audit.log` for forensics.
+- **`llm_config.json` now writes `0o600`** (HIGH) — previously inherited
+  user umask (`0o644`), leaving Claude / OpenAI / Mistral / Gemini API
+  keys readable by every local user. The keychain copy was always the
+  primary store; this closes the legacy JSON copy that
+  `AppState.ensureLLMService` still consumes.
+
+### Stability + performance
+
+- **`EventLoop` autoreleasepool gap closed** (BLOCKER) — the central
+  hot loop (~200-1000 events/s sustained) had no per-iteration drain
+  point. Foundation temporaries from enricher / ruleEngine / JSON
+  encode / sanitize accumulated between implicit yields; field reports
+  showed 1+ GB sawtooth growth after 24h on busy hosts. Added an
+  `await Task.yield()` at iteration end to force a cooperative drain
+  (`autoreleasepool {}` can't natively wrap `await` blocks, mirror of
+  v1.7.7-v1.7.9 fixes).
+- **Inbox poller reentrancy guard** (HIGH) — the v1.10.1 inbox file-IPC
+  poller fired a fresh Task every 5 s; if a campaign-suppress fan-out
+  was still draining (worst case 30 s at 5K alerts × 6 ms / write),
+  the next tick spawned a parallel Task that re-listed the dir + raced
+  for the same files. New `OSAllocatedUnfairLock<Bool>` on
+  `DaemonState.inboxPollerLock` makes the poller skip ticks while
+  draining — matches the `snapshotWriteInFlight` pattern v1.7.4
+  introduced for telemetry writers.
+- **`CampaignDetector.recordForStormDetection` now bounds its per-rule
+  timestamp array inline** (MEDIUM) — pre-fix only the 5-min sweep
+  ran `purgeStaleStormCounts`, so a high-volume rule accumulated
+  thousands of timestamps between sweeps. Cap at 2× `stormCriticalThreshold`.
+- **`AlertStore.alerts(forEventId:)` adds `LIMIT 1000`** (MEDIUM) —
+  bounds against rule-storm scenarios where many alerts pin the same
+  event_id.
+- **`AlertStore` + `CampaignStore` enable `auto_vacuum = INCREMENTAL`**
+  (MEDIUM) — pre-fix retention prune deleted rows but freed pages
+  stayed in the file. Existing DBs need a one-shot manual `VACUUM`
+  to convert; fresh installs flip immediately.
+- **MonitorTasks autoreleasepool gap** documented as v1.11.1 follow-up
+  — 13 secondary `for await` loops, lower volume than EventLoop, same
+  shape; quick mechanical follow-up.
+
+### Functionality (phantom subcommands + MCP enum drift)
+
+- **`maccrabctl rule show <id>` was a phantom subcommand** (BLOCKER) —
+  V2 Detection workspace error toast pointed users at a subcommand
+  that doesn't exist (only `maccrabctl rules list | grep` does).
+  Same class as the v1.10.1 dashboard-suppress hotfix.
+- **`maccrabctl ai tools` and `maccrabctl ai lineage` were phantom
+  subcommands** (BLOCKER) — V2 AI Guard panel told users to run them
+  to inspect AI tool inventory / lineage chains. Replaced with
+  concrete pointers to `~/Library/Application Support/MacCrab/agent_lineage.json`.
+- **MCP `get_events` advertised non-existent `EventCategory` values**
+  (BLOCKER) — schema enum included `auth` and `dns` which return nil
+  via `EventCategory(rawValue:)`, silently dropping the filter. Now
+  matches the real categories (`process / file / network /
+  authentication / tcc / registry`); DNS guidance documents the
+  `category=network` + `search=:53` pivot.
+- **V2 alerts table no longer renders "pid 0" for every row** (HIGH) —
+  pid sub-label gates on `> 0`, mirroring the inspector. Real pid
+  persistence is a v1.11.0 schema task.
+- **`OTLPOutput` ModuleStatus demoted to `.experimental`** (HIGH) — the
+  actor exists but `DaemonSetup.buildOutput(spec:)` does not yet
+  accept `{"type":"otlp"}` config entries. Receiver half (Agent
+  Traces) remains stable. Re-promotion tracked for v1.11.0.
+
+### Ship pipeline / version-drift hardening
+
+- **`homebrew/maccrab.rb` re-synced to `Casks/maccrab.rb`** (BLOCKER) —
+  the legacy doc copy had drifted by 40+ lines, missing v1.10.0's
+  inbox-dir mkdir, in-app CLI symlink fix, and v1.7.11 SIGTERM block.
+  Bodies now byte-equal modulo `version` + `sha256` lines.
+- **`.github/workflows/release.yml` now bumps both cask files**
+  (BLOCKER) — CI release path silently bumped `homebrew/maccrab.rb`
+  only, leaving the canonical `Casks/maccrab.rb` (what the tap reads)
+  pinned. Also removed `|| true` / `|| echo "..."` failure-swallowing
+  patterns. Same shape as the v1.6.5→v1.6.13 9-stale-release class
+  that `release.sh` already fixed locally.
+- **`scripts/release.sh` final-hint URL now points at `Casks/maccrab.rb`**
+  (HIGH).
+- **`pre-release-audit.sh` Pass 6 / Pass 12 / Pass 14 hardened** (BLOCKER)
+  — applied the v1.9.0 Pass 15 "fail loud if zero matches" guard so a
+  typo in a curated key list, a missing snapshot file, or a renamed
+  type can no longer silent-green.
+- **9 version-drift sites resolved through `MacCrabVersion.current`**
+  (HIGH × 5 + others) — `BundleExporter.maccrabVersion` (was "1.10.0"),
+  `ReplayEngine.engineVersion` (was "1.10.0"), `OtelEncoder` scope
+  version (was "1.10.0"), `TraceMaterializer` `daemonVersion` +
+  `rulesetVersion` defaults (CLI path baked "1.10.0"), `WebhookOutput`
+  / `NotificationIntegrations` / `ThreatIntelFeed` / `ThreatIntelAPIs`
+  / `PackageFreshnessChecker` User-Agent strings (drift values from
+  `MacCrab/1.0` to `MacCrab/0.5.0`), `AlertExporter` SARIF tool driver
+  version (was "1.0.0").
+
+### Functionality wire-the-orphans
+
+- **`alertNotifications` + `minAlertSeverity` Settings now reach the
+  daemon** (HIGH) — pre-fix the AppStorage keys wrote nowhere the
+  daemon read; the picker silently did nothing. SettingsView now
+  writes `<supportDir>/alert_notifications.json` on toggle/picker
+  change and SIGHUPs the sysext; `DaemonSetup` reads the file at
+  init via `loadAlertNotificationConfig`; the SIGHUP handler calls
+  `notifier.setMinimumSeverity(...)` for live reload.
+- **MCP `get_events` / V2 alerts pid-0 / phantom subcommand fixes**
+  rolled up in the BLOCKERs section above.
+
+### Live data wiring (v1.10.x M2 backlog, partial)
+
+- **V2 collectors workspace** now reads from `heartbeat_rich.json`
+  (the System workspace already consumed it) — surface name, status,
+  throughput (eventCount / uptime), lag (now − lastTick), lastEvent.
+- **V2 permissions workspace** now reads from `tcc_snapshot.json`
+  (TCCMonitor already publishes it) — surface service / client /
+  granted / required (FDA + ES Client are flagged required).
+- **M2 packages + integrations** remain empty — packages needs a
+  new `PackageScanner` (brew/npm/pip subprocess); integrations needs
+  the `DaemonConfig` integration list exposed via a public read API.
+  Both deferred to v1.11.1.
+
+### UX / accessibility
+
+- **V2 Sidebar protection-status accessibility label tracks real state**
+  (HIGH) — pre-fix VoiceOver said "active" even when degraded / inactive.
+- **V2 KPI card a11y** — value `"—"` previously read as "em dash";
+  now reads as "pending".
+- **V2 InvestigationWorkspace + AlertsWorkspace RTL fix** —
+  `chevron.right` / `arrow.right.circle.fill` switched to `.forward`
+  variants so they mirror under Arabic / Hebrew.
+- **V2 trace list and detail no longer render misleading "0n / 0e"**
+  — gated on `> 0` so rows that haven't been per-trace-loaded omit
+  the chip rather than imply zero.
+- **V2 campaign card no longer renders "0 entities"** — suffix
+  removed entirely (matched data was always 0; real entity counting
+  is a future enrichment).
+- **L10n** — 14 `Localizable.strings` files updated: stale "348
+  detection rules" string replaced with locale-stable "Hundreds of
+  detection rules"; orphan `welcome.setup.rulesLoaded` key dropped.
+  `SettingsView` "424 rules" hardcode → "hundreds of rules".
+
+### Audit-script hardening
+
+- **`pre-release-audit.sh` Pass 14** — now recognizes both snake_case
+  and Sigma CamelCase forms when checking rule references (rules use
+  `MachineAgentConfidence`, audit was greppging only for
+  `machine_agent_confidence`); broadened producer-side grep to also
+  accept SQL-column + Swift-constant patterns. Pruned info-only keys
+  (`agent_trace_id`, `agent_span_id`, `agent_tool`) from
+  `PASS14_KEYS` — they're analyst context surfaced in TraceStore +
+  alert detail, not rule predicates, and don't fit Pass 14's
+  contract.
+
+### Misc audit fixes
+
+- **WebhookOutput SSRF** — extended `blockedMetadata` to cover Azure
+  IMDSv2 IPv6 brackets, OCI v2 (`192.0.0.192`), IBM Cloud
+  (`metadata.softlayer.com`), GCP DNS host, and the all-zeroes
+  literals (`0.0.0.0`, `::`).
+- **`TrustSubstrateStorage.loadFilesystemPrivateKey`** — `lstat` +
+  refuse-on-symlink before `Data(contentsOf:)`, so a symlink in the
+  keys dir can't redirect a read.
+- **`ThreatIntelFeed` cache dir** — created with explicit `0o700`.
+- **`NotificationOutput.swift`** header comment — corrected to
+  reflect the `osascript` shell-out implementation (was misleadingly
+  claiming `NSUserNotificationCenter`).
+
+### Tests
+
+- **63 new V2 dashboard tests** — V2DeepLink, V2NavigationHistory,
+  V2HeartbeatSnapshot, V2DashboardState, V2LiveDataProvider mappers
+  (`toV2Alert`, `toV2Trace`). Closes the F46 zero-coverage gap
+  flagged in the v1.10.0 RC saga.
+- **1404 / 1404 tests pass** in 266 suites (was 1355 / 261 baseline).
+- New `MacCrabAppTests` SPM test target alongside `MacCrabCoreTests`.
+- **L10n coverage: 100%** across all 14 bundles (was 89% / 377/420
+  in 13 non-English bundles).
+
+### Additional fixes folded into v1.11.0
+
+After the first hand-off, every remaining item from the initial
+"deferred to v1.11.1" list was reviewed and closed:
+
+#### Schema + data layer
+
+- **AlertStore schema v3 migration** — persists `d3fend_techniques`,
+  `remediation_hint`, and `analyst_metadata_json` columns. V2 inspector
+  sections survive daemon restart. Pre-v3 alert rows decode safely with
+  the new columns NULL.
+- **`AlertStore.suppress(campaignId:)`** — single SQL `UPDATE alerts
+  SET suppressed = 1 WHERE campaign_id = ?`. Replaces the MCP
+  suppress_campaign N-serial-write fan-out (worst case 30 s at 5K
+  alerts).
+- **`AlertStore.aiAlerts(since:limit:)`** — SQL `rule_id LIKE` prefix
+  chain replacing the 8-keyword Swift substring scan over 10K rows.
+- **`SQLiteCausalGraphStore.memberCount(traceId:)` + `traceContaining(entityId:)` + `listTraces(limit:status:)` + `huntTraces(query:limit:)`** —
+  closes 4 MCP N+1 query patterns. `trace_from_event` drops from
+  200 × 2 SQL queries + 200 × M deserializations to 1 SQL union.
+- **`TraceStore.insertSpans(_:)`** — batch-insert with single
+  BEGIN/COMMIT. OTLP receiver no longer pays N fsyncs per request body.
+
+#### Live data wiring
+
+- **M2 packages** — new `Sources/MacCrabCore/Enrichment/PackageScanner.swift`
+  probes `brew list --versions`, `npm ls -g --depth=0 --json`,
+  `pip3 list --format=json`. 5-min cache; Intelligence → Package
+  Freshness panel populates. Latest-version + vulnCount placeholders
+  pending registry HTTP integration (v1.11.x).
+- **M2 integrations** — `V2LiveDataProvider.integrations()` reads
+  `daemon_config.json.outputs[]`, `notifications.json` webhook URLs,
+  and `alert_notifications.json` OS-notification state. Surfaces
+  configured Slack / Teams / Discord / PagerDuty / Splunk HEC /
+  Elastic Bulk / Datadog / Wazuh / S3 / SFTP / file outputs with
+  redacted URLs.
+
+#### Performance
+
+- **MonitorTasks autoreleasepool** — `await Task.yield()` added at the
+  end of all 13 secondary `for await` loops (browser ext, USB,
+  clipboard, ultrasonic, rootkit, TEMPEST, EDR, DNS, mcp baseline,
+  mcp monitor, system policy, event tap, fs events). Matches the
+  EventLoop pattern; addresses BLOCKER 2's secondary.
+- **`ProcessLineage.drainPendingPromotions()` wired** — called from
+  `DaemonTimers.maintenance` every 5 min. Surfaces drain counts so
+  PID-recycle storm saturation is observable; persisting drained
+  skeletons to `CompactPersistentLineage` is the v1.11.x next step.
+- **ISO8601DateFormatter hoisted** — `maccrab-mcp/main.swift` (file-
+  scope `let isoFormatter`), `AlertExporter.swift` (`Self.isoFormatter`),
+  `V2AlertsWorkspace.swift` (`V2AlertsWorkspace.isoFormatter`).
+  Removes ~20 per-call instantiations (~0.5 ms each).
+- **`AppState.loadRules` mtime cache** — `(rulesCacheDirPath,
+  rulesCacheDirMtime)` short-circuits repeat calls when the
+  compiled-rules dir hasn't changed. Repeat `loadRules` from a
+  recompile or dashboard reload skips the 427-file decode.
+- **`CampaignDetector.recordForStormDetection`** — bounds per-rule
+  timestamp arrays inline at 2× `stormCriticalThreshold` instead of
+  waiting for the 5-min sweep.
+
+#### Compiler + CLI
+
+- **YAML graph rule compiler** — new
+  `Compiler/compile_graph_rules.py`. Reads `Rules/graph/*.yml`,
+  validates against the v1.10 schema (node types, edge references,
+  severity, required fields), writes canonical JSON siblings. Wired
+  into `make compile-rules` step 2. Authors can now write graph
+  rules in YAML for readability; JSON remains the daemon-loaded form.
+- **`maccrabctl trace replay --compare-rules <a> <b>`** — runs replay
+  twice with two ruleset identifiers, diffs the resulting alert
+  sets, surfaces only-in-A / only-in-B / common counts plus the
+  result_sha256 divergence. Until a real RuleEngine-backed
+  `RulesetReplayer` lands (v1.11.x), the echo replayer makes the
+  alert diff empty + only result_sha256 differs — infrastructure
+  in place for the v1.11.x landing.
+
+#### UX
+
+- **Sidebar visual grouping** — 4 task buckets (Monitor / Investigate
+  / Configure / System) with uppercase section labels. Reduces
+  visual clutter without restructuring workspaces. The full 9 → 7
+  workspace collapse (`plans/2026-05-07-dashboard-overhaul.md`)
+  stays as a v1.11.x design proposal.
+- **Force-directed TraceGraph canvas** — already shipped in v1.10.0
+  as the `.force` layout option in the Investigation workspace's
+  toolbar (full Verlet-style simulation with spring + repulsion,
+  drag support, hover-highlight). Originally flagged in the audit
+  as deferred; on review the capability was already complete.
+
+#### L10n
+
+- **L10n drift cleared** — every non-English bundle now carries the
+  full 420-key set. 44 missing keys × 13 languages = 572 entries
+  appended with English fallback values + an "awaiting translation"
+  banner so future translators can find them. Runtime behaviour
+  unchanged (English fallback already worked); the keys are now
+  discoverable in the .strings files.
+
+#### Deferred to v1.11.x (intentional)
+
+- **9 → 7 workspace consolidation** — design proposal in
+  `plans/2026-05-07-dashboard-overhaul.md`. v1.11.1 ships the
+  lighter visual-grouping fix; the structural fold (Events into
+  Investigation tabs, Prevention into Detection tabs) ships
+  separately after design review.
+- **Real RuleEngine-backed `RulesetReplayer`** — `--compare-rules`
+  infrastructure is in; the meaningful diff requires hooking
+  RuleEngine into RulesetReplayer.
+- **PackageScanner registry integration** — latest-version + OSV.dev
+  vulnCount lookups (Homebrew API, npm registry, PyPI JSON).
+- **`SecurityScorer` dedicated DispatchSource** — flagged but the
+  per-tick `timeIntervalSince()` check is essentially free; keeping
+  the elapsed-time gate, revisit if profiling ever shows otherwise.
+- **`CampaignStore` indexed-column read path** — would require
+  changing the `Record` decode contract; defer until a v1.11.x
+  store-design pass.
+
+Full audit findings: `plans/2026-05-11-v1.11.0-audit-findings.md`
+(gitignored — local file with file:line cites for every BLOCKER /
+HIGH / MEDIUM / LOW).
+Full notes: `RELEASE_NOTES/v1.11.0.md`.
+
 ## [1.10.1] — 2026-05-11
 
 Hotfix release. Dashboard suppress / unsuppress / delete actions and

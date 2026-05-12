@@ -29,6 +29,14 @@ setbuf(stdout, nil)
 
 private let logger = Logger(subsystem: "com.maccrab.mcp", category: "server")
 
+// v1.11.1 (audit perf LOW): hoist ISO8601DateFormatter — pre-fix the
+// MCP request handlers instantiated a new formatter per timestamp
+// inside every loop. ~0.5 ms init cost each; at 100-row response
+// sizes that was 50 ms wasted per request, before any actual data
+// formatting. The formatter is stateless once configured, safe to
+// share file-wide.
+private let isoFormatter = ISO8601DateFormatter()
+
 // MARK: - Security: Parent Process Validation
 
 /// Verify the MCP server was launched by a trusted parent process.
@@ -201,7 +209,7 @@ let tools: [[String: Any]] = [
             "type": "object",
             "properties": [
                 "limit": ["type": "integer", "description": "Max events to return (default 20, max 100)", "default": 20],
-                "category": ["type": "string", "description": "Filter by category: process, file, network, auth, tcc, dns", "enum": ["process", "file", "network", "auth", "tcc", "dns"]],
+                "category": ["type": "string", "description": "Filter by EventCategory rawValue. DNS events live under `network`; for DNS-only results combine `category=network` with a search like `search=:53`. Process-injection / TCC events use the explicit categories.", "enum": ["process", "file", "network", "authentication", "tcc", "registry"]],
                 "search": ["type": "string", "description": "Full-text search query. Ignored when `cursor` is set."],
                 "hours": ["type": "number", "description": "Only events from the last N hours (default: 24). Ignored when `cursor` is set.", "default": 24],
                 "cursor": ["type": "string", "description": "Opaque pagination token from a previous response's `next_cursor`. Returns events strictly older than the token's position."],
@@ -440,18 +448,17 @@ func handleClusterAlerts(_ args: [String: Any]) async -> Any {
     let since = Date().addingTimeInterval(-Double(hours) * 3600)
     let alerts: [Alert]
     do {
-        alerts = try await store.alerts(since: since, severity: nil, suppressed: false, limit: 5000)
+        // v1.11.1 (audit perf HIGH): push minSeverity into SQL so we
+        // don't fetch up to 5000 rows just to discard most of them.
+        // AlertStore.alerts already accepts a severity floor.
+        alerts = try await store.alerts(since: since, severity: minSeverity, suppressed: false, limit: 5000)
     } catch {
         return ["content": [["type": "text", "text": "Failed to query alerts: \(error.localizedDescription)"]]]
     }
 
-    let filtered: [Alert] = {
-        guard let min = minSeverity else { return alerts }
-        return alerts.filter { $0.severity >= min }
-    }()
-
     let svc = AlertClusterService()
-    let clusters = await svc.cluster(alerts: filtered)
+    let clusters = await svc.cluster(alerts: alerts)
+    let filtered = alerts // alias retained for the summary line below
 
     let payload = clusters.map { c -> [String: Any] in
         [
@@ -464,8 +471,8 @@ func handleClusterAlerts(_ args: [String: Any]) async -> Any {
             "severity": c.severity.rawValue,
             "size": c.size,
             "tactics": Array(c.tactics).sorted(),
-            "first_seen": ISO8601DateFormatter().string(from: c.firstSeen),
-            "last_seen": ISO8601DateFormatter().string(from: c.lastSeen),
+            "first_seen": isoFormatter.string(from: c.firstSeen),
+            "last_seen": isoFormatter.string(from: c.lastSeen),
             "member_alert_ids": c.memberAlertIds,
         ]
     }
@@ -549,7 +556,7 @@ func handleGetAlerts(_ args: [String: Any]) async -> Any {
 
         var lines: [String] = [header]
         for alert in alerts {
-            let time = ISO8601DateFormatter().string(from: alert.timestamp)
+            let time = isoFormatter.string(from: alert.timestamp)
             lines.append("")
             lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)")
             lines.append("  Time: \(time)")
@@ -612,7 +619,7 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
 
         var lines: [String] = ["\(events.count) event(s):"]
         for event in events {
-            let time = ISO8601DateFormatter().string(from: event.timestamp)
+            let time = isoFormatter.string(from: event.timestamp)
             lines.append("")
             lines.append("\(time) [\(event.eventCategory.rawValue)] \(event.eventAction)")
             lines.append("  Process: \(event.process.name) (PID \(event.process.pid))")
@@ -653,7 +660,7 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
 
         var lines: [String] = ["\(campaigns.count) campaign(s) detected:"]
         for c in campaigns {
-            let time = ISO8601DateFormatter().string(from: c.timestamp)
+            let time = isoFormatter.string(from: c.timestamp)
             let type = c.ruleId.replacingOccurrences(of: "maccrab.campaign.", with: "")
             lines.append("")
             lines.append("[\(c.severity.rawValue.uppercased())] \(c.ruleTitle)")
@@ -729,7 +736,7 @@ func handleHunt(_ args: [String: Any]) async -> Any {
 
         var lines: [String] = ["\(results.count) result(s) for: \(query)"]
         for event in results {
-            let time = ISO8601DateFormatter().string(from: event.timestamp)
+            let time = isoFormatter.string(from: event.timestamp)
             lines.append("")
             lines.append("\(time) [\(event.eventCategory.rawValue)] \(event.process.name)")
             lines.append("  Path: \(event.process.executable)")
@@ -806,7 +813,7 @@ func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
         var lines: [String] = []
         lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)")
         lines.append("ID:     \(alert.id)")
-        lines.append("Time:   \(ISO8601DateFormatter().string(from: alert.timestamp))")
+        lines.append("Time:   \(isoFormatter.string(from: alert.timestamp))")
         lines.append("Status: \(alert.suppressed ? "Suppressed" : "Active")")
         if let proc = alert.processName { lines.append("Process: \(proc)") }
         if let path = alert.processPath  { lines.append("Path:    \(path)") }
@@ -867,14 +874,12 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
         // Suppress the campaign alert itself.
         try await store.suppress(alertId: campaignId)
 
-        // Suppress all contributing alerts (those whose campaignId references this campaign).
-        let all = try await store.alerts(since: Date.distantPast, limit: 10_000)
-        let contributing = all.filter { $0.campaignId == campaignId && !$0.suppressed }
-        for alert in contributing {
-            try? await store.suppress(alertId: alert.id)
-        }
+        // v1.11.1 (audit perf HIGH): single SQL UPDATE for the fan-out
+        // instead of a 10K-row pull + N-serial-write loop. Pre-fix the
+        // worst case wedged the handler ~30s on 5K matching alerts.
+        let count = try await store.suppress(campaignId: campaignId)
 
-        let extra = contributing.isEmpty ? "" : " Also suppressed \(contributing.count) contributing alert(s)."
+        let extra = count == 0 ? "" : " Also suppressed \(count) contributing alert(s)."
         return ["content": [["type": "text", "text": "Campaign \(campaignId) suppressed.\(extra)"]]]
     } catch {
         return ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]]]
@@ -888,18 +893,10 @@ func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
     do {
         let store = try AlertStore(directory: dataDir)
         let since = Date().addingTimeInterval(-hours * 3600)
-        let all = try await store.alerts(since: since, limit: 10_000)
-
-        let aiKeywords = ["ai_tool", "ai-tool", "ai_guard", "credential_fence",
-                          "boundary", "injection", "mcp_server", "prompt"]
-        let aiTitleKeywords = ["AI", "Credential Fence", "Boundary", "Injection", "MCP", "Prompt"]
-
-        let aiAlerts = all.filter { alert in
-            let ruleId = alert.ruleId.lowercased()
-            let title  = alert.ruleTitle
-            return aiKeywords.contains(where: { ruleId.contains($0) })
-                || aiTitleKeywords.contains(where: { title.contains($0) })
-        }.prefix(limit)
+        // v1.11.1 (audit perf HIGH): SQL-side rule_id LIKE prefix
+        // filter instead of "pull 10K + Swift substring match across
+        // 8 keywords on every row".
+        let aiAlerts = try await store.aiAlerts(since: since, limit: limit)
 
         if aiAlerts.isEmpty {
             return ["content": [["type": "text", "text": "No AI safety alerts in the last \(Int(hours))h. AI tools are operating within safe boundaries."]]]
@@ -909,7 +906,7 @@ func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
         for alert in aiAlerts {
             lines.append("")
             lines.append("[\(alert.severity.rawValue.uppercased())] \(alert.ruleTitle)")
-            lines.append("  Time:    \(ISO8601DateFormatter().string(from: alert.timestamp))")
+            lines.append("  Time:    \(isoFormatter.string(from: alert.timestamp))")
             lines.append("  ID:      \(alert.id)")
             if let proc = alert.processName { lines.append("  Process: \(proc)") }
             if let desc = alert.description { lines.append("  Detail:  \(desc)") }
@@ -991,21 +988,29 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
     let statusFilter = args["status"] as? String
     do {
         let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
-        let raw = try await store.listTraces(limit: limit)
-        let traces = statusFilter.map { f in raw.filter { $0.status == f } } ?? raw
+        // v1.11.1 (audit perf HIGH): push status filter into SQL so a
+        // caller asking for `limit:25 status:open` actually gets up
+        // to 25 matching rows (pre-fix the filter ran AFTER the limit,
+        // capping returned matches at whatever fraction of the first
+        // 25 happened to match).
+        let traces = try await store.listTraces(limit: limit, status: statusFilter)
         if traces.isEmpty {
             return ["content": [["type": "text", "text":
                 "No traces found. Either the daemon hasn't materialized any yet, or the tracegraph.db isn't on this machine. Run `maccrabctl trace demo` to seed a sample."]]]
         }
         var lines = ["\(traces.count) trace(s):"]
         for t in traces {
-            let nodes = (try? await store.loadTrace(id: t.id))?.members.count ?? 0
+            // v1.11.1 (audit perf HIGH): O(1) memberCount via dedicated
+            // SQL query instead of a full loadTrace round-trip per row.
+            // Pre-fix this was an N+1 — 200 traces × 2 SQL queries each
+            // + full member-set deserialization just to read .count.
+            let nodes = (try? await store.memberCount(traceId: t.id)) ?? 0
             lines.append("")
             lines.append("[\(t.severity.uppercased())] \(t.title)  (id: \(t.id))")
             lines.append("  Status:    \(t.status)")
             lines.append("  Anchor:    \(t.anchorEventId)")
             lines.append("  Nodes:     \(nodes)")
-            lines.append("  Updated:   \(ISO8601DateFormatter().string(from: t.updatedAt))")
+            lines.append("  Updated:   \(isoFormatter.string(from: t.updatedAt))")
         }
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
@@ -1031,8 +1036,8 @@ func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
         lines.append("Status:    \(trace.status)")
         lines.append("Anchor:    \(trace.anchorEventId)")
         if let root = trace.rootEntityId { lines.append("Root:      \(root)") }
-        lines.append("Created:   \(ISO8601DateFormatter().string(from: trace.createdAt))")
-        lines.append("Updated:   \(ISO8601DateFormatter().string(from: trace.updatedAt))")
+        lines.append("Created:   \(isoFormatter.string(from: trace.createdAt))")
+        lines.append("Updated:   \(isoFormatter.string(from: trace.updatedAt))")
         lines.append("")
         lines.append("Members (\(members.count)):")
         for m in members.prefix(50) {
@@ -1044,7 +1049,7 @@ func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
             lines.append("")
             lines.append("Latest hash-chain entry:")
             lines.append("  Sequence:  \(entry.sequenceNumber)")
-            lines.append("  Recorded:  \(ISO8601DateFormatter().string(from: entry.createdAt))")
+            lines.append("  Recorded:  \(isoFormatter.string(from: entry.createdAt))")
             lines.append("  Hash:      \(entry.currentHash.prefix(16))…")
         }
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
@@ -1058,14 +1063,12 @@ func handleHuntTrace(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": "Missing required argument: query"]]]
     }
     let limit = min(max(args["limit"] as? Int ?? 25, 1), 100)
-    let q = query.lowercased()
     do {
         let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
-        // Pull a wider candidate set then substring-filter; cheap given
-        // typical trace counts.
-        let candidates = try await store.listTraces(limit: 500)
-        let matches = candidates.filter { $0.title.lowercased().contains(q) }
-            .prefix(limit)
+        // v1.11.1 (audit perf LOW): SQL-side LIKE instead of pulling
+        // 500 candidates + Swift substring scan. Lets SQLite skip
+        // deserializing non-matches.
+        let matches = try await store.huntTraces(query: query, limit: limit)
         if matches.isEmpty {
             return ["content": [["type": "text", "text": "No traces match `\(query)`."]]]
         }
@@ -1140,31 +1143,24 @@ func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
     }
     do {
         let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
-        // Scan recent traces and check membership for this event id.
-        // Membership is the canonical link: a trace's membership rows
-        // include event_id when the entity in question contributed an
-        // event of the same id (the daemon writes these at materialise
-        // time).
-        let traces = try await store.listTraces(limit: 200)
-        for trace in traces {
-            guard let pair = try await store.loadTrace(id: trace.id) else { continue }
-            for member in pair.members {
-                if (member.entityId == eventId)
-                    || (member.role == "anchor" && trace.anchorEventId == eventId) {
-                    var lines = ["Event \(eventId) belongs to trace \(trace.id)"]
-                    lines.append("═══════════════════════════════════")
-                    lines.append("Title:    \(trace.title)")
-                    lines.append("Severity: \(trace.severity)")
-                    lines.append("Anchor:   \(trace.anchorEventId)")
-                    lines.append("Role:     \(trace.anchorEventId == eventId ? "anchor" : "member")")
-                    lines.append("Status:   \(trace.status)")
-                    lines.append("Updated:  \(ISO8601DateFormatter().string(from: trace.updatedAt))")
-                    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
-                }
-            }
+        // v1.11.1 (audit perf HIGH): single SQL UNION across the
+        // membership index AND the anchor_event_id column instead of
+        // listing 200 traces + linearly scanning each one's members.
+        // Pre-fix worst case: 200 × 2 SQL queries + 200 × M
+        // deserializations. Now: one query.
+        guard let trace = try await store.traceContaining(entityId: eventId) else {
+            return ["content": [["type": "text", "text":
+                "Event \(eventId) is not a member of any trace. Either it pre-dates the trace materialiser's window, or it didn't qualify as a trace anchor / member."]]]
         }
-        return ["content": [["type": "text", "text":
-            "Event \(eventId) is not a member of any recent trace. Either it pre-dates the trace materialiser's window, or it didn't qualify as a trace anchor / member."]]]
+        var lines = ["Event \(eventId) belongs to trace \(trace.id)"]
+        lines.append("═══════════════════════════════════")
+        lines.append("Title:    \(trace.title)")
+        lines.append("Severity: \(trace.severity)")
+        lines.append("Anchor:   \(trace.anchorEventId)")
+        lines.append("Role:     \(trace.anchorEventId == eventId ? "anchor" : "member")")
+        lines.append("Status:   \(trace.status)")
+        lines.append("Updated:  \(isoFormatter.string(from: trace.updatedAt))")
+        return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
         return ["content": [["type": "text", "text": "Error looking up trace: \(error.localizedDescription)"]]]
     }

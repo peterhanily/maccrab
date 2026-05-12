@@ -1,6 +1,6 @@
 cask "maccrab" do
-  version "1.10.1"
-  sha256 "cba90bfcb3a873799a38a2fc568ce5acee1bb7c4517c4a4de9956ff4a90e2501"
+  version "1.11.0"
+  sha256 :no_check  # release.sh updates with the actual DMG sha256 at sign time
 
   url "https://github.com/peterhanily/maccrab/releases/download/v#{version}/MacCrab-v#{version}.dmg"
   name "MacCrab"
@@ -57,6 +57,14 @@ cask "maccrab" do
     system_command "/bin/mkdir",
                    args: ["-p", "/Library/Application Support/MacCrab/compiled_rules/sequences"],
                    sudo: true
+    # v1.10.0 audit fix: cross-UID IPC drop point for the dashboard's
+    # "Reduce events.db now" button. 1777 = sticky+world-write.
+    system_command "/bin/mkdir",
+                   args: ["-p", "/Library/Application Support/MacCrab/inbox"],
+                   sudo: true
+    system_command "/bin/chmod",
+                   args: ["1777", "/Library/Application Support/MacCrab/inbox"],
+                   sudo: true
     Dir.glob("#{staged_path}/compiled_rules/*.json").each do |f|
       system_command "/bin/cp", args: [f, "/Library/Application Support/MacCrab/compiled_rules/"], sudo: true
     end
@@ -68,6 +76,26 @@ cask "maccrab" do
     # inside MacCrab.app/Contents/Library/SystemExtensions/ and is
     # registered with sysextd the first time the user opens the app
     # and clicks "Enable Protection" (see SystemExtensionPanel.swift).
+
+    # ── CLI symlink: point at the in-app binary, not the caskroom one
+    # ───────────────────────────────────────────────────────────────────
+    # The `binary` stanza above made brew install
+    # /opt/homebrew/bin/maccrabctl as a symlink to the cask's
+    # version-pinned copy in $HOMEBREW_PREFIX/Caskroom/maccrab/X.Y.Z/.
+    # That copy is frozen at install time. When Sparkle updates
+    # MacCrab.app in-place to v1.10+, the terminal CLI keeps
+    # resolving to the v1.8 binary in the Caskroom path — and any
+    # CLI subcommand added since then ("intel refresh", "trace ...",
+    # "unsuppress --id") fails with "Unknown command". Replace the
+    # symlink so it points at the CLI bundled inside MacCrab.app,
+    # which Sparkle DOES update atomically.
+    ["maccrabctl", "maccrab-mcp"].each do |cli|
+      target = "/Applications/MacCrab.app/Contents/Resources/bin/#{cli}"
+      link   = "#{HOMEBREW_PREFIX}/bin/#{cli}"
+      next unless File.executable?(target)
+      system_command "/bin/rm", args: ["-f", link], must_succeed: false
+      system_command "/bin/ln", args: ["-s", target, link], must_succeed: false
+    end
   end
 
   # v1.7.11 cask-only patch: clean up the user-context LaunchAgent that
@@ -80,7 +108,7 @@ cask "maccrab" do
   #   - ~/Library/LaunchAgents/com.maccrab.app.plist (legacy path)
   #   - ~/Library/LaunchAgents/79S425CW99.com.maccrab.app.plist (modern,
   #     team-id-prefixed; what most macOS 13+ systems actually create)
-  uninstall quit:      ["com.maccrab.app"],
+  uninstall quit:         ["com.maccrab.app"],
             # Belt-and-suspenders: if `quit` doesn't fully terminate the
             # menubar app within Homebrew's grace window (SwiftUI menubar
             # apps don't always respond to the quit AppleEvent if a
@@ -88,14 +116,26 @@ cask "maccrab" do
             # observed: post-uninstall a running process at PID-N kept
             # showing in `launchctl list` as `application.com.maccrab.app.X.Y`
             # because `quit` returned before the app actually exited.
-            signal:    [["TERM", "com.maccrab.app"]],
-            launchctl: [
+            signal:        [["TERM", "com.maccrab.app"]],
+            # Deactivate the system extension BEFORE the .app is removed.
+            # Without this step sysextd's ledger keeps a "pending" entry
+            # forever (visible via `systemextensionsctl list`) since the
+            # bundle it references gets deleted out from under it. The
+            # script may prompt for the user's password — that's fine
+            # for an uninstall flow.
+            early_script:  {
+              executable:   "/usr/bin/systemextensionsctl",
+              args:         ["uninstall", "79S425CW99", "com.maccrab.agent"],
+              must_succeed: false,
+              sudo:         true,
+            },
+            launchctl:     [
               "com.maccrab.agent",
               "com.maccrab.daemon",
               "com.maccrab.app",
               "79S425CW99.com.maccrab.app",
             ],
-            delete:    [
+            delete:        [
               "/Library/LaunchDaemons/com.maccrab.agent.plist",
               "/Library/LaunchDaemons/com.maccrab.daemon.plist",
               "~/Library/LaunchAgents/com.maccrab.app.plist",
@@ -103,9 +143,12 @@ cask "maccrab" do
             ]
 
   # /Library/Application Support/MacCrab is *deliberately* NOT in the
-  # uninstall delete: list. `brew upgrade` calls the uninstall stanza
-  # between versions; listing it there wiped user state on every upgrade
-  # through v1.3.7. `brew uninstall --zap maccrab` still removes it.
+  # uninstall delete: list above. `brew upgrade` calls the uninstall
+  # stanza between versions, so listing it there would wipe alerts,
+  # baselines, suppressions, and LLM keys on every upgrade — which is
+  # what bit v1.3.5 → v1.3.6 testers. The `zap` stanza below removes
+  # it only on `brew uninstall --zap maccrab` for users who really
+  # want a clean slate.
   zap trash: [
     "/Library/Application Support/MacCrab",
     "~/Library/Application Support/MacCrab",

@@ -88,7 +88,7 @@ public actor BundleExporter {
         public var anchorEntityId: String?
         public var title: String?
         public var severity: String?
-        public var maccrabVersion: String = "1.10.0"
+        public var maccrabVersion: String = MacCrabVersion.current
 
         public init() {}
     }

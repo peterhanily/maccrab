@@ -418,7 +418,7 @@
 "welcome.allSet" = "You’re All Set!";
 "welcome.ready" = "MacCrab is ready to protect your Mac.";
 "welcome.feature.detection" = "Real-Time Detection";
-"welcome.feature.detectionDesc" = "348 detection rules monitor your Mac for threats in real time";
+"welcome.feature.detectionDesc" = "Hundreds of detection rules monitor your Mac for threats in real time";
 "welcome.feature.ai" = "AI Safety";
 "welcome.feature.aiDesc" = "Monitors AI coding tools like Claude, Cursor, and Copilot for credential access";
 "welcome.feature.prevention" = "Active Prevention";
@@ -468,7 +468,6 @@
 "responseAction.quarantine" = "Quarantine File";
 "responseAction.blockNetwork" = "Block Network";
 "responseAction.runScript" = "Run Script";
-"welcome.setup.rulesLoaded" = "348 detection rules loaded";
 
 /* ── Severity Labels ── */
 /* TODO: translate */
@@ -482,3 +481,56 @@
 /* TODO: translate */
 "severity.critical" = "Critical";
 
+
+
+/* --------------------------------------------------------- */
+/* v1.11.1 — keys missing translation (English fallback).    */
+/* Pre-fix these keys lived only in en.lproj; SwiftUI used    */
+/* runtime fallback so users on this locale saw English      */
+/* anyway. Surfacing them here makes them discoverable for   */
+/* future translators without changing the visible UI.       */
+/* --------------------------------------------------------- */
+"severity.info" = "Info";
+"statusLevel.healthy" = "Healthy";
+"statusLevel.info" = "Info";
+"statusLevel.warning" = "Warning";
+"statusLevel.critical" = "Critical";
+"alerts.undoSuppress" = "Undo";
+"alerts.dismissToast" = "Dismiss";
+"alerts.suppressedCount" = "%lld alerts";
+"alerts.unsuppressedCount" = "Unsuppressed %lld alerts";
+"action.suppressAll.hint" = "Suppress all alerts matching '%1$@' from '%2$@'";
+"action.kill.hint" = "Terminate %@";
+"action.copyDetails.hint" = "Copies alert details to clipboard";
+"sysext.headline.enable" = "Enable Endpoint Security protection";
+"sysext.headline.activating" = "Activating protection";
+"sysext.headline.pending" = "Approval required";
+"sysext.headline.active" = "Protection active";
+"sysext.headline.failed" = "Activation failed";
+"sysext.body.checking" = "Checking extension state…";
+"sysext.body.notActivated" = "MacCrab's detection engine runs as a macOS system extension so it can observe kernel events at the source. The first time you enable it, macOS will ask for your approval in System Settings.";
+"sysext.body.activating" = "Registering the extension with sysextd. If a prompt appears in System Settings, approve it to continue.";
+"sysext.body.awaitingApproval" = "Open System Settings > General > Login Items & Extensions > Endpoint Security Extensions and enable MacCrab's extension. Detection won't start until you approve.";
+"sysext.body.activated" = "Kernel events are flowing through the MacCrab agent. All detection tiers are online.";
+"sysext.state.unknown" = "Unknown";
+"sysext.state.disabled" = "Disabled";
+"sysext.state.activating" = "Activating";
+"sysext.state.pending" = "Pending";
+"sysext.state.active" = "Active";
+"sysext.state.failed" = "Failed";
+"sysext.action.enable" = "Enable Protection";
+"sysext.action.openSettings" = "Open System Settings";
+"sysext.action.tryAgain" = "Try again";
+"overview.enableAbove" = "Enable protection above to start the detection engine.";
+"overview.populating" = "The extension is active — populating the dashboard.";
+"overview.critical.count" = "%lld %@ %@ investigation";
+"overview.high.count" = "%lld %@ to review";
+"overview.eventsRate" = "%lld events/sec monitored";
+"overview.fda.title" = "Full Disk Access is not granted";
+"overview.fda.body" = "MacCrab needs Full Disk Access to monitor TCC permissions and protected file paths. Detection coverage is currently incomplete.";
+"overview.fda.openSettings" = "Open Settings";
+"threatintel.apiKey.placeholder" = "API Key";
+"threatintel.apiKey.accessibility" = "%@ API Key";
+"threatintel.apiKey.getFree" = "Get a free API key →";
+"threatintel.apiKey.getPaid" = "Get an API key →";
+"menu.checkForUpdates" = "Check for Updates…";

@@ -332,7 +332,7 @@ public actor ThreatIntelAPIs {
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("MacCrab/1.0.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
         let body = "url=\(url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? url)&format=json&app_key=MacCrab"
         request.httpBody = body.data(using: .utf8)
 
@@ -402,7 +402,7 @@ public actor ThreatIntelAPIs {
         guard let requestURL = URL(string: url) else { return nil }
         var request = URLRequest(url: requestURL)
         request.timeoutInterval = 10
-        request.setValue("MacCrab/1.0.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
@@ -418,7 +418,7 @@ public actor ThreatIntelAPIs {
         guard let requestURL = URL(string: url) else { return nil }
         var request = URLRequest(url: requestURL)
         request.timeoutInterval = 10
-        request.setValue("MacCrab/1.0.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }

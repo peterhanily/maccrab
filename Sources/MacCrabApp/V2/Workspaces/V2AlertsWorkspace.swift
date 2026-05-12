@@ -7,6 +7,10 @@ import AppKit
 import UniformTypeIdentifiers
 
 struct V2AlertsWorkspace: View {
+    // v1.11.1 (audit perf LOW): hoisted formatter for the JSON-export
+    // path so we don't pay ~0.5 ms per alert row to instantiate one.
+    nonisolated(unsafe) static let isoFormatter = ISO8601DateFormatter()
+
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
     @State private var selected: V2MockAlert?
@@ -341,7 +345,10 @@ struct V2AlertsWorkspace: View {
                         "category": alert.category,
                         "mitre": alert.mitre,
                         "description": alert.description,
-                        "timestamp": ISO8601DateFormatter().string(from: alert.timestamp),
+                        // v1.11.1 (audit perf LOW): hoisted formatter
+                        // (V2AlertsWorkspace exports a JSON dump on
+                        // demand; pre-fix instantiated one per row).
+                        "timestamp": V2AlertsWorkspace.isoFormatter.string(from: alert.timestamp),
                         "suppressed": alert.suppressed,
                     ]
                     guard let data = try? JSONSerialization.data(
@@ -639,7 +646,15 @@ struct V2AlertsWorkspace: View {
             V2DataColumn(id: "process", title: "Process", width: .flexible(min: 120, max: 220)) { a in
                 VStack(alignment: .leading, spacing: 1) {
                     V2TableCellText(a.process)
-                    V2TableCellText("pid \(a.pid)", primary: false, mono: true)
+                    // v1.10.2 (audit functionality HIGH): pid is
+                    // hardcoded to 0 by V2LiveDataProvider.toV2Alert
+                    // because Alert doesn't persist process pid yet
+                    // (schema-v2 migration is a v1.11 task). Render
+                    // the sub-label only when a real pid exists,
+                    // matching the inspector's `if pid > 0` gate.
+                    if a.pid > 0 {
+                        V2TableCellText("pid \(a.pid)", primary: false, mono: true)
+                    }
                 }
             },
             V2DataColumn(id: "category", title: "Category", width: .fixed(110)) { a in
@@ -764,7 +779,10 @@ struct V2AlertsWorkspace: View {
                                 .padding(.top, 4)
                             ForEach(alert.llmSuggestedActions, id: \.self) { a in
                                 HStack(alignment: .top, spacing: 6) {
-                                    Image(systemName: "arrow.right.circle.fill")
+                                    // v1.11.0 (audit UX MEDIUM): use .forward
+                                    // variant so the arrow mirrors under
+                                    // RTL locales.
+                                    Image(systemName: "arrow.forward.circle.fill")
                                         .foregroundStyle(V2Theme.aiAccent)
                                         .font(.system(size: 11))
                                         .padding(.top, 2)
@@ -949,7 +967,12 @@ struct V2AlertsWorkspace: View {
                     Text(c.name)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("\(c.alertCount) alerts · \(c.entities) entities · \(V2TimeFormat.relative(c.firstSeen))")
+                    // v1.11.0 (audit functionality MEDIUM): drop the
+                    // "X entities" suffix — `toV2Campaign` hardcodes
+                    // entities to 0 because no entity-count is computed
+                    // at materialization time. Showed "0 entities" on
+                    // every card pre-fix.
+                    Text("\(c.alertCount) alerts · \(V2TimeFormat.relative(c.firstSeen))")
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 }

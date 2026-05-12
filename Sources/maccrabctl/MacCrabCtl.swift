@@ -325,13 +325,31 @@ struct MacCrabCtl {
             await traceVerify(bundlePath: path, checkUnifiedLog: checkUnifiedLog)
         case "replay":
             guard let path = rest.first else {
-                print("Usage: maccrabctl trace replay <bundle> [--normalization <version>]"); exit(1)
+                print("Usage: maccrabctl trace replay <bundle> [--normalization <version>] [--compare-rules <a> <b>]"); exit(1)
             }
             var normVersion = "1"
             if let idx = rest.firstIndex(of: "--normalization"), idx + 1 < rest.count {
                 normVersion = rest[idx + 1]
             }
-            await traceReplay(bundlePath: path, expectedNormalizationVersion: normVersion)
+            // v1.11.1 (audit backlog): --compare-rules <a> <b> runs
+            // the replay twice (once with each ruleset identifier) and
+            // diffs the resulting alert sets. The diff is meaningful
+            // once a non-echo RulesetReplayer is wired (v1.11.x);
+            // until then BundleEmbeddedRulesetReplayer is identity on
+            // matched_rules so the alert diff is empty + only the
+            // result_sha256 changes. Useful as the v1.11.x landing
+            // hook so the CLI surface is stable.
+            if let cmpIdx = rest.firstIndex(of: "--compare-rules"),
+               cmpIdx + 2 < rest.count {
+                let a = rest[cmpIdx + 1]
+                let b = rest[cmpIdx + 2]
+                await traceReplayCompare(bundlePath: path,
+                                          rulesetA: a,
+                                          rulesetB: b,
+                                          expectedNormalizationVersion: normVersion)
+            } else {
+                await traceReplay(bundlePath: path, expectedNormalizationVersion: normVersion)
+            }
         case "demo":
             let scenario = rest.first
             await traceDemo(scenario: scenario)

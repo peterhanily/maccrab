@@ -175,6 +175,12 @@ public actor CampaignStore {
         if !isReadOnly {
             Self.exec(handle, "PRAGMA journal_mode = WAL")
             Self.exec(handle, "PRAGMA synchronous = NORMAL")
+            // v1.11.0 (audit scalability MEDIUM): incremental auto-vacuum
+            // so deletions actually reclaim disk pages. Existing
+            // campaigns.db files need a one-shot manual `VACUUM` to
+            // convert (auto_vacuum can only flip on a fresh / empty DB
+            // or via VACUUM); fresh installs flip immediately.
+            Self.exec(handle, "PRAGMA auto_vacuum = INCREMENTAL")
         }
         // v1.4.4 — see EventStore.swift for the busy_timeout rationale.
         Self.exec(handle, "PRAGMA busy_timeout = 5000")

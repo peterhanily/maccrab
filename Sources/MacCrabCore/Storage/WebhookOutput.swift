@@ -115,8 +115,21 @@ public actor WebhookOutput {
         }
 
         // Metadata addresses are blocked regardless of allowPrivate.
-        let blockedMetadata: Set<String> = ["169.254.169.254", "fd00:ec2::254", "100.100.100.200"]
-        if blockedMetadata.contains(host) {
+        // v1.11.0 (audit security MEDIUM): extended to cover Azure
+        // IMDSv2 IPv6 brackets, OCI's metadata IP, IBM Cloud's host,
+        // and the all-zeroes literals (route to localhost on most
+        // OSes). Alibaba is caught via the RFC1918 path below.
+        let blockedMetadata: Set<String> = [
+            "169.254.169.254",            // AWS / GCP / Azure / Hetzner / OCI v1
+            "fd00:ec2::254",              // AWS IMDS IPv6
+            "[fd00:ec2::254]",            // AWS IMDS IPv6 with brackets (Azure-style)
+            "100.100.100.200",            // Alibaba ECS
+            "192.0.0.192",                // OCI v2
+            "metadata.softlayer.com",     // IBM Cloud (DNS host)
+            "metadata.google.internal",   // GCP DNS host
+            "0.0.0.0", "[::]", "::",      // any-addr → routes to localhost
+        ]
+        if blockedMetadata.contains(host) || blockedMetadata.contains(host.lowercased()) {
             throw ValidationError.metadataAddressBlocked(host)
         }
 
@@ -335,7 +348,7 @@ public actor WebhookOutput {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("MacCrab/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }

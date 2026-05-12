@@ -146,7 +146,10 @@ public actor PackageFreshnessChecker {
     }()
 
     /// User-Agent header required by some registries (crates.io).
-    private static let userAgent = "MacCrab/0.5.0"
+    /// Computed so the value tracks `MacCrabVersion.current` rather than
+    /// drifting (was stuck at "MacCrab/0.5.0" through 1.10.x as a
+    /// `static let`).
+    private static var userAgent: String { "MacCrab/\(MacCrabVersion.current)" }
 
     // MARK: - Initialization
 

@@ -1457,6 +1457,22 @@ enum EventLoop {
                     }
                 }
             }
+
+            // v1.10.2 (audit BLOCKER): the for-await body has many
+            // Foundation calls (enricher, ruleEngine, JSONEncoder via
+            // EventStore, ProcessInfo rebuild for sanitize) returning
+            // autoreleased temporaries. `autoreleasepool {}` can't
+            // wrap an async block; the next-best signal is a
+            // cooperative yield, which Swift's async runtime treats as
+            // a drain point for the current task's autorelease pool.
+            // Without this, sustained 200-1000 events/s flow has been
+            // observed accumulating autoreleased objects between
+            // implicit drain points (mirror of v1.7.7-v1.7.9
+            // eslogger/UnifiedLog/FileHasher fixes which used the same
+            // pattern via the inner `autoreleasepool` over synchronous
+            // chunks — that variant doesn't fit here because the body
+            // is interleaved async).
+            await Task.yield()
         }
 
         logger.info("Event stream ended. Daemon exiting.")

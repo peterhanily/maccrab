@@ -277,6 +277,29 @@ public struct V2MockPackage: Identifiable, Sendable, Hashable {
     public let staleness: TimeInterval
 }
 
+// MARK: - Integration
+
+/// v1.11.1: minimal integration descriptor for the Intelligence →
+/// Integrations panel. Surfaces the operator's configured external
+/// sinks (webhook destinations, SIEM endpoints, file outputs,
+/// object stores). `status` is "configured" until per-sink health
+/// reporting lands in v1.11.x — at which point we'll distinguish
+/// healthy / degraded / failing.
+public struct V2MockIntegration: Identifiable, Sendable, Hashable {
+    public let id: String
+    public let name: String
+    public let kind: String          // "webhook" / "siem" / "file" / "object-store" / "notification"
+    public let status: V2StatusLevel
+    public let detail: String
+    public init(id: String, name: String, kind: String, status: V2StatusLevel, detail: String) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.status = status
+        self.detail = detail
+    }
+}
+
 // MARK: - Repository
 
 public enum V2MockRepository {

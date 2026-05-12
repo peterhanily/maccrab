@@ -824,6 +824,16 @@ final class AppState: ObservableObject {
     private var previousEventCount: Int = 0
     private var lastStatsUpdate: Date = Date()
     private var rulesLoaded_cached = false
+    /// v1.11.1 (audit perf MEDIUM): mtime gate ported from
+    /// V2LiveDataProvider.rules(). Lets `loadRules()` short-circuit on
+    /// repeat calls when the compiled-rules dir hasn't changed —
+    /// previously the `rulesLoaded_cached` gate skipped the function
+    /// entirely, but a dashboard re-launch (or any manual call after
+    /// a SIGHUP-driven recompile) re-parsed all 427 JSON files
+    /// regardless. Tracks the dir mtime of whichever candidate path
+    /// won the load.
+    private var rulesCacheDirMtime: Date?
+    private var rulesCacheDirPath: String?
     private var lastAlertTimestamp: Date = .distantPast
     private var lastEventTimestamp: Date = .distantPast
     private var lastSecurityScoreUpdate: Date = .distantPast
@@ -1852,8 +1862,19 @@ final class AppState: ObservableObject {
         for dir in candidates {
             if let files = try? FileManager.default.contentsOfDirectory(atPath: dir),
                files.contains(where: { $0.hasSuffix(".json") }) {
+                // v1.11.1 (audit perf MEDIUM): mtime gate. If the
+                // dir we'd load from is the same one we last loaded
+                // AND its mtime is unchanged, the parsed `rules`
+                // array is still authoritative — skip the 427-file
+                // contentsOfDirectory + JSONDecoder.decode pass.
+                let mtime = (try? FileManager.default.attributesOfItem(atPath: dir))?[.modificationDate] as? Date
+                if dir == rulesCacheDirPath, let mtime, mtime == rulesCacheDirMtime, !rules.isEmpty {
+                    return
+                }
                 rules = loadRulesFromDir(dir, files: files)
                 rulesLoaded = rules.count
+                rulesCacheDirPath = dir
+                rulesCacheDirMtime = mtime
                 return
             }
         }
@@ -2454,7 +2475,15 @@ final class AppState: ObservableObject {
             lastStatsUpdate = now
         } catch {}
 
-        // Recompute security score at most every 5 minutes (scorer calls system APIs)
+        // Recompute security score at most every 5 minutes (scorer
+        // calls system APIs). v1.11.1 (audit perf LOW): the audit
+        // flagged this as "could be a dedicated DispatchSource", but
+        // a `timeIntervalSince()` comparison per 5-s refresh tick is
+        // essentially free (sub-microsecond), and the alternative
+        // (background Task with sleep) introduces lifecycle complexity
+        // around AppState teardown without a measurable win. Keeping
+        // the elapsed-time gate; revisit if profiling ever shows it
+        // matters.
         let now = Date()
         if now.timeIntervalSince(lastSecurityScoreUpdate) >= 300 {
             let result = await SecurityScorer().calculate()

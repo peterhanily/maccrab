@@ -1,8 +1,13 @@
 // NotificationOutput.swift
 // MacCrabCore
 //
-// Sends macOS native notifications for security alerts.
-// Uses NSUserNotificationCenter (works without app bundle / UNUserNotificationCenter entitlement).
+// Sends macOS native notifications for security alerts. The daemon
+// runs without a UI bundle, so neither NSUserNotificationCenter
+// (deprecated) nor UNUserNotificationCenter (requires the bundle's
+// notification entitlement) is reachable. Implementation shells out
+// to `osascript -e 'display notification …'` instead. Cheap for the
+// notification rate we run at; trades feature surface (custom
+// actions, attachments, identifiers) for working-without-bundle.
 
 import Foundation
 import os.log
@@ -36,6 +41,14 @@ public actor NotificationOutput {
     private var rateLimitedCount: Int = 0
     /// Whether a rate-limit summary notification has been sent this window.
     private var rateLimitNotified: Bool = false
+
+    /// v1.11.0 (audit functionality HIGH): mutate via this method
+    /// from outside the actor (SIGHUP reload path). Direct
+    /// `notifier.minimumSeverity = …` is rejected by Swift 6 strict
+    /// actor isolation when the caller isn't the same actor.
+    public func setMinimumSeverity(_ value: Severity) {
+        self.minimumSeverity = value
+    }
 
     public init(minimumSeverity: Severity = .high, maxPerMinute: Int = 10) {
         self.minimumSeverity = minimumSeverity

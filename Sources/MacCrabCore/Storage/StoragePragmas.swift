@@ -66,5 +66,22 @@ enum StoragePragmas {
         sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size = \(alertCacheSizeKB)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA mmap_size = \(alertMmapSizeBytes)", nil, nil, nil)
+        // v1.11.0 (audit scalability MEDIUM): same incremental-vacuum
+        // discipline as the event store so AlertStore's retention
+        // prune (`pruneOldest`) actually shrinks the file rather than
+        // leaving freed pages bloating the on-disk size. Existing
+        // alerts.db files need a one-shot manual `VACUUM` to convert
+        // (auto_vacuum can only be set on an empty / freshly-created
+        // DB or via VACUUM); fresh installs flip immediately.
+        sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
+    }
+
+    /// Apply CampaignStore-specific pragmas. Same shape as alerts.
+    static func applyCampaignStorePragmas(to handle: OpaquePointer) {
+        sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA cache_size = \(alertCacheSizeKB)", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
     }
 }

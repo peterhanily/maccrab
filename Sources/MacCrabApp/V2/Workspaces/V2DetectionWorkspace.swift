@@ -187,7 +187,7 @@ public struct V2DetectionWorkspace: View {
         state.showToast(V2Toast(
             kind: .error,
             title: "Couldn't find \(rule.id).yml",
-            detail: "Try: maccrabctl rule show \(rule.id)"
+            detail: "Try: maccrabctl rules list | grep \(rule.id)"
         ))
     }
 
@@ -422,7 +422,7 @@ public struct V2DetectionWorkspace: View {
             Text("AI tools observed").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
             HStack(spacing: 8) {
                 Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent)
-                Text("AI tool inventory is collected by the daemon's AIGuard pipeline. The dashboard surface for it is not yet wired — use `maccrabctl ai tools` to list discovered tools and recent calls.")
+                Text("AI tool inventory is collected by the daemon's AIGuard pipeline. The dashboard surface for it is not yet wired — inspect `~/Library/Application Support/MacCrab/agent_lineage.json` directly to view the captured tool calls.")
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
             }
             .padding(16)
@@ -436,7 +436,7 @@ public struct V2DetectionWorkspace: View {
             Text("Recent AI lineage").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
             HStack(spacing: 8) {
                 Image(systemName: "link").foregroundStyle(V2Theme.aiAccent)
-                Text("AI lineage chains (terminal → AI tool → command) are captured by the daemon's AgentLineageService and persisted to `<dataDir>/agent_lineage.json`. View the snapshot via `maccrabctl ai lineage`.")
+                Text("AI lineage chains (terminal → AI tool → command) are captured by the daemon's AgentLineageService and persisted to `<dataDir>/agent_lineage.json`. Open the file directly to inspect; a dedicated dashboard surface is planned.")
                     .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
             }
             .padding(12)

@@ -24,6 +24,16 @@ final class DaemonState {
     /// call `state.alertSink.submit(...)` instead.
     let alertSink: AlertSink
 
+    /// v1.11.0 (audit stability HIGH): reentrancy guard for the v1.10.1
+    /// inbox file-IPC poller. Pre-fix the 5s DispatchSourceTimer fired
+    /// a fresh Task every tick — if the previous tick's Task was still
+    /// draining a campaign suppress fan-out (worst case 30+ seconds at
+    /// 5K alerts × 6ms per write), the next tick spawned a parallel
+    /// Task that re-listed the same dir + raced for the same files.
+    /// `withLock` provides correct mutual exclusion across the
+    /// DispatchSource thread and any spawned Task.
+    let inboxPollerLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+
     // MARK: - Core Engines
     let enricher: EventEnricher
     let ruleEngine: RuleEngine

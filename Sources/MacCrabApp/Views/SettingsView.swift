@@ -399,6 +399,15 @@ struct SettingsView: View {
                 GroupBox(String(localized: "settings.macosNotifications", defaultValue: "macOS Notifications")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(String(localized: "settings.showNotifications", defaultValue: "Show notifications for detection alerts"), isOn: $alertNotifications)
+                            // v1.11.0 (audit functionality HIGH): persist
+                            // changes to <supportDir>/alert_notifications.json
+                            // so the daemon's NotificationOutput actually
+                            // honours the toggle. Pre-fix the AppStorage
+                            // key wrote nowhere the daemon read. macOS 13
+                            // deployment target → use the legacy single-arg
+                            // form of .onChange (the two-arg form lands in
+                            // macOS 14).
+                            .onChange(of: alertNotifications) { _ in syncAlertNotificationConfig() }
 
                         if alertNotifications {
                             HStack {
@@ -412,9 +421,10 @@ struct SettingsView: View {
                                 }
                                 .labelsHidden()
                                 .frame(width: 160)
+                                .onChange(of: minAlertSeverity) { _ in syncAlertNotificationConfig() }
                             }
 
-                            Text(String(localized: "settings.severityHelp", defaultValue: "Only alerts at or above this severity will trigger a macOS notification."))
+                            Text(String(localized: "settings.severityHelp", defaultValue: "Only alerts at or above this severity will trigger a macOS notification. Daemon picks up changes on next restart or SIGHUP."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -1077,7 +1087,18 @@ struct SettingsView: View {
         }
 
         if let data = try? JSONSerialization.data(withJSONObject: config) {
-            try? data.write(to: URL(fileURLWithPath: configPath))
+            // v1.10.2 (audit security HIGH): write atomically THEN tighten
+            // perms so the API key copy never lands at 0o644 (umask
+            // default). Keychain is the primary store; this file copy
+            // exists for the legacy AppState.ensureLLMService read path
+            // that still consumes JSON, and previously left every Claude
+            // / OpenAI / Mistral / Gemini key world-readable in
+            // ~/Library/Application Support/MacCrab/llm_config.json.
+            try? data.write(to: URL(fileURLWithPath: configPath), options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o600))],
+                ofItemAtPath: configPath
+            )
         }
 
         // Update AppState so UI reflects immediately
@@ -1170,6 +1191,41 @@ struct SettingsView: View {
         }
     }
 
+    /// v1.11.0 (audit functionality HIGH): write the OS-notification
+    /// config to `<supportDir>/alert_notifications.json` and SIGHUP the
+    /// daemon so `NotificationOutput.minimumSeverity` updates without
+    /// a manual restart. Closes a wire-the-orphans gap — the toggle +
+    /// picker existed since v1.0 but no daemon code consumed them.
+    /// Schema matches `loadAlertNotificationConfig(supportDir:)` in
+    /// `Sources/MacCrabAgentKit/DaemonSetup.swift`.
+    private func syncAlertNotificationConfig() {
+        let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let path = configDir + "/alert_notifications.json"
+        let payload: [String: Any] = [
+            "enabled": alertNotifications,
+            "min_severity": minAlertSeverity,
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+        let tmp = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp))
+            _ = try? FileManager.default.removeItem(atPath: path)
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
+        } catch { return }
+        // SIGHUP the sysext so the new config takes effect on the next
+        // notification. Best-effort — same pattern as syncWebhookConfig.
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-HUP", "com.maccrab.agent"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        try? task.run()
+    }
+
     /// v1.6.19: write the four webhook URLs + the minimum severity to
     /// `~/Library/Application Support/MacCrab/notifications.json` in the
     /// `NotificationIntegrations.Config` shape, then SIGHUP the daemon.
@@ -1255,7 +1311,7 @@ struct SettingsView: View {
                     .frame(width: 200)
 
                 VStack(spacing: 4) {
-                    Text(String(localized: "settings.aboutStats", defaultValue: "19 event sources | 5 detection layers | 424 rules"))
+                    Text(String(localized: "settings.aboutStats", defaultValue: "19 event sources | 5 detection layers | hundreds of rules"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Text(String(localized: "settings.aboutLicense", defaultValue: "Apache 2.0 (code)  |  DRL 1.1 (rules)"))

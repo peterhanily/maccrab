@@ -217,6 +217,16 @@ public actor CampaignDetector {
 
     private func recordForStormDetection(_ alert: AlertSummary) {
         ruleAlertCounts[alert.ruleId, default: []].append(alert.timestamp)
+        // v1.11.0 (audit stability MEDIUM): bound each rule's
+        // timestamp array inline. Pre-fix `purgeStaleStormCounts()`
+        // ran only at the 5-min sweep tick, so a high-volume rule
+        // accumulated thousands of timestamps between sweeps + held
+        // them in memory. Cap at 2× stormCriticalThreshold — well
+        // above the largest legitimate window query yet bounded.
+        let cap = stormCriticalThreshold * 2
+        if let count = ruleAlertCounts[alert.ruleId]?.count, count > cap {
+            ruleAlertCounts[alert.ruleId]?.removeFirst(count - cap)
+        }
     }
 
     private func checkAlertStorm(latestAlert: AlertSummary) -> Campaign? {

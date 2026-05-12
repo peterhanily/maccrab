@@ -373,7 +373,7 @@ public actor NotificationIntegrations {
         var request = URLRequest(url: requestURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("MacCrab/1.0.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
         request.httpBody = body
         request.timeoutInterval = 10
 

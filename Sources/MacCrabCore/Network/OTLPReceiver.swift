@@ -539,18 +539,27 @@ public actor OTLPReceiver {
                     valueRedacted: extraction.totalAttributesValueRedacted
                 )
                 if let store = await receiver.storeRef() {
-                    for span in extraction.spans {
+                    // v1.11.1 (audit perf HIGH): batch the inserts in
+                    // one BEGIN/COMMIT transaction. Pre-fix every span
+                    // hit its own implicit COMMIT + fsync — at 500-1000
+                    // spans per request body that was 500-1000 syncs.
+                    let valid = extraction.spans.filter { span in
                         // Skip spans missing identity — protobuf could
                         // have emitted truncated/garbage IDs. Better to
                         // drop than to write a row that breaks the
                         // index assumptions.
-                        guard span.traceId.count == 32, span.spanId.count == 16 else {
-                            continue
+                        span.traceId.count == 32 && span.spanId.count == 16
+                    }
+                    do {
+                        let result = try await store.insertSpans(valid)
+                        for _ in 0..<result.succeeded { await receiver.recordSpanPersisted() }
+                        for _ in 0..<result.failed {
+                            await receiver.recordSpanInsertError("batch insert: row failed")
                         }
-                        do {
-                            try await store.insertSpan(span)
-                            await receiver.recordSpanPersisted()
-                        } catch {
+                    } catch {
+                        // Fail the whole batch's count visibility — rare
+                        // (transaction-level error like DB closed).
+                        for _ in 0..<valid.count {
                             await receiver.recordSpanInsertError("\(error)")
                         }
                     }

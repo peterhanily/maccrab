@@ -46,8 +46,8 @@ public actor TraceMaterializer {
     public init(
         store: CausalGraphStore,
         policy: TracePolicy = .default,
-        daemonVersion: String = "1.10.0",
-        rulesetVersion: String = "1.10.0"
+        daemonVersion: String = MacCrabVersion.current,
+        rulesetVersion: String = MacCrabVersion.current
     ) {
         self.store = store
         self.policy = policy

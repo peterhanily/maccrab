@@ -106,7 +106,11 @@ public struct V2KpiCard: View {
         }
         .v2Panel()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title): \(value)\(trend.map { ", \($0)" } ?? "")")
+        // v1.11.0 (audit UX LOW): a "—" value rendered VoiceOver as
+        // "em dash" / "dash". Render "pending" instead so users hear
+        // a meaningful state. Once daemon-side data populates the
+        // KPI cards, real values flow through unchanged.
+        .accessibilityLabel("\(title)\(value == "—" ? ", pending" : ": \(value)")\(trend.map { ", \($0)" } ?? "")")
     }
 }
 

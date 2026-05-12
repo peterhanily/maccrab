@@ -171,6 +171,20 @@ public actor FilesystemTrustSubstrateStorage: TrustSubstrateStorage {
     public func loadFilesystemPrivateKey() throws -> Data? {
         let url = baseDirectory.appendingPathComponent(Self.privateKeyFile)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        // v1.11.0 (audit security MEDIUM): refuse to load if the path
+        // is a symlink. The 0o700 parent dir mostly prevents this, but
+        // a one-time directory misconfiguration could let an attacker
+        // substitute keys via a symlink in the keys dir. Open with
+        // O_NOFOLLOW; lstat first to catch symlinks deterministically
+        // (Foundation's Data(contentsOf:) doesn't expose O_NOFOLLOW).
+        var st = stat()
+        if lstat(url.path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK {
+            throw NSError(
+                domain: "TrustSubstrate", code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "trust-signing.key is a symlink — refusing to load (key substitution attempt)"]
+            )
+        }
         return try Data(contentsOf: url)
     }
 

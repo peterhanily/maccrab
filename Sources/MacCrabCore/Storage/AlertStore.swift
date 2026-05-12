@@ -110,6 +110,22 @@ public actor AlertStore {
                 "ALTER TABLE alerts ADD COLUMN llm_investigation_json TEXT",
             ]
         ),
+        // v3 (v1.11.1): persist the Alert "phantom" enrichments — D3FEND
+        // chips, remediation hint, analyst metadata. Pre-v1.11.1 the V2
+        // dashboard inspector read these from the in-memory Alert but
+        // `if let / !isEmpty` gates hid them after a daemon restart
+        // because they weren't persisted. Migration adds three columns;
+        // the AnalystMetadata blob is a Codable JSON shape consistent
+        // with the LLMInvestigation pattern.
+        Migration(
+            version: 3,
+            name: "add_phantom_field_columns",
+            sql: [
+                "ALTER TABLE alerts ADD COLUMN d3fend_techniques TEXT",
+                "ALTER TABLE alerts ADD COLUMN remediation_hint TEXT",
+                "ALTER TABLE alerts ADD COLUMN analyst_metadata_json TEXT",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -199,8 +215,9 @@ public actor AlertStore {
                 id, timestamp, rule_id, rule_title, severity,
                 event_id, process_path, process_name, description,
                 mitre_tactics, mitre_techniques, suppressed,
-                llm_investigation_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                llm_investigation_json,
+                d3fend_techniques, remediation_hint, analyst_metadata_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -326,6 +343,26 @@ public actor AlertStore {
             bindText(stmt, index: 13, value: json)
         } else {
             sqlite3_bind_null(stmt, 13)
+        }
+        // 14: d3fend_techniques — CSV of D3FEND defensive technique IDs
+        // (schema v3, v1.11.1). Pre-v1.11.1 these existed on `Alert`
+        // but were dropped on persist; the V2 inspector hid the chips
+        // post-restart even though they'd been computed at alert time.
+        if let d3fend = alert.d3fendTechniques, !d3fend.isEmpty {
+            bindText(stmt, index: 14, value: d3fend.joined(separator: ","))
+        } else {
+            sqlite3_bind_null(stmt, 14)
+        }
+        // 15: remediation_hint — first-line guidance (schema v3, v1.11.1).
+        bindTextOrNull(stmt, index: 15, value: alert.remediationHint)
+        // 16: analyst_metadata_json — analyst workflow state (notes,
+        // owner, status, ticket ref). Codable JSON blob (schema v3, v1.11.1).
+        if let analyst = alert.analyst,
+           let data = try? Self.investigationEncoder.encode(analyst),
+           let json = String(data: data, encoding: .utf8) {
+            bindText(stmt, index: 16, value: json)
+        } else {
+            sqlite3_bind_null(stmt, 16)
         }
 
         let rc = sqlite3_step(stmt)
@@ -546,12 +583,18 @@ public actor AlertStore {
         ])
     }
 
-    /// Returns all alerts associated with a specific event.
+    /// Returns alerts associated with a specific event.
     ///
     /// - Parameter eventId: The event's unique identifier.
-    /// - Returns: All alerts that reference the given event.
+    /// - Returns: Up to 1000 alerts that reference the given event.
+    ///
+    /// v1.11.0 (audit perf MEDIUM): added `LIMIT 1000`. Normally 1-3 rows
+    /// per event, but a rule storm pinned to the same event_id (e.g.
+    /// hundreds of behavioural-score variants firing on the same exec)
+    /// previously returned the unbounded set. The cap is high enough
+    /// that legitimate use cases never hit it.
     public func alerts(forEventId eventId: String) throws -> [Alert] {
-        let sql = "SELECT * FROM alerts WHERE event_id = ?1 ORDER BY timestamp DESC"
+        let sql = "SELECT * FROM alerts WHERE event_id = ?1 ORDER BY timestamp DESC LIMIT 1000"
         return try queryAlerts(sql: sql, bindings: [(1, .text(eventId))])
     }
 
@@ -592,6 +635,56 @@ public actor AlertStore {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             throw AlertStoreError.stepFailed(msg)
         }
+    }
+
+    /// Suppress every alert that belongs to a given campaign in a single
+    /// SQL statement. Returns the number of rows updated.
+    ///
+    /// v1.11.1 (audit perf HIGH): pre-fix the MCP `suppress_campaign`
+    /// handler pulled up to 10K alerts then issued a serial `suppress`
+    /// per match. With 5K matching alerts × 6ms / write that wedged the
+    /// handler for ~30s. Single SQL `UPDATE WHERE campaign_id = ?` is
+    /// O(matched rows) at the page level, with a single COMMIT.
+    @discardableResult
+    public func suppress(campaignId id: String) throws -> Int {
+        let sql = "UPDATE alerts SET suppressed = 1 WHERE campaign_id = ?1 AND suppressed = 0"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: id)
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            throw AlertStoreError.stepFailed(msg)
+        }
+        return db.map { Int(sqlite3_changes($0)) } ?? 0
+    }
+
+    /// v1.11.1 (audit perf HIGH): SQL-side AI-Guard alert filter.
+    /// Pre-fix the MCP `get_ai_alerts` handler pulled 10K alerts then
+    /// substring-matched 8 keywords across rule_id + title in Swift.
+    /// AI-Guard rule ids follow a stable prefix convention
+    /// (`ai_tool_*`, `ai_guard_*`, `credential_fence_*`, `boundary_*`,
+    /// `injection_*`, `mcp_*`, `prompt_*`), so a single SQL `LIKE`
+    /// chain selects only the relevant rows.
+    public func aiAlerts(since: Date, limit: Int) throws -> [Alert] {
+        let sql = """
+            SELECT * FROM alerts
+             WHERE timestamp >= ?1
+               AND suppressed = 0
+               AND (rule_id LIKE 'ai_%'
+                 OR rule_id LIKE 'maccrab.ai-guard.%'
+                 OR rule_id LIKE 'credential_fence_%'
+                 OR rule_id LIKE 'boundary_%'
+                 OR rule_id LIKE 'injection_%'
+                 OR rule_id LIKE 'mcp_%'
+                 OR rule_id LIKE 'prompt_%')
+             ORDER BY timestamp DESC
+             LIMIT ?2
+            """
+        return try queryAlerts(sql: sql, bindings: [
+            (1, .double(since.timeIntervalSince1970)),
+            (2, .int(Int32(limit))),
+        ])
     }
 
     /// Unsuppress a previously suppressed alert.
@@ -828,6 +921,24 @@ public actor AlertStore {
                 )
             }
 
+            // Columns 13/14/15: phantom-field enrichments (schema v3,
+            // v1.11.1). Each is independently nullable — a row written
+            // pre-v3 has all three NULL and the V2 inspector continues
+            // to hide the corresponding sections via its existing
+            // `if let / !isEmpty` gates.
+            let d3fend: [String]? = {
+                guard let csv = columnTextOrNil(stmt, index: 13), !csv.isEmpty else { return nil }
+                return csv.split(separator: ",").map { String($0) }
+            }()
+            let remediation = columnTextOrNil(stmt, index: 14)
+            var analyst: AnalystMetadata? = nil
+            if let json = columnTextOrNil(stmt, index: 15),
+               let data = json.data(using: .utf8) {
+                analyst = try? Self.investigationDecoder.decode(
+                    AnalystMetadata.self, from: data
+                )
+            }
+
             let alert = Alert(
                 id: id,
                 timestamp: Date(timeIntervalSince1970: timestamp),
@@ -841,6 +952,9 @@ public actor AlertStore {
                 mitreTactics: columnTextOrNil(stmt, index: 9),
                 mitreTechniques: columnTextOrNil(stmt, index: 10),
                 suppressed: suppressedInt != 0,
+                analyst: analyst,
+                d3fendTechniques: d3fend,
+                remediationHint: remediation,
                 llmInvestigation: investigation
             )
             results.append(alert)

@@ -182,7 +182,15 @@ public actor ThreatIntelFeed {
         self.maxDomains = maxDomains
         self.maxURLs = maxURLs
         self.maxAge = maxAge
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        // v1.11.0 (audit security LOW): tighten threat_intel cache
+        // dir to 0o700. IOC values aren't secret per se, but a local
+        // user with read can enumerate which campaigns the daemon
+        // has matched (privacy/timing leak).
+        try? FileManager.default.createDirectory(
+            atPath: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
+        )
     }
 
     // MARK: - Public API
@@ -782,7 +790,7 @@ public actor ThreatIntelFeed {
             !authKey.isEmpty {
             request.setValue(authKey, forHTTPHeaderField: "Auth-Key")
         }
-        request.setValue("MacCrab/1.9", forHTTPHeaderField: "User-Agent")
+        request.setValue("MacCrab/\(MacCrabVersion.current)", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await SecureURLSession.shared.data(for: request)

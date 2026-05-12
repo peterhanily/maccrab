@@ -43,7 +43,7 @@ public enum OtelEncoder {
         }
 
         let scopeSpans: [String: Any] = [
-            "scope": ["name": serviceName, "version": "1.10.0"],
+            "scope": ["name": serviceName, "version": MacCrabVersion.current],
             "spans": spans,
         ]
 

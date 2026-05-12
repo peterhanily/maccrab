@@ -540,6 +540,80 @@ extension MacCrabCtl {
         }
     }
 
+    // MARK: - trace replay --compare-rules
+
+    /// v1.11.1: run the replay twice with two different ruleset
+    /// identifiers and diff the resulting alert sets. Until a real
+    /// RuleEngine-backed `RulesetReplayer` lands (the echo replayer
+    /// always replays `matched_rules.json` verbatim), the diff is
+    /// alert-empty + the only observable change is `result_sha256`.
+    /// Once the v1.11.x ruleset replayer ships, the diff becomes
+    /// load-bearing for "did rule X change behaviour between v1 and
+    /// v2 of the corpus?".
+    static func traceReplayCompare(
+        bundlePath: String,
+        rulesetA: String,
+        rulesetB: String,
+        expectedNormalizationVersion: String
+    ) async {
+        let url = URL(fileURLWithPath: bundlePath)
+        let directory = try? extractIfArchive(url)
+        let target = directory ?? url
+        defer { cleanupExtracted(directory) }
+
+        var options = ReplayEngine.ReplayOptions()
+        options.expectedNormalizationVersion = expectedNormalizationVersion
+
+        let engineA = ReplayEngine(replayer: BundleEmbeddedRulesetReplayer(
+            rulesetVersion: rulesetA, normalizationVersion: expectedNormalizationVersion
+        ))
+        let engineB = ReplayEngine(replayer: BundleEmbeddedRulesetReplayer(
+            rulesetVersion: rulesetB, normalizationVersion: expectedNormalizationVersion
+        ))
+
+        let resultA: ReplayResult
+        let resultB: ReplayResult
+        do {
+            resultA = try await engineA.replay(bundleAt: target, options: options)
+            resultB = try await engineB.replay(bundleAt: target, options: options)
+        } catch {
+            print("Compare replay failed: \(error.localizedDescription)")
+            exit(9)
+        }
+
+        // Build alert id sets keyed by "<ruleId>@<ruleVersion>". Diff
+        // is symmetric: in A not in B, in B not in A, common count.
+        func key(_ alert: ReplayedAlert) -> String { "\(alert.ruleId)@\(alert.ruleVersion)" }
+        let setA = Set(resultA.alerts.map(key))
+        let setB = Set(resultB.alerts.map(key))
+        let onlyA = setA.subtracting(setB).sorted()
+        let onlyB = setB.subtracting(setA).sorted()
+        let common = setA.intersection(setB).count
+
+        print("[replay-compare] trace=\(resultA.traceId)")
+        print("  ruleset A:       \(rulesetA)  sha=\(resultA.rulesetSha256.prefix(12))…")
+        print("  ruleset B:       \(rulesetB)  sha=\(resultB.rulesetSha256.prefix(12))…")
+        print("  result_sha A:    \(resultA.resultSha256.prefix(12))…")
+        print("  result_sha B:    \(resultB.resultSha256.prefix(12))…")
+        print("  alerts A:        \(resultA.alerts.count)")
+        print("  alerts B:        \(resultB.alerts.count)")
+        print("  common:          \(common)")
+        print("  only in A (\(onlyA.count)):")
+        for k in onlyA { print("    - \(k)") }
+        print("  only in B (\(onlyB.count)):")
+        for k in onlyB { print("    + \(k)") }
+
+        // Exit non-zero when there's a divergence so this is usable
+        // from CI / regression scripts.
+        if onlyA.isEmpty && onlyB.isEmpty && resultA.resultSha256 == resultB.resultSha256 {
+            print("  verdict:         identical")
+            exit(0)
+        } else {
+            print("  verdict:         diverged")
+            exit(20)
+        }
+    }
+
     // MARK: - trace demo (synthetic-trace seeder)
 
     /// Materializes a synthetic Fixture-1-style AI-credential-access

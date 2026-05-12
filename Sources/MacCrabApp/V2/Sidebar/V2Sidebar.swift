@@ -38,14 +38,39 @@ struct V2Sidebar: View {
                     .padding(.top, 12)
                     .padding(.bottom, 12)
 
+                // v1.11.1 (audit UX MEDIUM): visual subgrouping to
+                // reduce sidebar clutter. The 9 workspaces split
+                // naturally into 4 task buckets — Monitor (where the
+                // user lives day-to-day), Investigate (when something
+                // looks off), Configure (the rule engine + prevention),
+                // and System (operational concerns + docs). Group
+                // labels only render when the sidebar is expanded;
+                // collapsed mode shows icons only without headers.
+                // This is the lighter version of the v1.11.x sidebar
+                // consolidation proposal (`plans/2026-05-07-dashboard-
+                // overhaul.md`) — that one collapses to 7 workspaces;
+                // v1.11.1 keeps the surface stable and just adds
+                // grouping. Same surface, less visual noise.
                 VStack(spacing: 2) {
-                    ForEach(V2Workspace.allCases) { workspace in
-                        V2SidebarItem(
-                            workspace: workspace,
-                            isActive: state.currentWorkspace == workspace,
-                            collapsed: collapsed,
-                            onSelect: { state.switchWorkspace(workspace) }
-                        )
+                    ForEach(V2SidebarGroup.allCases) { group in
+                        if !collapsed, let label = group.headerLabel {
+                            Text(label)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(V2Theme.tertiaryText)
+                                .textCase(.uppercase)
+                                .padding(.horizontal, 12)
+                                .padding(.top, group == .monitor ? 0 : 12)
+                                .padding(.bottom, 4)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        ForEach(group.workspaces) { workspace in
+                            V2SidebarItem(
+                                workspace: workspace,
+                                isActive: state.currentWorkspace == workspace,
+                                collapsed: collapsed,
+                                onSelect: { state.switchWorkspace(workspace) }
+                            )
+                        }
                     }
                 }
                 .padding(.horizontal, collapsed ? 6 : 8)
@@ -206,7 +231,45 @@ struct V2Sidebar: View {
         }
         .buttonStyle(.plain)
         .help("MacCrab protection · click to open System health")
-        .accessibilityLabel("MacCrab protection active. Click to open System health.")
+        // v1.10.2 (audit UX HIGH): a11y label was hardcoded "active"
+        // regardless of degraded/inactive state. VoiceOver users heard
+        // "active" even when the daemon was offline. Use the same
+        // resolved title the visible row uses.
+        .accessibilityLabel("\(title). Click to open System health.")
+    }
+}
+
+// MARK: - Sidebar groups (v1.11.1)
+//
+// Workspaces are split into 4 task buckets. Each bucket renders as
+// a small uppercase header above its members when the sidebar is
+// expanded. Order matters: Monitor first because it's where the
+// user lives day-to-day; System last because it's accessed least.
+
+private enum V2SidebarGroup: String, CaseIterable, Identifiable {
+    case monitor, investigate, configure, system
+
+    var id: String { rawValue }
+
+    /// Rendered above the group's first workspace. Nil for the
+    /// leading group (Monitor) so the sidebar doesn't open with a
+    /// bare header.
+    var headerLabel: String? {
+        switch self {
+        case .monitor:     return nil
+        case .investigate: return "Investigate"
+        case .configure:   return "Configure"
+        case .system:      return "System"
+        }
+    }
+
+    var workspaces: [V2Workspace] {
+        switch self {
+        case .monitor:     return [.overview, .alerts]
+        case .investigate: return [.events, .investigation]
+        case .configure:   return [.detection, .prevention, .intelligence]
+        case .system:      return [.system, .docs]
+        }
     }
 }
 

@@ -345,7 +345,16 @@ enum DaemonSetup {
             captureEnv: captureEnv
         )
         ruleEngine = RuleEngine()
-        let notifier = NotificationOutput(minimumSeverity: .high)
+        // v1.11.0 (audit functionality HIGH): read OS-notification
+        // config from <supportDir>/alert_notifications.json instead
+        // of hardcoding `.high`. Closes a wire-the-orphans gap —
+        // SettingsView's notification toggle + severity picker have
+        // existed since v1.0 but never reached the daemon. Falls
+        // back to (enabled=true, .high) when the file is absent.
+        let notifConfig = loadAlertNotificationConfig(supportDir: supportDir)
+        let notifier = NotificationOutput(
+            minimumSeverity: notifConfig.enabled ? notifConfig.minSeverity : .critical
+        )
         let responseEngine = ResponseEngine()
 
         // Self-defense: tamper detection
@@ -1607,6 +1616,36 @@ enum DaemonSetup {
 ///   • Rename to `events.db.orphan-<YYYYMMDD-HHMMSS>` so a later sweep
 ///     can distinguish repeated quarantines.
 ///
+/// v1.11.0 (audit functionality HIGH): read OS-notification config
+/// from `<supportDir>/alert_notifications.json`. SettingsView writes
+/// the file from the dashboard's notification toggle + severity
+/// picker. Defaults to (enabled=true, .high) when the file is
+/// absent or malformed, matching the historical hardcoded behaviour.
+///
+/// File schema:
+///   { "enabled": true | false, "min_severity": "critical" | "high" | "medium" | "low" | "informational" }
+func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSeverity: Severity) {
+    let path = supportDir + "/alert_notifications.json"
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        return (true, .high)
+    }
+    let enabled = json["enabled"] as? Bool ?? true
+    let raw = (json["min_severity"] as? String ?? "high").lowercased()
+    let sev: Severity = {
+        switch raw {
+        case "critical":      return .critical
+        case "high":          return .high
+        case "medium":        return .medium
+        case "low":           return .low
+        case "informational": return .informational
+        default:              return .high
+        }
+    }()
+    return (enabled, sev)
+}
+
 /// WAL/SHM sidecars are renamed alongside the main file. Failures
 /// are logged but don't abort daemon startup — a leftover orphan is
 /// cosmetic, not a safety issue.
