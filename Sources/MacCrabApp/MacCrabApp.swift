@@ -8,15 +8,21 @@ import Sparkle
 @main
 struct MacCrabApp: App {
     // v1.4.2: sync rules from the app bundle to the installed
-    // rules-dir before AppState is constructed — AppState opens the
-    // detection engine DB and loads rules on init, so getting fresh
-    // rule JSON in place before that point is a no-op for everything
-    // else. Runs at most once per process; syncIfNeeded compares the
-    // bundled vs. installed `.bundle_version` markers and skips when
-    // they match.
-    init() {
-        RuleBundleInstaller.syncIfNeeded()
-    }
+    // rules-dir. v1.11.1 (audit launch-perf): moved off the
+    // MacCrabApp.init() main-thread path to a Task.detached fired
+    // from the WindowGroup's .onAppear (line ~95). Pre-fix the
+    // sync ran SYNCHRONOUSLY on main BEFORE SwiftUI rendered the
+    // first frame — on first install / Sparkle update it ran
+    // SHA-256 manifest verification + copied hundreds of rule
+    // files to /Library/Application Support/MacCrab/compiled_rules/,
+    // producing a multi-second beachball before the dashboard
+    // window even appeared. Now: window paints first, sync runs
+    // in the background, daemon SIGHUP at sync completion picks up
+    // the new rules. Worst case the user sees rule list briefly
+    // populated from the prior installed corpus while the new one
+    // copies in; the dashboard's mtime-gated AppState.loadRules
+    // refresh picks up the new set on its next 5s tick.
+    init() {}
 
     @StateObject private var appState = AppState()
     @StateObject private var sysextManager = SystemExtensionManager()
@@ -68,6 +74,15 @@ struct MacCrabApp: App {
                 .tint(MacCrabTheme.accent)
                 .onAppear {
                     appDelegate.setupStatusBar(appState: appState, updater: updaterController.updater)
+                    // v1.11.1: rule sync deferred from MacCrabApp.init()
+                    // to here. Runs detached so the dashboard window
+                    // paints first; sync's SIGHUP at completion notifies
+                    // the daemon. SwiftUI's .onAppear fires right after
+                    // first frame, so visual time-to-first-paint is the
+                    // window-render budget, not the sync budget.
+                    Task.detached(priority: .utility) {
+                        RuleBundleInstaller.syncIfNeeded()
+                    }
                     // Kick off system-extension activation on first
                     // launch. The manager dedups against an already-
                     // activated extension, so this is also safe on

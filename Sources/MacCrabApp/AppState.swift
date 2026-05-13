@@ -1012,8 +1012,18 @@ final class AppState: ObservableObject {
 
     init() {
         startPolling()
-        loadSuppressPatterns()
-        loadSuppressedIDs()
+        // v1.11.1 (audit launch-perf): suppression file reads
+        // deferred to a Task so init() returns immediately. Pre-fix
+        // these two ran sync on @MainActor at init time, contributing
+        // ~10-30ms of pre-first-frame blocking. The Published
+        // suppressionPatterns / suppressedIDs default to empty, so a
+        // brief window where the dashboard renders before
+        // suppressions populate is benign — by the time the user
+        // can interact (clicks > 50ms), the Task has completed.
+        Task { @MainActor [weak self] in
+            self?.loadSuppressPatterns()
+            self?.loadSuppressedIDs()
+        }
         // v1.9.0 (audit UX-H5): if the receiver was already toggled
         // on at launch (config from disk), treat the dashboard's
         // open as the "request" so the awaiting-daemon pill has a

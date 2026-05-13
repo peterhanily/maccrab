@@ -3,6 +3,33 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] — 2026-05-13
+
+First-launch beachball hotfix. Three things ran on the main thread
+before SwiftUI rendered the dashboard's first frame; all three are
+now deferred:
+
+- **`RuleBundleInstaller.syncIfNeeded()` moved off `MacCrabApp.init()`** —
+  on first install / Sparkle update the sync did SHA-256 manifest
+  verification + copied 427 rule files to `/Library/Application
+  Support/MacCrab/compiled_rules/` (cold-cache: 200 ms – 2 s). Now
+  runs detached from the WindowGroup's `.onAppear` after first
+  frame; daemon SIGHUP at sync completion picks up the new corpus.
+- **`V2LiveDataProvider()` SQLite opens parallelized + detached** —
+  alerts.db / events.db / campaigns.db / tracegraph.db previously
+  opened serially on @MainActor. Now four parallel `async let` +
+  `Task.detached` opens; cold open drops from sum to ~max + actor
+  hop.
+- **`AppState.loadSuppressPatterns()` + `loadSuppressedIDs()` deferred** —
+  two small UI-state file reads in `AppState.init()` moved to a
+  `Task { @MainActor in ... }` so init returns immediately.
+
+Net result: dashboard window should paint in well under 200 ms on
+cold launch. 1404 / 1404 unit tests still pass; pure deferral, no
+behavior changes.
+
+Full notes: `RELEASE_NOTES/v1.11.1.md`.
+
 ## [1.11.0] — 2026-05-12
 
 Feature release combined with a sustained audit-fix pass. A six-domain

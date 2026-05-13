@@ -62,30 +62,50 @@ public final class V2LiveDataProvider: V2DataProvider {
 
         self.dataDir = dir
 
-        var firstErr: String? = nil
-
-        self.alertStore = {
+        // v1.11.1 (audit launch-perf): the class is @MainActor, so
+        // pre-fix the four SQLite opens (each running schema migration
+        // checks + WAL setup + pragma application) ran serially on the
+        // main thread, beachballing the dashboard for 50-300ms on cold
+        // open + further on schema-v4 ALTER. Now: run all four opens
+        // in parallel on background threads via Task.detached + async-
+        // let, then assign the results back on @MainActor (the actor
+        // types are Sendable so this is safe). Net: cold open drops
+        // from serial sum to ~max(individual open) + actor hop.
+        async let alertStoreT: AlertStore? = Task.detached { () -> AlertStore? in
             guard let dir = alertsDir else { return nil }
-            do { return try AlertStore(directory: dir) }
-            catch { if firstErr == nil { firstErr = "alerts: \(error)" }; return nil }
-        }()
-        self.eventStore = {
+            return try? AlertStore(directory: dir)
+        }.value
+        async let eventStoreT: EventStore? = Task.detached { () -> EventStore? in
             guard let dir = eventsDir else { return nil }
-            do { return try EventStore(directory: dir) }
-            catch { if firstErr == nil { firstErr = "events: \(error)" }; return nil }
-        }()
-        self.campaignStore = {
+            return try? EventStore(directory: dir)
+        }.value
+        async let campaignStoreT: CampaignStore? = Task.detached { () -> CampaignStore? in
             guard let dir = campaignDir else { return nil }
-            do { return try CampaignStore(directory: dir) }
-            catch { if firstErr == nil { firstErr = "campaigns: \(error)" }; return nil }
-        }()
-        self.causalStore = await {
+            return try? CampaignStore(directory: dir)
+        }.value
+        // SQLiteCausalGraphStore's init is already async (its own actor
+        // hop), so it doesn't need a Task.detached wrapper — but we
+        // still want it to run in parallel with the other three.
+        async let causalStoreT: SQLiteCausalGraphStore? = {
             guard let dir = traceDir else { return nil }
-            do { return try await SQLiteCausalGraphStore(databasePath: dir + "/tracegraph.db") }
-            catch { if firstErr == nil { firstErr = "tracegraph: \(error)" }; return nil }
+            return try? await SQLiteCausalGraphStore(databasePath: dir + "/tracegraph.db")
         }()
 
-        self.lastErrorDescription = firstErr
+        self.alertStore = await alertStoreT
+        self.eventStore = await eventStoreT
+        self.campaignStore = await campaignStoreT
+        self.causalStore = await causalStoreT
+
+        // Surface a generic "one or more stores failed to open" error
+        // when any store is nil despite its dir existing. The previous
+        // per-store error string was rarely consumed by the dashboard
+        // (just logged) — the simpler signal is enough.
+        let allOpened = (alertsDir == nil   || self.alertStore != nil)
+                     && (eventsDir == nil   || self.eventStore != nil)
+                     && (campaignDir == nil || self.campaignStore != nil)
+                     && (traceDir == nil    || self.causalStore != nil)
+        self.lastErrorDescription = allOpened ? nil
+            : "one or more on-disk stores failed to open — see daemon log"
     }
 
     // MARK: - V2DataProvider
