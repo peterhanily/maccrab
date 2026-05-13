@@ -1,6 +1,6 @@
 cask "maccrab" do
   version "1.11.1"
-  sha256 :no_check  # release.sh updates with the actual DMG sha256 at sign time
+  sha256 "6b85aec1e281b0eec7163f48c28a9098db3113aff62ab836708990efd75ef1f5"
 
   url "https://github.com/peterhanily/maccrab/releases/download/v#{version}/MacCrab-v#{version}.dmg"
   name "MacCrab"
