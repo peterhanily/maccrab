@@ -366,7 +366,7 @@ public actor AlertStore {
             sqlite3_bind_null(stmt, 13)
         }
         // 14: d3fend_techniques — CSV of D3FEND defensive technique IDs
-        // (schema v3, v1.11.1). Pre-v1.11.1 these existed on `Alert`
+        // (schema v3, v1.11.0). Pre-v1.11.0 these existed on `Alert`
         // but were dropped on persist; the V2 inspector hid the chips
         // post-restart even though they'd been computed at alert time.
         if let d3fend = alert.d3fendTechniques, !d3fend.isEmpty {
@@ -374,7 +374,7 @@ public actor AlertStore {
         } else {
             sqlite3_bind_null(stmt, 14)
         }
-        // 15: remediation_hint — first-line guidance (schema v3, v1.11.1).
+        // 15: remediation_hint — first-line guidance (schema v3, v1.11.0).
         bindTextOrNull(stmt, index: 15, value: alert.remediationHint)
         // 16: analyst_metadata_json — analyst workflow state (notes,
         // owner, status, ticket ref). Codable JSON blob (schema v3, v1.11.0).
@@ -666,7 +666,7 @@ public actor AlertStore {
     /// Suppress every alert that belongs to a given campaign in a single
     /// SQL statement. Returns the number of rows updated.
     ///
-    /// v1.11.1 (audit perf HIGH): pre-fix the MCP `suppress_campaign`
+    /// v1.11.0 (audit perf HIGH): pre-fix the MCP `suppress_campaign`
     /// handler pulled up to 10K alerts then issued a serial `suppress`
     /// per match. With 5K matching alerts × 6ms / write that wedged the
     /// handler for ~30s. Single SQL `UPDATE WHERE campaign_id = ?` is
@@ -969,7 +969,7 @@ public actor AlertStore {
             }
 
             // Columns 13/14/15: phantom-field enrichments (schema v3,
-            // v1.11.1). Each is independently nullable — a row written
+            // v1.11.0). Each is independently nullable — a row written
             // pre-v3 has all three NULL and the V2 inspector continues
             // to hide the corresponding sections via its existing
             // `if let / !isEmpty` gates.

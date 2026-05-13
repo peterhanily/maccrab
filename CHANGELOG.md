@@ -323,6 +323,75 @@ Full audit findings: `plans/2026-05-11-v1.11.0-audit-findings.md`
 HIGH / MEDIUM / LOW).
 Full notes: `RELEASE_NOTES/v1.11.0.md`.
 
+### v1.11.0 RC2 ship-blocker fixes (operator-relevant)
+
+A second 6-agent audit on the RC1 commit (`75e96c6`) surfaced 5
+ship-blockers + 7 HIGHs + 4 MEDIUMs that the v1.11.0 RC1 tag would
+have shipped broken. The RC2 commit (`6774fb5`) closes them all
+before the v1.11.0 tag landed; ship-readiness checks (DMG sha256 +
+codesign + stapler + Gatekeeper notarization) all green.
+
+Behavior-changing RC2 fixes (worth knowing about for upgrade planning):
+
+- **AlertStore schema v4** — adds `campaign_id` column + index.
+  Without this the new `suppress(campaignId:)` SQL errored on every
+  invocation ("no such column") AND the dashboard's suppress-campaign
+  fan-out silently no-op'd because `Alert.campaignId` was never
+  restored from disk. The migration is forward-only and idempotent;
+  upgrades from v1.10.x / v1.11.0 RC1 run it automatically on first
+  boot.
+- **alertNotifications config path probe** — the daemon (root,
+  reads `/Library/...`) now also probes `/Users/*/Library/...` with
+  UID validation, mirroring the `NotificationIntegrations` walker.
+  Pre-fix the dashboard's writes never reached the production sysext.
+  Mute toggles + severity changes now actually take effect on SIGHUP.
+- **Inbox UID gate hardened** — `lstat()` (not `stat()`) + S_IFLNK
+  refusal + hardlink (`st_nlink>1`) refusal. Pre-fix an attacker with
+  sticky-bit-write access could symlink a request file → root-owned
+  file → forge `st_uid=0` → blind the EDR. Inbox audit-log fields
+  also sanitize `\n`/`\r`/non-printable bytes to prevent log-line
+  forgery.
+- **NotificationOutput hard-mute** — `enabled=false` now actually
+  mutes (was previously folded into `Severity.critical`, which still
+  let critical alerts through).
+- **MCP `get_ai_alerts` SQL extended** — adds `rule_title LIKE`
+  patterns + `agent_%` / `maccrab.mcp.%` prefixes. Pre-fix the
+  v1.11.0 RC1 prefix-only filter missed every YAML-defined AI rule
+  (UUID rule_ids don't match prefix LIKE).
+- **MCP `get_events` description corrected** — pre-fix it advised a
+  `category=network search=:53` pivot for DNS observability that
+  returns no rows (DNS lookups aren't stored as events; FTS doesn't
+  index port). Now points operators at `get_alerts` + DNS rules.
+- **V2 dashboard wire-ups** — Intelligence → Integrations and
+  Intelligence → Package Freshness panels now consume
+  `state.provider.integrations()` / `.packages()`. Pre-fix RC1
+  shipped the data layer but the panels were placeholders / unwired.
+- **`syncAlertNotificationConfig` debounced 500 ms** — rapid
+  Picker scrolls used to fire one SIGHUP per onChange (DoS surface
+  via the daemon's expensive retroactive scan).
+- **`V2LiveDataProvider.permissions()` + `.integrations()` detached
+  off `@MainActor`** — pre-fix sync file I/O on the main queue
+  produced 1-3ms jitter per dashboard refresh tick.
+- **`V2LiveDataProvider.suppressCampaign` uses single-SQL fan-out**
+  — adopts the same `AlertStore.suppress(campaignId:)` rewrite as
+  the MCP path; no more 30s wedge under storm.
+- **`ThreatIntelFeed` cache dir** explicit `chmod 0o700` on
+  EXISTING dirs (createDirectory's `attributes:` parameter doesn't
+  chmod existing — RC2 adds the explicit setAttributes after).
+- **Sidebar group headers localized** ("Investigate" / "Configure"
+  / "System") via `String(localized:)` keys added to all 14
+  `.strings` bundles.
+- **`maccrabctl --help`** master block now lists `--compare-rules
+  <a> <b>`.
+- **`docs/TRUST.md`** sample DMG filenames bumped to v1.11.0.
+- **`build-release.sh`** rule count excludes `manifest.json` (was
+  miscounting build-time metadata as a rule, producing
+  `release.json: "rules": 428` when the actual count is 427).
+
+The full RC1 → RC2 fix wave commit is `6774fb5` (30 files,
++463 / −93). 1404 / 1404 tests still pass; both prerelease scripts
+green; DMG sha256 matches release.json after re-build.
+
 ## [1.10.1] — 2026-05-11
 
 Hotfix release. Dashboard suppress / unsuppress / delete actions and

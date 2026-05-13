@@ -543,7 +543,24 @@ public final class V2LiveDataProvider: V2DataProvider {
         // Status stays at "configured" until per-sink health reporting
         // lands; for v1.11.1 the panel simply surfaces what's wired so
         // operators can confirm their config reached the daemon.
+        //
+        // v1.11.0 RC2 follow-up (perf HIGH from RC2 audit): detach the
+        // sync file I/O off-MainActor. V2LiveDataProvider is @MainActor
+        // and `.task(id: refreshTick)` in V2IntelligenceWorkspace fires
+        // this every 5s while ANY Intelligence sub-tab is active —
+        // 3 × Data(contentsOf:) + JSONSerialization on the main queue
+        // produced 1-3ms jitter per tick (worse on cold cache). Same
+        // detach pattern as the freshly-fixed `permissions()`.
         guard let dir = dataDir else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            return Self._loadIntegrations(dataDir: dir)
+        }.value
+    }
+
+    /// Pure file-I/O helper invoked from the detached Task above.
+    /// `nonisolated` so the Task body can call it without bouncing
+    /// back onto the MainActor.
+    nonisolated private static func _loadIntegrations(dataDir dir: String) -> [V2MockIntegration] {
         var out: [V2MockIntegration] = []
 
         // daemon_config.json outputs[]
@@ -647,7 +664,10 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     /// Hide the path / token portion of a webhook URL so the integration
     /// panel doesn't leak secrets when the dashboard is screenshotted.
-    private nonisolated func redactedWebhookURL(_ url: String) -> String {
+    /// v1.11.0 RC2 follow-up: now `static` so the off-MainActor
+    /// `_loadIntegrations` helper can invoke it without bouncing back
+    /// onto the actor.
+    nonisolated private static func redactedWebhookURL(_ url: String) -> String {
         guard let comps = URLComponents(string: url), let host = comps.host else { return "configured" }
         return "https://\(host)/…"
     }

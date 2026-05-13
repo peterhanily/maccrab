@@ -408,10 +408,16 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(String(localized: "settings.showNotifications", defaultValue: "Show notifications for detection alerts"), isOn: $alertNotifications)
                             // v1.11.0 (audit functionality HIGH): persist
-                            // changes to <supportDir>/alert_notifications.json
-                            // so the daemon's NotificationOutput actually
-                            // honours the toggle. v1.11.0 RC2 (audit
-                            // security/stability HIGH): debounced 500ms
+                            // changes to ~/Library/Application Support/MacCrab/
+                            // alert_notifications.json (the dashboard runs
+                            // as the user, can't write the root-owned
+                            // /Library/... path). The daemon's
+                            // loadAlertNotificationConfig probes BOTH the
+                            // system AND user-home paths and picks the
+                            // most-recently-modified — see DaemonSetup
+                            // for the user-home walker.
+                            // v1.11.0 RC2 (audit security/stability HIGH):
+                            // debounced 500ms
                             // so rapid clicks don't issue parallel SIGHUPs
                             // (each SIGHUP runs an expensive retroactive
                             // scan + storage reload).
