@@ -191,6 +191,14 @@ public actor ThreatIntelFeed {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
         )
+        // v1.11.0 RC2 (audit security MEDIUM): `createDirectory(...
+        // attributes:)` does NOT chmod an EXISTING directory. On
+        // upgrade from a prior version the dir already exists with
+        // the historical 0o755 default — explicitly tighten now.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o700))],
+            ofItemAtPath: dir
+        )
     }
 
     // MARK: - Public API

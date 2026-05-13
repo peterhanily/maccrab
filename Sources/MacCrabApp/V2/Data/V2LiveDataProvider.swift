@@ -438,9 +438,20 @@ public final class V2LiveDataProvider: V2DataProvider {
     public func permissions() async -> [V2MockPermission] {
         // The daemon writes <supportDir>/tcc_snapshot.json on each
         // TCCMonitor change; readSnapshot decodes it.
+        //
+        // v1.11.0 RC2 ship-blocker fix (audit perf MEDIUM): detach
+        // off-MainActor. V2LiveDataProvider is @MainActor so the
+        // sync `Data(contentsOf:)` + JSONDecoder() inside
+        // `readSnapshot` previously ran on main, producing 1-3ms
+        // jitter per dashboard refresh tick (worse on cold cache /
+        // FDA-snapshot scan storms). Mirrors the existing `heartbeat`
+        // detach pattern.
         guard let dir = dataDir else { return [] }
         let path = dir + "/tcc_snapshot.json"
-        guard let snap = TCCMonitor.readSnapshot(at: path) else { return [] }
+        let snap = await Task.detached(priority: .userInitiated) {
+            TCCMonitor.readSnapshot(at: path)
+        }.value
+        guard let snap else { return [] }
         return snap.entries.map { e -> V2MockPermission in
             V2MockPermission(
                 id: "\(e.service)|\(e.client)",
@@ -814,26 +825,21 @@ public final class V2LiveDataProvider: V2DataProvider {
                 return 0
             }
         }
-        // 2. Find contributing alerts and suppress each.
+        // 2. Fan out: every alert tagged with this campaign id.
+        // v1.11.0 RC2 (audit functionality MEDIUM): use the new
+        // single-SQL `AlertStore.suppress(campaignId:)` method
+        // instead of pulling 10K rows + per-row UPDATE in a loop.
+        // The MCP path adopted this in v1.11.0; the dashboard path
+        // should match. Avoids the 30s wedge under storm conditions.
         do {
-            let raw = try await alertStore.alerts(
-                since: Date.distantPast,
-                severity: nil, suppressed: false, limit: 10_000
-            )
-            let contributors = raw.filter { $0.campaignId == id }
-            for alert in contributors {
-                do {
-                    try await alertStore.suppress(alertId: alert.id)
-                    count += 1
-                } catch {
-                    if isReadOnlyError(error) {
-                        lastErrorDescription = describeMutationError(error)
-                        break
-                    }
-                }
-            }
+            let n = try await alertStore.suppress(campaignId: id)
+            count += n
         } catch {
-            lastErrorDescription = "campaign contributors lookup: \(error)"
+            if isReadOnlyError(error) {
+                lastErrorDescription = describeMutationError(error)
+            } else {
+                lastErrorDescription = "campaign fan-out: \(error)"
+            }
         }
         // 3. Flip the persistent campaign row so the dashboard's
         //    campaigns list reflects suppressed state. Best-effort.

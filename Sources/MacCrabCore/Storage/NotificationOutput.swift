@@ -23,6 +23,19 @@ public actor NotificationOutput {
     /// Minimum severity to trigger a notification.
     public var minimumSeverity: Severity
 
+    /// v1.11.0 RC2 (audit functionality MEDIUM): hard mute switch
+    /// independent of minimumSeverity. Pre-fix `enabled=false` in
+    /// alert_notifications.json was mapped to `Severity.critical`,
+    /// which still passed critical alerts through (since `.critical`
+    /// is the highest level the gate `>= minimumSeverity` allows).
+    /// The user expectation is "off = NO notifications". This flag
+    /// short-circuits `notify` regardless of severity.
+    public var enabled: Bool = true
+
+    public func setEnabled(_ value: Bool) {
+        self.enabled = value
+    }
+
     /// Maximum notifications per minute (rate limiting).
     private let maxPerMinute: Int
     private var recentTimestamps: [Date] = []
@@ -57,6 +70,9 @@ public actor NotificationOutput {
 
     /// Send a notification for an alert if it passes severity and rate filters.
     public func notify(alert: Alert) {
+        // v1.11.0 RC2: hard mute when the user toggled OFF in
+        // SettingsView (writes enabled=false to alert_notifications.json).
+        guard enabled else { return }
         guard alert.severity >= minimumSeverity else { return }
 
         // Rate limit

@@ -183,7 +183,7 @@ public struct ModuleStatus: Sendable {
               summary: "SFTP alert log shipping."),
         .init(id: "otlp-output", name: "OpenTelemetry (OTLP) output",
               category: "output", maturity: .experimental,
-              summary: "OTLP HTTP/JSON span export. v1.10.2: demoted from .stable — the OTLPOutput actor exists but DaemonSetup.buildOutput(spec:) does not yet accept `{\"type\": \"otlp\"}` entries (audit functionality HIGH). The receiver half (Agent Traces, separate row below) remains stable. Tracking re-promotion to .stable once the buildOutput arm lands."),
+              summary: "OTLP HTTP/JSON span export. v1.11.0: demoted from .stable — the OTLPOutput actor exists but DaemonSetup.buildOutput(spec:) does not yet accept `{\"type\": \"otlp\"}` entries (audit functionality HIGH). The receiver half (Agent Traces, separate row below) remains stable. Tracking re-promotion to .stable once the buildOutput arm lands."),
         .init(id: "agent-traces-receiver", name: "Agent Traces (OTLP receiver + lineage)",
               category: "ai", maturity: .stable,
               summary: "Loopback OTLP receiver + W3C TRACEPARENT correlation between AI-agent activity and kernel events. New in v1.9.0."),

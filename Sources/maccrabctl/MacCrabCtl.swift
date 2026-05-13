@@ -439,7 +439,7 @@ struct MacCrabCtl {
           trace inspect <bundle>                   Print manifest + stats
           trace verify <bundle> [--check-unified-log]
                                                    Tamper-evidence check (exits 0,2,3,4)
-          trace replay <bundle> [--normalization <version>]
+          trace replay <bundle> [--normalization <version>] [--compare-rules <a> <b>]
                                                    Deterministic replay (exits 0,1,6,11)
           trace replay-batch <dir> [--report <html>] [--normalization <version>]
                                                    Replay every bundle in a directory; emit HTML report.

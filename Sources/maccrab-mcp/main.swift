@@ -209,7 +209,7 @@ let tools: [[String: Any]] = [
             "type": "object",
             "properties": [
                 "limit": ["type": "integer", "description": "Max events to return (default 20, max 100)", "default": 20],
-                "category": ["type": "string", "description": "Filter by EventCategory rawValue. DNS events live under `network`; for DNS-only results combine `category=network` with a search like `search=:53`. Process-injection / TCC events use the explicit categories.", "enum": ["process", "file", "network", "authentication", "tcc", "registry"]],
+                "category": ["type": "string", "description": "Filter by EventCategory rawValue. Note: DNS lookups themselves are NOT stored in the events table — DNSCollector emits to the alert path, not EventStore — so DNS observability comes via `get_alerts` matching DNS-pattern rules, not via this tool. Process-injection / TCC / file / authentication events all surface here.", "enum": ["process", "file", "network", "authentication", "tcc", "registry"]],
                 "search": ["type": "string", "description": "Full-text search query. Ignored when `cursor` is set."],
                 "hours": ["type": "number", "description": "Only events from the last N hours (default: 24). Ignored when `cursor` is set.", "default": 24],
                 "cursor": ["type": "string", "description": "Opaque pagination token from a previous response's `next_cursor`. Returns events strictly older than the token's position."],

@@ -115,6 +115,14 @@ struct SettingsView: View {
     // config file + SIGHUP the daemon 30 times in quick succession (each
     // SIGHUP triggers a /Users walk in NotificationIntegrations).
     @State private var pendingWebhookSync: Task<Void, Never>?
+    /// v1.11.0 RC2 ship-blocker fix: same debounce treatment for
+    /// the alert-notification config sync. Pre-fix every onChange
+    /// (toggle click + every Picker tab/click cycle) immediately
+    /// fired pkill -HUP, and SIGHUP triggers an expensive retroactive
+    /// scan + storage reload + rule reload. Rapid UI changes piled up
+    /// parallel daemon Tasks. 500 ms debounce mirrors the webhook
+    /// sync pattern.
+    @State private var pendingAlertNotificationSync: Task<Void, Never>?
 
     // v1.6.21 surface E: LLM "Test Connection" button state. nil =
     // hasn't been tested in this session; .testing = in flight; .ok /
@@ -402,12 +410,12 @@ struct SettingsView: View {
                             // v1.11.0 (audit functionality HIGH): persist
                             // changes to <supportDir>/alert_notifications.json
                             // so the daemon's NotificationOutput actually
-                            // honours the toggle. Pre-fix the AppStorage
-                            // key wrote nowhere the daemon read. macOS 13
-                            // deployment target → use the legacy single-arg
-                            // form of .onChange (the two-arg form lands in
-                            // macOS 14).
-                            .onChange(of: alertNotifications) { _ in syncAlertNotificationConfig() }
+                            // honours the toggle. v1.11.0 RC2 (audit
+                            // security/stability HIGH): debounced 500ms
+                            // so rapid clicks don't issue parallel SIGHUPs
+                            // (each SIGHUP runs an expensive retroactive
+                            // scan + storage reload).
+                            .onChange(of: alertNotifications) { _ in scheduleAlertNotificationSync() }
 
                         if alertNotifications {
                             HStack {
@@ -421,7 +429,7 @@ struct SettingsView: View {
                                 }
                                 .labelsHidden()
                                 .frame(width: 160)
-                                .onChange(of: minAlertSeverity) { _ in syncAlertNotificationConfig() }
+                                .onChange(of: minAlertSeverity) { _ in scheduleAlertNotificationSync() }
                             }
 
                             Text(String(localized: "settings.severityHelp", defaultValue: "Only alerts at or above this severity will trigger a macOS notification. Daemon picks up changes on next restart or SIGHUP."))
@@ -1166,6 +1174,24 @@ struct SettingsView: View {
         task.standardOutput = Pipe()
         task.standardError = Pipe()
         try? task.run()
+    }
+
+    /// v1.11.0 RC2 ship-blocker fix: 500ms debounce around
+    /// `syncAlertNotificationConfig`. Same shape + rationale as
+    /// `scheduleWebhookSync` below — rapid Picker tab/click cycles
+    /// previously fired one SIGHUP per onChange, and each SIGHUP
+    /// runs the retroactive scan + storage reload + rule reload.
+    private func scheduleAlertNotificationSync() {
+        pendingAlertNotificationSync?.cancel()
+        pendingAlertNotificationSync = Task {
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self.syncAlertNotificationConfig() }
+        }
     }
 
     /// Debounced wrapper for syncWebhookConfig. Cancels any pending sync

@@ -76,10 +76,13 @@ enum SignalHandlers {
                     // v1.11.0: reload OS-notification config so the
                     // SettingsView toggle/picker takes effect on the
                     // next notification without a daemon restart.
+                    // v1.11.0 RC2: pass `enabled` through as its own
+                    // flag (was previously folded into a `.critical`
+                    // sentinel which didn't actually mute critical
+                    // alerts).
                     let notifConfig = loadAlertNotificationConfig(supportDir: state.supportDir)
-                    let resolved: Severity = notifConfig.enabled
-                        ? notifConfig.minSeverity : .critical
-                    await state.notifier.setMinimumSeverity(resolved)
+                    await state.notifier.setMinimumSeverity(notifConfig.minSeverity)
+                    await state.notifier.setEnabled(notifConfig.enabled)
                     print("[SIGHUP] Alert-notification config reloaded: enabled=\(notifConfig.enabled), minSeverity=\(notifConfig.minSeverity.rawValue)")
 
                     let freshConfig = DaemonConfig.load(from: state.supportDir)

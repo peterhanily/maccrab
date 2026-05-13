@@ -534,3 +534,8 @@
 "threatintel.apiKey.getFree" = "Get a free API key →";
 "threatintel.apiKey.getPaid" = "Get an API key →";
 "menu.checkForUpdates" = "Check for Updates…";
+
+/* v1.11.0 RC2: sidebar group headers (visual subgrouping) */
+"sidebar.group.investigate" = "Investigate";
+"sidebar.group.configure"   = "Configure";
+"sidebar.group.system"      = "System";

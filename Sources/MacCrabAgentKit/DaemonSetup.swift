@@ -351,10 +351,11 @@ enum DaemonSetup {
         // SettingsView's notification toggle + severity picker have
         // existed since v1.0 but never reached the daemon. Falls
         // back to (enabled=true, .high) when the file is absent.
+        // v1.11.0 RC2: pass `enabled` as its own flag (the previous
+        // `.critical` sentinel didn't actually mute critical alerts).
         let notifConfig = loadAlertNotificationConfig(supportDir: supportDir)
-        let notifier = NotificationOutput(
-            minimumSeverity: notifConfig.enabled ? notifConfig.minSeverity : .critical
-        )
+        let notifier = NotificationOutput(minimumSeverity: notifConfig.minSeverity)
+        await notifier.setEnabled(notifConfig.enabled)
         let responseEngine = ResponseEngine()
 
         // Self-defense: tamper detection
@@ -1617,33 +1618,97 @@ enum DaemonSetup {
 ///     can distinguish repeated quarantines.
 ///
 /// v1.11.0 (audit functionality HIGH): read OS-notification config
-/// from `<supportDir>/alert_notifications.json`. SettingsView writes
-/// the file from the dashboard's notification toggle + severity
-/// picker. Defaults to (enabled=true, .high) when the file is
-/// absent or malformed, matching the historical hardcoded behaviour.
+/// from `alert_notifications.json`. SettingsView writes the file
+/// from the dashboard's notification toggle + severity picker.
+/// Defaults to (enabled=true, .high) when the file is absent or
+/// malformed, matching the historical hardcoded behaviour.
+///
+/// **v1.11.0 RC2 ship-blocker fix:** the dashboard runs as the user
+/// and writes to `~/Library/Application Support/MacCrab/`, but the
+/// sysext runs as root and reads `<supportDir>` =
+/// `/Library/Application Support/MacCrab/`. Pre-fix the dashboard's
+/// writes never reached the daemon's reads in production deployments
+/// (RC1 audit BLOCKER). Mirrors the `NotificationIntegrations`
+/// system+user-walker pattern (`loadEffectiveConfig`): system path
+/// first, then walk `/Users/*` for a UID-validated user-home copy,
+/// pick the most-recently-modified non-nil candidate. Same UID-
+/// validation discipline (the file's owner must match the home dir's
+/// owner) so a rogue process running as a different user can't
+/// inject a config.
 ///
 /// File schema:
 ///   { "enabled": true | false, "min_severity": "critical" | "high" | "medium" | "low" | "informational" }
 func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSeverity: Severity) {
-    let path = supportDir + "/alert_notifications.json"
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else {
-        return (true, .high)
+    let systemPath = supportDir + "/alert_notifications.json"
+    let userPath = _findUserHomeAlertNotificationConfigPath()
+
+    let fm = FileManager.default
+    let systemMtime = (try? fm.attributesOfItem(atPath: systemPath))?[.modificationDate] as? Date
+    let userMtime = userPath.flatMap {
+        (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
     }
-    let enabled = json["enabled"] as? Bool ?? true
-    let raw = (json["min_severity"] as? String ?? "high").lowercased()
-    let sev: Severity = {
-        switch raw {
-        case "critical":      return .critical
-        case "high":          return .high
-        case "medium":        return .medium
-        case "low":           return .low
-        case "informational": return .informational
-        default:              return .high
-        }
-    }()
-    return (enabled, sev)
+
+    func decode(at path: String) -> (enabled: Bool, minSeverity: Severity)? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let enabled = json["enabled"] as? Bool ?? true
+        let raw = (json["min_severity"] as? String ?? "high").lowercased()
+        let sev: Severity = {
+            switch raw {
+            case "critical":      return .critical
+            case "high":          return .high
+            case "medium":        return .medium
+            case "low":           return .low
+            case "informational": return .informational
+            default:              return .high
+            }
+        }()
+        return (enabled, sev)
+    }
+
+    let systemConfig = decode(at: systemPath)
+    let userConfig = userPath.flatMap(decode)
+
+    switch (systemConfig, userConfig) {
+    case (nil, nil):
+        return (true, .high)
+    case (let sc?, nil):
+        return sc
+    case (nil, let uc?):
+        return uc
+    case (let sc?, let uc?):
+        let sm = systemMtime ?? .distantPast
+        let um = userMtime ?? .distantPast
+        return um > sm ? uc : sc
+    }
+}
+
+/// Walk `/Users/*` for an `alert_notifications.json` owned by the
+/// home's uid. Returns the most-recently-modified validated
+/// candidate's path, or nil. Same shape as
+/// `NotificationIntegrations.findUserHomeConfigPath` — kept as a
+/// sibling helper rather than generalising because the cross-target
+/// abstraction would have to thread through MacCrabCore and the
+/// path string is the only difference.
+private func _findUserHomeAlertNotificationConfigPath() -> String? {
+    let fm = FileManager.default
+    guard let users = try? fm.contentsOfDirectory(atPath: "/Users") else { return nil }
+    struct Candidate { let path: String; let mtime: Date }
+    var candidates: [Candidate] = []
+    for user in users where user != "Shared" && !user.hasPrefix(".") {
+        let home = "/Users/\(user)"
+        let path = home + "/Library/Application Support/MacCrab/alert_notifications.json"
+        guard fm.fileExists(atPath: path) else { continue }
+        guard let homeAttrs = try? fm.attributesOfItem(atPath: home),
+              let fileAttrs = try? fm.attributesOfItem(atPath: path) else { continue }
+        let homeUID = (homeAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+        let fileUID = (fileAttrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+        guard homeUID == fileUID, homeUID != UInt32.max else { continue }
+        let mtime = (fileAttrs[.modificationDate] as? Date) ?? .distantPast
+        candidates.append(Candidate(path: path, mtime: mtime))
+    }
+    return candidates.max(by: { $0.mtime < $1.mtime })?.path
 }
 
 /// WAL/SHM sidecars are renamed alongside the main file. Failures

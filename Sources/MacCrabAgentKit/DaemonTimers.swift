@@ -1139,12 +1139,30 @@ enum DaemonTimers {
     }
 
     /// Stat the request file to get the UID of whoever dropped it.
-    /// Used by `isAuthorizedInboxRequest(uid:)` below. Returns -1 on
-    /// stat failure — that value never satisfies the gate.
+    /// Used by `isAuthorizedInboxRequest(uid:)` below.
+    ///
+    /// **v1.11.0 RC2 ship-blocker fix:** uses `lstat()` (not `stat()`)
+    /// so a symlink in the 1777 inbox dir CANNOT be used to forge a
+    /// root UID — pre-fix `stat()` followed symlinks, so an attacker
+    /// could symlink `suppress-alert-X.json → /Library/Application
+    /// Support/MacCrab/agent_lineage.json` (root-owned) and the gate
+    /// authorised the request as root. Now: lstat returns the symlink
+    /// owner (the attacker's uid), and the additional S_IFLNK check
+    /// rejects symlinks outright before the request is processed.
+    /// Hardlinks are also rejected (st_nlink > 1) so an attacker can't
+    /// hardlink a root-owned file into the inbox either.
+    /// Returns -1 on stat failure or any rejection condition — that
+    /// value never satisfies the gate.
     private static func requestOwnerUID(at path: String) -> Int {
         var st = stat()
-        if stat(path, &st) == 0 { return Int(st.st_uid) }
-        return -1
+        guard lstat(path, &st) == 0 else { return -1 }
+        // Refuse symlinks outright — too easy to forge root ownership.
+        if (st.st_mode & S_IFMT) == S_IFLNK { return -1 }
+        // Refuse hardlinked files: st_nlink > 1 means the inode also
+        // exists elsewhere in the filesystem; the attacker may have
+        // hardlinked a root-owned file into the world-writable inbox.
+        if st.st_nlink > 1 { return -1 }
+        return Int(st.st_uid)
     }
 
     /// Returns the UID of the user logged in at the macOS GUI console.
@@ -1190,11 +1208,34 @@ enum DaemonTimers {
         return f
     }()
 
+    /// Sanitize an attacker-controlled string before it lands in the
+    /// audit log. v1.11.0 RC2 ship-blocker fix: a request id like
+    /// `valid-uuid\nresult=ok uid=0` would have forged a fake "ok"
+    /// audit line, since the audit format is one line-per-mutation
+    /// space-separated key=value pairs. Reject newlines / carriage
+    /// returns / non-printable ASCII; cap length at 128 (alert ids
+    /// are UUIDs, well under that). Replacement makes the truncation
+    /// visible to operators tailing the log.
+    private static func sanitizeAuditField(_ s: String, max: Int = 128) -> String {
+        let scrubbed = String(s.unicodeScalars.prefix(max).map { scalar -> Character in
+            if scalar == "\n" || scalar == "\r" { return "_" }
+            if !scalar.isASCII { return "?" }
+            if scalar.value < 0x20 { return "_" }
+            return Character(scalar)
+        })
+        return scrubbed
+    }
+
     private static func auditLogInbox(
         state: DaemonState, prefix: String, id: String, uid: Int, result: String
     ) {
         let logPath = state.supportDir + "/dashboard_audit.log"
-        let line = "\(_inboxAuditFmt.string(from: Date())) source=inbox prefix=\(prefix) id=\(id) uid=\(uid) result=\(result)\n"
+        // Sanitize all attacker-controlled fields so log-injection
+        // attempts (newlines, ANSI escapes, control chars in the id
+        // / result string) can't forge subsequent log lines.
+        let safeId = sanitizeAuditField(id)
+        let safeResult = sanitizeAuditField(result, max: 256)
+        let line = "\(_inboxAuditFmt.string(from: Date())) source=inbox prefix=\(prefix) id=\(safeId) uid=\(uid) result=\(safeResult)\n"
         guard let data = line.data(using: .utf8) else { return }
         let url = URL(fileURLWithPath: logPath)
         if let handle = try? FileHandle(forWritingTo: url) {

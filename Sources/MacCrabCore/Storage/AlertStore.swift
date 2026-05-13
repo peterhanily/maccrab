@@ -110,8 +110,8 @@ public actor AlertStore {
                 "ALTER TABLE alerts ADD COLUMN llm_investigation_json TEXT",
             ]
         ),
-        // v3 (v1.11.1): persist the Alert "phantom" enrichments — D3FEND
-        // chips, remediation hint, analyst metadata. Pre-v1.11.1 the V2
+        // v3 (v1.11.0): persist the Alert "phantom" enrichments — D3FEND
+        // chips, remediation hint, analyst metadata. Pre-v1.11.0 the V2
         // dashboard inspector read these from the in-memory Alert but
         // `if let / !isEmpty` gates hid them after a daemon restart
         // because they weren't persisted. Migration adds three columns;
@@ -124,6 +124,26 @@ public actor AlertStore {
                 "ALTER TABLE alerts ADD COLUMN d3fend_techniques TEXT",
                 "ALTER TABLE alerts ADD COLUMN remediation_hint TEXT",
                 "ALTER TABLE alerts ADD COLUMN analyst_metadata_json TEXT",
+            ]
+        ),
+        // v4 (v1.11.0 RC2 ship-blocker fix): persist `Alert.campaignId`.
+        // Pre-RC2 the v1.11.0 release added `AlertStore.suppress(campaignId:)`
+        // and the MCP suppress_campaign tool used it, but the column was
+        // never added to the schema and the field was never bound on
+        // insert / restored on read — so every MCP campaign-suppress
+        // call errored with "no such column: campaign_id" AND the
+        // dashboard inbox-IPC fan-out (`for a in alerts where a.campaignId
+        // == id`) silently no-op'd because campaignId was always nil
+        // post-restart. Pre-existing v1.10.x bug (Alert.campaignId was
+        // never persisted), but the v1.11.0 perf rewrite turned a
+        // silent no-op into a hard SQL error. Index on the column so
+        // the new UPDATE WHERE clause is O(matching rows) not O(table).
+        Migration(
+            version: 4,
+            name: "add_campaign_id_column",
+            sql: [
+                "ALTER TABLE alerts ADD COLUMN campaign_id TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_alerts_campaign_id ON alerts(campaign_id)",
             ]
         ),
     ]
@@ -216,8 +236,9 @@ public actor AlertStore {
                 event_id, process_path, process_name, description,
                 mitre_tactics, mitre_techniques, suppressed,
                 llm_investigation_json,
-                d3fend_techniques, remediation_hint, analyst_metadata_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                d3fend_techniques, remediation_hint, analyst_metadata_json,
+                campaign_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -356,7 +377,7 @@ public actor AlertStore {
         // 15: remediation_hint — first-line guidance (schema v3, v1.11.1).
         bindTextOrNull(stmt, index: 15, value: alert.remediationHint)
         // 16: analyst_metadata_json — analyst workflow state (notes,
-        // owner, status, ticket ref). Codable JSON blob (schema v3, v1.11.1).
+        // owner, status, ticket ref). Codable JSON blob (schema v3, v1.11.0).
         if let analyst = alert.analyst,
            let data = try? Self.investigationEncoder.encode(analyst),
            let json = String(data: data, encoding: .utf8) {
@@ -364,6 +385,11 @@ public actor AlertStore {
         } else {
             sqlite3_bind_null(stmt, 16)
         }
+        // 17: campaign_id — required so AlertStore.suppress(campaignId:)
+        // and the inbox-IPC fan-out actually find rows post-restart
+        // (schema v4, v1.11.0 RC2). Pre-fix this field was Codable on
+        // Alert but never reached SQL.
+        bindTextOrNull(stmt, index: 17, value: alert.campaignId)
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
@@ -659,13 +685,25 @@ public actor AlertStore {
         return db.map { Int(sqlite3_changes($0)) } ?? 0
     }
 
-    /// v1.11.1 (audit perf HIGH): SQL-side AI-Guard alert filter.
+    /// v1.11.0 (audit perf HIGH): SQL-side AI-Guard alert filter.
     /// Pre-fix the MCP `get_ai_alerts` handler pulled 10K alerts then
     /// substring-matched 8 keywords across rule_id + title in Swift.
-    /// AI-Guard rule ids follow a stable prefix convention
-    /// (`ai_tool_*`, `ai_guard_*`, `credential_fence_*`, `boundary_*`,
-    /// `injection_*`, `mcp_*`, `prompt_*`), so a single SQL `LIKE`
-    /// chain selects only the relevant rows.
+    ///
+    /// **v1.11.0 RC2 ship-blocker fix:** the original RC1 SQL used
+    /// only rule_id prefixes (`ai_%`, `credential_fence_%`,
+    /// `injection_%`, `mcp_%`, `prompt_%`, etc.). Swift-emitted
+    /// alerts (rule_id starts with `maccrab.ai-guard.`) matched, but
+    /// every YAML-authored AI safety / credential rule has a UUID
+    /// rule_id (`d1a2b3c4-…`) — no prefix match — so the new SQL
+    /// returned NOTHING for the bulk of AI rules that the v1.10.x
+    /// Swift filter (which scanned rule_title for "AI" / "Credential
+    /// Fence" / "Boundary" / "Injection" / "MCP" / "Prompt") would
+    /// have caught. RC2 adds rule_title LIKE clauses to recover the
+    /// title-keyword path. Both rule_id AND rule_title must be
+    /// indexed for this not to scan the whole table; the existing
+    /// idx_alerts_rule_id covers the prefix path; rule_title is
+    /// scanned LIKE-pattern (worst-case linear, but bounded by the
+    /// timestamp + suppressed predicate first).
     public func aiAlerts(since: Date, limit: Int) throws -> [Alert] {
         let sql = """
             SELECT * FROM alerts
@@ -673,11 +711,20 @@ public actor AlertStore {
                AND suppressed = 0
                AND (rule_id LIKE 'ai_%'
                  OR rule_id LIKE 'maccrab.ai-guard.%'
+                 OR rule_id LIKE 'maccrab.mcp.%'
                  OR rule_id LIKE 'credential_fence_%'
                  OR rule_id LIKE 'boundary_%'
                  OR rule_id LIKE 'injection_%'
                  OR rule_id LIKE 'mcp_%'
-                 OR rule_id LIKE 'prompt_%')
+                 OR rule_id LIKE 'prompt_%'
+                 OR rule_id LIKE 'agent_%'
+                 OR rule_title LIKE 'AI %'
+                 OR rule_title LIKE '%Credential Fence%'
+                 OR rule_title LIKE '%Boundary Violation%'
+                 OR rule_title LIKE '%Prompt Injection%'
+                 OR rule_title LIKE '%MCP%'
+                 OR rule_title LIKE '%Agent %'
+                 OR rule_title LIKE '%AI Coding Tool%')
              ORDER BY timestamp DESC
              LIMIT ?2
             """
@@ -939,6 +986,13 @@ public actor AlertStore {
                 )
             }
 
+            // Column 16: campaign_id (added in schema v4, v1.11.0 RC2).
+            // NULL for pre-v4 rows; v4+ rows reflect the originating
+            // CampaignDetector grouping. Required so the dashboard's
+            // suppress-campaign fan-out and AlertStore.suppress(campaignId:)
+            // actually identify contributing rows.
+            let campaignId = columnTextOrNil(stmt, index: 16)
+
             let alert = Alert(
                 id: id,
                 timestamp: Date(timeIntervalSince1970: timestamp),
@@ -952,6 +1006,7 @@ public actor AlertStore {
                 mitreTactics: columnTextOrNil(stmt, index: 9),
                 mitreTechniques: columnTextOrNil(stmt, index: 10),
                 suppressed: suppressedInt != 0,
+                campaignId: campaignId,
                 analyst: analyst,
                 d3fendTechniques: d3fend,
                 remediationHint: remediation,

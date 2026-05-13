@@ -12,6 +12,10 @@ public struct V2IntelligenceWorkspace: View {
     @State private var selectedPackage: V2MockPackage?
     @State private var packageScanInProgress: Bool = false
     @State private var packageLastScannedAt: Date? = nil
+    /// v1.11.0 RC2 ship-blocker fix: integrations tab is now backed
+    /// by `state.provider.integrations()` (audit caught it as a
+    /// static placeholder in RC1). Refreshed on every workspace tick.
+    @State private var integrations: [V2MockIntegration] = []
     /// State for the per-feed configuration sheet — pre-fix the
     /// managed-feeds card showed read-only chips that the user
     /// couldn't click to configure / enable / supply API keys.
@@ -31,15 +35,28 @@ public struct V2IntelligenceWorkspace: View {
             tabBody
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick)") {
-            // v1.10 fix: only refresh feeds on tick. Packages are
-            // populated explicitly by the user clicking "Run scan"
-            // and overwriting from the (currently-empty) live
-            // provider every 5s wiped the scan results. Live-side
-            // provider does not yet expose a packages() reader, so
-            // ticking would always blow away the scan.
-            let f = await state.provider.feeds()
+            // v1.11.0 RC2: live provider now exposes packages() (via
+            // PackageScanner with 5-min cache) and integrations() (via
+            // daemon_config.json + notifications.json). Pre-fix the V2
+            // panel ignored both readers — packages tab was driven
+            // only by the manual "Run scan" button (using the OLD
+            // PackageFreshnessChecker, NOT the new PackageScanner),
+            // and the integrations tab was a static placeholder. Pull
+            // both on every tick; the cache absorbs the cost.
+            async let f = state.provider.feeds()
+            async let p = state.provider.packages()
+            async let i = state.provider.integrations()
+            let (feedsResult, pkgsResult, integResult) = await (f, p, i)
             await MainActor.run {
-                self.feeds = f
+                self.feeds = feedsResult
+                // Only seed packages from the live provider when the
+                // user hasn't run an explicit scan (which uses the
+                // older PackageFreshnessChecker for richer data).
+                // Manual scan results win over auto-refresh.
+                if self.packageLastScannedAt == nil && !pkgsResult.isEmpty {
+                    self.packages = pkgsResult
+                }
+                self.integrations = integResult
             }
         }
     }
@@ -707,14 +724,72 @@ public struct V2IntelligenceWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 8) {
                     Image(systemName: "info.circle").foregroundStyle(V2Theme.mutedText)
-                    Text("Configure external sinks (SIEM, ticketing, chat) in Settings → Integrations. This view will show their live status once wired.")
+                    Text("Configured external sinks. Edit in Settings → Integrations or `daemon_config.json`. v1.11.0 wires the live read; per-sink health reporting lands in v1.11.x — for now status reflects 'configured', not last-call success.")
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .v2Panel()
+
+                if integrations.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "powerplug").foregroundStyle(V2Theme.mutedText)
+                        Text("No integrations configured. Drop a notifications.json or daemon_config.json with an outputs[] entry into the support directory.")
+                            .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .v2Panel()
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Configured integrations (\(integrations.count))")
+                            .font(V2Theme.sectionTitle())
+                            .foregroundStyle(V2Theme.primaryText)
+                        VStack(spacing: 6) {
+                            ForEach(integrations) { integ in
+                                HStack(spacing: 12) {
+                                    Image(systemName: iconForIntegration(integ))
+                                        .foregroundStyle(integ.status.chipKind.color)
+                                        .frame(width: 18)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(integ.name)
+                                            .font(V2Theme.body())
+                                            .foregroundStyle(V2Theme.primaryText)
+                                        Text(integ.detail)
+                                            .font(V2Theme.meta())
+                                            .foregroundStyle(V2Theme.mutedText)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                    V2StatusChip(integ.kind, kind: .neutral)
+                                    V2StatusChip(integ.status.label, kind: integ.status.chipKind)
+                                }
+                                .padding(.vertical, 8)
+                                .padding(.horizontal, 10)
+                                .background(V2Theme.panelBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .v2Panel()
+                }
             }
             .padding(16)
+        }
+    }
+
+    private func iconForIntegration(_ integ: V2MockIntegration) -> String {
+        switch integ.kind {
+        case "webhook":      return "bubble.left.and.bubble.right"
+        case "siem":         return "server.rack"
+        case "file":         return "doc.text"
+        case "object-store": return "archivebox"
+        case "telemetry":    return "chart.line.uptrend.xyaxis"
+        case "notification": return "bell.badge"
+        default:             return "powerplug"
         }
     }
 

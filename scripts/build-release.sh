@@ -473,7 +473,10 @@ echo ""
 echo "  DMG: $DMG_PATH"
 echo "  Size: $(du -h "$DMG_PATH" | cut -f1)"
 echo "  Binaries: universal (arm64 + x86_64)"
-RULE_COUNT=$(find "$STAGING_DIR/compiled_rules" -name "*.json" | wc -l | tr -d ' ')
+# v1.11.0 RC2 (audit ship MEDIUM): exclude `manifest.json` from the
+# rule count so release.json doesn't ship "428 rules" when the actual
+# count is 427. manifest.json is build-time metadata, not a rule.
+RULE_COUNT=$(find "$STAGING_DIR/compiled_rules" -name "*.json" ! -name "manifest.json" | wc -l | tr -d ' ')
 echo "  Rules: $RULE_COUNT"
 echo ""
 

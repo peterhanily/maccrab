@@ -253,13 +253,15 @@ private enum V2SidebarGroup: String, CaseIterable, Identifiable {
 
     /// Rendered above the group's first workspace. Nil for the
     /// leading group (Monitor) so the sidebar doesn't open with a
-    /// bare header.
+    /// bare header. v1.11.0 RC2 ship-blocker fix: localized via
+    /// `String(localized:)` so non-English bundles don't show
+    /// English headers above translated workspace titles.
     var headerLabel: String? {
         switch self {
         case .monitor:     return nil
-        case .investigate: return "Investigate"
-        case .configure:   return "Configure"
-        case .system:      return "System"
+        case .investigate: return String(localized: "sidebar.group.investigate", defaultValue: "Investigate")
+        case .configure:   return String(localized: "sidebar.group.configure",   defaultValue: "Configure")
+        case .system:      return String(localized: "sidebar.group.system",      defaultValue: "System")
         }
     }
 

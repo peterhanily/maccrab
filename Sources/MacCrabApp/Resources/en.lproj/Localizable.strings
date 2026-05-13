@@ -558,3 +558,8 @@
 
 /* ── Sparkle auto-update (v1.3.5+) ── */
 "menu.checkForUpdates" = "Check for Updates…";
+
+/* v1.11.0 RC2: sidebar group headers (visual subgrouping) */
+"sidebar.group.investigate" = "Investigate";
+"sidebar.group.configure"   = "Configure";
+"sidebar.group.system"      = "System";
