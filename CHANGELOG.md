@@ -3,6 +3,62 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.3] — 2026-05-16
+
+Consolidated v1.12 rollup release. **No new code vs v1.12.2** —
+same binary, fresh canonical install target with comprehensive
+release notes for users coming from v1.11.x or earlier. The four
+v1.12.x same-day releases (v1.12.0 → v1.12.3) are now collapsed
+into a single recommended upgrade path:
+
+- **v1.11.x or earlier** → Sparkle in-place upgrade to v1.12.3
+  works directly. Or `brew upgrade --cask maccrab`.
+- **v1.12.0 / v1.12.1** → manual upgrade required
+  (`brew upgrade --cask maccrab` or download the v1.12.3 DMG).
+  Their nested Sparkle helpers are baked broken and cannot
+  auto-update.
+- **v1.12.2** → Sparkle in-place upgrade to v1.12.3 works
+  directly.
+
+The headline contents (rolled up from v1.12.0):
+
+- 36 new single-event Sigma rules + 6 sequence rules + 6
+  multi-entity TraceGraph rules covering Shai-Hulud /
+  Mini Shai-Hulud / Lightning PyPI / TanStack CVE-2026-45321.
+- Bayesian intent posterior over attacker goals per process tree
+  + LLM-backed `IntentClassifier` on `npm install` / `pip install`
+  exec events. Heuristic fallback alone catches worm
+  self-propagation when no LLM is configured.
+- 8 new MCP tools (25 total): `check_typosquat_score`,
+  `scan_package_content`, `analyze_package_metadata`,
+  `verify_package_attestation`, `classify_package_intent`,
+  `predict_next_technique`, `score_text_style`,
+  `get_intent_posterior`.
+- Daemon cold start: 114 s → 118 ms (~1000× faster). Seven sources
+  of synchronous main-thread work deferred behind `Task.detached`
+  after the first heartbeat; 14 `boot_phase` breadcrumbs for
+  regression visibility.
+- In-dashboard Sigma YAML editor (read-only viewer + Save flow
+  piped through bundled `compile_rules.py`, writes
+  user-rules overlay).
+
+The hotfix substance (from v1.12.1):
+
+- Self-defense FP fix for Sparkle/cask in-place upgrades. Sentinel
+  file under the data dir + `codesign --verify --` signer-validity
+  check on hash-mismatched binaries. Trust posture unchanged for
+  actual tampering.
+
+The build-pipeline fix (from v1.12.2):
+
+- Dropped `--deep` from the outer `.app` codesign pass. Was
+  propagating MacCrab's main-app entitlements onto Sparkle's
+  `Installer.xpc`, which made macOS refuse to launch the updater.
+  CodeResources still seals `Resources/*` without `--deep`.
+
+See `RELEASE_NOTES/v1.12.3.md` for the full upgrade matrix +
+detailed change descriptions targeted at v1.11.x users.
+
 ## [1.12.2] — 2026-05-16
 
 Same-day hotfix-of-the-hotfix. v1.12.1 shipped a broken Sparkle
