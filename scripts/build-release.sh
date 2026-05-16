@@ -491,25 +491,40 @@ if [ -n "$DEVELOPER_ID" ]; then
 
     # 5. App bundle — signs the outer container last so the bundle
     # signature seals the sysext + the profile + the inner executable.
-    # v1.12.0 RC28 audit fix (Release-H2): --deep on the outer bundle
-    # so Resources/compiled_rules/, Resources/rules/, and
-    # Resources/Compiler/ all get sealed into the signature. Pre-fix
-    # those were unsigned data resources — an attacker with write
-    # access to /Applications/MacCrab.app/Contents/Resources/ could
-    # swap a compiled JSON rule with a malicious one and Gatekeeper
-    # wouldn't notice (the outer signature only sealed Mach-O bytes,
-    # not nested resources). RuleBundleInstaller's manifest.json hash
-    # check covers post-install tampering, but bundle-time integrity
-    # is now a layered defense.
+    #
+    # Resources/* sealing (compiled_rules, rules, Compiler) is provided
+    # by codesign's bundle-mode `_CodeSignature/CodeResources` hash
+    # list — built automatically when signing the bundle, NO --deep
+    # required. The original v1.12.0 RC28 audit fix added --deep on
+    # the assumption that --deep was needed for Resources sealing;
+    # that assumption was wrong — --deep is for recursing into nested
+    # SIGNED code (frameworks, XPC services), not for sealing data
+    # resources. CodeResources covers data resources unconditionally.
+    #
+    # v1.12.2 fix (Sparkle install FP): drop --deep. With --deep on,
+    # codesign re-signed every nested Mach-O (Sparkle.framework's
+    # Autoupdate, Updater.app, Downloader.xpc, Installer.xpc) and
+    # propagated our main-app entitlements
+    # (`com.apple.developer.system-extension.install` +
+    # keychain-access-groups) onto each. macOS refuses to launch a
+    # Sparkle XPC helper carrying the system-extension.install
+    # entitlement, which surfaced as the generic "An error occurred
+    # while running the updater" on every Sparkle upgrade. Tried
+    # --preserve-metadata=entitlements first (v1.12.1) — turns out
+    # codesign doesn't "preserve" the *absence* of entitlements, so
+    # the propagation still happened. Dropping --deep is the actual
+    # fix: Sparkle's helpers keep their step-4a signatures (no
+    # entitlements), and the outer .app sign just seals the bundle
+    # via its own primary executable (which already carries APP_ENT
+    # from step 4b) plus the CodeResources hash list.
     codesign --sign "$DEVELOPER_ID" \
         --identifier "com.maccrab.app" \
         --options runtime \
         --entitlements "$APP_ENT" \
         --timestamp \
-        --deep \
         --force \
         "$APP"
-    echo "    ✓ Signed MacCrab.app (system-extension.install entitlement, --deep seals Resources)"
+    echo "    ✓ Signed MacCrab.app (CodeResources seals Resources/, nested code kept own signatures)"
 
     # Verify before handing off to notarization — catches staging
     # layout mistakes fast. --deep emits many lines now that

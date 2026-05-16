@@ -3,6 +3,40 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.2] — 2026-05-16
+
+Same-day hotfix-of-the-hotfix. v1.12.1 shipped a broken Sparkle
+auto-updater because the v1.12.0 RC28 build-release.sh change that
+added `--deep --entitlements <APP_ENT> --force` to the outer .app
+codesign pass also propagated MacCrab's main-app entitlements
+(`com.apple.developer.system-extension.install` +
+`keychain-access-groups`) into every nested Sparkle helper —
+Autoupdate, Updater.app, Downloader.xpc, **Installer.xpc**. macOS
+refused to launch Installer.xpc with that entitlement combo and
+surfaced it as the generic "An error occurred while running the
+updater" on every Sparkle in-place upgrade.
+
+**Fix**: add `--preserve-metadata=entitlements` to the outer
+`codesign --deep` pass so nested Mach-Os keep the entitlements they
+were signed with at their own (earlier) step — empty/Sparkle-default
+for the Sparkle helpers, APP_ENT for the inner MacCrab executable.
+Resources sealing (the original RC28 goal) is unchanged.
+
+Verified post-build: `codesign -d --entitlements -
+Sparkle.framework/Versions/B/XPCServices/Installer.xpc` now returns
+no entitlements (correct); the outer MacCrab executable still
+carries `com.apple.developer.system-extension.install` (correct).
+
+**Existing v1.12.0 / v1.12.1 installs** carry the broken nested
+entitlements on their OWN Sparkle helpers, so their Sparkle can't
+install v1.12.2 either. Affected users must upgrade via
+`brew upgrade --cask maccrab` or download the v1.12.2 DMG manually
+from https://github.com/peterhanily/maccrab/releases/tag/v1.12.2.
+Once on v1.12.2, future Sparkle upgrades will work normally because
+v1.12.2's Sparkle helpers carry the correct (empty) entitlements.
+
+No Swift source changes from v1.12.1 — pure build-pipeline fix.
+
 ## [1.12.1] — 2026-05-16
 
 Same-day self-defense FP hotfix for the two tamper alerts a v1.11.1 →
