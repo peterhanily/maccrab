@@ -1,0 +1,84 @@
+title: Package-Install Lineage Writes a GitHub Actions Workflow
+id: d1a2b3c4-0302-4000-a000-000000000036
+status: experimental
+description: >
+    Detects creation of a `.github/workflows/*.yml` /  `*.yaml`
+    file by a process descending from a package manager
+    (`npm` / `pnpm` / `yarn` / `pip` / `uv` / `poetry`). The
+    September 2025 Shai-Hulud worm planted workflow files named
+    `shai-hulud-workflow.yml` and `discussion.yaml` to grant the
+    attacker persistent push access; the May 2026 Mini Shai-Hulud
+    Wave 4 reused the same pattern with command-injection sinks
+    on `pull_request_target`. A package install has no legitimate
+    reason to write into the project's CI configuration, so this
+    pattern is high-signal regardless of filename.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.sysdig.com/blog/shai-hulud-the-novel-self-replicating-worm-infecting-hundreds-of-npm-packages
+    - https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://attack.mitre.org/techniques/T1546/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.persistence
+    - attack.t1546
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.defense_evasion
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_workflow_path:
+        TargetFilename|contains:
+            - '/.github/workflows/'
+        TargetFilename|endswith:
+            - '.yml'
+            - '.yaml'
+        FileAction:
+            - 'create'
+            - 'close'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'add'
+            - 'postinstall'
+            - 'preinstall'
+    # v1.12.0 RC3 fix (Det-H1): exclude project-scaffold tools whose
+    # documented purpose is to drop `.github/workflows/` at first
+    # init. Pre-fix the rule was `critical` and fired on every
+    # create-react-app / vite init / cookiecutter / poetry new —
+    # the worm-scrape pattern is structurally indistinguishable from
+    # scaffold output. Until we can detect "scaffold context" (no
+    # prior .git, fresh-cwd marker), downgrade to `high` and add an
+    # explicit allowlist of common scaffolders.
+    filter_known_scaffolders:
+        ParentImage|endswith:
+            - '/create-react-app'
+            - '/create-next-app'
+            - '/create-vite'
+            - '/cookiecutter'
+            - '/poetry'
+            - '/cargo'
+            - '/yo'
+        ParentCommandLine|contains:
+            - 'init'
+            - 'new'
+    condition: selection_workflow_path and selection_lineage and not filter_known_scaffolders
+falsepositives:
+    - Project scaffold tools (create-react-app, vite, poetry new, cookiecutter) — covered by filter_known_scaffolders, but allowlist by package name if a custom scaffolder fires
+    - Workflow-generator packages (e.g., `@actions/workflow-gen`) whose declared purpose is to write workflow files — allowlist by package name
+level: high

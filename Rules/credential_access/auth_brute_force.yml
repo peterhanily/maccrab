@@ -1,18 +1,26 @@
-title: Repeated Authentication Failures
+title: Sudo Stdin Password Or Keychain Unlock By Non-Apple Process
 id: d1a2b3c4-0448-4000-a000-000000000448
 status: experimental
 description: >
-    Detects processes that repeatedly invoke sudo or security commands,
-    suggesting password brute-force or credential spraying. Normal users
-    rarely fail authentication more than once or twice. Repeated failures
-    from a single process or in rapid succession indicate automated attack.
+    Detects single-event uses of sudo with `-S`/`-A`/`--stdin` (password piped
+    in) or `security` invoked against the keychain, by non-Apple-parent
+    processes. The original rule was titled "Repeated Authentication Failures"
+    but Sigma cannot aggregate across events — a true brute-force / repeated-
+    failure detection belongs in the sequence engine (see
+    Rules/sequences/). This single-event approximation flags one of the
+    primitives an automated attack would use and relies on the rest of the
+    detection stack (sequence rules, behavior scoring) for cadence.
+    TODO: convert to a sequences/ rule that requires >=N events in a window.
 author: MacCrab Community
 date: 2026/04/09
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1110/
+    - https://attack.mitre.org/techniques/T1555.001/
 tags:
     - attack.credential_access
     - attack.t1110
+    - attack.t1555.001
 logsource:
     category: process_creation
     product: macos
@@ -20,8 +28,8 @@ detection:
     selection_sudo:
         Image|endswith: '/sudo'
         CommandLine|contains:
-            - '-S'
-            - '-A'
+            - ' -S '
+            - ' -A '
             - '--stdin'
     selection_security_unlock:
         Image|endswith: '/security'
@@ -30,20 +38,20 @@ detection:
             - 'authorizationdb'
             - 'find-generic-password'
             - 'find-internet-password'
-    selection_login:
-        Image|endswith:
-            - '/login'
-            - '/su'
-        CommandLine|contains:
-            - '-f'
-            - '-l'
     filter_apple:
         SignerType: 'apple'
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: (selection_sudo or selection_security_unlock or selection_login) and not filter_apple
+    filter_password_managers:
+        ParentImage|contains:
+            - '/1Password'
+            - '/Bitwarden'
+            - '/Dashlane'
+            - '/KeePassXC'
+    condition: (selection_sudo or selection_security_unlock) and not filter_apple and not filter_password_managers
 falsepositives:
-    - Automated deployment scripts using sudo -S with correct passwords
-    - Password managers querying keychain
-level: high
+    - Automated deployment scripts that pipe a sudo password
+    - Password managers querying the keychain (covered by filter_password_managers)
+    - CI/CD harnesses running `security unlock-keychain` before signing
+level: medium

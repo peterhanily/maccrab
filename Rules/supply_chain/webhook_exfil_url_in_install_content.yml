@@ -1,0 +1,90 @@
+title: Known Exfil Endpoint URL in Installed Package Content
+id: d1a2b3c4-0302-4000-a000-000000000032
+status: experimental
+description: >
+    Detects URL strings to well-known no-auth exfil destinations
+    (webhook.site, Discord webhooks, Telegram bot API, Pastebin,
+    ngrok, trycloudflare, api.ipify.org, request-bin variants)
+    inside files written during a package-install lineage. The
+    September 2025 Shai-Hulud worm embedded
+    `https://webhook.site/bb8ca5f6-4175-45d2-b042-fc9ebb8170b7`
+    directly in payloads; subsequent waves rotated specific URLs
+    but reuse the same handful of services because they require no
+    attacker infrastructure or domain registration. The signal is
+    high-precision: legitimate packages have no reason to embed
+    these URLs.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.sysdig.com/blog/shai-hulud-the-novel-self-replicating-worm-infecting-hundreds-of-npm-packages
+    - https://www.reversinglabs.com/blog/shai-hulud-worm-npm
+    - https://socket.dev/blog/malicious-open-source-packages-2025-mid-year-threat-report
+    - https://attack.mitre.org/techniques/T1567/
+    - https://attack.mitre.org/techniques/T1102/
+tags:
+    - attack.exfiltration
+    - attack.t1567
+    - attack.command_and_control
+    - attack.t1102
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    # v1.12.0 RC2 fix (N-Det3): trim selection to the four install
+    # roots that FileContentEnricher.shouldScan actually inspects.
+    # Pre-fix the rule listed /dist-packages/, /.bundle/, /vendor/
+    # but the enricher never scanned those paths → FileContent
+    # selector would never carry data for them → rule silently
+    # uncovered those ecosystems. If we want to cover them, the
+    # enricher allowlist must grow first.
+    selection_install_target:
+        TargetFilename|contains:
+            - '/node_modules/'
+            - '/site-packages/'
+            - '/.yarn/cache/'
+            - '/.npm/_cacache/'
+    selection_exfil_url:
+        FileContent|contains:
+            - 'webhook.site/'
+            - 'discord.com/api/webhooks/'
+            - 'discordapp.com/api/webhooks/'
+            - 'api.telegram.org/bot'
+            - 'hooks.slack.com/services/'
+            - 'pastebin.com/raw/'
+            - 'ngrok.io/'
+            - 'ngrok-free.app/'
+            - 'trycloudflare.com/'
+            # v1.12.0 RC3 fix (Det-H2): `api.ipify.org` removed —
+            # it's a legitimate public-IP probe embedded in many
+            # popular packages (public-ip, geoip-lite test fixtures,
+            # CDN routing helpers, vite dev-server external-host
+            # detection). Generated too many FPs at `critical`
+            # severity. If we want it back, gate behind a separate
+            # rule that ALSO requires a webhook-shaped destination.
+            - 'requestbin.com/'
+            - 'beeceptor.com/'
+            - 'eo.dnslog.cn'
+            - 'filev2.getsession.org'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+            - '/gem'
+            - '/cargo'
+    condition: selection_install_target and selection_exfil_url and selection_lineage
+falsepositives:
+    - Security research / IOC datasets shipped as a package (rare but possible — e.g., a maintained YARA / Sigma corpus) — allowlist by package name
+    - Telegram or Slack notification libraries whose source code legitimately contains the API base URL for documentation purposes; in practice these are usually in test fixtures only and the rule fires once at install
+    - Debugging samples in Jupyter notebooks bundled into a Python wheel
+level: critical

@@ -1,9 +1,20 @@
-title: CGEventTap Created by Non-Apple Process
+title: CGEventTap API Reference In Command Line By Non-Apple Process
 id: d1a2b3c4-0091-4000-a000-000000000091
 status: experimental
-description: Detects creation of keyboard event taps, which can be used for keylogging. Uses process execution patterns associated with event tap creation.
+description: >
+    Detects a non-Apple process whose command line literally references the
+    CGEventTap / NSEvent global-monitor APIs — e.g. an attacker dropping a
+    swift one-liner or osascript shim that calls `CGEventTapCreate`. This is
+    a string heuristic, not API-call telemetry: legitimate keyboard-shortcut
+    managers (Karabiner, BetterTouchTool, Hammerspoon) invoke the API from
+    compiled binaries and do not surface the symbol on their command line, so
+    they are not expected to match. The allowlist below is defense-in-depth
+    in case a power-user wires Karabiner / Hammerspoon to a shell snippet
+    that does mention the API. True keylogger detection requires EndpointSec
+    + the EventTapMonitor (see Sources/MacCrabCore/Collectors/).
 author: MacCrab Community
 date: 2026/03/31
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1056/001/
 tags:
@@ -17,13 +28,26 @@ detection:
     selection:
         CommandLine|contains:
             - 'CGEventTapCreate'
-            - 'CGEventTap'
             - 'kCGEventKeyDown'
             - 'NSEvent.addGlobalMonitorForEvents'
+            - 'addGlobalMonitorForEventsMatchingMask'
     filter_apple:
         SignerType: 'apple'
-    condition: selection and not filter_apple
+    filter_keyboard_managers:
+        Image|contains:
+            - '/Karabiner-Elements'
+            - '/karabiner_'
+            - '/BetterTouchTool'
+            - '/Hammerspoon'
+            - '/Keyboard Maestro'
+        ParentImage|contains:
+            - '/Karabiner-Elements'
+            - '/karabiner_'
+            - '/BetterTouchTool'
+            - '/Hammerspoon'
+            - '/Keyboard Maestro'
+    condition: selection and not filter_apple and not filter_keyboard_managers
 falsepositives:
-    - Legitimate keyboard shortcut managers (Karabiner, BetterTouchTool)
-    - Accessibility software
+    - Power-user shell snippets that print or echo CGEventTap API names for diagnostics
+    - Accessibility / automation software not yet in the allowlist
 level: high

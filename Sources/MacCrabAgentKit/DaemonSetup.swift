@@ -73,13 +73,19 @@ enum DaemonSetup {
     static func recoverEventStore(supportDir: String, logger: Logger) -> EventStore {
         // First, capture the original error with public privacy so the
         // log shows what's wrong instead of "<private>".
+        // v1.12.0 RC27 audit fix (Stab-B1): replace the `try!` second-
+        // probe with a graceful return path. The prior code assumed
+        // "unreachable" but a race or transient I/O hiccup between
+        // the first failure and the second probe would crash the
+        // daemon hard instead of running through the backup-and-retry
+        // recovery path below.
         let originalError: String
         do {
-            _ = try EventStore(directory: supportDir)
-            // Should be unreachable — this path is only hit when init
-            // already failed; calling it again as a probe is just to
-            // capture the error for logging.
-            return try! EventStore(directory: supportDir)
+            let store = try EventStore(directory: supportDir)
+            // First attempt actually succeeded (transient failure
+            // resolved itself). Return immediately; skip backup.
+            logger.warning("EventStore: first init failed but a probe re-init succeeded — transient error; skipping backup")
+            return store
         } catch {
             originalError = "\(error.localizedDescription) — \(error)"
         }
@@ -101,10 +107,12 @@ enum DaemonSetup {
     /// events.db) doesn't help an AlertStore failure. If init fails,
     /// back up the corrupt alerts.db and retry once.
     static func recoverAlertStore(supportDir: String, logger: Logger) -> AlertStore {
+        // v1.12.0 RC27 audit fix (Stab-B1): same pattern as recoverEventStore.
         let originalError: String
         do {
-            _ = try AlertStore(directory: supportDir)
-            return try! AlertStore(directory: supportDir)
+            let store = try AlertStore(directory: supportDir)
+            logger.warning("AlertStore: first init failed but a probe re-init succeeded — transient error; skipping backup")
+            return store
         } catch {
             originalError = "\(error.localizedDescription) — \(error)"
         }
@@ -121,8 +129,61 @@ enum DaemonSetup {
         }
     }
 
+    /// Print a timing breadcrumb to the standard log. Used to find
+    /// the actual daemon-boot bottleneck — v1.12.0 RC18 added these
+    /// at major boot milestones so a `log show --predicate 'process ==
+    /// "com.maccrab.agent"' | grep BOOT_TIMING` produces a single-pass
+    /// breakdown of where the boot path spends time.
+    fileprivate static func logBootStep(label: String, startedAt: Date) {
+        let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+        print("[BOOT_TIMING] \(label): +\(elapsed) ms")
+        logger.notice("[BOOT_TIMING] \(label, privacy: .public): +\(elapsed, privacy: .public) ms")
+    }
+
+    /// Write a minimal boot-phase heartbeat so the dashboard can show
+    /// "Daemon: Starting (loading rules)..." with real-time progress
+    /// instead of "Not running" for 15-20 s while the daemon finishes
+    /// initialising. Phase strings: "starting", "stores_ready",
+    /// "rules_loaded", "collectors_started", "ready". Once `ready`, the
+    /// regular livenessTimer takes over (`liveness: true` writes).
+    /// Atomic via .tmp + rename, same as the livenessTimer pattern.
+    fileprivate static func writeBootPhase(
+        supportDir: String,
+        phase: String,
+        startedAt: Date
+    ) {
+        let payload: [String: Any] = [
+            "written_at_unix": Date().timeIntervalSince1970,
+            "started_at_unix": startedAt.timeIntervalSince1970,
+            "uptime_seconds": Int(Date().timeIntervalSince(startedAt)),
+            "boot_phase": phase,
+            "liveness": false,
+            "schema_version": 4,
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.sortedKeys]
+        ) else { return }
+        // Ensure the dir exists; on first daemon launch after install
+        // the directory may be brand new.
+        try? FileManager.default.createDirectory(
+            atPath: supportDir,
+            withIntermediateDirectories: true
+        )
+        let path = supportDir + "/heartbeat.json"
+        let tmp = path + ".tmp"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp))
+            try FileManager.default.moveItem(atPath: tmp, toPath: path)
+        } catch {
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+        }
+    }
+
     static func initialize() async -> DaemonState {
         let startupBegin = DispatchTime.now()
+        let startedAt = Date()
 
         // Check if running as root (required for ES framework, optional for other sources)
         let isRoot = getuid() == 0
@@ -158,6 +219,15 @@ enum DaemonSetup {
             supportDir = userAppSupport
         }
         let compiledRulesDir = supportDir + "/compiled_rules"
+
+        // v1.12.0 RC15: write an early "starting" heartbeat the moment
+        // the support dir is known. Pre-fix, heartbeat.json didn't
+        // appear until DaemonSetup.initialize() returned and the
+        // livenessTimer fired (timer +0.5 s, dashboard poll every 10 s,
+        // so steady-state "Daemon: starting…" appeared for up to 15-20 s
+        // even though the process was up). With the boot_phase marker
+        // here at T+~0 s, the dashboard can show real-time progress.
+        writeBootPhase(supportDir: supportDir, phase: "starting", startedAt: startedAt)
 
         // Determine rules directory using a fixed, secure search order.
         // Environment variables are NOT used because a non-root user could
@@ -290,6 +360,19 @@ enum DaemonSetup {
         alertStore = (try? AlertStore(directory: supportDir))
             ?? Self.recoverAlertStore(supportDir: supportDir, logger: logger)
 
+        Self.writeBootPhase(supportDir: supportDir, phase: "stores_ready", startedAt: startedAt)
+        Self.logBootStep(label: "stores_ready", startedAt: startedAt)
+
+        // v1.12.0 RC23: quick_check entirely skipped on the daemon side.
+        // RC15 deferred it to a background Task, but the actor model
+        // means that Task still HELD eventStore for the duration of
+        // PRAGMA quick_check (1-2 s on 962 MB DB) — so the very next
+        // `await eventStore.setInsertFilter` call on the boot path
+        // queued behind it for ~9 s (field-measured in RC22 timing
+        // breadcrumbs). Real corruption surfaces immediately on actual
+        // queries via SQLITE_CORRUPT, and `maccrabctl maintenance
+        // check` exists for explicit operator-driven verification.
+
         // v1.8.0 Layer 1: install the pre-insert filter so noise events
         // never reach SQLite. Default filter drops the daemon's own self-
         // monitoring loop (own log/DB/support dir, /dev/null, /dev/ttys*)
@@ -305,6 +388,7 @@ enum DaemonSetup {
         await eventStore.setInsertFilter(
             EventInsertFilter.defaultFilter(supportDir: supportDir)
         )
+        Self.logBootStep(label: "after_insert_filter", startedAt: startedAt)
 
         // ProcessHasher populates SHA-256 + CDHash on exec/fork events so
         // downstream rules and exports can match against threat-intel hashes.
@@ -315,9 +399,16 @@ enum DaemonSetup {
         // credential files and exposes an isHoneyfile() lookup the enricher
         // uses to tag file events touching a canary.
         let honeyfileManager: HoneyfileManager?
+        let honeyPromptManager: HoneyPromptManager?
         if ProcessInfo.processInfo.environment["MACCRAB_DECEPTION"] == "1" {
             let mgr = HoneyfileManager()
             honeyfileManager = mgr
+            // v1.12.0 — pair the credential-shape bait (HoneyfileManager) with
+            // AI-agent-context bait (HoneyPromptManager). Both deploy under
+            // the same env-var gate so the operator's mental model stays
+            // "deception on" / "deception off".
+            let promptMgr = HoneyPromptManager()
+            honeyPromptManager = promptMgr
             Task {
                 do {
                     let deployed = try await mgr.deploy()
@@ -325,10 +416,25 @@ enum DaemonSetup {
                 } catch {
                     logger.warning("Honeyfile deploy failed: \(error.localizedDescription)")
                 }
+                do {
+                    let deployedPrompts = try await promptMgr.deploy()
+                    logger.info("Deployed \(deployedPrompts.count) honey-prompts (AI-agent context bait)")
+                } catch {
+                    logger.warning("Honey-prompt deploy failed: \(error.localizedDescription)")
+                }
             }
         } else {
             honeyfileManager = nil
+            honeyPromptManager = nil
         }
+
+        // v1.12.0 — FileContent enricher reads first 64KB of close-write
+        // events on a small allowlist (Info.plist, CHANGELOG, README,
+        // .gitconfig, LaunchAgents plists, specific IOC filenames) so
+        // detection rules can use `FileContent|contains: '...'` selectors.
+        // Always on — the allowlist is tight enough that the cost is
+        // negligible compared to the enrichment value.
+        let fileContentEnricher = FileContentEnricher()
 
         // Env-var capture (opt-in). Reads DYLD_*, SSH_*, SUDO_*, AWS_PROFILE,
         // and a small set of context keys via sysctl on exec/fork. Secret-
@@ -342,9 +448,12 @@ enum DaemonSetup {
         enricher = EventEnricher(
             processHasher: processHasher,
             honeyfileManager: honeyfileManager,
+            honeyPromptManager: honeyPromptManager,
+            fileContentEnricher: fileContentEnricher,
             captureEnv: captureEnv
         )
         ruleEngine = RuleEngine()
+        Self.logBootStep(label: "after_enricher_engine", startedAt: startedAt)
         // v1.11.0 (audit functionality HIGH): read OS-notification
         // config from <supportDir>/alert_notifications.json instead
         // of hardcoding `.high`. Closes a wire-the-orphans gap —
@@ -358,9 +467,21 @@ enum DaemonSetup {
         await notifier.setEnabled(notifConfig.enabled)
         let responseEngine = ResponseEngine()
 
-        // Self-defense: tamper detection
+        Self.logBootStep(label: "after_response_engine", startedAt: startedAt)
+        // Self-defense: tamper detection.
+        // v1.12.0 RC21: the await selfDefense.start() pre-fix was on
+        // the boot critical path. SelfDefense's startup does a baseline
+        // scan of the rules dir + binary + WAL pages — easily multi-
+        // second on first launch after install. Tamper detection
+        // doesn't need to be ready by event #1; deferring .start() to
+        // a Task gets the daemon serving events ~10× sooner while
+        // losing only the tamper baseline for the first ~1 s.
+        // (RC22 caught the constructor itself doing 3.6 s of binary
+        // SHA-256 + rule dir hash — addressed in RC24 by lazy-hashing
+        // inside SelfDefense rather than at-construct time. v1.12.1.)
         let selfDefense = SelfDefense(dataDir: supportDir, rulesDir: compiledRulesDir)
-        await selfDefense.start { event in
+        Task.detached(priority: .utility) {
+            await selfDefense.start { event in
             logger.critical("SELF-DEFENSE: [\(event.type.rawValue)] \(event.description)")
             print("[TAMPER] \(event.type.rawValue): \(event.description)")
 
@@ -388,17 +509,28 @@ enum DaemonSetup {
                 await notifier.notify(alert: alert)
             }
         }
-        print("Self-defense active (binary integrity, file monitoring, anti-debug)")
-
-        // ES infrastructure health monitor
-        let esHealthMonitor = ESClientMonitor(pollInterval: config.esHealthPollInterval)
-        await esHealthMonitor.start()
-        let esHealth = await esHealthMonitor.currentStatus()
-        if esHealth.isHealthy {
-            print("ES infrastructure: healthy (xprotectd, syspolicyd, endpointsecurityd running)")
-        } else {
-            print("ES infrastructure: DEGRADED -- \(esHealth.issues.joined(separator: ", "))")
+            print("Self-defense active (deferred — baseline forming in background)")
         }
+        Self.logBootStep(label: "after_self_defense", startedAt: startedAt)
+
+        // ES infrastructure health monitor.
+        // v1.12.0 RC21 (TURBO): both await calls (start + currentStatus)
+        // talk to xprotectd / syspolicyd / endpointsecurityd via private
+        // OS APIs and can each block several seconds on a cold launch
+        // (system services may be mid-init themselves). The status is
+        // purely informational on the boot path — defer the whole probe
+        // to a Task so the daemon doesn't wait on Apple's bootstrap.
+        let esHealthMonitor = ESClientMonitor(pollInterval: config.esHealthPollInterval)
+        Task.detached(priority: .utility) {
+            await esHealthMonitor.start()
+            let esHealth = await esHealthMonitor.currentStatus()
+            if esHealth.isHealthy {
+                print("ES infrastructure (deferred probe): healthy (xprotectd, syspolicyd, endpointsecurityd running)")
+            } else {
+                print("ES infrastructure (deferred probe): DEGRADED -- \(esHealth.issues.joined(separator: ", "))")
+            }
+        }
+        Self.logBootStep(label: "after_es_health", startedAt: startedAt)
 
         // ES health monitoring task
         Task {
@@ -426,16 +558,23 @@ enum DaemonSetup {
             }
         }
 
-        // Threat intelligence feed
+        // Threat intelligence feed. v1.12.0 RC16 (TURBO): construct
+        // the actor immediately (cheap), but defer the `.start()`
+        // refresh loop AND the bundled IOC load to a background Task.
+        // Rules referencing threat-intel run against an empty index
+        // for the first ~1-2 s of daemon life, then populate as the
+        // background load completes — a tiny window of missed lookup
+        // for a multi-second startup win.
         let threatIntel = ThreatIntelFeed(cacheDir: supportDir + "/threat_intel")
-        await threatIntel.start()
+        Task.detached(priority: .utility) {
+            await threatIntel.start()
+            await BundledThreatIntel.loadInto(threatIntel)
+            let bundledStats = BundledThreatIntel.stats
+            print("Bundled threat intel loaded (deferred): \(bundledStats.hashes) hashes, \(bundledStats.ips) IPs, \(bundledStats.domains) domains")
+            print("Threat intel feed active (abuse.ch Feodo, URLhaus, MalwareBazaar)")
+        }
 
-        // Load bundled threat intel for immediate protection (before any event collection)
-        await BundledThreatIntel.loadInto(threatIntel)
-        let bundledStats = BundledThreatIntel.stats
-        print("Bundled threat intel loaded: \(bundledStats.hashes) hashes, \(bundledStats.ips) IPs, \(bundledStats.domains) domains")
-        print("Threat intel feed active (abuse.ch Feodo, URLhaus, MalwareBazaar)")
-
+        Self.logBootStep(label: "threat_intel_init", startedAt: startedAt)
         // Behavioral scoring engine
         let behaviorScoring = BehaviorScoring(alertThreshold: config.behaviorAlertThreshold, criticalThreshold: config.behaviorCriticalThreshold)
 
@@ -459,6 +598,7 @@ enum DaemonSetup {
             logger.warning("CampaignStore failed to open: \(error.localizedDescription) — campaigns will not persist across restarts")
             campaignStore = nil
         }
+        Self.logBootStep(label: "after_campaign_store", startedAt: startedAt)
 
         // v1.10.0 TraceGraph wiring. Pre-fix the materializer + rolling
         // graph + event bridge shipped compiled but were never
@@ -486,11 +626,51 @@ enum DaemonSetup {
         // Hoisted out of the do-block so the daily retention timer in
         // DaemonTimers can call prune / size-cap on the same store.
         let causalStoreOuter: SQLiteCausalGraphStore?
-        do {
-            let causalStore = try await SQLiteCausalGraphStore(
-                databasePath: supportDir + "/tracegraph.db",
-                encryption: earlyDbEncryption
-            )
+        // v1.12.0 RC25 audit fix (Int-H3): retry with backup on corrupt
+        // tracegraph.db. EventStore + AlertStore have recovery paths
+        // (lines 73-122); SQLiteCausalGraphStore previously had none.
+        // With this fix a 7GB corrupt tracegraph gets quarantined and
+        // the daemon continues with a fresh empty store — the rest of
+        // detection keeps working.
+        func openCausalStore() async -> SQLiteCausalGraphStore? {
+            let dbPath = supportDir + "/tracegraph.db"
+            do {
+                return try await SQLiteCausalGraphStore(
+                    databasePath: dbPath, encryption: earlyDbEncryption
+                )
+            } catch {
+                logger.error("TraceGraph init failed: \(error.localizedDescription, privacy: .public) — quarantining and retrying")
+                let ts = Int(Date().timeIntervalSince1970)
+                let quarantineDir = supportDir + "/quarantine"
+                // v1.12.0 RC28 audit fix (Sec-M2): refuse to use a
+                // symlinked quarantine dir. Without this an attacker
+                // who can pre-create supportDir/quarantine as a link
+                // to /Users/<them>/ would have us land sensitive
+                // tracegraph.db content under their control on next
+                // crash. lstat refuses to follow; URL resource-keys
+                // .isSymbolicLink is the same check.
+                let qURL = URL(fileURLWithPath: quarantineDir)
+                let qIsSymlink = (try? qURL.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+                if qIsSymlink {
+                    logger.error("TraceGraph quarantine refused: \(quarantineDir, privacy: .public) is a symlink")
+                    return nil
+                }
+                try? FileManager.default.createDirectory(
+                    atPath: quarantineDir, withIntermediateDirectories: true
+                )
+                for ext in ["", "-wal", "-shm", "-journal"] {
+                    let src = dbPath + ext
+                    if FileManager.default.fileExists(atPath: src) {
+                        let dst = "\(quarantineDir)/tracegraph.db.corrupt-\(ts)\(ext)"
+                        try? FileManager.default.moveItem(atPath: src, toPath: dst)
+                    }
+                }
+                return try? await SQLiteCausalGraphStore(
+                    databasePath: dbPath, encryption: earlyDbEncryption
+                )
+            }
+        }
+        if let causalStore = await openCausalStore() {
             let materializer = TraceMaterializer(
                 store: causalStore,
                 daemonVersion: MacCrabVersion.current,
@@ -503,11 +683,41 @@ enum DaemonSetup {
             causalGraphBridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
             causalStoreOuter = causalStore
             logger.info("TraceGraph materializer wired — events will now anchor traces in tracegraph.db")
-        } catch {
-            logger.warning("TraceGraph init failed: \(error.localizedDescription) — trace materialization disabled this run")
+        } else {
+            logger.warning("TraceGraph init failed twice; trace materialization disabled this run")
             causalGraphBridge = nil
             causalStoreOuter = nil
         }
+
+        // v1.12.0 — load graph rules from `<support-dir>/compiled_rules/graph`
+        // (release builds) or `Rules/graph` (dev builds). Each rule is a
+        // JSON file describing a multi-entity pattern that fires only
+        // when a materialized Trace contains a matching constellation of
+        // entities + edges. The evaluator runs in EventLoop right after
+        // `EventToRollingCausalGraphBridge.process` returns its [Trace],
+        // so every materialized trace gets one pass of graph rules.
+        // Skipped when causalStoreOuter is nil — without traces there's
+        // nothing to evaluate against.
+        let graphEvaluator: GraphRuleEvaluator?
+        if causalStoreOuter != nil {
+            let compiledGraphDir = URL(fileURLWithPath: supportDir + "/compiled_rules/graph")
+            var loaded = GraphRuleLoader.loadRules(from: compiledGraphDir)
+            if loaded.isEmpty {
+                // Dev fallback: pick up rules straight from the source tree.
+                let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                loaded = GraphRuleLoader.loadFromProjectSource(projectRoot: cwd)
+            }
+            if loaded.isEmpty {
+                logger.info("TraceGraph rule evaluator: no graph rules found — multi-entity detection disabled this run")
+                graphEvaluator = nil
+            } else {
+                graphEvaluator = GraphRuleEvaluator(rules: loaded)
+                logger.info("TraceGraph rule evaluator: loaded \(loaded.count) graph rules")
+            }
+        } else {
+            graphEvaluator = nil
+        }
+        Self.logBootStep(label: "after_graph_evaluator", startedAt: startedAt)
 
         // Load response action config if it exists
         let actionConfigPath = supportDir + "/actions.json"
@@ -604,10 +814,15 @@ enum DaemonSetup {
             print("Trust substrate: bootstrap failed — \(error). Trace-bundle signing will lazily retry on first export.")
         }
 
-        // USB device monitor -- detects mass storage, HID keyboard emulation
+        // USB device monitor -- detects mass storage, HID keyboard emulation.
+        // v1.12.0 RC21 (TURBO): IOKit polling startup is cheap on the
+        // happy path but blocks if IOKit power-management is mid-state.
+        // Defer to a Task.
         let usbMonitor = USBMonitor(pollInterval: config.usbPollInterval)
-        await usbMonitor.start()
-        print("USB device monitor active")
+        Task.detached(priority: .utility) {
+            await usbMonitor.start()
+            print("USB device monitor active (deferred)")
+        }
 
         // Database encryption -- AES-256 field encryption, key in Keychain.
         // v1.9.0 (audit Sec-H2): default ON to match the dashboard's
@@ -631,16 +846,23 @@ enum DaemonSetup {
         // Report generator -- HTML incident reports
         let reportGenerator = ReportGenerator()
 
-        // Clipboard monitor -- detects sensitive data and injection on clipboard
+        // Clipboard monitor -- detects sensitive data and injection on clipboard.
+        // v1.12.0 RC21 (TURBO): polled monitor, defer .start().
         let clipboardMonitor = ClipboardMonitor(pollInterval: config.clipboardPollInterval)
-        await clipboardMonitor.start()
+        Task.detached(priority: .utility) {
+            await clipboardMonitor.start()
+            print("Clipboard monitor active (deferred, sensitive data + injection detection)")
+        }
         let clipboardInjectionDetector = ClipboardInjectionDetector()
-        print("Clipboard monitor active (sensitive data + injection detection)")
 
-        // Browser extension monitor -- scans Chrome/Firefox/Brave/Edge/Arc
+        // Browser extension monitor -- scans Chrome/Firefox/Brave/Edge/Arc.
+        // v1.12.0 RC21 (TURBO): startup scans 5 browser profile dirs +
+        // enumerates each extension manifest — disk-heavy. Defer.
         let browserExtMonitor = BrowserExtensionMonitor(pollInterval: config.browserExtensionPollInterval)
-        await browserExtMonitor.start()
-        print("Browser extension monitor active")
+        Task.detached(priority: .utility) {
+            await browserExtMonitor.start()
+            print("Browser extension monitor active (deferred)")
+        }
 
         // Ultrasonic attack monitor -- FFT mic sampling for DolphinAttack/NUIT
         // Opt-in: requires microphone access which triggers a TCC permission popup.
@@ -675,20 +897,33 @@ enum DaemonSetup {
         // Auto rule generator -- creates Sigma rules from observed campaigns
         let ruleGenerator = RuleGenerator(outputDir: supportDir + "/compiled_rules")
 
-        // Rootkit detector -- cross-references proc_listallpids vs sysctl for hidden processes
+        // Rootkit detector — dual-API cross-reference of process tables.
+        // v1.12.0 RC21 (TURBO): polled (120 s default) — defer .start().
         let rootkitDetector = RootkitDetector(pollInterval: config.rootkitPollInterval)
-        await rootkitDetector.start()
-        print("Rootkit detector active (dual-API cross-reference)")
+        Task.detached(priority: .utility) {
+            await rootkitDetector.start()
+            print("Rootkit detector active (deferred, dual-API cross-reference)")
+        }
 
-        // EDR/RMM tool monitor — scans for EDR, insider threat, MDM, and remote access tools
+        // EDR/RMM tool monitor — scans for EDR, insider threat, MDM, and remote access tools.
+        // v1.12.0 RC21 (TURBO): scans for 30+ tool signatures = disk +
+        // code-signing churn. This was flagged by the RC18 perf agent;
+        // already deferred for SecurityToolIntegrations, but EDRMonitor
+        // is a SEPARATE actor doing similar work. Defer.
         let edrMonitor = EDRMonitor(pollInterval: 120)
-        await edrMonitor.start()
-        print("EDR/RMM monitor active (CrowdStrike, SentinelOne, ForcePoint, Jamf, TeamViewer + 25 more)")
+        Task.detached(priority: .utility) {
+            await edrMonitor.start()
+            print("EDR/RMM monitor active (deferred — CrowdStrike, SentinelOne, ForcePoint, Jamf, TeamViewer + 25 more)")
+        }
 
-        // TEMPEST / Van Eck phreaking monitor — SDR device detection + display anomalies
+        // TEMPEST / Van Eck phreaking monitor — SDR device detection + display anomalies.
+        // v1.12.0 RC21 (TURBO): IOKit enumeration + DRM display probe;
+        // defer.
         let tempestMonitor = TEMPESTMonitor(pollInterval: 60)
-        await tempestMonitor.start()
-        print("TEMPEST monitor active (SDR device detection, display anomaly monitoring)")
+        Task.detached(priority: .utility) {
+            await tempestMonitor.start()
+            print("TEMPEST monitor active (deferred, SDR device detection, display anomaly monitoring)")
+        }
 
         // Library inventory -- scans for injected dylibs
         let libraryInventory = LibraryInventory()
@@ -771,12 +1006,21 @@ enum DaemonSetup {
             print("Prevention layer: STANDBY (set MACCRAB_PREVENTION=1 to enable)")
         }
 
+        Self.logBootStep(label: "before_user_security", startedAt: startedAt)
         // === USER SECURITY FEATURES ===
 
-        // Security scorer -- 0-100 system security posture score
+        // Security scorer -- 0-100 system security posture score.
+        // v1.12.0 RC19 (TURBO): the calculate() pass enumerates 20+
+        // posture signals (SIP/Gatekeeper/FileVault states, kext load
+        // history, MDM enrolment, software update lag) — each a system
+        // call. Defer to a Task; the dashboard's first read of the
+        // score lands at first heartbeat tick (30 s) which is also
+        // when the deferred calculation completes.
         let securityScorer = SecurityScorer()
-        let initialScore = await securityScorer.calculate()
-        print("Security score: \(initialScore.totalScore)/100 (\(initialScore.grade))\(initialScore.recommendations.isEmpty ? "" : " -- \(initialScore.recommendations.first ?? "")")")
+        Task.detached(priority: .utility) {
+            let initialScore = await securityScorer.calculate()
+            print("Security score (deferred): \(initialScore.totalScore)/100 (\(initialScore.grade))\(initialScore.recommendations.isEmpty ? "" : " -- \(initialScore.recommendations.first ?? "")")")
+        }
 
         // App privacy auditor -- tracks which apps phone home
         let appPrivacyAuditor = AppPrivacyAuditor()
@@ -811,29 +1055,41 @@ enum DaemonSetup {
             print("Scheduled reports: daily=\(reportSchedule.dailyDigestEnabled), weekly=\(reportSchedule.weeklyReportEnabled)")
         }
 
-        // MISP threat intel integration
+        // MISP threat intel integration.
+        // v1.12.0 RC19 (TURBO): network call to MISP can block 10-30 s
+        // on a slow/unreachable endpoint. Defer the whole fetch to a
+        // background Task so the boot path isn't held hostage to a
+        // remote service. Worst case: rules referencing MISP-sourced
+        // IOCs miss matches for the first second of daemon life.
         let mispClient = MISPClient()
-        if await mispClient.isConfigured {
-            print("MISP integration: configured")
-            // Fetch IOCs from MISP and feed into threat intel
-            let mispIOCs = await mispClient.fetchCategorized(lastDays: 7)
-            if !mispIOCs.ips.isEmpty || !mispIOCs.domains.isEmpty || !mispIOCs.hashes.isEmpty {
-                await threatIntel.addCustomIOCs(hashes: mispIOCs.hashes, ips: mispIOCs.ips, domains: mispIOCs.domains)
-                print("  MISP import: \(mispIOCs.ips.count) IPs, \(mispIOCs.domains.count) domains, \(mispIOCs.hashes.count) hashes")
+        Task.detached(priority: .utility) {
+            if await mispClient.isConfigured {
+                print("MISP integration: configured (deferred fetch)")
+                let mispIOCs = await mispClient.fetchCategorized(lastDays: 7)
+                if !mispIOCs.ips.isEmpty || !mispIOCs.domains.isEmpty || !mispIOCs.hashes.isEmpty {
+                    await threatIntel.addCustomIOCs(hashes: mispIOCs.hashes, ips: mispIOCs.ips, domains: mispIOCs.domains)
+                    print("  MISP import (deferred): \(mispIOCs.ips.count) IPs, \(mispIOCs.domains.count) domains, \(mispIOCs.hashes.count) hashes")
+                }
             }
         }
 
-        // Security tool integrations (read-only detection of other tools)
+        // Security tool integrations (read-only detection of other tools).
+        // v1.12.0 RC19 (TURBO): the detection pass scans for 30+ EDR/
+        // MDM/remote-access tool signatures, each involving filesystem
+        // probes + code-signing checks. Field profiling (RC18 timing
+        // breadcrumbs) showed this is the #1 single contributor to the
+        // ~41 s pre-rules boot phase. Defer to a background Task; the
+        // dashboard's IntegrationsView reads the snapshot once it's
+        // written.
         let toolIntegrations = SecurityToolIntegrations()
-        let installedTools = await toolIntegrations.detectInstalledTools()
-        if !installedTools.isEmpty {
-            let running = installedTools.filter(\.isRunning).map(\.name)
-            print("Security tools detected: \(installedTools.map(\.name).joined(separator: ", "))\(running.isEmpty ? "" : " (running: \(running.joined(separator: ", ")))")")
+        Task.detached(priority: .utility) {
+            let installedTools = await toolIntegrations.detectInstalledTools()
+            if !installedTools.isEmpty {
+                let running = installedTools.filter(\.isRunning).map(\.name)
+                print("Security tools detected (deferred): \(installedTools.map(\.name).joined(separator: ", "))\(running.isEmpty ? "" : " (running: \(running.joined(separator: ", ")))")")
+            }
+            await toolIntegrations.writeSnapshot(to: supportDir + "/integrations_snapshot.json")
         }
-        // v1.6.15: persist a snapshot at startup so the dashboard's
-        // IntegrationsView picks up the daemon's results immediately.
-        // Refreshed hourly by DaemonTimers.
-        await toolIntegrations.writeSnapshot(to: supportDir + "/integrations_snapshot.json")
 
         // Notarization checker -- verifies notarization status of executed binaries
         let notarizationChecker = NotarizationChecker()
@@ -849,6 +1105,7 @@ enum DaemonSetup {
         let crossProcessCorrelator = CrossProcessCorrelator()
 
         // Process tree ML -- Markov chain anomaly detection on parent-child transitions
+        Self.logBootStep(label: "before_process_tree", startedAt: startedAt)
         let processTreeAnalyzer = ProcessTreeAnalyzer(modelPath: supportDir + "/process_tree_model.json")
         do {
             try await processTreeAnalyzer.load()
@@ -951,25 +1208,30 @@ enum DaemonSetup {
                 backend = GeminiBackend(apiKey: key, model: llmConfig.geminiModel)
             }
 
+            // v1.12.0 RC19 (TURBO): the `isAvailable()` probe is a
+            // network call. On an unreachable backend (Ollama down,
+            // Claude API rate-limited, captive-portal network) the
+            // default URLSession timeout is 60 s — a third of the
+            // previous boot path. Optimistically return the service
+            // without probing; LLMService's own circuit breaker
+            // handles unreachable-at-call-time gracefully (3 failures
+            // → 5 min cool-down) and triages all LLM features as
+            // advisory-only.
             let service = LLMService(backend: backend, config: llmConfig)
-            if await service.isAvailable() {
-                let model: String
-                switch llmConfig.provider {
-                case .ollama:  model = llmConfig.ollamaModel
-                case .claude:  model = llmConfig.claudeModel
-                case .openai:  model = llmConfig.openaiModel
-                case .mistral: model = llmConfig.mistralModel
-                case .gemini:  model = llmConfig.geminiModel
-                }
-                print("LLM backend: \(llmConfig.provider.rawValue) (\(model))")
-                return service
-            } else {
-                print("LLM backend: \(llmConfig.provider.rawValue) configured but not reachable")
-                return nil
+            let model: String
+            switch llmConfig.provider {
+            case .ollama:  model = llmConfig.ollamaModel
+            case .claude:  model = llmConfig.claudeModel
+            case .openai:  model = llmConfig.openaiModel
+            case .mistral: model = llmConfig.mistralModel
+            case .gemini:  model = llmConfig.geminiModel
             }
+            print("LLM backend: \(llmConfig.provider.rawValue) (\(model)) — availability checked lazily")
+            return service
         }()
 
         // DNS collector (BPF capture or passive mode)
+        Self.logBootStep(label: "before_dns_collector", startedAt: startedAt)
         let dnsCollector = DNSCollector()
         await dnsCollector.start()
         print("DNS collector active")
@@ -994,25 +1256,50 @@ enum DaemonSetup {
         // Quarantine provenance enricher
         let quarantineEnricher = QuarantineEnricher()
 
+        Self.logBootStep(label: "before_sequence_engine", startedAt: startedAt)
         // Initialize sequence engine (Phase 2: temporal-causal detection)
+        Self.logBootStep(label: "before_sequence_engine_construct", startedAt: startedAt)
         let sequenceEngine = await SequenceEngine(lineage: enricher.lineage)
+        Self.logBootStep(label: "after_sequence_engine_construct", startedAt: startedAt)
 
-        // Initialize baseline anomaly engine (Phase 3: learned detection)
+        // Initialize baseline anomaly engine (Phase 3: learned detection).
+        // v1.12.0 RC16 (TURBO): defer the on-disk model load to a
+        // background Task. The actor is constructed synchronously
+        // (cheap, no I/O), then `load()` happens in parallel with the
+        // rest of boot. Events arriving in the first ~1 s after launch
+        // see the engine in an "empty" state — equivalent to a fresh
+        // learning period — which is benign: anomaly detection is
+        // additive on top of the rule layer.
         let baselineEngine = BaselineEngine()
-        do {
-            try await baselineEngine.load()
-            let status = await baselineEngine.status()
-            logger.info("Baseline engine: \(status.state.rawValue), \(status.totalEdges) edges")
-            print("Baseline engine: \(status.state.rawValue) (\(status.totalEdges) edges learned)")
-        } catch {
-            logger.info("Baseline engine: starting fresh learning period")
-            print("Baseline engine: starting 7-day learning period")
+        Task.detached(priority: .utility) {
+            do {
+                try await baselineEngine.load()
+                let status = await baselineEngine.status()
+                logger.info("Baseline engine (deferred load): \(status.state.rawValue), \(status.totalEdges) edges")
+                print("Baseline engine: \(status.state.rawValue) (\(status.totalEdges) edges learned)")
+            } catch {
+                logger.info("Baseline engine: starting fresh learning period")
+                print("Baseline engine: starting 7-day learning period")
+            }
         }
 
         // Initialize alert deduplicator (Phase 3)
         let deduplicator = AlertDeduplicator()
 
-        // Load per-rule process suppressions (from maccrabctl suppress)
+        // Load per-rule process suppressions (from maccrabctl suppress).
+        // v1.12.0 RC16 (TURBO): defer load() — suppressions are an
+        // additive filter (rule fires → suppression check → drop or
+        // keep). Worst case for an event arriving in the boot window
+        // is a small handful of alerts that would have been suppressed
+        // get through. Acceptable for a multi-second boot win.
+        // v1.12.0 RC25 audit fix (Int-H1): the prior deferral let
+        // ESCollector start before .load() completed — events arriving
+        // in the ~10-100 ms boot-finish window bypassed user-configured
+        // suppressions and fired alerts the operator had explicitly
+        // muted. Suppression load reads a single small JSON file
+        // (typically <1 KB on a fresh install), so the cost is ~ms.
+        // Switch back to a synchronous await before any collector
+        // starts.
         let suppressionManager = SuppressionManager(dataDir: supportDir)
         await suppressionManager.load()
         let suppressionStats = await suppressionManager.stats()
@@ -1081,6 +1368,7 @@ enum DaemonSetup {
         Task { await networkCollector.start() }
         print("Network connection collector active (5s poll)")
 
+        Self.logBootStep(label: "before_load_rules", startedAt: startedAt)
         // Load compiled rules (single-event)
         // Check both the system dir and the binary-local dir; prefer whichever has more
         // JSON files (the one with more rules is fresher from a recent build or install).
@@ -1118,6 +1406,30 @@ enum DaemonSetup {
             print("Warning: No compiled rules found. Run: python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir '\(compiledRulesDir)'")
         }
 
+        // v1.12.0: overlay user-customised rules from
+        // /Library/Application Support/MacCrab/user_rules/*.json. These
+        // load AFTER bundled rules, so a user file with the same rule id
+        // replaces the bundled definition (RuleEngine.loadRules uses
+        // allRules[rule.id] = rule — last write wins). The dashboard
+        // writes user_rules from V2DetectionWorkspace's Edit panel; the
+        // dir itself is created lazily on first edit (root:admin 0775)
+        // via osascript so subsequent saves don't need elevation. A
+        // mtime watcher on `<dir>/.reload_tick` (installed below) gives
+        // live reload without admin per save.
+        let userOverridesDir = supportDir + "/user_rules"
+        let userOverridesURL = URL(fileURLWithPath: userOverridesDir)
+        if fm.fileExists(atPath: userOverridesDir) {
+            do {
+                let userCount = try await ruleEngine.loadRules(from: userOverridesURL)
+                if userCount > 0 {
+                    logger.info("Loaded \(userCount) user rule override(s) from \(userOverridesDir)")
+                    print("Loaded \(userCount) user rule override(s)")
+                }
+            } catch {
+                logger.warning("user_rules overlay skipped: \(error.localizedDescription)")
+            }
+        }
+
         // Load sequence rules (use same effective dir as single-event rules)
         let sequenceRulesDir = effectiveRulesDir + "/sequences"
         try? FileManager.default.createDirectory(atPath: sequenceRulesDir, withIntermediateDirectories: true)
@@ -1127,6 +1439,44 @@ enum DaemonSetup {
             print("Loaded \(seqCount) sequence detection rules")
         } catch {
             logger.info("No sequence rules loaded (this is fine for initial setup)")
+        }
+
+        Self.writeBootPhase(supportDir: supportDir, phase: "rules_loaded", startedAt: startedAt)
+        Self.logBootStep(label: "rules_loaded", startedAt: startedAt)
+
+        // v1.12.0: user-rules live-reload watcher. Dashboard's Edit Rule
+        // panel writes overrides into <userOverridesDir>/<uuid>.json then
+        // touches <userOverridesDir>/.reload_tick. We poll the tick file's
+        // mtime every 5 s and rebuild the rule index when it changes.
+        // 5 s is well under the typical edit→test cycle while keeping the
+        // cost trivial (one stat() per poll). Avoids per-save admin
+        // prompts that a SIGHUP path would force.
+        let userOverridesDirForWatcher = userOverridesDir
+        let tickPath = userOverridesDirForWatcher + "/.reload_tick"
+        let liveCompiledRulesURL = rulesURL
+        Task.detached(priority: .utility) {
+            var lastSeen: Date = (try? FileManager.default
+                .attributesOfItem(atPath: tickPath))?[.modificationDate] as? Date ?? .distantPast
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+                let mtime = (try? FileManager.default
+                    .attributesOfItem(atPath: tickPath))?[.modificationDate] as? Date
+                guard let mtime, mtime != lastSeen else { continue }
+                lastSeen = mtime
+                logger.notice("user_rules .reload_tick fired — reloading rules")
+                do {
+                    let baseCount = try await ruleEngine.reloadRules(from: liveCompiledRulesURL)
+                    var total = baseCount
+                    if FileManager.default.fileExists(atPath: userOverridesDirForWatcher) {
+                        if let overlayed = try? await ruleEngine.loadRules(from: URL(fileURLWithPath: userOverridesDirForWatcher)) {
+                            total += overlayed
+                        }
+                    }
+                    logger.notice("Rules reloaded after user-rules tick: \(total) active rule(s)")
+                } catch {
+                    logger.warning("Reload after user-rules tick failed: \(error.localizedDescription)")
+                }
+            }
         }
 
         // Start TCC monitor (Phase 2: permission change detection)
@@ -1191,6 +1541,26 @@ enum DaemonSetup {
 
         let startupMs = Double(DispatchTime.now().uptimeNanoseconds - startupBegin.uptimeNanoseconds) / 1_000_000
         print(String(format: "Startup complete in %.0fms", startupMs))
+
+        // v1.12.0 — Bayesian intent posterior + LLM-backed package
+        // classifier. The Bayesian engine is fed Evidence values from
+        // EventLoop and emits a posterior over attacker Goals per
+        // process tree. The IntentClassifier is held here as a shared
+        // singleton (MCP handlers + future PackageScanner call into it)
+        // and does NOT run automatically on every event — its LLM cost
+        // makes it suitable only for explicit package-install signals.
+        let bayesianIntent = BayesianIntentEngine()
+        let intentClassifier = IntentClassifier(llmService: llmService)
+
+        // v1.12.0 post-audit (M-Int1): PromptIntentBridge needs an
+        // AgentLineageService snapshot provider. Build one here so we
+        // can bind the closure to it; assign to state.agentLineageService
+        // post-construction so EventLoop's record() calls land in the
+        // same instance the bridge queries.
+        let agentLineageService = AgentLineageService()
+        let promptIntentBridge = PromptIntentBridge(snapshotProvider: { aiPid in
+            await agentLineageService.snapshot(aiPid: aiPid)
+        })
 
         let state = DaemonState(
             isRoot: isRoot,
@@ -1284,6 +1654,10 @@ enum DaemonSetup {
             ruleGenerator: ruleGenerator,
             causalGraphBridge: causalGraphBridge,
             causalStore: causalStoreOuter,
+            graphEvaluator: graphEvaluator,
+            bayesianIntent: bayesianIntent,
+            intentClassifier: intentClassifier,
+            promptIntentBridge: promptIntentBridge,
             packageChecker: packageChecker,
             notarizationChecker: notarizationChecker,
             gitSecurityMonitor: gitSecurityMonitor,
@@ -1317,6 +1691,20 @@ enum DaemonSetup {
         storage.campaignsRetentionDays = max(1, storage.campaignsRetentionDays)
         storage.campaignsMaxSizeMB    = max(50, storage.campaignsMaxSizeMB)
         state.storage = storage
+
+        // v1.12.0 post-audit (M-Cfg1): wire intent thresholds from
+        // daemon_config.json onto DaemonState. Clamp to sane ranges
+        // so an operator typo can't make every install fire (threshold
+        // 0) or kill the rule (threshold > 1).
+        state.intentPosteriorThreshold = max(0.5, min(1.0, config.intentPosteriorThreshold))
+        state.intentPosteriorMinDistinctEvidence = max(1, min(10, config.intentPosteriorMinDistinctEvidence))
+
+        // v1.12.0 post-audit (M-Int1): bind state.agentLineageService
+        // to the SAME instance the PromptIntentBridge captured above.
+        // Otherwise EventLoop.record() calls would write into one
+        // instance and the bridge.snapshot() would query a different
+        // one — every install would see an empty snapshot.
+        state.agentLineageService = agentLineageService
 
         // v1.9 Agent Traces (PR-2): if the operator opted in via
         // MACCRAB_AGENT_TRACES=1, allocate a TraceRegistry and spawn
@@ -1420,6 +1808,13 @@ enum DaemonSetup {
                 to: supportDir
             )
         }
+
+        // v1.12.0 RC15: boot complete — write the final "ready" phase
+        // so the dashboard flips its banner from "Daemon: Starting…" to
+        // "Daemon: Running ✓". The livenessTimer in DaemonTimers takes
+        // over from here with `liveness: true` writes every 30 s.
+        Self.writeBootPhase(supportDir: supportDir, phase: "ready", startedAt: startedAt)
+        Self.logBootStep(label: "ready", startedAt: startedAt)
 
         return state
     }

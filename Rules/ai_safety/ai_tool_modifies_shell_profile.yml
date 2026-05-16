@@ -1,12 +1,19 @@
 title: AI Tool Modifies Shell Profile
 id: d1a2b3c4-2010-4000-a000-000000002010
-status: stable
+status: test
 description: >
-    Detects when an AI tool or its child process modifies shell profiles
-    (.zshrc, .bashrc, .bash_profile). While sometimes legitimate, this
-    can indicate persistence installation via prompt injection.
+    Detects when an AI coding tool (or a child process it spawned)
+    modifies a user's shell profile (.zshrc, .bashrc, .bash_profile,
+    .profile, .zprofile, .zshenv, .bash_login). Shell profiles run on
+    every new terminal session and are a classic persistence vector
+    (T1546.004). Without an AI-parent context this rule would fire on
+    every user-initiated dotfile edit, so the selector requires the
+    writing process or its parent to match a known AI tool name. The
+    user explicitly asking the AI to set PATH or aliases will still
+    fire and should be suppressed in that workflow.
 author: MacCrab Community
 date: 2026/04/04
+modified: 2026/05/14
 tags:
     - attack.persistence
     - attack.t1546.004
@@ -14,14 +21,35 @@ logsource:
     category: file_event
     product: macos
 detection:
-    selection:
+    selection_file:
         TargetFilename|endswith:
             - '/.zshrc'
             - '/.bashrc'
             - '/.bash_profile'
             - '/.profile'
             - '/.zprofile'
-    condition: selection
+            - '/.zshenv'
+            - '/.bash_login'
+    selection_ai_writer:
+        Image|contains:
+            - 'claude'
+            - 'codex'
+            - 'openclaw'
+            - 'Cursor'
+            - 'cline'
+            - 'aider'
+            - 'continue'
+    selection_ai_parent:
+        ParentImage|contains:
+            - 'claude'
+            - 'codex'
+            - 'openclaw'
+            - 'Cursor'
+            - 'cline'
+            - 'aider'
+            - 'continue'
+    condition: selection_file and (selection_ai_writer or selection_ai_parent)
 falsepositives:
-    - User explicitly asking AI to add PATH entries or aliases
+    - User explicitly asking the AI to add PATH entries or aliases
+    - AI-assisted dotfile management workflows
 level: medium

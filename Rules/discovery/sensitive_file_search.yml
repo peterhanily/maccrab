@@ -65,7 +65,39 @@ detection:
             - '/Code Helper'
     filter_apple_parent:
         ParentSignerType: 'apple'
-    condition: selection_find and selection_sensitive_patterns and not filter_apple and not filter_terminal and not filter_apple_parent
+    # Credential-leak scanners, CI/CD secret-detection, and git-secret
+    # wrappers legitimately run `find ... -name '*.pem'` and similar
+    # patterns. Filter on the canonical tool names + their CI runner
+    # parents to keep this rule out of every developer-laptop pipeline.
+    filter_secret_scanners:
+        Image|contains:
+            - '/gitleaks'
+            - '/trufflehog'
+            - '/detect-secrets'
+            - '/git-secret'
+            - '/git-secrets'
+            - '/ggshield'
+            - '/talisman'
+            - '/whispers'
+        CommandLine|contains:
+            - 'gitleaks'
+            - 'trufflehog'
+            - 'detect-secrets'
+            - 'git-secret'
+            - 'git-secrets'
+            - 'ggshield'
+            - 'talisman'
+            - 'whispers'
+    filter_ci_runner:
+        ParentImage|contains:
+            - '/Runner.Listener'
+            - '/Runner.Worker'
+            - '/runner-worker'
+            - '/buildkite-agent'
+            - '/gitlab-runner'
+            - '/jenkins-agent'
+            - '/circleci-agent'
+    condition: selection_find and selection_sensitive_patterns and not filter_apple and not filter_terminal and not filter_apple_parent and not filter_secret_scanners and not filter_ci_runner
 falsepositives:
     - Security auditing tools scanning for key exposure
     - Developers searching their own project directories

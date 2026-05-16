@@ -1,0 +1,59 @@
+title: Honey-Prompt Canary Package Install Attempted
+id: d1a2b3c4-2057-4000-a000-000000002057
+status: experimental
+description: >
+    Detects an attempted install of a MacCrab honey-prompt canary
+    package name. HoneyPromptManager (Sources/MacCrabCore/Deception/)
+    plants fake `CLAUDE.md` / `.cursorrules` / `.claude/skills/*.md`
+    bait that *instructs* the AI agent to install a specific
+    impossible-to-publish package name (`maccrab-canary-do-not-install`,
+    `maccrab-honey-do-not-fetch`, `maccrab-decoy-skill`). The bait
+    exists in the user's home directory but the package itself is
+    not registered on any real registry. If an AI agent (or a worm
+    scraping the home directory for "what packages should I install")
+    follows the bait, the install command itself is diagnostic — the
+    user did not type these names, and they don't appear in any
+    legitimate dependency manifest. Zero-FP-by-design.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://arxiv.org/abs/2604.13301
+    - https://snyk.io/blog/toxicskills-malicious-ai-agent-skills-clawhub/
+    - https://www.aikido.dev/blog/slopsquatting-ai-package-hallucination-attacks
+    - https://attack.mitre.org/techniques/T1195/
+    - https://d3fend.mitre.org/technique/d3f:DecoyFile/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - maccrab.deception
+    - maccrab.honey_prompt
+    - d3fend.decoy_file
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_pkg_install:
+        Image|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/bun'
+        CommandLine|contains:
+            - 'install'
+            - 'add'
+            - 'i '
+    selection_canary_name:
+        CommandLine|contains:
+            - 'maccrab-canary-do-not-install'
+            - 'maccrab-honey-do-not-fetch'
+            - 'maccrab-decoy-skill'
+    condition: selection_pkg_install and selection_canary_name
+falsepositives:
+    - A security researcher analysing the honey-prompt mechanism on the same machine MacCrab is running on — that's the correct outcome and the alert should be triaged manually
+    - Documentation copies of this rule or the deception README cached by an editor's indexer; the rule scopes to process exec so static file content alone does not trigger it
+level: critical

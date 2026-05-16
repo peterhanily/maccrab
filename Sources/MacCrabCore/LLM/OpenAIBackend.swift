@@ -15,9 +15,57 @@ public actor OpenAIBackend: LLMBackend {
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "openai")
     private let session: URLSession = SecureURLSession.make(for: .openai)
 
+    /// Hosts an operator can legitimately point an OpenAI-compatible
+    /// backend at. Pre-fix any user-set `baseURL` was accepted —
+    /// including attacker-controlled hosts that would happily collect
+    /// the API key on the first request. We allow the canonical OpenAI
+    /// API, Azure OpenAI endpoints, and the `localhost` family used by
+    /// LocalAI / vLLM-shaped self-hosted gateways.
+    /// Exact host names (no subdomains accepted) plus dot-anchored
+    /// suffix entries. v1.12.0 RC27 audit: the previous suffix list
+    /// used `lower.hasSuffix(suffix)` which let `evilapi.openai.com`
+    /// pass the `api.openai.com` check (suffix matches because
+    /// "evilapi.openai.com" ends with "api.openai.com" character-wise).
+    /// Now we require either the EXACT host or a dot-anchored suffix —
+    /// "x.openai.azure.com" matches ".openai.azure.com" but plain
+    /// "openai.azure.com.attacker.com" does NOT.
+    private static let allowedExactHosts: Set<String> = [
+        "api.openai.com",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ]
+    private static let allowedDotSuffixes: [String] = [
+        ".openai.azure.com",
+    ]
+
+    private static func isHostAllowed(_ host: String) -> Bool {
+        let lower = host.lowercased()
+        if allowedExactHosts.contains(lower) { return true }
+        return allowedDotSuffixes.contains { suffix in
+            lower.hasSuffix(suffix) && lower.count > suffix.count
+        }
+    }
+
     public init(baseURL: String = "https://api.openai.com/v1",
                 apiKey: String, model: String = "gpt-4o-mini") {
-        self.baseURL = URL(string: baseURL) ?? URL(string: "https://api.openai.com/v1")!
+        let fallback = URL(string: "https://api.openai.com/v1")!
+        let parsed = URL(string: baseURL)
+        if let parsed,
+           let host = parsed.host,
+           Self.isHostAllowed(host) {
+            self.baseURL = parsed
+        } else {
+            // Log the rejected URL at .public privacy — operators need to
+            // see WHICH baseURL we rejected so they can fix the config.
+            // Logger isn't accessible from init (instance not built yet),
+            // so use os_log directly.
+            os_log("OpenAIBackend: rejecting non-allowlisted baseURL %{public}@ — falling back to api.openai.com",
+                   log: OSLog(subsystem: "com.maccrab.llm", category: "openai"),
+                   type: .error,
+                   baseURL)
+            self.baseURL = fallback
+        }
         self.apiKey = apiKey
         self.model = model
     }

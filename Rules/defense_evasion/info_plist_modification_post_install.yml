@@ -1,0 +1,63 @@
+title: Application Info.plist Modified Post-Installation By Non-Updater
+id: d1a2b3c4-0500-4000-a000-000000000513
+status: experimental
+description: >
+    Detects writes to `Info.plist` of an installed `.app` bundle by
+    a process that is not a known updater (Sparkle, Apple's
+    `installer`, system_installd, App Store) and not Xcode-derived.
+    Mutating a bundle's `CFBundleDisplayName`, declared category, or
+    requested entitlements after installation is the canonical
+    masquerade primitive — making a malicious bundle present
+    itself as a different / more innocuous app. Pair with
+    `binary_resigned_post_installation.yml` for the codesign side
+    of the same kill chain and with `fake_apple_bundle_in_user_dir.yml`
+    for the staged variant.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://attack.mitre.org/techniques/T1036/005/
+    - https://attack.mitre.org/techniques/T1036/
+tags:
+    - attack.defense_evasion
+    - attack.t1036
+    - attack.t1036.005
+    - attack.persistence
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_info_plist:
+        TargetFilename|endswith: '.app/Contents/Info.plist'
+        FileAction:
+            - 'modify'
+            - 'close'
+    selection_installed_path:
+        TargetFilename|contains:
+            - '/Applications/'
+            - '/System/Applications/'
+            - '/Library/Application Support/'
+            - '/Users/'
+    filter_xcode:
+        Image|contains:
+            - '/Xcode.app/Contents/'
+            - '/xcodebuild'
+            - '/xcrun'
+    filter_apple_installers:
+        Image|endswith:
+            - '/installer'
+            - '/system_installd'
+            - '/package_script_service'
+            - '/storeaccountd'
+            - '/appstoreagent'
+    filter_known_updaters:
+        ParentImage|endswith:
+            - '/Sparkle'
+            - '/sparkle'
+            - '/Updater'
+    condition: selection_info_plist and selection_installed_path and not filter_xcode and not filter_apple_installers and not filter_known_updaters
+falsepositives:
+    - In-place Sparkle delta updates; covered by filter_known_updaters
+    - Developers manually editing Info.plist in Xcode-derived workflows; covered by filter_xcode
+    - Spotlight reading metadata is read-only; the rule scopes to modify / close write events only
+level: medium

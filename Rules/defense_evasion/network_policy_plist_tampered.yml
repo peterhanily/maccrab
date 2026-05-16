@@ -1,0 +1,60 @@
+title: Network Firewall / Policy Preferences Tampered By Non-Vendor Process
+id: d1a2b3c4-0500-4000-a000-000000000512
+status: experimental
+description: >
+    Detects writes to per-app network-firewall preference files
+    (Little Snitch, Lulu, Radio Silence) by a process that is not
+    the vendor's own helper / GUI app. Modern macOS malware
+    increasingly disables host firewalls before initiating C2 (the
+    AMOS Atomic Stealer flow includes a Little Snitch disable
+    step). Distinct from `network_extension_unsigned_install.yml`
+    which catches the system-extension-install layer; this rule
+    catches direct preferences-plist tampering one layer up.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://help.obdev.at/littlesnitch5/ref-files-and-folders
+    - https://attack.mitre.org/techniques/T1562/004/
+    - https://attack.mitre.org/techniques/T1562/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.004
+    - attack.t1562.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target:
+        TargetFilename|contains:
+            - '/Library/Preferences/at.obdev.LittleSnitch'
+            - '/Library/Preferences/at.obdev.networkmonitor'
+            - '/Library/Application Support/Objective Development/Little Snitch'
+            - '/Library/Application Support/Lulu/'
+            - '/Library/Preferences/com.objective-see.lulu'
+            - '/Library/Application Support/Radio Silence/'
+            - '/Library/Preferences/com.radiosilenceapp'
+            - '/Library/Preferences/com.murusfirewall'
+            - '/Library/Application Support/Murus/'
+        FileAction:
+            - 'create'
+            - 'modify'
+            - 'close'
+    filter_vendor_writers:
+        Image|contains:
+            - 'Little Snitch.app/'
+            - 'LuLu.app/'
+            - 'Radio Silence.app/'
+            - 'Murus.app/'
+            - '/at.obdev.littlesnitchd'
+            - '/com.objective-see.lulu'
+    filter_apple_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+        PlatformBinary: 'true'
+    condition: selection_target and not filter_vendor_writers and not filter_apple_system
+falsepositives:
+    - The user manually editing rule files via vim / nvim / Cursor; investigate parent shell
+    - Backup tooling reading these prefs files; reads aren't matched (rule scopes to create / modify / close write events)
+level: high

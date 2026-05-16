@@ -27,9 +27,70 @@ detection:
             - 'apple'
             - 'appStore'
             - 'devId'
-    condition: selection and not filter_signed
+    filter_platform:
+        PlatformBinary: 'true'
+    # Apple ships /usr/sbin/lsof as a platform binary. Anchor on the install
+    # location as a backstop because PlatformBinary / SignerType enrichment is
+    # not always populated on short-lived events.
+    filter_system_path:
+        Image|startswith:
+            - '/usr/sbin/'
+            - '/usr/bin/'
+            - '/bin/'
+            - '/sbin/'
+            - '/System/'
+    # Daily interactive admin/dev usage from terminals, editors, CI runners,
+    # and dotfile managers. lsof is the standard tool for "what's using port X"
+    # so flagging shell-invoked calls produces constant noise.
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/brew'
+            - '/npm'
+            - '/yarn'
+            - '/pnpm'
+            - '/pip'
+            - '/pip3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
+    filter_homebrew_parent:
+        ParentImage|startswith:
+            - '/opt/homebrew/'
+            - '/usr/local/Cellar/'
+            - '/usr/local/opt/'
+            - '/Applications/Xcode'
+            - '/Library/Developer/'
+    condition: selection and not filter_signed and not filter_platform and not filter_system_path and not filter_dev_tools and not filter_homebrew_parent
 falsepositives:
-    - Monitoring and troubleshooting scripts
-    - Network management utilities
+    - Monitoring and troubleshooting scripts (filtered via shell ancestry)
+    - Network management utilities (Homebrew / devId-signed)
+    - On dev machines `MACCRAB_DEV_MODE` users may still see residual FPs from
+      custom CLI wrappers; escalate via campaign context only.
 level: low
 # v1.4: lowered from medium. lsof is standard admin/dev troubleshooting.
+# v1.11.2: added platform-binary / system-path / dev-tool parent filters so
+# the rule only fires on lsof binaries launched from suspicious lineage (e.g.
+# dropped /tmp/lsof or unsigned IDE-less invokers). Without these the rule
+# fired on every Homebrew/Cursor/npm/buildkite invocation.

@@ -17,6 +17,9 @@ logsource:
     category: process_creation
     product: macos
 detection:
+    # NOTE: shells are Apple platform binaries by design; the standard
+    # `not PlatformBinary` filter would disable this rule entirely.
+    # FP control lives in the parent-lineage filters below.
     selection_shell:
         Image|endswith:
             - '/sh'
@@ -51,25 +54,63 @@ detection:
             - '/Alacritty'
             - '/kitty'
             - '/WarpTerminal'
+            - '/Ghostty'
+            - '/Hyper'
             - '/login'
             - '/sshd'
             - '/tmux'
             - '/screen'
+            - '/zellij'
     filter_build_systems:
-        # Build tools commonly create deep shell nesting
+        # Build tools and language runtimes commonly create deep shell
+        # nesting via wrapper scripts and post-install hooks.
         GrandparentImage|endswith:
             - '/make'
             - '/gmake'
             - '/ninja'
+            - '/cmake'
             - '/xcodebuild'
+            - '/xcrun'
             - '/node'
             - '/npm'
             - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/bun'
+            - '/deno'
             - '/gradle'
+            - '/gradlew'
             - '/mvnw'
+            - '/mvn'
             - '/bazel'
+            - '/bazelisk'
+            - '/buck'
             - '/cargo'
+            - '/rustup'
             - '/brew'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/pipenv'
+            - '/tox'
+            - '/just'
+            - '/task'
+            - '/installer'
+            - '/package_script_service'
+    filter_env_managers:
+        # Shell environment managers that legitimately spawn nested shells
+        # for shimming / activation.
+        GrandparentImage|endswith:
+            - '/direnv'
+            - '/asdf'
+            - '/mise'
+            - '/nvm'
+            - '/pyenv'
+            - '/rbenv'
+            - '/jenv'
+            - '/sdkman-init.sh'
+            - '/sdk'
     filter_ci_cd:
         # CI/CD agents and automation tools
         GrandparentImage|contains:
@@ -77,9 +118,15 @@ detection:
             - 'buildkite'
             - 'github-actions'
             - 'gitlab-runner'
-    condition: selection_shell and selection_parent_shell and selection_grandparent_shell and not filter_terminal and not filter_build_systems and not filter_ci_cd
+            - 'circleci'
+            - 'concourse'
+            - 'teamcity'
+            - 'TeamCity'
+            - 'drone'
+            - 'Runner.Listener'
+            - 'fastlane'
+    condition: selection_shell and selection_parent_shell and selection_grandparent_shell and not filter_terminal and not filter_build_systems and not filter_env_managers and not filter_ci_cd
 falsepositives:
-    - Complex shell scripts calling sub-shells
-    - Build systems with nested script invocations
-    - Terminal multiplexers (tmux, screen) with nested sessions
+    - Complex shell scripts calling sub-shells outside the build-system / env-manager lineage — extend filters as you observe new tooling
+    - Terminal multiplexers (tmux, screen, zellij) with nested sessions — already filtered
 level: medium

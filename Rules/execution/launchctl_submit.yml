@@ -27,7 +27,32 @@ detection:
             - '/usr/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_system and not filter_apple_signed
+    # Homebrew Services (`brew services start ...`) shells out to
+    # launchctl bootstrap/load for user-scoped LaunchAgents. Filter
+    # Homebrew + common dev-tool parents (Docker, mas, mackup, etc.) to
+    # stop this rule firing on every `brew services` invocation.
+    filter_homebrew:
+        ParentImage|startswith:
+            - '/usr/local/Homebrew/'
+            - '/usr/local/Cellar/'
+            - '/opt/homebrew/'
+        ParentImage|contains:
+            - '/brew'
+            - '/brew-services'
+            - '/.brew/'
+    filter_dev_tools:
+        ParentImage|contains:
+            - '/Docker.app/'
+            - '/Docker Desktop.app/'
+            - '/com.docker.helper'
+            - '/OrbStack.app/'
+            - '/colima'
+            - '/lima'
+            - '/podman'
+            - '/Mackup'
+            - '/mas'
+            - '/asdf'
+    condition: selection and not filter_system and not filter_apple_signed and not filter_homebrew and not filter_dev_tools
 falsepositives:
     - Legitimate system administration tasks
     - Enterprise management tools

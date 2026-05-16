@@ -1,9 +1,15 @@
-title: Calendar Database Accessed by Non-Calendar Process
+title: Calendar Database Accessed By Non-Calendar Process
 id: d1a2b3c4-0263-4000-a000-000000000263
 status: experimental
-description: Detects access to the Calendar.app database by processes other than Calendar. Adversaries may access calendar data to gather meeting details, contacts, location information, and schedule intelligence.
+description: >
+    Detects access to the Calendar.app database by processes other than the
+    Calendar app, Apple's calendar sync daemons, third-party calendar
+    clients (Fantastical, BusyCal, Outlook), Spotlight, and common backup
+    tools. Adversaries may scrape calendar data for meeting details,
+    contacts, locations, and schedule intelligence.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1005/
 tags:
@@ -29,14 +35,41 @@ detection:
             - 'CalendarAgent'
             - 'calendaragent'
             - 'remindd'
+            - 'dataaccessd'
+            - 'accountsd'
+            - 'CalendarNotification'
+    filter_third_party_calendar:
+        Image|contains:
+            - '/Fantastical'
+            - '/BusyCal'
+            - '/Microsoft Outlook'
+            - '/Outlook.app'
+            - '/Notion Calendar'
+            - '/Cron.app'
+            - '/Amie'
+            - '/Rise.app'
     filter_system:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
+    filter_apple:
+        SignerType: 'apple'
     filter_spotlight:
-        Image|contains: 'mdworker'
-    condition: selection and not filter_calendar and not filter_system and not filter_spotlight
+        Image|contains:
+            - 'mdworker'
+            - 'mds_stores'
+            - 'corespotlightd'
+    filter_backup:
+        Image|endswith:
+            - '/rsync'
+            - '/tar'
+            - '/cp'
+            - '/ditto'
+        Image|contains:
+            - '/backupd'
+            - 'TimeMachine'
+    condition: selection and not filter_calendar and not filter_third_party_calendar and not filter_system and not filter_apple and not filter_spotlight and not filter_backup
 falsepositives:
-    - Calendar sync utilities
-    - Meeting management applications
+    - Calendar sync utilities not yet in the allowlist
+    - Meeting / focus-time productivity apps
 level: medium

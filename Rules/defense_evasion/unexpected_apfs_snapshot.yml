@@ -1,14 +1,20 @@
-title: APFS Snapshot Created Outside Time Machine
+title: APFS Snapshot Activity Outside Time Machine / Apple Tooling
 id: d1a2b3c4-1010-4000-a000-000000001010
 status: experimental
 description: >
-    Detects creation of APFS snapshots outside of normal Time Machine backups.
-    Attackers can use snapshots to hide data, stage exfiltration, or create
-    restore points before deploying destructive payloads.
+    Detects `tmutil` snapshot-related sub-commands invoked outside
+    Time Machine's backupd daemon and not parented by Apple-signed
+    tooling. Adversaries can use snapshots to hide data, stage
+    exfiltration, or create restore points before deploying
+    destructive payloads. Manual snapshot management by admins is
+    common, so severity remains low; correlate with mass-unlink /
+    ransomware-note rules for higher confidence.
 author: MacCrab Community
 date: 2026/04/04
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1564/
+    - https://eclecticlight.co/2019/05/29/snapshots-changes-in-mojave-and-catalina/
 tags:
     - attack.defense_evasion
     - attack.t1564
@@ -18,10 +24,20 @@ logsource:
 detection:
     selection:
         Image|endswith: '/tmutil'
-        CommandLine|contains: 'snapshot'
+        CommandLine|contains:
+            - 'localsnapshot'
+            - 'deletelocalsnapshot'
+            - 'deletelocalsnapshots'
+            - 'snapshot'
+            - 'thinlocalsnapshots'
     filter_timemachine:
-        ParentImage|contains: 'backupd'
-    condition: selection and not filter_timemachine
+        ParentImage|contains:
+            - 'backupd'
+            - '/usr/libexec/'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_timemachine and not filter_apple_parent
 falsepositives:
-    - System administrators creating manual snapshots
+    - System administrators manually creating or pruning local snapshots
+    - Disk-utility wrappers and backup tools
 level: low

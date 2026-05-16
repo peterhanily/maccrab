@@ -1,0 +1,49 @@
+title: Homebrew Formula Installed Without SHA Verification (:no_check)
+id: d1a2b3c4-0302-4000-a000-000000000021
+status: experimental
+description: >
+    Detects brew installing a formula or cask whose Ruby source contains
+    `sha256 :no_check`, which disables cryptographic integrity checking of
+    the downloaded artifact. The Koi Brew Hijack research (May 2026)
+    showed that on-path attackers can serve arbitrary binaries to any
+    formula that opts out of SHA verification. A modern Homebrew install
+    of a `:no_check` formula is itself anomalous — most legitimate
+    formulas pin a hash.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://www.koi.ai/blog/brew-hijack-serving-malware
+    - https://docs.brew.sh/Cask-Cookbook
+    - https://attack.mitre.org/techniques/T1195/002/
+tags:
+    - attack.initial_access
+    - attack.t1195.002
+    - attack.defense_evasion
+logsource:
+    category: file_event
+    product: macos
+detection:
+    # v1.12.0 post-audit (M-Det2): the prior `selection_brew:
+    # Image|endswith /brew` was wrong — brew itself rarely writes
+    # formula files; tap updates land via `git`. The intent of the
+    # rule is "a :no_check formula exists in a brew tap dir", not
+    # "brew wrote a :no_check formula." Drop the Image gate. The
+    # FileContent match is gated by FileContentEnricher's allowlist
+    # which only scans .rb files under /Library/Taps/, so the rule
+    # is well-scoped to formula content.
+    selection_tap_formula:
+        TargetFilename|contains: '/Library/Taps/'
+        TargetFilename|endswith: '.rb'
+        FileAction:
+            - 'close'
+            - 'write'
+            - 'create'
+    selection_no_check:
+        FileContent|contains:
+            - 'sha256 :no_check'
+            - 'sha256 "no_check"'
+    condition: selection_tap_formula and selection_no_check
+falsepositives:
+    - Self-maintained formulas in a personal tap pinned by repo-trust rather than hash
+    - Auditing or formula-linting workflows that intentionally read formulas with :no_check
+level: medium

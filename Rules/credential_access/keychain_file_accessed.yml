@@ -1,7 +1,12 @@
-title: Keychain Database File Accessed by Non-System Process
+title: login.keychain or System.keychain Database Opened by Non-Apple Process
 id: d1a2b3c4-0034-4000-a000-000000000034
 status: experimental
-description: Detects direct file access to keychain database files by processes other than the security subsystem.
+description: >
+    Detects direct file access to the on-disk keychain database
+    (login.keychain-db, System.keychain) by processes that are not
+    Apple-signed. Legitimate keychain operations go through the
+    `securityd` daemon via XPC; direct file reads are a hallmark of
+    credential-stealing tooling that bypasses the keychain API.
 author: MacCrab Community
 date: 2026/03/31
 references:
@@ -26,6 +31,8 @@ detection:
             - '/usr/sbin/'
     condition: selection and not filter_apple and not filter_system
 falsepositives:
-    - Keychain management applications
-    - Backup tools
+    - Third-party keychain managers (Keychain Access alternative apps, MacPass keychain importers)
+    - Password manager import flows (1Password, Bitwarden, Dashlane, LastPass) that bulk-import Apple keychain entries on first launch
+    - Backup tooling that captures the full home directory (Time Machine via `backupd`, Backblaze, Carbon Copy Cloner, Arq)
+    - Migration Assistant transferring a user's keychain to a new Mac
 level: high

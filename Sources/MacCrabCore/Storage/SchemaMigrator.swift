@@ -80,7 +80,8 @@ public enum SchemaMigrator {
     public static func run(
         on db: OpaquePointer,
         migrations: [Migration],
-        logger: ((String) -> Void)? = nil
+        logger: ((String) -> Void)? = nil,
+        skipQuickCheck: Bool = false
     ) throws {
         let current = try readVersion(db: db)
         let latest = migrations.map(\.version).max() ?? 0
@@ -124,10 +125,19 @@ public enum SchemaMigrator {
 
         // Post-migration quick_check: catches structure-level corruption
         // (orphan rowids, broken indexes, malformed pages) that didn't
-        // surface during the migration's writes themselves. Cheap — sub-
-        // second on a 500MB DB. integrity_check is full-scan and is left
-        // for `maccrabctl maintenance check`. v1.10 audit-driven hardening.
-        try quickCheck(db: db, logger: logger)
+        // surface during the migration's writes themselves. Originally
+        // billed as "sub-second on a 500 MB DB" (v1.10 audit hardening),
+        // but field measurement on a 962 MB events.db with FTS5 puts it
+        // at 1–2 s of synchronous PRAGMA work — significant chunk of
+        // daemon cold-start time. v1.12.0: callers that care about
+        // boot latency pass `skipQuickCheck: true` and re-invoke
+        // `SchemaMigrator.quickCheck(on:)` from a deferred Task once
+        // the store is up. Corruption surfaces immediately on real
+        // queries via SQLITE_CORRUPT, so deferring the up-front check
+        // is a perf trade with no correctness loss.
+        if !skipQuickCheck {
+            try quickCheck(db: db, logger: logger)
+        }
     }
 
     /// Run `PRAGMA quick_check`. Throws `quickCheckFailed` if SQLite reports

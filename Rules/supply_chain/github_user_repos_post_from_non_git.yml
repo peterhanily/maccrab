@@ -1,0 +1,71 @@
+title: api.github.com /user/repos POST From Non-Git Client (Dead-Drop Repo Creation)
+id: d1a2b3c4-0302-4000-a000-000000000023
+status: experimental
+description: >
+    Detects an outbound connection to api.github.com originating from a
+    process that is not a recognised git client (git, gh, hub). The
+    Shai-Hulud worm family (Sept 2025 through May 2026 waves) uses
+    POST https://api.github.com/user/repos with a stolen developer
+    token to create a public "dead drop" repo (named "Shai-Hulud",
+    "Sha1-Hulud", or a random 18-char alphanumeric) and commit a base64
+    credential dump. A node/python/bun process talking to GitHub's
+    repo-creation API is therefore high-signal in a supply-chain
+    compromise.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/
+    - https://www.sysdig.com/blog/shai-hulud-the-novel-self-replicating-worm-infecting-hundreds-of-npm-packages
+    - https://attack.mitre.org/techniques/T1567/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.exfiltration
+    - attack.t1567
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.credential_access
+    - attack.t1552
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    # Detection-rewrite v1.12.0: dropped the `CommandLine|contains '/user/repos'`
+    # selector — network_connection events carry process argv, not the
+    # HTTP URI, so the URI substring never matched. The current shape
+    # fires on ANY outbound to api.github.com from a node/python/bun
+    # process whose parent is a package-install lineage — a single-
+    # event approximation of the worm's dead-drop-repo-creation. Pair
+    # with the worm sequence rule for full kill-chain context.
+    selection_github_api:
+        DestinationHostname|contains:
+            - 'api.github.com'
+    selection_pkg_lineage:
+        Image|endswith:
+            - '/node'
+            - '/bun'
+            - '/python'
+            - '/python3'
+            - '/deno'
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/node'
+            - '/launchd'
+    filter_git_clients:
+        Image|endswith:
+            - '/git'
+            - '/gh'
+            - '/hub'
+            - '/git-credential-osxkeychain'
+    condition: selection_github_api and selection_pkg_lineage and not filter_git_clients
+falsepositives:
+    - Developer scripts that legitimately automate repo creation (terraform-github, custom dev-portal tooling) — should be allowlisted by Image or repo project boundary
+    - GitHub Actions runners running locally via act; parent will be /act
+    - Internal CI/CD tools (CircleCI, Jenkins) running with a service account
+level: critical

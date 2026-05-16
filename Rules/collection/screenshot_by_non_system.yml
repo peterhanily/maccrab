@@ -1,9 +1,17 @@
-title: Screenshot Capture by Non-System Process
+title: Screencapture Invocation By Non-System Process
 id: d1a2b3c4-0090-4000-a000-000000000090
 status: experimental
-description: Detects screencapture utility invocation by non-Apple parent processes.
+description: >
+    Detects `/usr/sbin/screencapture` invocation by a non-Apple parent.
+    Screenshot capture is a legitimate primitive for screen recorders and
+    conferencing apps, so this rule allowlists the standard kit (Zoom,
+    Microsoft Teams, Loom, ScreenFlow, Skitch, OBS, Snagit, CleanShot,
+    Camtasia, Quicktime). Surviving hits are CLI- or script-driven
+    screenshots from unrecognized parents — interesting because malware
+    families frequently shell out to `screencapture` for periodic exfil.
 author: MacCrab Community
 date: 2026/03/31
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1113/
 tags:
@@ -19,10 +27,45 @@ detection:
         ParentImage|startswith:
             - '/System/'
             - '/usr/'
+        SignerType: 'apple'
     filter_shortcuts:
         ParentImage|contains: 'Shortcuts'
-    condition: selection and not filter_apple and not filter_shortcuts
+    filter_conferencing:
+        ParentImage|contains:
+            - '/zoom.us'
+            - '/ZoomOpener'
+            - '/Microsoft Teams'
+            - '/MSTeams'
+            - '/Slack.app'
+            - '/Webex'
+            - '/GoToMeeting'
+            - '/Discord.app'
+            - '/Google Chrome'
+            - '/Firefox.app'
+            - '/Safari.app'
+    filter_screen_recorders:
+        ParentImage|contains:
+            - '/Loom.app'
+            - '/ScreenFlow'
+            - '/Skitch.app'
+            - '/OBS.app'
+            - '/Snagit'
+            - '/CleanShot'
+            - '/Camtasia'
+            - '/QuickTime Player'
+            - '/Kap.app'
+            - '/Xnapper'
+            - '/Shottr'
+            - '/CleanShot X'
+            - '/Monosnap'
+    filter_productivity:
+        ParentImage|contains:
+            - '/Alfred'
+            - '/Raycast'
+            - '/Hammerspoon'
+            - '/Keyboard Maestro'
+    condition: selection and not filter_apple and not filter_shortcuts and not filter_conferencing and not filter_screen_recorders and not filter_productivity
 falsepositives:
-    - Legitimate screenshot automation workflows
-    - Screen recording applications
+    - User-written screenshot automation scripts
+    - Screen recorders not yet in the allowlist (extend filter_screen_recorders)
 level: medium

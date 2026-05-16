@@ -87,4 +87,4 @@ detection:
 falsepositives:
     - IT administrators checking enrollment status
     - Compliance verification scripts
-level: medium
+level: low

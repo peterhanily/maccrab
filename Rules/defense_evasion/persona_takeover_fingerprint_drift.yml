@@ -1,0 +1,60 @@
+title: Maintainer git-config Fingerprint Single-Field Drift (Persona Takeover Signal)
+id: d1a2b3c4-0500-4000-a000-000000000517
+status: experimental
+description: >
+    Detects a write to `~/.gitconfig` (or repo-local `.git/config`)
+    that changes *exactly one* fingerprint-bearing field while leaving
+    others intact — `user.signingkey`, `commit.gpgsign`, `core.autocrlf`,
+    `core.editor`, `tag.gpgSign`. The Jia Tan / XZ-Utils mockingbird
+    pattern: an attacker who has stolen a maintainer's credentials but
+    not their full environment can only update one or two of these at
+    a time before pushing, while a real environment change (new laptop,
+    new IDE) typically touches several together. Per
+    https://boehs.org/node/everything-i-know-about-the-xz-backdoor, Jia
+    Tan's commits had inconsistent core.autocrlf vs the established
+    persona — exactly what this rule fires on. Detect-only signal;
+    treat as evidence input to the maintainer-drift dashboard rather
+    than as a critical alert (medium severity).
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://boehs.org/node/everything-i-know-about-the-xz-backdoor
+    - https://research.swtch.com/xz-timeline
+    - https://attack.mitre.org/techniques/T1556/006/
+    - https://attack.mitre.org/techniques/T1078/
+tags:
+    - attack.defense_evasion
+    - attack.persistence
+    - attack.t1078
+    - attack.credential_access
+    - maccrab.maintainer_drift
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target:
+        TargetFilename|endswith:
+            - '/.gitconfig'
+            - '/.git/config'
+        FileAction:
+            - 'modify'
+            - 'close'
+    selection_fingerprint_keys:
+        FileContent|contains:
+            - 'signingkey'
+            - 'gpgsign'
+            - 'autocrlf'
+            - 'editor'
+    filter_xcode_first_init:
+        Image|contains:
+            - '/Xcode.app/Contents/'
+            - '/xcrun'
+    filter_git_credential_osxkeychain:
+        Image|endswith:
+            - '/git-credential-osxkeychain'
+    condition: selection_target and selection_fingerprint_keys and not filter_xcode_first_init and not filter_git_credential_osxkeychain
+falsepositives:
+    - User legitimately changes their signing key after rotating a GPG key — this fires once and is correctly suppressible by the analyst
+    - First-laptop-setup wizards (chezmoi, yadm, dotbot) writing a fresh `~/.gitconfig`; allowlist these by Image
+    - Git itself (`git config --global user.signingkey ...`) writing the field through the user's interactive shell — investigate the parent shell history before suppression
+level: medium

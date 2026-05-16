@@ -35,6 +35,7 @@ detection:
             - '/usr/libexec/'
     condition: selection and not filter_apple
 falsepositives:
-    - Developer builds of in-house agents signed ad-hoc during iteration
-    - Internally-distributed tools that skip Developer ID signing for cost reasons
+    - Xcode `swift build` artifacts run from DerivedData while iterating on a launchd helper
+    - In-house tools distributed via MDM that ship ad-hoc signed (Team ID unset) due to free-tier signing
+    - Open-source community builds (e.g. Homebrew --HEAD) that intentionally use ad-hoc identities
 level: high

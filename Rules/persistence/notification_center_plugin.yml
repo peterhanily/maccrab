@@ -1,11 +1,22 @@
-title: Notification Center Widget Plugin Installed
+title: Notification Center Widget Plugin Installed (Legacy)
 id: d1a2b3c4-0218-4000-a000-000000000218
 status: experimental
-description: Detects installation of notification center widget plugins by non-system processes. These plugins run in a persistent context and can be abused for code execution on every login.
+description: >
+    Detects installation of legacy Notification Center widget plugins
+    (.wdgt bundles) by non-system processes. NOTE: this is a LEGACY
+    detection. Apple deprecated Notification Center widgets in macOS
+    10.13 High Sierra (2017) and replaced them with the Today
+    extensions / WidgetKit. Modern systems should virtually never see
+    new .wdgt installs. Any new .wdgt write by a non-Apple-signed
+    process on a modern macOS is anomalous and worth flagging as
+    informational; on rare legacy systems running widgets, this rule
+    will be noisy and should be suppressed.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1547/
+    - https://developer.apple.com/library/archive/releasenotes/General/WhatsNewInOSX/Articles/OSXv10.html
 tags:
     - attack.persistence
     - attack.t1547
@@ -18,15 +29,17 @@ detection:
             - '/Library/Widgets/'
             - '/Widgets/'
         TargetFilename|endswith: '.wdgt'
-    filter_apple:
+    filter_apple_path:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
-    filter_signed:
+    filter_apple_signer:
         SignerType:
             - 'apple'
             - 'appStore'
-    condition: selection and not filter_apple and not filter_signed
+    condition: selection and not filter_apple_path and not filter_apple_signer
 falsepositives:
-    - Legitimate widget installations from trusted developers
-level: medium
+    - Legacy widgets installed by long-tail third-party apps on systems
+      still running older macOS releases
+    - Migration of a user account from an older macOS install
+level: informational

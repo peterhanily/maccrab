@@ -1,12 +1,19 @@
-title: TCC Permission Grant Followed by Immediate Sensitive Access
+title: TCC Permission Grant Followed by Sensitive Access (Same Lineage)
 id: e1f2a3b4-0005-4000-b000-000000000005
 status: experimental
 description: >
-    Detects a TCC permission being granted followed almost immediately by
-    the granted app accessing sensitive resources, suggesting automated
-    permission manipulation.
+    Detects a TCC permission grant followed within 30 seconds by the
+    GRANTED process accessing sensitive resources (Keychains, the TCC
+    database itself, or user data directories). Correlation uses process
+    lineage so the rule only fires when the same process tree that
+    received the grant performs the subsequent access — a single user
+    granting permission to one app while another app independently
+    reads Documents will NOT fire. Window widened to 30s from the
+    earlier 10s to absorb legitimate first-launch enumeration latency,
+    and severity reduced to medium so false-positive cost is bounded.
 author: MacCrab Community
 date: 2026/03/31
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1562/001/
 tags:
@@ -15,8 +22,8 @@ tags:
     - attack.t1562.001
 
 type: sequence
-window: 10s
-correlation: none
+window: 30s
+correlation: process.lineage
 ordered: true
 
 steps:
@@ -34,18 +41,26 @@ steps:
           category: file_event
           product: macos
       detection:
-          selection:
+          selection_sensitive:
               TargetFilename|contains:
                   - '/Library/Application Support/com.apple.TCC/'
                   - '/Library/Keychains/'
+          selection_user_data:
+              TargetFilename|contains:
                   - '/Desktop/'
                   - '/Documents/'
                   - '/Downloads/'
-          condition: selection
+          filter_apple:
+              SignerType: 'apple'
+          condition: (selection_sensitive or selection_user_data) and not filter_apple
 
 trigger: all
 falsepositives:
-    - First-run experience of legitimate apps (e.g., backup tools, cloud sync, communication apps) that immediately access Documents, Desktop, or Downloads after the user grants Full Disk Access
-    - IDE or editor onboarding that opens files in the newly-authorized location
-    - Password managers or keychain utilities accessing keychain paths right after being granted permission
-level: high
+    - First-run experience of legitimate apps (backup tools, cloud sync,
+      communication apps) that immediately access Documents, Desktop, or
+      Downloads after the user grants Full Disk Access — usually
+      Apple-signed and filtered, but third-party signed apps will still
+      fire
+    - IDE or editor onboarding that opens files in the newly-authorized
+      location
+level: medium

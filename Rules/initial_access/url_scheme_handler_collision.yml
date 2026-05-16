@@ -1,0 +1,64 @@
+title: URL-Scheme Handler Registered To Non-Canonical App
+id: d1a2b3c4-0500-4000-a000-000000000514
+status: experimental
+description: >
+    Detects `lsregister -f` (LaunchServices force-register) or
+    `defaults write com.apple.LaunchServices/com.apple.launchservices.secure`
+    targeting a well-known URL scheme (`mailto`, `http`, `https`,
+    `slack`, `zoommtg`, `vscode`, `cursor`, `git`, `x-callback-url`,
+    `iterm2`) and binding it to a non-canonical bundle identifier.
+    Used by adware (SearchAwesome, Bundlore) to hijack browser
+    handlers and by some Atomic Stealer drops to capture
+    `slack://` / `zoommtg://` redirects. The signal is binding —
+    not registration of a brand-new scheme.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://objective-see.org/blog/blog_0x47.html
+    - https://attack.mitre.org/techniques/T1547/015/
+    - https://attack.mitre.org/techniques/T1546/
+tags:
+    - attack.persistence
+    - attack.t1547.015
+    - attack.initial_access
+    - attack.defense_evasion
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_lsregister:
+        Image|endswith:
+            - '/lsregister'
+        CommandLine|contains:
+            - '-f'
+            - '-u'
+    selection_defaults_write_handlers:
+        Image|endswith:
+            - '/defaults'
+        CommandLine|contains|all:
+            - 'write'
+            - 'LSHandlers'
+    selection_well_known_schemes:
+        CommandLine|contains:
+            - 'mailto'
+            - 'public.html'
+            - 'public.url'
+            - '"http"'
+            - '"https"'
+            - 'slack://'
+            - 'zoommtg'
+            - 'vscode://'
+            - 'cursor://'
+            - 'git+'
+            - 'x-callback-url'
+            - 'iterm2://'
+    filter_apple_handlers_setup:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+        PlatformBinary: 'true'
+    condition: (selection_lsregister or selection_defaults_write_handlers) and selection_well_known_schemes and not filter_apple_handlers_setup
+falsepositives:
+    - User explicitly changing default browser via Safari / System Settings → Default Web Browser flow; the system-level flow goes through `/System/`-signed binaries (covered by `filter_apple_handlers_setup`)
+    - VS Code / Cursor / iTerm2 first-launch registration of their own schemes; allowlist by parent app
+level: medium

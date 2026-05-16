@@ -631,8 +631,14 @@ enum DaemonTimers {
         // work. Future regressions in the rich payload (slow query,
         // stuck actor, full disk for snapshot writes) can NEVER cause
         // the dashboard to think the daemon is dead when it isn't.
+        // v1.12.0 fix: first heartbeat fires at +0.5 s, not +5 s, so the
+        // dashboard's 10-second poll cadence has a fresh heartbeat to
+        // read on its first tick. Pre-fix, the +5 s timer delay stacked
+        // with the dashboard poll lag to produce a 15-25 s "Daemon:
+        // starting…" window before "Daemon: Running ✓" appeared, even
+        // though the daemon process was up and serving events in ~3 s.
         let livenessTimer = DispatchSource.makeTimerSource(queue: .global())
-        livenessTimer.schedule(deadline: .now() + 5, repeating: 30)
+        livenessTimer.schedule(deadline: .now() + 0.5, repeating: 30)
         livenessTimer.setEventHandler {
             // Synchronous on the dispatch queue. No Task wrapper, no
             // actor hops. The probeSysextFDA call is itself sync —
@@ -659,6 +665,11 @@ enum DaemonTimers {
                     "alerts_emitted": alertCount(),
                     "schema_version": 4,
                     "liveness": true,
+                    // v1.12.0 RC15: keep boot_phase populated even after
+                    // boot completes so the dashboard's interpretation
+                    // logic ({phase == "ready"} → "Running") doesn't have
+                    // to fall back to inferring from liveness alone.
+                    "boot_phase": "ready",
                 ]
                 guard let data = try? JSONSerialization.data(
                     withJSONObject: payload,

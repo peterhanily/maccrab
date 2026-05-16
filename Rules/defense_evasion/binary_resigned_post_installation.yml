@@ -1,0 +1,60 @@
+title: codesign Re-Sign of Installed Application Bundle
+id: d1a2b3c4-0500-4000-a000-000000000510
+status: experimental
+description: >
+    Detects `codesign` (or `codesign_allocate`) invoked against an
+    existing `.app` bundle already living in `/Applications/`,
+    `~/Applications/`, or `/Library/Application Support/`. Modifying
+    the signature on an already-installed application is the
+    canonical trojan-an-installed-app primitive: an attacker
+    replaces the binary contents of a legitimate app and re-signs
+    with their own (or an ad-hoc) identity to keep Gatekeeper
+    quiet on next launch. Targets WINDSHIFT-style trojanised-update
+    abuse and Atomic Stealer's CleanMyMac / Arc disguises.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://www.jamf.com/blog/macsync-stealer-evolution-code-signed-swift-malware-analysis/
+    - https://attack.mitre.org/techniques/T1554/
+    - https://attack.mitre.org/techniques/T1036/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1036.001
+    - attack.persistence
+    - attack.t1554
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_codesign:
+        Image|endswith:
+            - '/codesign'
+            - '/codesign_allocate'
+    selection_targets_installed:
+        CommandLine|contains:
+            - '/Applications/'
+            - '/Library/Application Support/'
+            - '/Volumes/'
+    filter_xcode_build:
+        ParentImage|contains:
+            - '/Xcode.app/Contents/'
+            - '/xcodebuild'
+            - '/xcrun'
+    filter_installer_stapler:
+        Image|endswith:
+            - '/stapler'
+        ParentImage|endswith:
+            - '/notarytool'
+            - '/altool'
+    filter_known_updaters:
+        ParentImage|endswith:
+            - '/Sparkle'
+            - '/sparkle'
+            - '/Updater'
+            - '/install_finished'
+    condition: selection_codesign and selection_targets_installed and not filter_xcode_build and not filter_installer_stapler and not filter_known_updaters
+falsepositives:
+    - Sparkle / Updater frameworks re-staping a delta upgrade; covered by filter_known_updaters
+    - Developers re-signing apps locally for testing (rare but possible); investigate parent shell + recent Xcode activity
+level: high

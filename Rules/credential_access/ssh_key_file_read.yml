@@ -67,4 +67,4 @@ detection:
 falsepositives:
     - Backup tools copying SSH directory
     - IDE SSH integrations
-level: high
+level: medium

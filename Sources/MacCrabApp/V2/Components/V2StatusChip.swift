@@ -58,7 +58,34 @@ public struct V2StatusChip: View {
             RoundedRectangle(cornerRadius: V2Theme.chipCornerRadius)
                 .stroke(kind.color.opacity(0.25), lineWidth: 1)
         )
-        .accessibilityLabel(label)
+        // v1.12.0 RC28 audit fix (UX a11y): include the semantic
+        // status name in the accessibility label. Pre-fix VoiceOver
+        // read just the user-visible text (e.g., "Connected"), losing
+        // the kind context that sighted users get from the color
+        // (red/critical, amber/warning, green/healthy). Now VO reads
+        // "Healthy: Connected" so the severity is part of the line.
+        .accessibilityLabel("\(kind.accessibilityName): \(label)")
+    }
+}
+
+extension V2ChipKind {
+    /// Spoken-form severity name for VoiceOver. v1.12.0 RC28.
+    var accessibilityName: String {
+        switch self {
+        case .critical:   return "Critical"
+        case .high:       return "High severity"
+        case .medium:     return "Medium severity"
+        case .low:        return "Low severity"
+        case .healthy:    return "Healthy"
+        case .warning:    return "Warning"
+        case .degraded:   return "Degraded"
+        case .down:       return "Down"
+        case .info:       return "Informational"
+        case .neutral:    return "Neutral"
+        case .ai:         return "AI"
+        case .data:       return "Data"
+        case .custom:     return "Custom"
+        }
     }
 }
 

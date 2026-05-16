@@ -718,7 +718,18 @@ public actor RuleEngine {
         values: [String],
         lowercasedValues: [String]
     ) -> Bool {
-        let fieldLower = fieldValue.lowercased()
+        // v1.12.0 RC25 (perf): only lowercase the field value when the
+        // modifier actually compares case-insensitive. Pre-fix every
+        // call did `fieldValue.lowercased()` upfront — ~75K wasted
+        // String allocations/sec for regex/gt/lt/exists predicates
+        // (~30% of the rule corpus).
+        let needsLower: Bool = {
+            switch modifier {
+            case .equals, .contains, .startswith, .endswith: return true
+            default: return false
+            }
+        }()
+        let fieldLower = needsLower ? fieldValue.lowercased() : ""
 
         switch modifier {
         case .equals:

@@ -1,16 +1,27 @@
-title: Privileged XPC Service Enumeration
+title: Privileged XPC Service Enumeration (Discovery Precursor)
 id: d1a2b3c4-0439-4000-a000-000000000439
 status: experimental
 description: >
-    Detects enumeration of privileged XPC services using launchctl or
-    other tools. Attackers enumerate available XPC services to identify
-    targets for privilege escalation via XPC message abuse.
+    Detects non-interactive enumeration of XPC services via launchctl.
+    Daily admin use from a terminal (bash, zsh, Terminal, iTerm) is
+    explicitly filtered. What remains is `launchctl list` /
+    `launchctl print` invoked by a background script, a downloaded
+    binary, or a non-Apple-signed helper — the canonical "discovery"
+    step before XPC client-impersonation privilege escalation.
+    LOW severity because the signal alone is insufficient: it must
+    be correlated downstream with an XPC connect to one of the
+    enumerated services (sequence-engine work tracked for v1.13).
+    Use as a triage breadcrumb, not as a standalone alert.
 author: MacCrab Community
 date: 2026/04/08
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1559/
+    - https://attack.mitre.org/techniques/T1057/
+    - https://wojciechregula.blog/post/abusing-the-mac-app-sandbox-by-injecting-malicious-code/
 tags:
     - attack.discovery
+    - attack.t1057
     - attack.privilege_escalation
     - attack.t1559
 logsource:
@@ -21,17 +32,16 @@ detection:
         Image|endswith: '/launchctl'
         CommandLine|contains:
             - 'print system/'
-            - 'list'
+            - ' list'
             - 'print-disabled'
-    selection_xpc_enum:
-        CommandLine|contains:
-            - 'XPCServices'
-            - 'com.apple.xpc'
-            - 'NSXPCConnection'
+            - 'dumpstate'
+    # Apple-signed platform binaries running launchctl are part of
+    # boot / login / sleep flows.
     filter_apple:
         SignerType: 'apple'
     filter_platform:
         PlatformBinary: 'true'
+    # Interactive shells and terminal emulators — admin work.
     filter_terminal:
         ParentImage|endswith:
             - '/bash'
@@ -46,8 +56,28 @@ detection:
             - '/WarpTerminal'
             - '/tmux'
             - '/screen'
-    condition: (selection_launchctl or selection_xpc_enum) and not filter_apple and not filter_platform and not filter_terminal
+    # MDM / config-management agents legitimately enumerate launchd
+    # state during inventory sweeps.
+    filter_mdm:
+        ParentImage|contains:
+            - '/jamf'
+            - '/Jamf'
+            - '/kandji-daemon'
+            - '/MosyleDaemon'
+            - '/Hexnode'
+            - '/Addigy'
+            - '/Munki'
+            - '/munki'
+            - '/FileWave'
+    # Apple's own diagnostics tooling sweeps services.
+    filter_diagnostics:
+        ParentImage|endswith:
+            - '/sysdiagnose'
+            - '/diagnose'
+            - '/spindump'
+    condition: selection_launchctl and not (filter_apple or filter_platform or filter_terminal or filter_mdm or filter_diagnostics)
 falsepositives:
-    - System administrators auditing services
-    - Monitoring tools inspecting launchd state
-level: medium
+    - Non-MDM endpoint management tools not yet in the filter list — add to filter_mdm
+    - Developer scripts that wrap launchctl for environment introspection
+    - CI runners performing post-install verification on macOS hosts
+level: low

@@ -66,4 +66,4 @@ detection:
 falsepositives:
     - System administration
     - Security audit tools
-level: low
+level: informational

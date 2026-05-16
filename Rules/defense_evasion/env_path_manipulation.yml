@@ -34,6 +34,9 @@ detection:
             - '/opt/homebrew/'
     condition: selection and not filter_system and not filter_homebrew
 falsepositives:
-    - User shell configuration changes
-    - Package manager installations modifying PATH
+    - User editing dotfiles directly in Vim, Nano, Cursor, VS Code, Sublime, BBEdit
+    - oh-my-zsh / Prezto / Antigen installers rewriting .zshrc on first install
+    - Package managers (Homebrew, MacPorts, pyenv, rbenv, nvm, asdf, conda) appending to PATH
+    - Language SDK installers (rustup, dotnet, cargo, go) modifying .zprofile / .bash_profile
+    - Dotfile sync engines (chezmoi, yadm, GNU stow) restoring shell config from a git repo
 level: low

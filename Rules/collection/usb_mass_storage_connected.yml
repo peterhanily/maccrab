@@ -1,15 +1,25 @@
-title: USB Mass Storage Device Connected
+title: Disk Image Or Volume Mount From Non-System Process
 id: d1a2b3c4-0350-4000-a000-000000000350
-status: stable
-description: Detects connection of USB mass storage devices which could be used for data exfiltration or malware delivery.
+status: experimental
+description: >
+    Detects `diskutil mount` / `hdiutil attach` invocations from a non-Apple,
+    non-system-launchd parent. Mounting itself is benign — Finder, Disk
+    Utility, and Apple installers all do it — so the previous rule fired on
+    every plugged-in USB stick or downloaded DMG. This rewrite drops to low
+    severity and primarily exists to feed sequence rules
+    (e.g. dmg_mount_unsigned_exec) which correlate the mount with subsequent
+    execution from the mounted volume. Treat a single hit as informational.
 author: MacCrab Community
 date: 2026/04/05
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1200/
+    - https://attack.mitre.org/techniques/T1204.002/
 tags:
     - attack.initial_access
     - attack.exfiltration
     - attack.t1200
+    - attack.t1204.002
 logsource:
     category: process_creation
     product: macos
@@ -25,7 +35,19 @@ detection:
             - '/usr/libexec/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_system and not filter_apple_signed
+    filter_finder:
+        ParentImage|endswith:
+            - '/Finder'
+            - '/Disk Utility'
+            - '/Installer'
+    filter_homebrew:
+        ParentImage|contains:
+            - '/Homebrew/'
+            - '/homebrew/'
+        CommandLine|contains: 'hdiutil attach'
+    condition: selection and not filter_system and not filter_apple_signed and not filter_finder and not filter_homebrew
 falsepositives:
-    - Legitimate removable media usage
-level: medium
+    - Legitimate removable media usage outside Finder (CLI-driven workflows)
+    - Software installer scripts that attach DMGs
+    - Backup tooling mounting sparse bundles
+level: low

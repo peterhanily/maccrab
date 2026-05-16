@@ -42,4 +42,4 @@ detection:
 falsepositives:
     - IDE plugins reading cloud configurations
     - Legitimate cloud management tools
-level: high
+level: medium

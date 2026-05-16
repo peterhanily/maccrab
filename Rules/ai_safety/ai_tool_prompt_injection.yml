@@ -1,12 +1,19 @@
 title: Prompt Injection Pattern in AI Tool Command
 id: d1a2b3c4-2012-4000-a000-000000002012
-status: stable
+status: test
 description: >
-    Detects prompt injection patterns in command lines executed by AI coding
-    tools. These patterns indicate an attempt to hijack the AI's behavior
-    via malicious content in code, README files, or other project files.
+    Detects prompt-injection phrases ("ignore previous instructions",
+    "you are now DAN", "jailbreak mode", etc.) appearing in command-line
+    arguments executed by AI coding tools. These phrases also appear
+    legitimately in security documentation, AI safety research, and
+    code comments, so the rule is restricted to commands whose process
+    or parent is a known AI tool AND whose target is NOT a Markdown /
+    docs path. Severity is intentionally low; this rule is most useful
+    as a pair-detector alongside higher-confidence signals (network
+    egress to unknown hosts, persistence writes, credential reads).
 author: MacCrab Community
 date: 2026/04/04
+modified: 2026/05/14
 references:
     - https://owasp.org/www-project-top-10-for-large-language-model-applications/
 tags:
@@ -16,7 +23,7 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection:
+    selection_injection_phrase:
         CommandLine|contains:
             - 'ignore all previous'
             - 'ignore your instructions'
@@ -25,8 +32,34 @@ detection:
             - 'jailbreak mode'
             - 'developer mode enabled'
             - 'act as if you have no restrictions'
-    condition: selection
+    selection_ai_context:
+        ParentImage|contains:
+            - 'claude'
+            - 'codex'
+            - 'openclaw'
+            - 'Cursor'
+            - 'cline'
+            - 'aider'
+            - 'continue'
+    filter_docs_paths:
+        CommandLine|contains:
+            - '/Documents/'
+            - '.md'
+            - '.markdown'
+            - '.rst'
+            - '/docs/'
+            - 'README'
+            - 'CHANGELOG'
+    filter_security_tools:
+        Image|endswith:
+            - '/grep'
+            - '/ripgrep'
+            - '/rg'
+            - '/ag'
+            - '/git'
+    condition: selection_injection_phrase and selection_ai_context and not filter_docs_paths and not filter_security_tools
 falsepositives:
-    - Security testing and red teaming
-    - Prompt injection research
-level: high
+    - Security testing and red-team exercises
+    - Prompt-injection research literature being read by the AI tool
+    - AI safety documentation copied into a chat session
+level: low

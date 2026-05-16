@@ -24,9 +24,22 @@ detection:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
+    # Finder, the network browser, and File Sharing prefs pane all spawn
+    # smbutil during normal "Connect to Server" / "Browse Network" flows.
+    # The bare Finder filter previously missed NetAuth Agent and the
+    # com.apple.netauth subsystem, which are the actual parent procs for
+    # most user-initiated SMB enumeration on modern macOS.
     filter_finder:
-        ParentImage|contains: 'Finder.app'
-    condition: selection and not filter_system and not filter_finder
+        ParentImage|contains:
+            - 'Finder.app'
+            - 'NetAuthAgent'
+            - 'NetAuthSysAgent'
+            - 'com.apple.NetAuthAgent'
+            - 'com.apple.netauth'
+            - 'NetworkBrowser'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and not filter_system and not filter_finder and not filter_apple_parent
 falsepositives:
     - Network troubleshooting by administrators
     - File sharing utilities

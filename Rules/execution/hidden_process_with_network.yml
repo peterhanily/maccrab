@@ -1,7 +1,15 @@
-title: Hidden Process Name with Network Activity
+title: Hidden (Dot-Prefixed) Binary Execution
 id: d1a2b3c4-0008-4000-a000-000000000008
 status: experimental
-description: Detects execution of binaries with hidden names (starting with a dot) that may indicate malware attempting to avoid casual observation.
+description: >
+    Detects execution of a binary whose file name begins with a `.`
+    (hidden in Finder and most `ls` invocations). Malware commonly
+    uses this to evade casual filesystem inspection. Excludes
+    Apple-signed binaries and well-known dev-tool hidden-directory
+    layouts (`~/.cargo/`, `~/.rustup/`, `~/.nvm/`, `~/.deno/`,
+    `~/.bun/`, `~/.local/`, `~/.dotnet/`, `~/.cache/`). NOTE: title
+    previously claimed network correlation but the rule is single-
+    event; network co-occurrence is left to the sequence-tier rules.
 author: MacCrab Community
 date: 2026/03/31
 references:
@@ -15,14 +23,37 @@ logsource:
     product: macos
 detection:
     selection:
-        Image|re: '/\.[^/]+$'
+        # Matches `/some/path/.binaryname` — the basename starts with `.`.
+        Image|re: '/\.[^/.][^/]*$'
     filter_apple:
-        SignerType: 'apple'
-    filter_common:
+        PlatformBinary: 'true'
+    filter_common_hidden_dirs:
         Image|contains:
             - '/.Trash/'
             - '/Contents/'
-    condition: selection and not filter_apple and not filter_common
+            - '/.cargo/'
+            - '/.rustup/'
+            - '/.nvm/'
+            - '/.deno/'
+            - '/.bun/'
+            - '/.local/'
+            - '/.dotnet/'
+            - '/.cache/'
+            - '/.pyenv/'
+            - '/.rbenv/'
+            - '/.asdf/'
+            - '/.sdkman/'
+            - '/.npm/'
+            - '/.pnpm/'
+            - '/.yarn/'
+            - '/.gem/'
+            - '/.go/'
+            - '/.tox/'
+            - '/.venv/'
+            - '/.virtualenvs/'
+            - '/.vscode/'
+            - '/.cursor/'
+    condition: selection and not filter_apple and not filter_common_hidden_dirs
 falsepositives:
-    - Hidden helper binaries from legitimate applications
+    - Dot-prefixed helper binaries from third-party apps that ship outside `/Contents/` (rare; review)
 level: medium

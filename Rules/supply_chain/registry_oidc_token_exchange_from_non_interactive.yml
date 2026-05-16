@@ -1,0 +1,73 @@
+title: npm Registry OIDC Token Exchange From Non-Interactive Parent
+id: d1a2b3c4-0302-4000-a000-000000000034
+status: experimental
+description: >
+    Detects an outbound HTTPS request to
+    `registry.npmjs.org/-/npm/v1/oidc/token/exchange/` from a
+    process whose parent is not an interactive shell or a known CI
+    agent. The November 2025 "Sha1-Hulud: The Second Coming"
+    variant of the Shai-Hulud worm added the OIDC trusted-publisher
+    path as an alternative to the classic `_authToken` publish
+    flow — it lets the worm trade a captured GitHub Actions OIDC
+    token for an npm publish token without needing to steal the
+    user's `~/.npmrc`. The fingerprint of this lane is the
+    `/oidc/token/exchange/` URI; legitimate use is exclusively from
+    GitHub Actions or other OIDC-issuing CI runners, never from a
+    developer's workstation node/python process.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/
+    - https://github.com/npm/cli/issues/8103
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1098/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.persistence
+    - attack.t1098
+    - attack.lateral_movement
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    # Detection-rewrite v1.12.0: network_connection events do not
+    # carry HTTP URI strings, so the prior `CommandLine|contains
+    # /oidc/token/exchange` selector never matched. Replaced with
+    # the hostname + a node-class Image filter; this catches the
+    # full worm signature when paired with the worm-self-propagation
+    # sequence rule. A non-interactive, non-CI npm publish over the
+    # registry endpoint is the diagnostic, regardless of which
+    # registry sub-path is hit.
+    selection_registry:
+        DestinationHostname|contains:
+            - 'registry.npmjs.org'
+    selection_node_lineage:
+        Image|endswith:
+            - '/node'
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/bun'
+    filter_interactive_parent:
+        ParentImage|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+            - '/fish'
+    filter_known_ci:
+        ParentImage|endswith:
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+            - '/gitlab-runner'
+            - '/act'
+            - '/dagger'
+    condition: selection_registry and selection_node_lineage and not filter_interactive_parent and not filter_known_ci
+falsepositives:
+    - A local GitHub Actions emulator (act, dagger) running with OIDC enabled — parent will be `/act` or `/dagger`; extend filter_known_ci with the runner basename
+    - Custom dev-portal tooling that legitimately uses OIDC trusted publishing from a service account on a Mac runner — allowlist by parent Image
+level: critical

@@ -23,10 +23,75 @@ detection:
             - 'apple'
             - 'appStore'
             - 'devId'
+    filter_platform:
+        PlatformBinary: 'true'
     filter_system:
-        ParentImage|startswith: '/System/'
-    condition: selection and not filter_signed and not filter_system
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    # Backstop: ifconfig / networksetup / airport all ship under /usr/sbin/.
+    # PlatformBinary / SignerType enrichment can be missing on short-lived
+    # events, so anchor on install location too.
+    filter_system_path:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/System/'
+    # ifconfig / networksetup are daily admin commands. Filter ancestry from
+    # interactive shells, editors, package managers, CI runners, and dotfile
+    # managers so the rule only fires on suspicious invokers (e.g. dropped
+    # payloads in /tmp, browser children, unsigned IDE-less binaries).
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/brew'
+            - '/npm'
+            - '/yarn'
+            - '/pnpm'
+            - '/pip'
+            - '/pip3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
+    filter_homebrew_parent:
+        ParentImage|startswith:
+            - '/opt/homebrew/'
+            - '/usr/local/Cellar/'
+            - '/usr/local/opt/'
+            - '/Applications/Xcode'
+            - '/Library/Developer/'
+    condition: selection and not filter_signed and not filter_platform and not filter_system and not filter_system_path and not filter_dev_tools and not filter_homebrew_parent
 falsepositives:
-    - System administration scripts
-    - Network monitoring tools
+    - System administration scripts (filtered via shell/system ancestry)
+    - Network monitoring tools (Homebrew / devId-signed)
+    - On dev machines `MACCRAB_DEV_MODE` users may still see residual FPs from
+      custom network-probe wrappers; escalate via campaign context only.
 level: low
+# v1.11.2: added platform-binary / system-path / dev-tool parent filters so
+# the rule only fires on suspicious invokers (e.g. dropped /tmp/ifconfig or
+# unsigned non-IDE binaries). Daily admin/dev usage is now filtered.

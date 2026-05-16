@@ -1,9 +1,17 @@
-title: User-Level LaunchAgent Created by Non-User Process
+title: User LaunchAgent Created by Non-Installer Parent
 id: d1a2b3c4-0019-4000-a000-000000000019
 status: experimental
-description: Detects creation of user-level LaunchAgent plists by processes running outside the user context, which may indicate malware persistence.
+description: >
+    Detects creation of user-level LaunchAgent plists by parents that
+    are NOT recognised installers, package managers, software updaters,
+    or Apple-signed tooling. Legitimate apps install user LaunchAgents
+    via /usr/bin/installer, system_installd, brew, softwareupdate, or
+    their own Apple-signed installer process. A LaunchAgent plist
+    written by curl, wget, a shell, osascript, or an unsigned binary
+    is a strong persistence signal.
 author: MacCrab Community
 date: 2026/03/31
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1543/001/
 tags:
@@ -17,11 +25,26 @@ detection:
         TargetFilename|re: '/Users/[^/]+/Library/LaunchAgents/.*\.plist$'
     filter_installers:
         Image|endswith:
-            - '/Installer'
             - '/installer'
-    filter_apple:
+            - '/Installer'
+            - '/system_installd'
+            - '/installd'
+            - '/softwareupdated'
+            - '/softwareupdate'
+            - '/brew'
+            - '/port'
+            - '/pkgutil'
+            - '/PackageKit'
+            - '/xcodebuild'
+            - '/storedownloadd'
+            - '/appstoreagent'
+    filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and not filter_installers and not filter_apple
+    filter_appstore_signed:
+        SignerType: 'appStore'
+    condition: selection and not filter_installers and not filter_apple_signed and not filter_appstore_signed
 falsepositives:
-    - Application installers creating user launch agents
-level: medium
+    - Non-Apple-signed third-party installers (e.g., dev tools that
+      bypass installer.app) — add their executable name to filter_installers
+    - First-run helper bootstrap by legitimate but unsigned developer tools
+level: high

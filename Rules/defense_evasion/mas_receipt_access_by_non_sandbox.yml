@@ -1,0 +1,61 @@
+title: Mac App Store Receipt Read By Non-Sandboxed Process
+id: d1a2b3c4-0500-4000-a000-000000000509
+status: experimental
+description: >
+    Detects a non-sandboxed, non-Apple process reading
+    `Contents/_MASReceipt/receipt` from a Mac App Store-distributed
+    application. The receipt is a PKCS#7 blob signed by Apple's CA
+    that legitimate apps validate via StoreKit at launch (inside
+    the sandbox) — there is no legitimate reason for an external
+    process to harvest receipts. Historical use: Alexey Borodin's
+    2012 in-appstore.com IAP-fraud SDK relied on harvested
+    receipts; cracked-MAS distribution channels (AppKed, KuaiGo,
+    MacKed) all required scraping legitimate purchasers' receipts.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://objective-see.org/blog/blog_0x10.html
+    - https://www.objc.io/issues/17-security/receipt-validation/
+    - https://attack.mitre.org/techniques/T1552/001/
+    - https://attack.mitre.org/techniques/T1005/
+tags:
+    - attack.credential_access
+    - attack.t1552.001
+    - attack.collection
+    - attack.t1005
+    - attack.defense_evasion
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_receipt:
+        TargetFilename|contains: '/_MASReceipt/receipt'
+        FileAction:
+            - 'open'
+            - 'close'
+    # v1.12.0 post-audit (M-Det1): the prior `filter_owning_app` was
+    # `Image|contains: '.app/Contents/MacOS/'` — which matched EVERY
+    # .app bundle, malicious or otherwise. Sigma doesn't support a
+    # "Image's bundle prefix matches TargetFilename's bundle prefix"
+    # predicate, so we instead drop the over-broad filter and rely
+    # on the signer-side filters: legitimate MAS-receipt readers are
+    # either notarized (consumers of StoreKit) or the storeaccountd
+    # daemon. An ad-hoc-signed or unsigned .app reading a receipt
+    # remains in scope — which is the correct shape for this rule.
+    filter_apple_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+        PlatformBinary: 'true'
+    filter_notarized_app:
+        Image|contains: '.app/Contents/MacOS/'
+        NotarizationStatus: 'notarized'
+    filter_storekit:
+        Image|contains: 'storeaccountd'
+    condition: selection_receipt and not filter_notarized_app and not filter_apple_system and not filter_storekit
+falsepositives:
+    - Backup tooling (Time Machine helper `backupd`, Backblaze, Carbon Copy Cloner, Arq) reading every file in `/Applications/`; filter by Image basename and allowlist these
+    - Spotlight / mds / mdworker indexing app bundles; covered by filter_apple_system
+    - The user explicitly running `codesign -dvv` against an MAS app; investigate the parent shell
+level: high

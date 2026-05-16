@@ -2,13 +2,22 @@ title: AI Coding Tool Installs Package
 id: d1a2b3c4-2003-4000-a000-000000002003
 status: experimental
 description: >
-    Detects when an AI coding tool installs packages via npm, pip, or other
-    package managers. Monitors for supply chain attacks and slopsquatting
-    where AI hallucinate package names that attackers have registered.
+    Detects when an AI coding tool installs packages via npm, pip,
+    cargo, gem, go, or brew. Targets supply-chain attacks and
+    "slopsquatting" — where AI hallucinated package names get
+    registered by attackers as malicious lookalikes. To suppress noise
+    from user-typed `npm install` in a regular terminal, the rule
+    requires the package-manager process or its parent to be an AI
+    coding tool. The filter list excludes top-N well-known package
+    names (react, numpy, requests, lodash, etc.) so common installs
+    don't fire — uncommon / fuzzy / typosquat names still fire and
+    feed into the slopsquatting sequence detector.
 author: MacCrab Community
 date: 2026/04/04
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1195/001/
+    - https://www.lasso.security/blog/slopsquatting-ai-hallucinated-packages
 tags:
     - attack.initial_access
     - attack.t1195.001
@@ -21,15 +30,64 @@ detection:
             - 'npm install'
             - 'npm i '
             - 'npm add'
+            - 'yarn add'
+            - 'pnpm add'
+            - 'pnpm install'
     selection_pip:
         CommandLine|contains:
             - 'pip install'
             - 'pip3 install'
+            - 'uv pip install'
+            - 'uv add'
+            - 'poetry add'
     selection_cargo:
         CommandLine|contains: 'cargo add'
     selection_brew:
         CommandLine|contains: 'brew install'
-    condition: selection_npm or selection_pip or selection_cargo or selection_brew
+    selection_gem:
+        CommandLine|contains: 'gem install'
+    selection_go:
+        CommandLine|contains: 'go install'
+    selection_ai_parent:
+        ParentImage|contains:
+            - 'claude'
+            - 'codex'
+            - 'openclaw'
+            - 'Cursor'
+            - 'cline'
+            - 'aider'
+            - 'continue'
+    filter_top_packages:
+        CommandLine|contains:
+            - ' react '
+            - ' react@'
+            - ' react-dom'
+            - ' lodash'
+            - ' express'
+            - ' axios'
+            - ' typescript'
+            - ' eslint'
+            - ' prettier'
+            - ' webpack'
+            - ' vite'
+            - ' next '
+            - ' next@'
+            - ' numpy'
+            - ' pandas'
+            - ' requests'
+            - ' flask'
+            - ' django'
+            - ' pytest'
+            - ' fastapi'
+            - ' boto3'
+            - ' pydantic'
+            - ' sqlalchemy'
+            - ' setuptools'
+            - ' wheel '
+            - ' pip '
+    condition: (selection_npm or selection_pip or selection_cargo or selection_brew or selection_gem or selection_go) and selection_ai_parent and not filter_top_packages
 falsepositives:
-    - Legitimate package installation during development
+    - Legitimate AI-assisted dependency installation of less-popular
+      packages — pair with the slopsquatting sequence detector for
+      higher-confidence alerts
 level: medium

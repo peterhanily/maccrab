@@ -1,0 +1,88 @@
+title: Periodic api.github.com /user Poll From Non-TTY Lineage (Dead-Man's-Switch Watchdog)
+id: d1a2b3c4-0519-4000-a000-000000000519
+status: experimental
+description: >
+    Detects the periodic-poll half of the dead-man's-switch primitive
+    used by the May 2026 Mini Shai-Hulud Wave 4 TanStack worm. The
+    worm spawns a detached `node` child that calls
+    `GET https://api.github.com/user` every ~60 seconds carrying
+    `Authorization: token <stolen_PAT>`. A 2xx response means the
+    attacker still wants the host alive; a 4xx is the cancel signal
+    and fires `rm -rf $HOME`. The literal token-description scanner
+    `dead_mans_switch_literal_scanner.yml` catches the PAT marker
+    string; this rule catches the watchdog itself, which fires even
+    when the attacker rotates marker strings between waves. Pair
+    with `mass_unlink_from_package_lineage.yml` for the destructive
+    half of the chain.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://attack.mitre.org/techniques/T1102/
+tags:
+    - attack.command_and_control
+    - attack.t1071.001
+    - attack.t1102
+    - attack.impact
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    # Detection-rewrite v1.12.0: network_connection events do not
+    # carry HTTP URIs or headers, so the prior `CommandLine|contains
+    # '/user' / 'Authorization: token'` selectors never matched.
+    # Replaced with hostname + node-class Image + launchd-rooted-or-
+    # postinstall-rooted parent — the signature of a detached
+    # background watcher process. Cadence detection (the "every 60s
+    # poll" half) is a sequence-engine job; the current rule alerts
+    # on the presence of the watcher and lets the operator drill in.
+    selection_github_api:
+        DestinationHostname|contains:
+            - 'api.github.com'
+    selection_node_lineage:
+        Image|endswith:
+            - '/node'
+            - '/bun'
+            - '/python'
+            - '/python3'
+            - '/deno'
+        ParentImage|endswith:
+            - '/launchd'
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+    # v1.12.0 RC3 fix (Det-H8) + RC4 fix (Det-R4-H1): exclude
+    # legitimate GitHub-aware dev tooling that polls api.github.com
+    # from a non-interactive parent. Pre-RC4 the filter declared
+    # Image AND ParentImage in a single selection map, which Sigma
+    # ANDs across fields — no real process satisfies both (Renovate
+    # / dependabot run as `node` and do NOT descend from `gh`/`hub`),
+    # so the filter was structurally unreachable and Renovate/
+    # dependabot polling still fired the rule. Split into two
+    # filters joined by OR (`not filter_a and not filter_b`) so
+    # either signal alone suppresses.
+    filter_github_gui_or_bot_image:
+        Image|contains:
+            - '/GitHub Desktop'
+            - '/GitHub Desktop.app/'
+            - '/Tower.app/'
+            - '/Fork.app/'
+            - '/Renovate'
+            - '/dependabot'
+            - '/renovate-bot'
+    filter_github_cli_parent:
+        ParentImage|endswith:
+            - '/gh'
+            - '/hub'
+    condition: selection_github_api and selection_node_lineage and not filter_github_gui_or_bot_image and not filter_github_cli_parent
+falsepositives:
+    - GitHub-aware dev tooling that performs interactive auth checks (gh status, hub auth) — these descend from an interactive shell, not from launchd / a package manager
+    - CI runners polling for trigger events; expected to descend from /runner / /Runner.Listener (already filtered downstream by lineage)
+    - GitHub Desktop / Tower / Fork polling for repo status — these descend from the GUI app, not from launchd / node
+level: high

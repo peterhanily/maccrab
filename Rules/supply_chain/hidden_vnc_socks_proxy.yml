@@ -2,10 +2,13 @@ title: Hidden VNC or SOCKS Proxy Server Started by Non-System Process
 id: d1a2b3c4-0318-4000-a000-000000000018
 status: experimental
 description: >
-    Detects VNC servers or SOCKS proxy servers started by non-system processes. The
-    GlassWorm worm (Jan-March 2026) deployed hidden SOCKS proxies and VNC servers
-    on compromised machines to enable remote access and lateral movement. These services
-    running outside of legitimate remote management tools indicate compromise.
+    Detects VNC servers or SOCKS proxy servers started in listening mode by
+    non-system processes. The GlassWorm worm (Jan-March 2026) deployed hidden
+    SOCKS proxies and VNC servers on compromised machines to enable remote
+    access and lateral movement. To reduce false positives from legitimate SSH
+    tunneling, this rule requires both a VNC/SOCKS keyword AND an explicit
+    listening/bind flag in the command line, plus a non-Apple, non-developer-IDE
+    parent so day-to-day `ssh -D 1080` from a terminal does not trigger.
 author: MacCrab Community
 date: 2026/03/30
 references:
@@ -22,38 +25,47 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection_vnc:
+    selection_proxy_keyword:
         CommandLine|contains:
-            - 'vnc'
-            - 'VNC'
             - 'x11vnc'
             - 'tightvnc'
-            - 'rfb'
-    selection_socks:
-        CommandLine|contains:
-            - 'socks'
-            - 'SOCKS'
-            - '-D 1080'
-            - '-D 9050'
+            - 'tigervnc'
+            - 'vnc-server'
+            - 'vncserver'
+            - ' rfb '
             - 'socksify'
             - 'proxychains'
+            - ' socks5 '
+            - ' socks4 '
     selection_listening:
         CommandLine|contains:
-            - '-listen'
-            - '--listen'
-            - '-L '
-            - 'bind'
+            - ' -D 1080'
+            - ' -D 9050'
+            - ' -listen'
+            - ' --listen'
+            - ' -p 5900'
+            - ' -p 5901'
+            - ' -port 5900'
+            - ' bind '
     filter_system:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
     filter_apple:
         SignerType: 'apple'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
     filter_screen_sharing:
         Image|endswith: '/screensharingd'
-    condition: (selection_vnc or selection_socks or selection_listening) and not filter_system and not filter_apple and not filter_screen_sharing
+    filter_ide_parent:
+        ParentImage|endswith:
+            - '/Code'
+            - '/Code Helper'
+            - '/Cursor'
+            - '/Xcode'
+    condition: selection_proxy_keyword and selection_listening and not filter_system and not filter_apple and not filter_apple_parent and not filter_screen_sharing and not filter_ide_parent
 falsepositives:
     - Legitimate remote desktop applications (TeamViewer, AnyDesk)
-    - SSH tunneling for development
+    - SSH SOCKS tunneling from terminal for development (-D flag)
     - Corporate VPN/proxy tools
-level: high
+level: medium

@@ -37,6 +37,12 @@ public final class V2LiveDataProvider: V2DataProvider {
     private var rulesCache: [V2MockRule] = []
     private var rulesCacheDirMtime: Date? = nil
     private var rulesCacheTelemetryMtime: Date? = nil
+    /// v1.12.0 RC20: track user_rules dir mtime so the dashboard
+    /// rule-list refreshes after the user saves a YAML edit. Pre-fix,
+    /// rulesCache wasn't invalidated when user_rules changed, so the
+    /// inspector kept showing the bundled severity even after the
+    /// user-override JSON landed on disk.
+    private var rulesCacheUserRulesMtime: Date? = nil
 
     /// Returns nil if no candidate directory exists at all (fresh dev
     /// machine where the daemon has never run). Caller should fall
@@ -194,13 +200,19 @@ public final class V2LiveDataProvider: V2DataProvider {
         let fm = FileManager.default
 
         // mtime gate — return the cache unchanged if neither the
-        // compiled_rules directory nor the rule_telemetry.json file
-        // has been touched since the last call.
+        // compiled_rules directory, the rule_telemetry.json file, NOR
+        // the user_rules dir has been touched since the last call.
+        // v1.12.0 RC20: user_rules mtime added so Edit-YAML saves
+        // invalidate the cache and the dashboard re-renders with the
+        // new severity.
+        let userRulesPath = dir + "/user_rules"
         let dirMtime  = (try? fm.attributesOfItem(atPath: rulesPath))?[.modificationDate] as? Date
         let teleMtime = (try? fm.attributesOfItem(atPath: telemetryPath))?[.modificationDate] as? Date
+        let userMtime = (try? fm.attributesOfItem(atPath: userRulesPath))?[.modificationDate] as? Date
         if !rulesCache.isEmpty,
            dirMtime == rulesCacheDirMtime,
-           teleMtime == rulesCacheTelemetryMtime {
+           teleMtime == rulesCacheTelemetryMtime,
+           userMtime == rulesCacheUserRulesMtime {
             return rulesCache
         }
 
@@ -210,6 +222,18 @@ public final class V2LiveDataProvider: V2DataProvider {
         catch {
             lastErrorDescription = "rules read: \(error)"
             return []
+        }
+        // v1.12.0 RC20: overlay user_rules on top of bundled rules so
+        // the dashboard's Detection → Rules list reflects user edits
+        // (severity changes, disabled flags) the same way the daemon
+        // does. Pre-fix the dashboard read ONLY the bundled compiled_
+        // rules tree, so when a user lowered a rule's severity via
+        // Edit YAML the displayed severity stayed at the bundled
+        // default — even though the daemon was firing the user's
+        // version. RuleEngine.loadRules does last-write-wins on
+        // rule.id, so the user_rules load that runs second wins.
+        if fm.fileExists(atPath: userRulesPath) {
+            _ = try? await engine.loadRules(from: URL(fileURLWithPath: userRulesPath))
         }
         let rules = await engine.listRules()
 
@@ -226,6 +250,7 @@ public final class V2LiveDataProvider: V2DataProvider {
         rulesCache = mapped
         rulesCacheDirMtime = dirMtime
         rulesCacheTelemetryMtime = teleMtime
+        rulesCacheUserRulesMtime = userMtime
         return mapped
     }
 
@@ -531,16 +556,32 @@ public final class V2LiveDataProvider: V2DataProvider {
         // dashboard refresh doesn't re-shell each tick. Latest-version
         // + vulnCount stay at placeholder defaults — registry API
         // wiring is a v1.11.x follow-up.
+        //
+        // v1.12.0 post-audit (H-Int1): the bulk scan() output only
+        // includes the pure-local typosquat score. Attestation +
+        // content-flag fields require registry HTTP and an installed-
+        // tree walk — too expensive for every refresh tick. We
+        // kick off background enrichment of the top-3 typosquat-flagged
+        // packages on each tick; those are the highest-risk entries
+        // and the Supply chain inspector renders the result once it
+        // lands. The 5-min cache absorbs repeated enrichment calls.
         let infos = await Self.packageScanner.scan()
+        await Self.kickOffBackgroundEnrichment(infos: infos)
+        let enrichedInfos = await Self.enrichmentResults.snapshot()
         return infos.map { info in
-            V2MockPackage(
-                id: info.id,
-                name: info.name,
-                installed: info.installedVersion,
-                latest: info.latestVersion,
-                manager: info.manager,
-                vulnCount: info.vulnCount,
-                staleness: info.stalenessSeconds
+            let merged = enrichedInfos[info.id] ?? info
+            return V2MockPackage(
+                id: merged.id,
+                name: merged.name,
+                installed: merged.installedVersion,
+                latest: merged.latestVersion,
+                manager: merged.manager,
+                vulnCount: merged.vulnCount,
+                staleness: merged.stalenessSeconds,
+                typosquatScore: merged.typosquatScore,
+                typosquatSimilarTo: merged.typosquatSimilarTo,
+                attestationStatus: merged.attestationStatus,
+                contentRedFlags: merged.contentRedFlags
             )
         }
     }
@@ -548,6 +589,38 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// Shared across V2LiveDataProvider instances so the 5-min cache
     /// doesn't reset on every dashboard reconnect.
     private static let packageScanner = PackageScanner()
+
+    /// v1.12.0 post-audit (H-Int1): shared analyzers + per-package
+    /// enrichment-result map for background dashboard hydration.
+    private static let attestationEnricher = AttestationEnricher()
+    private static let metadataAnalyzer = PackageMetadataAnalyzer()
+    private static let contentAnalyzer = PackageContentAnalyzer()
+    private static let enrichmentResults = EnrichmentResultCache()
+
+    /// Spawn at most one background enrichment per tick. Picks the
+    /// highest-typosquat-score packages first since those are the
+    /// rows the analyst will click on. The actor's `snapshot()`
+    /// returns whatever has landed so far.
+    private static func kickOffBackgroundEnrichment(infos: [PackageInfo]) async {
+        let candidates = infos
+            .filter { ($0.typosquatScore ?? 0) >= 50 }
+            .sorted { ($0.typosquatScore ?? 0) > ($1.typosquatScore ?? 0) }
+            .prefix(3)
+        let pending = await enrichmentResults.pending()
+        for info in candidates where !pending.contains(info.id) {
+            await enrichmentResults.markPending(info.id)
+            Task.detached(priority: .utility) {
+                let enriched = await packageScanner.enrich(
+                    info,
+                    metadataAnalyzer: metadataAnalyzer,
+                    attestationEnricher: attestationEnricher,
+                    contentAnalyzer: nil,
+                    installedPath: nil
+                )
+                await enrichmentResults.record(enriched)
+            }
+        }
+    }
 
     public func integrations() async -> [V2MockIntegration] {
         // v1.11.1 (M2 backlog): read the daemon's configured external
@@ -1265,6 +1338,25 @@ public final class V2LiveDataProvider: V2DataProvider {
         case "informational", "info": return .info
         default: return .info
         }
+    }
+}
+
+/// v1.12.0 post-audit (H-Int1): small actor that holds the most
+/// recent deep-enrichment result per package id and tracks which
+/// packages have an in-flight enrichment so we don't double-fire.
+private actor EnrichmentResultCache {
+    private var results: [String: PackageInfo] = [:]
+    private var inFlight: Set<String> = []
+
+    func snapshot() -> [String: PackageInfo] { results }
+
+    func pending() -> Set<String> { inFlight }
+
+    func markPending(_ id: String) { inFlight.insert(id) }
+
+    func record(_ info: PackageInfo) {
+        results[info.id] = info
+        inFlight.remove(info.id)
     }
 }
 

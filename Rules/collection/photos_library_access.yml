@@ -1,9 +1,16 @@
-title: Photos Library Accessed by Non-Photos Process
+title: Photos Library Accessed By Non-Photos Process
 id: d1a2b3c4-0262-4000-a000-000000000262
 status: experimental
-description: Detects access to the Photos library database by a process other than Photos.app. Adversaries may access photo libraries for surveillance, personal data theft, or leverage photos for extortion.
+description: >
+    Detects access to the Photos library database by processes other than
+    Photos.app and the system photo daemons. Allowlists common cloud-sync
+    clients (iCloud Photos, Google Drive/Photos, Dropbox, OneDrive),
+    well-known photo editors (Lightroom, Capture One, Pixelmator, Affinity),
+    backup tools, and Spotlight. Adversaries may scrape photo libraries for
+    surveillance, personal-data theft, or extortion leverage.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1005/
 tags:
@@ -27,14 +34,54 @@ detection:
             - '/Photos'
             - 'photoanalysisd'
             - 'photolibraryd'
+            - 'cloudphotod'
+            - 'mediaanalysisd'
+    filter_sync_clients:
+        Image|contains:
+            - '/Google Drive'
+            - '/Backup and Sync'
+            - '/Dropbox.app'
+            - '/OneDrive.app'
+            - '/Box.app'
+            - '/iCloudPhotos'
+            - '/bird'
+            - '/cloudd'
+    filter_photo_editors:
+        Image|contains:
+            - '/Lightroom'
+            - '/Adobe Photoshop'
+            - '/Capture One'
+            - '/Pixelmator'
+            - '/Affinity Photo'
+            - '/Luminar'
+            - '/Darktable'
+            - '/GIMP'
+            - '/Photomator'
     filter_system:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
+    filter_apple:
+        SignerType: 'apple'
     filter_spotlight:
-        Image|contains: 'mdworker'
-    condition: selection and not filter_photos and not filter_system and not filter_spotlight
+        Image|contains:
+            - 'mdworker'
+            - 'mds_stores'
+            - 'corespotlightd'
+    filter_backup:
+        Image|endswith:
+            - '/rsync'
+            - '/tar'
+            - '/cp'
+            - '/ditto'
+        Image|contains:
+            - '/backupd'
+            - 'TimeMachine'
+            - '/CarbonCopyCloner'
+            - '/SuperDuper'
+            - '/Arq'
+    condition: selection and not filter_photos and not filter_sync_clients and not filter_photo_editors and not filter_system and not filter_apple and not filter_spotlight and not filter_backup
 falsepositives:
-    - Photo editing and management applications
-    - Cloud photo sync services
+    - Photo editing / management apps not yet in the allowlist
+    - Cloud photo sync services not yet in filter_sync_clients
 level: high

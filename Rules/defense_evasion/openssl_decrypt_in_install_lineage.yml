@@ -1,0 +1,72 @@
+title: openssl Decrypt In Package-Install Lineage (Staged Payload Decrypt)
+id: d1a2b3c4-0500-4000-a000-000000000507
+status: experimental
+description: >
+    Detects `openssl enc -d` (symmetric decryption) invoked by a
+    package-install lineage. Lazarus's KandyKorn (2023) and the
+    multi-stage NX npm worm pattern (2025-2026) both decrypt a
+    second-stage payload at install time so the first-stage tarball
+    can pass static analysis. Other AES decryption invocation
+    patterns (e.g., `gpg --decrypt`, `python -c "from cryptography
+    ...decrypt"`) are out of scope here — covered downstream by the
+    obfuscator-signature rule.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.elastic.co/security-labs/lazarus-side-loading
+    - https://cyber.wtf/2025/02/12/unpacking-pyarmor-v8-scripts/
+    - https://attack.mitre.org/techniques/T1140/
+    - https://attack.mitre.org/techniques/T1027/
+tags:
+    - attack.defense_evasion
+    - attack.t1140
+    - attack.t1027
+    - attack.execution
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_openssl_decrypt:
+        Image|endswith:
+            - '/openssl'
+        CommandLine|contains:
+            - 'enc -d'
+            - 'enc -aes-'
+            - '-pbkdf2'
+            - '-K '
+            - '-k '
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+            - '/bun'
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+        GrandparentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/node'
+            - '/bun'
+    condition: selection_openssl_decrypt and selection_lineage
+falsepositives:
+    - Encryption utilities legitimately used during package install (rare); a maintainer-distributed certificate decrypt flow may match
+    - Test fixtures for crypto libraries that exercise the openssl CLI; allowlist by package name
+level: high

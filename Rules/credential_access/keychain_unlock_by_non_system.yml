@@ -27,7 +27,8 @@ detection:
         ParentSignerType: 'apple'
     condition: selection and not filter_apple_parent and not filter_system_signed
 falsepositives:
-    - CI/CD build agents that unlock the keychain for code signing
-    - Enterprise deployment tools performing automated signing
-    - Xcode build scripts unlocking the login keychain
+    - CI/CD build agents that unlock the keychain for code signing (GitHub Actions runner, Bitrise, CircleCI macOS agent, Jenkins agent, GitLab runner)
+    - 1Password, Bitwarden, Dashlane, Keeper, LastPass desktop apps unlocking the system keychain to sync stored items
+    - fastlane / `match` / Bitrise xcode_select scripts that wrap `security unlock-keychain` during signing
+    - Xcode build scripts unlocking the login keychain before `codesign`
 level: high

@@ -1,0 +1,59 @@
+title: twine upload Spawned by Non-Interactive Parent (PyPI Worm Propagation)
+id: d1a2b3c4-0302-4000-a000-000000000025
+status: experimental
+description: >
+    Detects `twine upload` invoked by a non-interactive parent. The
+    Lightning PyPI compromise (April 2026) shipped a wheel that, during
+    `python -c "import lightning"`, spawned a daemon thread that
+    re-published the trojanised package via twine. Mirrors the npm
+    self-propagation pattern in the cross-ecosystem PyPI lane. Writes
+    to ~/.pypirc by a non-interactive parent are a related indicator.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://socket.dev/blog/lightning-pypi-package-compromised
+    - https://www.stepsecurity.io/blog/lightning-obfuscated-javascript-credential-stealer-bundled-in-pypi-wheel
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1098/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.persistence
+    - attack.t1098
+    - attack.lateral_movement
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_twine_upload:
+        Image|endswith:
+            - '/twine'
+        CommandLine|contains:
+            - 'upload'
+    selection_python_upload:
+        Image|endswith:
+            - '/python'
+            - '/python3'
+        CommandLine|contains:
+            - 'twine upload'
+            - '-m twine'
+            - 'setup.py upload'
+    filter_interactive_parent:
+        ParentImage|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+            - '/fish'
+            - '/tmux'
+            - '/screen'
+    filter_known_ci:
+        ParentImage|endswith:
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+    condition: (selection_twine_upload or selection_python_upload) and not filter_interactive_parent and not filter_known_ci
+falsepositives:
+    - Local release scripts wrapped in make/just/poetry that spawn twine upload — investigate parent before suppressing
+    - Self-hosted CI agent not in filter_known_ci — extend the filter
+level: critical

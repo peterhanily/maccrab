@@ -62,8 +62,28 @@ detection:
             - '| bash -'
     filter_apple:
         SignerType: 'apple'
+    # Known-good installer endpoints. `curl -s <url> | sh` is the
+    # documented install path for these tools, so suppress the curl-pipe
+    # branch only (JXA / reflective Python / reflective Ruby branches
+    # remain active because those domains never legitimately produce
+    # ObjC.import or ctypes.CDLL pipelines).
+    filter_known_installers:
+        CommandLine|contains:
+            - 'sh.rustup.rs'
+            - 'get.docker.com'
+            - 'raw.githubusercontent.com/Homebrew/install/'
+            - 'raw.githubusercontent.com/nvm-sh/nvm/'
+            - 'sh.brew.sh'
+            - 'install.python-poetry.org'
+            - 'astral.sh/uv/install'
+            - 'starship.rs/install'
+            - 'fnm.vercel.app/install'
+            - 'pyenv.run'
+            - 'get.sdkman.io'
+            - 'cli.github.com'
     condition: (selection_jxa or selection_python_reflective or selection_ruby_reflective
-        or (selection_curl_pipe_silent and selection_curl_pipe_interp)) and not filter_apple
+        or (selection_curl_pipe_silent and selection_curl_pipe_interp and not filter_known_installers))
+        and not filter_apple
 falsepositives:
     - Legitimate JXA automation scripts
     - Python scientific computing using ctypes/cffi

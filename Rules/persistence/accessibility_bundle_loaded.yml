@@ -17,6 +17,15 @@ detection:
     selection:
         TargetFilename|contains: '/AccessibilityBundles/'
         TargetFilename|endswith: '.bundle'
+        # Only fire on actual writes / creates. Pure reads of the
+        # bundle directory (Spotlight indexing, ls in Finder) were the
+        # dominant FP source — accessibility bundles are persistence,
+        # so a write is what matters.
+        FileAction:
+            - 'create'
+            - 'write'
+            - 'rename'
+            - 'clone'
     filter_system:
         TargetFilename|startswith:
             - '/System/'

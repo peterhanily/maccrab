@@ -1,0 +1,64 @@
+title: Package Postinstall Lineage Fetches Bun / Deno / Node Runtime Binary
+id: d1a2b3c4-0302-4000-a000-000000000033
+status: experimental
+description: >
+    Detects an `npm`/`pnpm`/`yarn`/`pip`/`uv`/`poetry`-descended
+    process making an outbound connection or HTTPS request to the
+    canonical download endpoints for Bun, Deno, or Node runtime
+    binaries. The Lightning PyPI compromise (April 2026) and the
+    May 2026 Mini Shai-Hulud TanStack wave both download Bun at
+    install/import time so the payload can run under a non-Node
+    interpreter and evade Node-based EDR hooks. These three
+    domains plus `nodejs.org/dist` are the documented retrieval
+    URLs for legitimate self-managed runtime tooling; the IOC is
+    *who* initiates the fetch, not the destination itself.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.stepsecurity.io/blog/lightning-obfuscated-javascript-credential-stealer-bundled-in-pypi-wheel
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://www.aikido.dev/blog/mini-shai-hulud-is-back-tanstack-compromised
+    - https://attack.mitre.org/techniques/T1105/
+    - https://attack.mitre.org/techniques/T1027/
+tags:
+    - attack.command_and_control
+    - attack.t1105
+    - attack.defense_evasion
+    - attack.t1027
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection_runtime_endpoint:
+        DestinationHostname|contains:
+            - 'bun.sh'
+            - 'github.com/oven-sh/bun/releases'
+            - 'github.com/denoland/deno/releases'
+            - 'deno.land'
+            - 'nodejs.org/dist'
+            - 'unofficial-builds.nodejs.org'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'postinstall'
+            - 'preinstall'
+            - 'lifecycle'
+    condition: selection_runtime_endpoint and selection_lineage
+falsepositives:
+    - A package that legitimately requires a specific Node runtime version and downloads it at install (`@vercel/node-build`-style tooling) — rare; allowlist by package
+    - Self-update flows (`bun upgrade`, `deno upgrade`) accidentally triggered during an install lineage — review parent CommandLine
+    - Multi-runtime managers (proto, asdf, mise) installed via npm postinstall — these wrap the legit download and should be allowlisted by Image basename
+level: high

@@ -196,7 +196,21 @@ enum EventLoop {
                         // For file events, record the read/write. Our
                         // FileAction enum has no "read"; reads come
                         // through as `.close` in most ES subtypes.
-                        if let file = enrichedEvent.file {
+                        //
+                        // v1.12.0 RC3 fix (Sec-H2): filter credential-
+                        // shaped paths out of the lineage record. The
+                        // snapshot persists to disk (under root) and is
+                        // readable by the dashboard (admin user). A
+                        // path like `~/.aws/credentials` recorded here
+                        // would surface to any tool that reads the
+                        // snapshot or any LLM call that ingests it.
+                        // Filtering at record time keeps the deception/
+                        // intent-bridge signal (which only needs the
+                        // shape of the agent's activity, not specific
+                        // credential paths) while keeping the file
+                        // path off disk.
+                        if let file = enrichedEvent.file,
+                           !isCredentialShapedPath(file.path) {
                             let kind: AgentEvent.Kind
                             switch file.action {
                             case .write, .create, .rename, .link:
@@ -926,8 +940,267 @@ enum EventLoop {
             // happens inside the bridge → rolling graph → materializer
             // path. Errors are logged inside the bridge and don't block
             // the rest of the event loop.
+            //
+            // v1.12.0: when the bridge materializes a Trace AND a graph
+            // rule evaluator is loaded, walk the neighborhood around the
+            // trace's root entity and run every graph rule against the
+            // entities + edges. Matches become Alerts on the standard
+            // sink — same flow as Sigma single-event matches above.
+            //
+            // v1.12.0 post-audit (B3): the per-trace neighborhood SQL
+            // walk is detached into a fire-and-forget Task. Pre-fix,
+            // a burst of anchor materializations (one `npm install` can
+            // fire dozens) would serialize on the single causalStore
+            // SQLite actor — same actor that handles every event/edge
+            // insertion — and head-of-line-block the main event pump.
+            // Detaching is safe because the graph evaluator's only
+            // downstream consumer is the alert sink, which is itself
+            // an actor with its own queue.
             if let bridge = state.causalGraphBridge {
-                _ = await bridge.process(enrichedEvent)
+                let materialized = await bridge.process(enrichedEvent)
+                if !materialized.isEmpty,
+                   let evaluator = state.graphEvaluator,
+                   let store = state.causalStore {
+                    let traceList = materialized
+                    let anchorEventId = enrichedEvent.id.uuidString
+                    let anchorProcPath = enrichedEvent.process.executable
+                    let anchorProcName = enrichedEvent.process.name
+                    let anchorEvent = enrichedEvent
+                    let alertSink = state.alertSink
+                    Task.detached(priority: .utility) {
+                        for trace in traceList {
+                            guard let rootId = trace.rootEntityId else { continue }
+                            let window = TimeWindow(
+                                start: trace.createdAt.addingTimeInterval(-300),
+                                end: trace.createdAt.addingTimeInterval(300)
+                            )
+                            let subtree: GraphSubtree
+                            do {
+                                subtree = try await store.neighborhood(
+                                    of: rootId,
+                                    depth: 3,
+                                    within: window
+                                )
+                            } catch {
+                                continue
+                            }
+                            let matches = await evaluator.evaluate(
+                                entities: subtree.entities,
+                                edges: subtree.edges
+                            )
+                            for match in matches {
+                                let alert = Alert(
+                                    ruleId: match.ruleId,
+                                    ruleTitle: match.ruleTitle,
+                                    severity: Severity(rawValue: match.severity) ?? .medium,
+                                    eventId: anchorEventId,
+                                    processPath: anchorProcPath,
+                                    processName: anchorProcName,
+                                    description: "Multi-entity graph rule fired against trace \(trace.id). Bindings: \(match.bindings.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))",
+                                    mitreTactics: nil,
+                                    mitreTechniques: match.attack.isEmpty ? nil : match.attack.joined(separator: ",")
+                                )
+                                do {
+                                    _ = try await alertSink.submit(alert: alert, event: anchorEvent)
+                                } catch {
+                                    await StorageErrorTracker.shared.recordAlertError(error)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // v1.12.0 — Bayesian intent posterior update. Each event
+            // is mapped to zero-or-more Evidence values; the engine
+            // accumulates per-process-tree posteriors and we emit an
+            // alert only when the top non-benign goal crosses 0.85
+            // with at least 3 distinct evidence types. Threshold +
+            // evidence floor are deliberately strict — single-event
+            // signals already fire through Sigma rules below.
+            //
+            // v1.12.0 RC3 (Int-HLoc1): the alert ruleTitle and
+            // description strings emitted from this section
+            // (`Intent posterior crossed threshold`, `Bayesian
+            // belief network reports...`, `AI agent install:`,
+            // `Counterfactual:`, `Forecast: likely next tactic...`)
+            // ship as English-only literals — same shape as the
+            // existing pre-v1.12 alert strings throughout EventLoop.
+            // A workspace-wide alert-string localization sweep is
+            // queued for v1.12.x; until then, non-English locale
+            // users see English text in the alert table + OS
+            // notifications. Matches the consistency rationale
+            // already documented at V2IntelligenceWorkspace.swift
+            // for the Supply chain section.
+            let intentEvidence = IntentEvidenceClassifier.extract(enrichedEvent)
+            var latestPosterior: BayesianIntentEngine.Posterior?
+            let treeKey = IntentEvidenceClassifier.treeKey(for: enrichedEvent)
+            if !intentEvidence.isEmpty {
+                for evidence in intentEvidence {
+                    latestPosterior = await state.bayesianIntent.observe(evidence, treeKey: treeKey)
+                }
+                if let posterior = latestPosterior,
+                   posterior.topGoal != .benign,
+                   posterior.topProbability >= state.intentPosteriorThreshold,
+                   posterior.distinctEvidenceCount >= state.intentPosteriorMinDistinctEvidence {
+                    let goalLabel = String(describing: posterior.topGoal)
+                    let alert = Alert(
+                        ruleId: "maccrab.intent.bayesian-posterior",
+                        ruleTitle: "Intent posterior crossed threshold (\(goalLabel))",
+                        severity: posterior.topProbability >= 0.95 ? .high : .medium,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: enrichedEvent.process.executable,
+                        processName: enrichedEvent.process.name,
+                        description: "Bayesian belief network reports p(\(goalLabel))=\(String(format: "%.2f", posterior.topProbability)) for process tree \(treeKey) after \(posterior.evidenceLog.count) observations (\(Set(posterior.evidenceLog).map { $0.rawValue }.sorted().joined(separator: ", ")))",
+                        mitreTactics: nil,
+                        mitreTechniques: nil
+                    )
+                    do {
+                        _ = try await state.alertSink.submit(alert: alert, event: enrichedEvent)
+                    } catch {
+                        await StorageErrorTracker.shared.recordAlertError(error)
+                    }
+                }
+            }
+
+            // v1.12.0 — IntentClassifier verdict stamp. On a package-
+            // manager install exec, build a BehaviorBrief from the
+            // Bayesian engine's per-tree evidence log + the current
+            // event's lineage / command-line, run the pure-local
+            // heuristic classifier, and stamp IntentLabel +
+            // IntentConfidence onto the event. The downstream Sigma
+            // rule `llm_classifier_high_risk_intent.yml` predicates on
+            // these enrichments to fire when the verdict is one of
+            // {credentialHarvest, exfiltration, destructive,
+            // lateralMovement}. LLM-backed verdicts remain available
+            // via the `classify_package_intent` MCP tool — the hot-
+            // path stays heuristic-only so the EventLoop never blocks
+            // on a network LLM call.
+            //
+            // v1.12.0 RC3 fix (B-Int1): when the current event has no
+            // new evidence (e.g., a plain `npm install` exec without
+            // any credential-read in this same observation), we still
+            // need the brief to see the tree's historical evidence
+            // log. Otherwise the install event would build a brief
+            // with empty credentialsRead → heuristic returns .benign
+            // → the rule never fires for the credential-read-then-
+            // install worm shape. Query the engine for the existing
+            // posterior when `latestPosterior` is nil.
+            // v1.12.0 RC6 fix (Perf-R6-N1): only pay the actor-hop
+            // cost to fetch the posterior when this event is a
+            // candidate for IntentBriefBuilder — i.e. a process-exec.
+            // The brief builder rejects non-exec events at line 30-33
+            // anyway, so for ~95% of events (file / network / non-exec
+            // process) the prior code was burning an actor hop only to
+            // discard the result. Gate up-front.
+            let isInstallExecCandidate = enrichedEvent.eventCategory == .process
+                && enrichedEvent.eventAction.caseInsensitiveCompare("exec") == .orderedSame
+            let posteriorForBrief: BayesianIntentEngine.Posterior?
+            if !isInstallExecCandidate {
+                posteriorForBrief = nil
+            } else if let latest = latestPosterior {
+                posteriorForBrief = latest
+            } else {
+                posteriorForBrief = await state.bayesianIntent.posterior(treeKey: treeKey)
+            }
+            if let brief = IntentBriefBuilder.brief(for: enrichedEvent, posterior: posteriorForBrief) {
+                let result = IntentClassifier.heuristicClassifyPublic(brief)
+                enrichedEvent.enrichments["IntentLabel"] = result.label.rawValue
+                enrichedEvent.enrichments["IntentConfidence"] = String(format: "%.2f", result.confidence)
+                // v1.12.0 RC6 (Int-R6-N1) + RC7 fix (Int-R7-N1):
+                // stamp a boolean high-confidence flag so the Sigma
+                // rule can predicate on a numeric-equivalent threshold
+                // via plain string equality.
+                //
+                // RC6 set the threshold at 0.7 — but the heuristic
+                // classifier's max score per single-label-path is 4-5
+                // (credentialHarvest=4, lateralMovement=5), divided by
+                // 8 = confidence 0.5-0.625. So a 0.7 gate was
+                // unreachable by the headline worm scenario (cat creds
+                // → npm install). RC7 lowers the threshold to 0.5,
+                // which the credentialHarvest path can clear exactly,
+                // and which lateralMovement (creds + publish-endpoint)
+                // clears with margin. The heuristic's design treats
+                // 0.5 as the "moderate confidence" tier — same value
+                // as `unknown` fallback's confidence, distinct from
+                // `benign` (0.8). CHANGELOG updated to match.
+                if result.confidence >= 0.5 {
+                    enrichedEvent.enrichments["IntentHighConfidence"] = "true"
+                }
+
+                // v1.12.0 post-audit (M-Int1): when the install was
+                // initiated by an AI coding agent (claude / codex /
+                // cursor / etc.), also run PromptIntentBridge.
+                // It correlates the AI agent's recent context reads
+                // with the package being installed and labels the
+                // install user-initiated / autonomous / slopsquat /
+                // injectionContext / vagueDestructive. The result
+                // becomes a PromptIntentLabel enrichment which a
+                // future rule can predicate on. Runs in a detached
+                // Task because the bridge reads up to 32 context
+                // files — too heavy for the hot path. The stamping
+                // lands on the FOLLOWING events from the same tree
+                // (PromptIntentLabel is a session attribute, not a
+                // per-event verdict).
+                // v1.12.0 RC3 fix (B-Int2): the enrichment key is
+                // "ai_tool" (set by AIProcessTracker at lines 89/97
+                // above) or "agent_tool" (set by TraceCorrelator's
+                // EnrichmentKey.agentTool constant). Pre-fix we read
+                // "AgentTool" which no writer produces, so the
+                // PromptIntentBridge analyzeInstall path was dead
+                // code in production. Accept either key now.
+                let agentToolKey = enrichedEvent.enrichments["ai_tool"]
+                    ?? enrichedEvent.enrichments["agent_tool"]
+                if let agentTool = agentToolKey,
+                   !agentTool.isEmpty {
+                    // v1.12.0 RC4 fix (Int-R4-N3): pre-fix used
+                    // `ancestors.last?.pid` which is launchd (pid 1),
+                    // not the AI tool's pid. AgentLineageService keys
+                    // its snapshot by the AI process's actual pid
+                    // (the `claude` / `cursor` / etc. binary), so the
+                    // bridge would always get nil and short-circuit.
+                    // Match the lookup pattern already used at
+                    // lines 183-186 for the lineage-record path:
+                    // find the first ancestor that AIToolRegistry
+                    // recognizes as an AI tool.
+                    var aiPid = enrichedEvent.process.pid
+                    for ancestor in enrichedEvent.process.ancestors {
+                        if state.aiRegistry.isAITool(executablePath: ancestor.executable) != nil {
+                            aiPid = ancestor.pid
+                            break
+                        }
+                    }
+                    let pkgName = brief.packageName
+                    let bridge = state.promptIntentBridge
+                    let alertSink = state.alertSink
+                    let anchorEvent = enrichedEvent
+                    let aiPidCaptured = aiPid
+                    Task.detached(priority: .utility) {
+                        let verdict = await bridge.analyzeInstall(
+                            aiPid: aiPidCaptured,
+                            packageName: pkgName
+                        )
+                        guard verdict.label != .unknown,
+                              verdict.label != .userInitiated,
+                              verdict.confidence >= 0.5 else { return }
+                        let alert = Alert(
+                            ruleId: "maccrab.prompt-intent.\(verdict.label.rawValue)",
+                            ruleTitle: "AI agent install: \(verdict.label.rawValue) (\(pkgName))",
+                            severity: verdict.label == .slopsquat || verdict.label == .vagueDestructive ? .high : .medium,
+                            eventId: anchorEvent.id.uuidString,
+                            processPath: anchorEvent.process.executable,
+                            processName: anchorEvent.process.name,
+                            description: "PromptIntentBridge classified install of \(pkgName) as \(verdict.label.rawValue) (confidence \(String(format: "%.2f", verdict.confidence))). Reasons: \(verdict.reasons.joined(separator: "; "))",
+                            mitreTactics: nil,
+                            mitreTechniques: nil
+                        )
+                        do {
+                            _ = try await alertSink.submit(alert: alert, event: anchorEvent)
+                        } catch {
+                            await StorageErrorTracker.shared.recordAlertError(error)
+                        }
+                    }
+                }
             }
 
             // === Detection: 3 layers ===
@@ -938,6 +1211,80 @@ enum EventLoop {
             // Layer 2: Temporal sequence rules (Phase 2)
             let sequenceMatches = await state.sequenceEngine.evaluate(enrichedEvent)
             matches.append(contentsOf: sequenceMatches)
+
+            // v1.12.0 post-audit (M-Int2 + M-Int3): attach a
+            // CounterfactualReasoner narrative AND a NextTechniquePredictor
+            // forecast to HIGH/CRITICAL sequence matches. Pre-fix both
+            // actors only fired in unit tests / MCP. This is a single-
+            // step counterfactual built from the firing event because
+            // SequenceEngine doesn't expose its internal `matchedSteps`
+            // chain — a proper N-step counterfactual lives in v1.12.x
+            // once SequenceEngine grows a `partialChain(for:)` accessor.
+            // The single-step result still tells the analyst which
+            // prevention capability could have blocked the impact
+            // moment + the top-3 most-likely next tactics.
+            if !sequenceMatches.isEmpty {
+                for seqMatch in sequenceMatches where seqMatch.severity == .high || seqMatch.severity == .critical {
+                    let matchCopy = seqMatch
+                    let primitive = inferPreventionPrimitive(from: enrichedEvent)
+                    let step = CounterfactualReasoner.ChainStep(
+                        stepId: matchCopy.ruleId,
+                        tactic: .impact,
+                        timestamp: enrichedEvent.timestamp,
+                        primitive: primitive
+                    )
+                    let reasoner = CounterfactualReasoner()
+                    let predictor = NextTechniquePredictor()
+                    let observedTactics = inferTacticsFromMatch(matchCopy)
+                    let anchorEvent = enrichedEvent
+                    let alertSink = state.alertSink
+                    Task.detached(priority: .utility) {
+                        // Counterfactual narrative
+                        let result = await reasoner.analyze(chain: [step])
+                        if result.earliestBlockable != nil {
+                            let alert = Alert(
+                                ruleId: "maccrab.counterfactual.\(matchCopy.ruleId)",
+                                ruleTitle: "Counterfactual: \(matchCopy.ruleName)",
+                                severity: .informational,
+                                eventId: anchorEvent.id.uuidString,
+                                processPath: anchorEvent.process.executable,
+                                processName: anchorEvent.process.name,
+                                description: result.narrative,
+                                mitreTactics: nil,
+                                mitreTechniques: nil
+                            )
+                            do {
+                                _ = try await alertSink.submit(alert: alert, event: anchorEvent)
+                            } catch {
+                                await StorageErrorTracker.shared.recordAlertError(error)
+                            }
+                        }
+                        // Next-tactic forecast
+                        if !observedTactics.isEmpty {
+                            let predictions = await predictor.predictNext(after: observedTactics, topN: 3)
+                            if !predictions.isEmpty {
+                                let summary = predictions.map { "\(String(describing: $0.tactic)) (\(String(format: "%.0f", $0.probability * 100))%)" }.joined(separator: ", ")
+                                let alert = Alert(
+                                    ruleId: "maccrab.predict.next-technique.\(matchCopy.ruleId)",
+                                    ruleTitle: "Forecast: likely next tactic after \(matchCopy.ruleName)",
+                                    severity: .informational,
+                                    eventId: anchorEvent.id.uuidString,
+                                    processPath: anchorEvent.process.executable,
+                                    processName: anchorEvent.process.name,
+                                    description: "Markov-1 prior over MITRE tactics suggests: \(summary). Watch the listed tactics over the next ~10 minutes.",
+                                    mitreTactics: nil,
+                                    mitreTechniques: nil
+                                )
+                                do {
+                                    _ = try await alertSink.submit(alert: alert, event: anchorEvent)
+                                } catch {
+                                    await StorageErrorTracker.shared.recordAlertError(error)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // LLM sequence analysis (non-blocking) — explains temporal attack chains
             if let llm = state.llmService, !sequenceMatches.isEmpty {
@@ -1480,4 +1827,53 @@ enum EventLoop {
 
     // NoiseFilter logic lives in MacCrabCore/Detection/NoiseFilter.swift
     // so the test target can exercise it directly. See FPRegressionTests.
+}
+
+/// v1.12.0 RC3 (Sec-H2): credential-path filter for AgentLineageService
+/// records. The lineage snapshot is persisted to disk and read by the
+/// dashboard / PromptIntentBridge / future MCP tooling — paths that
+/// match credential shapes are dropped at record time so they never
+/// leave the daemon's memory.
+func isCredentialShapedPath(_ path: String) -> Bool {
+    let lower = path.lowercased()
+    return lower.contains("/.aws/credentials")
+        || lower.contains("/.aws/config")
+        // v1.12.0 RC5 (Sec-R5-N7): AWS SSO cache + Azure CLI +
+        // Bitwarden + 1Password CLI paths added.
+        || lower.contains("/.aws/sso/cache/")
+        || lower.contains("/.azure/")
+        || lower.contains("/.bw/data.json")
+        || lower.contains("/.config/op/")
+        // v1.12.0 RC6 (Sec-R6-N4): 1Password desktop (v7 and v8)
+        // group-container vault paths, GnuPG keyrings.
+        || lower.contains("/group containers/2bua8c4s2c.com.agilebits/")
+        || lower.contains("/group containers/2bua8c4s2c.com.1password/")
+        || lower.contains("/.gnupg/")
+        || lower.contains("/.ssh/id_")
+        || lower.contains("/.ssh/authorized_keys")
+        || lower.hasSuffix("/.netrc")
+        || lower.hasSuffix("/.npmrc")
+        || lower.hasSuffix("/.pypirc")
+        || lower.contains("/.docker/config.json")
+        || lower.contains("/.kube/config")
+        || lower.hasSuffix("/.gitconfig")
+        || lower.contains("/.config/gh/hosts.yml")
+        || lower.contains("/.cargo/credentials")
+        || lower.contains("/library/keychains/")
+        // v1.12.0 RC4 fix (Sec-R4-N7): expand browser profile coverage
+        // beyond Chrome + Firefox. Safari uses /Library/Safari/ and
+        // /Library/Containers/com.apple.Safari/; Arc, Brave, Edge,
+        // Vivaldi, Opera all live under /Library/Application Support/.
+        || lower.contains("/library/application support/google/chrome/")
+        || lower.contains("/library/application support/firefox/")
+        || lower.contains("/library/application support/bravesoftware/")
+        || lower.contains("/library/application support/microsoft edge/")
+        || lower.contains("/library/application support/arc/")
+        || lower.contains("/library/application support/vivaldi/")
+        || lower.contains("/library/application support/com.operasoftware.opera/")
+        || lower.contains("/library/safari/")
+        || lower.contains("/library/containers/com.apple.safari/")
+        || lower.hasSuffix("/login data")
+        || lower.hasSuffix("/cookies")
+        || lower.hasSuffix("/cookies.binarycookies")
 }

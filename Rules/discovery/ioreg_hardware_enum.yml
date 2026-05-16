@@ -17,6 +17,9 @@ detection:
     selection:
         Image|endswith: '/ioreg'
     selection_sensitive:
+        # v1.11.2: dropped 'model' (matched every generic ioreg query) and
+        # '-rd1' (the most common output-format flag, used by every wrapper).
+        # Kept high-signal tokens used for VM-detection / fingerprinting.
         CommandLine|contains:
             - 'IOPlatformSerialNumber'
             - 'IOPlatformUUID'
@@ -24,20 +27,65 @@ detection:
             - 'IOUSBHostDevice'
             - 'IOHIDSystem'
             - 'IODisplayConnect'
-            - 'model'
-            - '-rd1'
+            - 'IODeviceTree'
+            - 'manufacturer'
+            - 'VMware'
+            - 'VirtualBox'
+            - 'Parallels'
     filter_system:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
+            - '/usr/sbin/'
     filter_signed:
         SignerType:
             - 'apple'
             - 'appStore'
-    condition: selection and selection_sensitive and not filter_system and not filter_signed
+            - 'devId'
+    filter_platform:
+        PlatformBinary: 'true'
+    filter_system_path:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/System/'
+    # ioreg is used by every hardware-info utility, USB device manager, and
+    # display tool. Filter ancestry from interactive shells / editors / CI so
+    # only unusual lineage fires.
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+    condition: selection and selection_sensitive and not filter_system and not filter_signed and not filter_platform and not filter_system_path and not filter_dev_tools
 falsepositives:
-    - Hardware diagnostic tools
-    - System information utilities
+    - Hardware diagnostic tools (devId-signed)
+    - System information utilities (filter_dev_tools)
 level: low
 # v1.4: lowered from medium. ioreg is used by Apple Hardware Info and every
 # diagnostic tool. Treat as discovery signal only; escalate via campaign context.
+# v1.11.2: dropped overly broad 'model' / '-rd1' tokens; added VM-detection
+# strings (VMware/VirtualBox/Parallels), platform-binary / system-path /
+# dev-tool ancestry filters.

@@ -3,6 +3,1140 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] — 2026-05-16
+
+### Release-week fix wave (RC25 → RC30)
+
+Two pre-ship audit cycles
+(round 9: 6 parallel domains, round 10: 5 parallel domains) surfaced
+a long tail of BLOCKERs/HIGHs/MEDIUMs across security, performance,
+detection FP, integration, release engineering, data safety, secrets,
+resiliency, stability, and UX. ~24 fixes landed across RCs 25–30
+before this tag; the highlights:
+
+- **Daemon cold-start: 114 s → 118 ms (~1000×).** A perf re-audit on
+  the v1.12.0 baseline found seven distinct sources of synchronous
+  main-thread work that the v1.11.1 deferral pass had missed: a
+  `quick_check` on a 7 GB `tracegraph.db` (now skipped via
+  `SchemaMigrator.skipQuickCheck:`), `SelfDefense` SHA-256ing its own
+  binary + rules manifest at init (now lazy, computed in `start()`),
+  `BaselineEngine.load`, `ThreatIntelFeed`, `BundledThreatIntel`,
+  `ESClientMonitor`, and a half-dozen polled monitors (USB / clipboard
+  / browser-extension / rootkit / EDR / TEMPEST). All deferred behind
+  a `Task.detached` after the first heartbeat. `boot_phase` breadcrumbs
+  are now stamped at 14 milestones in `DaemonSetup.swift` so future
+  regressions surface immediately.
+- **In-dashboard Sigma YAML editor.** The Detection workspace now
+  ships a read-only viewer + a TextEditor save flow that pipes the
+  edited YAML through the bundled `compile_rules.py` and writes the
+  resulting JSON to `/Library/Application Support/MacCrab/user_rules/<uuid>.json`.
+  Daemon picks up the change via a `.reload_tick` mtime watcher; no
+  restart needed. Disable / re-enable actions write the same overlay
+  with `enabled=false`. First write fires a single AppleScript admin
+  prompt to create the override directory `root:admin 0775`; subsequent
+  edits don't prompt.
+- **Rule sync correctness (RC18).** `RuleBundleInstaller` was
+  short-circuiting on a same-version string check — every RC between
+  RC11 and RC17 silently failed to deliver fixes because the bundled
+  `.bundle_version` matched the installed one. Now also compares
+  `manifest.json` byte-for-byte before declaring "no sync needed".
+- **AppleScript `do shell script` parser fix (RC12).** The override-
+  directory bootstrap used `find -exec ... \;`, which AppleScript
+  parsed as an escape and returned `-2741`. Replaced with
+  `chmod -R u=rwX,go=rX` (no escapes) so the password prompt actually
+  runs.
+- **Disable-rule UUID lookup (RC30).** `loadBundledCompiledRule(id:)`
+  was looking up `compiled_rules/<uuid>.json`, but build-release.sh
+  bundles JSONs under their *slug* name (only YAMLs were duplicated
+  under both keys). Added a fallback directory scan keyed by each
+  JSON's internal `id` field; one-time ~100 ms hit on first Disable
+  click after launch, then cached.
+- **OpenAI host allowlist bypass (RC27).** The cloud-LLM backend
+  used `hasSuffix("api.openai.com")` for the host check, which let
+  `evilapi.openai.com` through. Replaced with a dot-anchored exact-
+  host Set plus `.openai.azure.com` dot-suffix with a
+  `count > suffix.count` guard. Gemini and Ollama got companion
+  fixes (regex model-name allowlist; explicit nil-host check on
+  plaintext-remote detection).
+- **CampaignStore tamper-check skip (RC27).** RC23's quick_check
+  skip landed for EventStore / AlertStore / SQLiteCausalGraphStore
+  but missed CampaignStore. Caught by the round-10 perf re-pass.
+- **`try!` force-unwraps removed from recovery paths.** EventStore
+  and AlertStore's "DB quarantine + re-open" path used `try!` on
+  the second open — a transient failure between probe and re-open
+  would hard-crash the daemon. Now returns gracefully and logs.
+- **Privacy: webhook + syslog default hostname.** Both stop leaking
+  the machine hostname by default; overrideable via
+  `MACCRAB_WEBHOOK_HOSTNAME` / `MACCRAB_SYSLOG_HOSTNAME` env vars.
+- **MCP `get_alerts` / `get_alert_detail` / `scan_text` payloads**
+  now route through `LLMSanitizer.sanitize()` before returning to
+  the agent, matching the redaction guarantees of the LLM backends.
+- **Pipe-deadlock fix in YAML editor.** The compile subprocess could
+  fill its 64 KB stderr pipe and block before
+  `waitUntilExit()` returned. Now drains in real time via
+  `readabilityHandler` with a 10-second SIGTERM / SIGKILL timeout.
+- **False-positive suppression on 5 task_for_pid / mach_port rules.**
+  `/bin/ls`, `/bin/chmod`, `grep`, Claude Code, and other AI/dev
+  tools were tripping the Mach-port-injection family. Added
+  `filter_text_tools` / `filter_shells` / `filter_apple_paths` /
+  `filter_dev_ai_tools` blocks per rule.
+- **PromptInjectionScanner force-unwrap removed (RC29).**
+  Single-init-context `found!` pattern was logically safe but
+  fragile to future concurrency refactors.
+- **Sigma reference link** added to the YAML editor sheet, pointing
+  at `sigmahq.io/docs/basics/rules.html`.
+
+Two audit rounds, ~24 fixes, opsec scan clean — see below for the
+feature substance shipped earlier in the v1.12.0 cycle.
+
+### Feature substance (cycle-open work, 2026-05-14)
+
+**Supply-chain detection wave + intent posterior**. v1.12.0 ships
+detection coverage for the September 2025 Shai-Hulud worm class and
+the April–May 2026 follow-on incidents (Mini Shai-Hulud, Lightning
+PyPI, TanStack CVE-2026-45321). It also adds an intent-based
+detection layer on top of the rule layer: a Bayesian belief network
+maintains a per-process-tree posterior over attacker goals, and an
+LLM-backed `IntentClassifier` produces a categorical verdict on
+`npm install` / `pip install` exec events. Both are detection-only;
+single-event Sigma rules continue to fire on the same events.
+Wave-5 components (counterfactual reasoning, stylometric maintainer
+drift, honey-prompt deception, prompt-intent bridging) ship today
+behind their respective entry points; some are reachable only via
+MCP for v1.12.0 and will get fuller daemon-side wiring in v1.12.x.
+
+**Schema**: no migrations. EventStore stays at schema v5, alerts.db
+and tracegraph.db unchanged from v1.11.x. Upgrade is non-destructive
+— Sparkle in-place upgrade preserves all history and settings.
+
+### Wave 5 — Innovative-research layer (new Swift actors + 6 rules + 8 MCP tools)
+
+**`IntentClassifier`** (Sources/MacCrabCore/Enrichment/) — LLM-
+driven structured-intent classifier. Takes a `BehaviorBrief`
+(package name + installer lineage + credential reads + network
+egress + content anomaly flags + AI-agent attribution) and returns
+a calibrated `IntentLabel` (benign / credentialHarvest /
+exfiltration / persistence / destructive / reconnaissance /
+lateralMovement / unknown) + confidence + ranked reasons. Routes
+through the existing `LLMService` (Ollama / Claude / OpenAI /
+Mistral / Gemini) with sanitization + caching + circuit breaker.
+Falls back to a deterministic heuristic classifier when no LLM is
+configured — the heuristic alone catches the worm self-propagation
+shape (credentialRead + publish-endpoint egress = lateralMovement
+verdict). Per NDSS 2025 "Mind the Gap", Llama 3.3 70B local hits
+F1 0.77 / GPT-4.1 cloud hits F1 0.99 on this task; our scaffolding
+supports both with the user picking which provider to trust.
+
+**`PromptIntentBridge`** (Sources/MacCrabCore/Enrichment/) —
+correlates an AI agent's behavior with its recently-read context to
+classify installs as `.userInitiated` / `.autonomous` /
+`.slopsquat` / `.vagueDestructive` / `.injectionContext`. Reads
+the existing AgentLineageService snapshot for the AI tool's recent
+`.fileRead` events, builds a context corpus from the actually-read
+files (CLAUDE.md / project README / Cursor rules / etc.), extracts
+package-name tokens, and decides:
+- If the installed package name is **explicitly mentioned** in
+  recent context → `.userInitiated` (low risk).
+- If the agent context mentions a name within
+  Damerau-Levenshtein 2 of the installed name → `.slopsquat`
+  (the Lasso huggingface-cli / Aikido react-codeshift pattern).
+- If the context has none → `.autonomous` (the LLM hallucinated
+  this package; the user didn't ask).
+- If the context contains injection markers ("ignore previous",
+  "act as", etc.) AND the action is destructive → `.injectionContext`.
+- If the prompt was very short relative to the destructive blast
+  radius → `.vagueDestructive`.
+
+No new privacy surface — we never read raw LLM prompts; we read
+the *files the agent read*, which is the same privilege level we
+already use for the AIGuard subsystem.
+
+**`BayesianIntentEngine`** (Sources/MacCrabCore/Enrichment/) —
+4-node belief network maintaining a posterior over
+`Goal ∈ {benign, credentialHarvest, exfiltration, persistence,
+destructive, reconnaissance, lateralMovement}` per process tree.
+Each observed evidence type (credentialRead, registryEgress,
+nonRegistryEgress, launchAgentWrite, shellRcWrite, workflowWrite,
+destructiveCmd, vmDetectionProbe, localeProbe, obfuscatedContent,
+runtimeDrop, configFileTampered) updates the posterior via a
+stationary `LikelihoodTable` shipped inside the binary. Math is
+deliberately minimal — no online learning, no neural net — so the
+actor is cheap, reproducible, and explainable. Initial prior is
+0.95 benign / 0.05 spread across malicious goals; two strong
+matching observations are sufficient to flip the dominant goal.
+EventLoop emits an alert when the top non-benign goal probability
+crosses 0.85 with ≥3 distinct evidence types accumulated.
+
+**`HoneyPromptManager`** (Sources/MacCrabCore/Deception/) —
+Honey-prompt extension of the deception tier. Plants
+`CLAUDE.md.canary`, `~/.claude/skills/maccrab-decoy/SKILL.md`, and
+`~/.cursorrules.canary` files containing instructions to install
+the impossible-to-publish canary package names
+`maccrab-canary-do-not-install`, `maccrab-honey-do-not-fetch`,
+`maccrab-decoy-skill`. Two trigger primitives:
+- **Context-read trip** — any process reading a canary
+  (`canary_skill_or_rules_read.yml`).
+- **Canary-install trip** — any `npm/pip install` of a canary
+  package name (`honeyprompt_canary_package_install.yml`).
+Per Snyk ToxicSkills (early 2026), 36% of public Claude skills
+already contained injection payloads; this puts MacCrab on the
+defending side of that attack surface with zero-FP-by-design
+canaries.
+
+**`NextTechniquePredictor`** (Sources/MacCrabCore/Enrichment/) —
+Inspired by KillChainGraph (arXiv 2508.18230). Given a sequence
+of ATT&CK tactics observed for a process tree, returns the top-N
+most-likely next tactics from a hand-calibrated 14×14 transition
+prior shipped inside the binary. Markov-1 for v1.12.0; longer
+context deferred to v1.13.x once we have a deployable training
+corpus.
+
+**`CounterfactualReasoner`** (Sources/MacCrabCore/Enrichment/) —
+Given a fired sequence rule's partial-match chain, walks back to
+identify the earliest step where an available prevention
+capability (DNSSinkhole, NetworkBlocker, PersistenceGuard,
+SupplyChainGate) could have aborted. Surfaces
+"Blocking X at T-Ns via DNSSinkhole would have aborted this chain"
+copy intended for the dashboard. v1.12.0 ships the actor + tests;
+the dashboard render path is queued for v1.12.x.
+
+**`StylometricFingerprinter`** (Sources/MacCrabCore/Enrichment/)
+— 32-feature stylometric fingerprint for code / commit messages /
+PR descriptions. Three uses:
+- **Maintainer drift detection** — cosine distance against a
+  per-author rolling baseline; the XZ-Utils Jia Tan signal.
+- **LLM-text scoring** — em-dash density + hedge-phrase density +
+  sentence-length-variance, per arXiv 2603.27006 "The Last
+  Fingerprint" (em-dash markers degraded but still useful as a
+  prior).
+- **Urgency-lexicon scoring** — XZ-Utils "Jigar Kumar" /
+  polyfill.io social-engineering text pattern.
+
+### Wave 5 — 6 new YAML rules
+
+- **`ai_safety/honeyprompt_canary_package_install.yml`** (critical)
+  — any pkg-mgr install of a HoneyPromptManager canary name.
+  Zero-FP-by-design.
+- **`ai_safety/canary_skill_or_rules_read.yml`** (critical) —
+  any process reads a `.canary`-suffixed AI-agent context file.
+- **`ai_safety/llm_classifier_high_risk_intent.yml`** (high) —
+  downstream alert that fires when `IntentClassifier` returns
+  credentialHarvest / exfiltration / destructive / lateralMovement
+  with confidence ≥ 0.5. The threshold matches the heuristic's
+  "moderate-confidence" tier (single-label paths cap at 4–5 / 8
+  → confidence 0.5–0.625); the credential-harvest worm shape
+  clears the gate at 0.5.
+- **`defense_evasion/persona_takeover_fingerprint_drift.yml`**
+  (medium) — single git-config fingerprint field flipped in
+  isolation. The XZ-Utils Jia Tan mockingbird shape.
+- **`supply_chain/urgency_lexicon_in_install_lineage_pr.yml`**
+  (medium) — urgency keywords ("merge now", "critical hotfix",
+  "zero day") in install-time fetched README / CHANGELOG content.
+- **`persistence/maintainer_publish_hour_anomaly.yml`** (medium)
+  — pkg publish from non-tty parent; v1.12 heuristic, v1.13.x
+  will compute a real Welford histogram per-maintainer.
+
+### Wave 5 — 8 new MCP tools
+
+`check_typosquat_score`, `scan_package_content`,
+`analyze_package_metadata`, `verify_package_attestation`,
+`classify_package_intent`, `predict_next_technique`,
+`score_text_style`, `get_intent_posterior`. AI agents (Claude
+Code, Cursor, Cline, Continue, Windsurf) can now query MacCrab's
+package-intelligence and intent-classification surface directly,
+including from an LLM in agent-mode reasoning over a suspicious
+package decision.
+
+### Supply-chain detection coverage for the npm / PyPI / Homebrew
+worm class — including "Shai-Hulud" (Sept 2025), "Sha1-Hulud: The
+Second Coming" (Nov 2025), the April 2026 Lightning PyPI compromise,
+and the May 2026 Mini Shai-Hulud Wave 4 (TanStack / CVE-2026-45321).
+Ships in four waves within a single v1.12.0 release:
+
+- **Wave 1** — worm-loop kill-chain wedge (graph rule + sequence rule +
+  9 single-event rules covering the read-cred → enumerate-pkgs →
+  publish loop, Homebrew tap MITM, Bun-from-node_modules, the
+  `~/.claude/settings.json` hook injection, and the dead-man's-switch
+  literal).
+- **Wave 2** — dependency confusion + content anomaly (11 single-event
+  rules: Birsan-class scope confusion, `.npmrc`/`.pypirc` tampering,
+  cross-ecosystem language smuggle, native-binary drop in pure-JS
+  packages, obfuscator-signature detection, leaked-secret-in-tarball,
+  GitHub Actions workflow planting, VS Code `tasks.json` hook
+  injection, and registry OIDC token exchange abuse).
+- **Wave 3** — dead-man's-switch design space (8 single-event rules
+  closing the TanStack token-revocation watchdog, mass-unlink
+  payload, distant-future launchd time-bomb, AppleLanguages locale
+  skip, sysctl/ioreg VM-detection probe, EDR self-protection,
+  staged fetch-then-exec, and openssl-decrypt-in-install-lineage).
+- **Wave 4** — macOS app threat surface (8 single-event rules
+  covering fake Apple bundle in user dir, MAS receipt access by
+  non-sandboxed reader, post-install codesign re-signing, ad-hoc
+  app from user-writable path, Little Snitch / Lulu / Radio Silence
+  prefs tampering, post-install Info.plist mutation, URL-scheme
+  handler collision, and bulk quarantine-xattr strip).
+
+Plus four new Swift enrichment actors — pulled forward from the
+planned v1.13.x roadmap because the user authorised the larger RC
+scope: **`TyposquatDatabase`** (Damerau-Levenshtein + Unicode TR39
+confusable fold, with starter top-50 bundled corpora for npm / PyPI),
+**`PackageContentAnalyzer`** (size / language fingerprint / single-line
+bundle / Mach-O / obfuscator / bundled-runtime detection on an
+on-disk package tree), **`PackageMetadataAnalyzer`** (one registry
+JSON GET per package, scores description / homepage / version history
+/ maintainer signals with 24h cache and injectable fetcher),
+**`AttestationEnricher`** (Sigstore / PEP 740 / OIDC verifier with
+publishing-method-mismatch detection vs. a supplied prior builder).
+
+Plus the **`HoneyfileManager` extension** — five new credential-shaped
+bait types (`.npmrc.bak`, `.pypirc.bak`, `.gitconfig.bak`,
+`.config/gh/hosts.yml.bak`, `.cargo/credentials.toml.bak`) deployed
+at the exact paths the Shai-Hulud worm family scrapes. Wires into
+the existing `Rules/persistence/honeyfile_accessed.yml` decoy-read
+rule automatically via the `IsHoneyfile: 'true'` enrichment.
+
+Detection-only — every new rule emits an alert; no auto-response.
+FPs will be baselined against the developer devloop in RC1/RC2
+before any later wedge wires in containment. AI-agent attribution
+flows through every fire via the existing AIGuard plumbing.
+
+### Detection — 9 new single-event rules
+
+- **`supply_chain/homebrew_tap_mitm_cleartext_http.yml`** (high) —
+  outbound port 80 from a `brew` lineage process. Catches the Koi
+  "Brew Hijack" pattern (May 2026) where ~20 Homebrew Cask formulas
+  used `http://` upstream URLs with `sha256 :no_check`, letting an
+  on-path attacker substitute arbitrary binaries.
+- **`supply_chain/homebrew_formula_no_check_sha.yml`** (medium) —
+  brew loading a formula whose Ruby source contains
+  `sha256 :no_check`. Modern Homebrew formulas pin a hash; a
+  `:no_check` installation is itself the anomaly.
+- **`supply_chain/bun_executes_from_node_modules.yml`** (high) —
+  Bun runtime executing a script from a `node_modules/` tree while
+  descended from npm/pnpm/yarn install. The May 2026 Mini Shai-Hulud
+  Wave 4 dropped Bun specifically to evade Node-based introspection.
+- **`ai_safety/claude_settings_hook_injection_by_non_claude.yml`**
+  (high) — write to `~/.claude/settings.json` /
+  `settings.local.json` / `CLAUDE.md` by anything not the Claude
+  Code CLI. The May 2026 wave weaponised this file to inject
+  SessionStart / PreToolUse hook entries, gaining code execution in
+  the developer's AI agent context on every Claude Code session.
+- **`supply_chain/github_user_repos_post_from_non_git.yml`**
+  (critical) — outbound to `api.github.com` carrying `/user/repos`
+  from a non-git client (anything not `/git`, `/gh`, `/hub`,
+  `/git-credential-osxkeychain`). Catches the Shai-Hulud
+  "dead-drop repo" pattern (the "Shai-Hulud" /
+  "Sha1-Hulud: The Second Coming" / random-18-char public repos).
+- **`supply_chain/npm_publish_self_propagation.yml`** (critical) —
+  `npm publish` (or `oidc/token/exchange`) invoked by a parent that
+  is not an interactive shell or a known CI agent. The defining
+  Shai-Hulud worm signature: the worm calls publish from a
+  postinstall context to republish itself into every package the
+  stolen token can reach.
+- **`supply_chain/pypi_twine_upload_from_non_interactive.yml`**
+  (critical) — `twine upload` (or `python -m twine`) invoked by a
+  non-interactive parent. The PyPI-lane cousin of the npm
+  self-propagation signal; covers the April 2026 Lightning PyPI
+  compromise where a wheel daemon-thread re-published the trojanised
+  package.
+- **`supply_chain/dead_mans_switch_literal_scanner.yml`** (critical)
+  — process command line or written file content containing the
+  literal string
+  "IfYouRevokeThisTokenItWillWipeTheComputerOfTheOwner". That is
+  the GitHub PAT description used by Shai-Hulud 2.0 to coerce
+  victims into not revoking the stolen token; if the worm detects
+  the token is gone, a polling loop fires `rm -rf $HOME`. The
+  literal is diagnostic.
+- **`supply_chain/package_runtime_drop_evasion.yml`** (high) —
+  package-manager descendant (npm/pnpm/yarn/pip/uv/poetry) writing
+  a Bun, Deno, or alternate Python interpreter binary into a
+  user-writable location (`~/.bun/bin`, `~/.deno/bin`, `/tmp`,
+  `/Library/Caches/`). Catches "bring-your-own-runtime" evasion.
+
+### Detection — 11 more single-event rules (Wave 2: dep-confusion / content-anomaly)
+
+**Dependency confusion / namespace collision (3):**
+
+- **`supply_chain/pip_install_with_extra_index_url_to_public_pypi.yml`**
+  (high) — pip invoked with `--extra-index-url` alongside public
+  PyPI, or with both `--index-url` (private) and a `pypi.org/simple`
+  extra. pip's resolver picks highest-version-across-indexes
+  regardless of source (Birsan dependency-confusion primitive,
+  reused in the AWS Lambda 24712-pl campaign (2025) and the
+  alone5511 campaign (May 2026)). PEP 766 "index priority" was
+  ratified Nov 2024 but pip has not shipped it as default by
+  May 2026, so the resolver behavior is still unsafe.
+- **`supply_chain/npmrc_pypirc_modified_by_non_package_manager.yml`**
+  (high) — `.npmrc` / `.pypirc` / `pip.conf` / `.yarnrc*` /
+  `.cargo/config.toml` / `.gem/credentials` written by anything
+  that isn't a recognised package manager, dotfile manager, or
+  editor. Catches registry-redirect attacks (silently swap the
+  upstream index) and credential-theft staging.
+- **`supply_chain/registry_oidc_token_exchange_from_non_interactive.yml`**
+  (critical) — outbound to `registry.npmjs.org/-/npm/v1/oidc/token/
+  exchange/` from a non-interactive, non-CI parent. The Shai-Hulud
+  2.0 "Second Coming" lane that doesn't need a stolen `.npmrc` —
+  the worm exchanges a captured GitHub Actions OIDC token for an
+  npm publish token directly.
+
+**Cross-ecosystem content anomaly (5):**
+
+- **`supply_chain/package_drops_native_binary_in_pure_js_pkg.yml`**
+  (high) — Mach-O / ELF / `.dylib` / `.so` / `.node` written under
+  `node_modules/` during an npm install lineage. Catches the
+  March 2026 axios npm compromise's bundled Mach-O dropper and
+  the "ambar-src" family.
+- **`supply_chain/pip_wheel_drops_javascript_runtime_files.yml`**
+  (critical) — `.js` / `.mjs` written under `site-packages/`
+  during a `pip install` lineage, including the specific Lightning
+  PyPI filenames (`_runtime/router_runtime.js`, `setup_bun.js`,
+  `router_init.js`, `execution.js`, `bun_environment.js`). The
+  defining cross-ecosystem smuggle signature.
+- **`supply_chain/webhook_exfil_url_in_install_content.yml`**
+  (critical) — well-known no-auth exfil URLs (webhook.site,
+  Discord webhooks, Telegram bot API, Pastebin, ngrok,
+  trycloudflare, api.ipify.org, request-bin variants,
+  `filev2.getsession.org`) inside files written during a
+  package-install lineage. Legitimate packages have no reason
+  to embed these.
+- **`supply_chain/package_postinstall_fetches_alt_runtime.yml`**
+  (high) — package-manager-descended process fetching from
+  `bun.sh`, `github.com/oven-sh/bun/releases`, `deno.land`,
+  `nodejs.org/dist`, or `github.com/denoland/deno/releases`.
+  The runtime-drop evasion pattern as it happens at the network
+  layer, complementing the file-event-side
+  `package_runtime_drop_evasion.yml`.
+- **`supply_chain/obfuscator_signature_in_package_payload.yml`**
+  (medium) — obfuscator.io / javascript-obfuscator / PyArmor
+  fingerprints (`__pyarmor__`, `pyarmor_runtime`, the literal
+  `eval('quire'['replace']` greppable Mini Shai-Hulud uses to
+  defeat static `require(` scanners, `var _0x[hex]` / `let _0x` /
+  `const _0x`, webpack signatures) inside installed package
+  files. Medium severity because some legitimate packages
+  distribute minified code; high-confidence when correlated with
+  another rule.
+
+**Editor / CI persistence (3):**
+
+- **`supply_chain/node_modules_contains_leaked_dotfile.yml`** (high)
+  — `.env`, `.npmrc`, `.git/config`, `.aws/credentials`,
+  `.ssh/id_rsa`, `credentials.json` created under `node_modules/`
+  or `site-packages/` during an install. Either accidentally
+  leaked by the maintainer or planted by the attacker for later
+  exfiltration via a separate process (the staged-credential
+  exfil dodge).
+- **`supply_chain/package_install_drops_github_workflow.yml`**
+  (critical) — write to `.github/workflows/*.yml` / `*.yaml` by a
+  package-manager descendant. Catches Shai-Hulud's
+  `shai-hulud-workflow.yml` planting and Mini Shai-Hulud Wave 4's
+  `pull_request_target` command-injection sinks.
+- **`ai_safety/vscode_tasks_json_modified_by_non_vscode.yml`**
+  (high) — `.vscode/tasks.json` / `settings.json` / `launch.json`
+  written by anything that isn't VS Code, Cursor, VSCodium,
+  Windsurf, or a dotfile manager. May 2026 Mini Shai-Hulud Wave 4
+  weaponised this file with `runOn: folderOpen` task injection.
+  Editor-context persistence cousin of
+  `claude_settings_hook_injection_by_non_claude`.
+
+### Detection — sequence rule
+
+- **`sequences/worm_self_propagation_signal.yml`** (critical) —
+  three-step kill chain within a 120-second process-lineage window:
+  (a) package-manager descendant spawns, (b) it reads a developer
+  credential (`.npmrc`, `.pypirc`, `.aws/credentials`, `.ssh/id_*`,
+  GitHub host config, gem / cargo / netrc creds), (c) it makes an
+  outbound connection to a publish / maintainer-enumeration endpoint
+  (`registry.npmjs.org`, `upload.pypi.org`, `api.github.com
+  /user/repos`, OIDC token-exchange paths). Mirrors the graph rule
+  below in the sequence-engine lane so engines that key off
+  `process.lineage` instead of TraceGraph nodes still match.
+
+### Detection — graph rule
+
+- **`Rules/graph/maccrab_worm_self_propagation.json`** (critical) —
+  three-node TraceGraph signature in the same 120-second window:
+  a `process` whose `executable_name` is in a curated package-manager
+  set (npm / pnpm / yarn / pip / uv / poetry / python / bun / deno /
+  gem / cargo / twine / ...), a `file` of kind `credential_file`
+  (resolved by `CredentialFence`), and a `network` node whose
+  `reputation` is not `known_good` or `private_range`. Edges:
+  `proc → cred` (read, ≥ weak_inferred), `proc → net`
+  (connected_to, ≥ weak_inferred). `common_ancestor: proc`,
+  `min_confidence: 0.7`. ATT&CK: T1195.001, T1555, T1567, T1098.
+  **v1.12.0 wiring note**: pre-RC the GraphRuleEvaluator existed
+  but had no daemon-side caller — graph rules fired only in unit
+  tests. The post-audit fix wave wires the evaluator into EventLoop
+  (against every materialized Trace) AND adds the staging step in
+  `scripts/build-release.sh` that copies `Rules/graph/*.json` into
+  the DMG's `compiled_rules/graph/` so the evaluator finds them at
+  daemon start. Both fixes ship in the v1.12.0 tag; if you read
+  earlier RC notes that talk about graph rules being unwired, those
+  refer to pre-audit state.
+
+### Rule-quality audit fixes
+
+- **UUID collision fixed** — the initial Wave 1 sequence rule
+  `worm_self_propagation_signal.yml` was authored with id
+  `e1f2a3b4-0022-...` which already belonged to
+  `vscode_extension_to_credential_theft.yml`. Reassigned to
+  `e1f2a3b4-0040-...` before any compiled output left the dev
+  machine. A new test
+  (`sequenceRuleIdsAreUnique`) walks `Rules/sequences/` on
+  every test run so this class of error fails the build going
+  forward.
+- **`claude_settings_hook_injection_by_non_claude.yml`** — dropped
+  the redundant `/Claude` case variants from the filter. APFS is
+  case-sensitive on the executable basename, so the second variant
+  was unreachable.
+- **`homebrew_formula_no_check_sha.yml`** — dropped `/ruby` from
+  the `Image|endswith` set. Brew formulas are read by the `brew`
+  binary itself, not by a bare `ruby` interpreter, so the second
+  match was dead weight that could only widen FPs.
+- **`npm_publish_self_propagation.yml`** — added a description
+  paragraph documenting the deliberate overlap with the
+  pre-existing `npm_publish_from_ci.yml`. Both rules are kept
+  intentionally because they key off different signals (suspicious
+  CWD/parent vs. absence of interactive/CI parent); a live worm
+  fires both, and that redundancy is the desired property for a
+  critical-severity detection.
+- **Namespace check** — verified the `maccrab` name is currently
+  free on `registry.npmjs.org`, `pypi.org`, and the Homebrew core
+  taps as of 2026-05-14. Recommendation captured in memory:
+  defensively register placeholder packages on npm and PyPI to
+  prevent post-press squat.
+
+### Tests
+
+- **`WormSelfPropagationRuleCompilationTests`** (suite, 5 tests
+  now) — smoke-tests that all 20 v1.12.0 single-event YAML rules
+  + the worm sequence rule compile to JSON predicates, each
+  compiled JSON carries the required top-level fields
+  (`id`, `title`, `level`), the 8 critical-severity rules are
+  tagged as such, and every sequence rule under
+  `Rules/sequences/` has a unique id.
+- **`GraphRuleEvaluatorTests`** — 4 new cases covering the worm
+  graph rule: positive npm fixture, positive Python/.pypirc
+  fixture, negative case where the process is not a package
+  manager (the `executable_name` filter rejects), negative case
+  where the network is `private_range` (the reputation filter
+  rejects). The starter-rules-decode count was bumped from 5 to
+  6 to include the worm rule.
+
+### Detection — 16 more single-event rules (Waves 3 & 4)
+
+**Dead-man's-switch / time-bomb / tripwire (8):**
+
+- **`command_and_control/token_revocation_polling_loop.yml`** (high) —
+  periodic api.github.com `/user` poll with `Authorization: token`
+  from a non-tty parent (the TanStack watchdog itself).
+- **`impact/mass_unlink_from_package_lineage.yml`** (critical) —
+  `rm -rf`, `find -delete`, `dscl -delete /Users/...`, or
+  `mv $HOME /tmp/...` invoked by a package-manager descendant.
+- **`persistence/launchagent_with_distant_future_trigger.yml`**
+  (medium) — LaunchAgent plist with `StartInterval ≥ 3600` /
+  `StartCalendarInterval` and `RunAtLoad: false`. XCSSET /
+  BlueNoroff RustBucket time-bomb pattern.
+- **`discovery/locale_check_from_package_lineage.yml`** (medium) —
+  `defaults read AppleLanguages` / `.GlobalPreferences.plist` read
+  by package-manager descendant (Lazarus / Shai-Hulud CIS-skip).
+- **`discovery/vm_detection_probe_from_package_lineage.yml`** (high)
+  — `sysctl hw.model` / `ioreg -l` / `system_profiler` from package
+  lineage (AMOS, KandyKorn).
+- **`defense_evasion/maccrab_tamper_attempt.yml`** (critical) —
+  non-MacCrab process trying to kill, unload, or delete MacCrab
+  components. EDR-disable canary.
+- **`execution/staged_fetch_then_exec_from_user_writable.yml`**
+  (high) — exec of binary under `/tmp`, `/var/folders`,
+  `~/Library/Caches/` whose lineage includes a fetch from a
+  package install.
+- **`defense_evasion/openssl_decrypt_in_install_lineage.yml`**
+  (high) — `openssl enc -d` from npm / pip lineage (KandyKorn,
+  NX worm multi-stage primitive).
+
+**macOS app threat surface (8):**
+
+- **`defense_evasion/fake_apple_bundle_in_user_dir.yml`** (high) —
+  `.app/Info.plist` declaring `CFBundleIdentifier: com.apple.*`
+  outside `/System/` or `/Applications/`.
+- **`defense_evasion/mas_receipt_access_by_non_sandbox.yml`** (high)
+  — read of `Contents/_MASReceipt/receipt` by a process that is not
+  the owning sandboxed app, not Apple, not StoreKit.
+- **`defense_evasion/binary_resigned_post_installation.yml`** (high)
+  — `codesign` targeting `/Applications/*.app` or
+  `/Library/Application Support/...` from a non-Xcode, non-Sparkle,
+  non-installer parent. Trojanise-an-installed-app primitive.
+- **`execution/adhoc_signed_app_execution_from_user_dir.yml`** (high)
+  — ad-hoc-signed binary executing from `~/Downloads/`,
+  `~/Desktop/`, `/tmp/`, `/Volumes/`. Atomic Stealer / Cthulhu /
+  MacSync signature.
+- **`defense_evasion/network_policy_plist_tampered.yml`** (high) —
+  write to Little Snitch / Lulu / Radio Silence / Murus prefs by
+  non-vendor, non-Apple process.
+- **`defense_evasion/info_plist_modification_post_install.yml`**
+  (medium) — write to `.app/Contents/Info.plist` of an installed
+  bundle by non-Xcode / non-installer / non-Sparkle parent.
+- **`initial_access/url_scheme_handler_collision.yml`** (medium) —
+  `lsregister -f` or `defaults write LSHandlers` binding a
+  well-known scheme (mailto, http, slack, zoommtg, vscode,
+  cursor, git+) to a non-canonical bundle.
+- **`defense_evasion/bulk_quarantine_strip.yml`** (high) — `xattr -cr`
+  or `find ... -exec xattr -d com.apple.quarantine`. The ClickFix
+  pattern for Sequoia-era Gatekeeper bypass.
+
+### Swift actors (new — pulled forward from v1.13.x)
+
+- **`Sources/MacCrabCore/Enrichment/TyposquatDatabase.swift`** —
+  pure-local typosquat / slopsquat scorer. Damerau-Levenshtein
+  with transposition cost 1, Unicode TR39 confusable fold
+  covering high-value Cyrillic / Greek / fullwidth mappings,
+  starter top-50 npm + top-50 PyPI corpora bundled (full
+  top-1000s loadable via the test-friendly initializer).
+- **`Sources/MacCrabCore/Enrichment/PackageContentAnalyzer.swift`**
+  — on-disk package walker. Computes total size, file-extension
+  census, single-line >100KB file count, Mach-O magic-byte
+  detection (32/64-bit LE/BE + FAT universal), obfuscator-marker
+  scan (PyArmor, javascript-obfuscator `_0x`, Mini Shai-Hulud
+  `eval('quire'['replace'])` greppable, webpack), and bundled-
+  runtime detection (Bun / Deno / Node / Python / Ruby / PHP
+  binary 20-200MB by basename + magic). Returns 0-100 score plus
+  per-factor reasons.
+- **`Sources/MacCrabCore/Enrichment/PackageMetadataAnalyzer.swift`**
+  — registry-JSON-driven scorer. One GET per package per 24h
+  (cached). Scores: description length distribution, boilerplate
+  phrase match, homepage host class (free-host vs corporate),
+  repository URL, version-history burst (≥10 in 24h on
+  previously-quiet package), top-version-squat (first publish
+  ≥ 99.x.x), maintainer signals (`@users.noreply.github.com`).
+  Injectable fetcher closure for testability.
+- **`Sources/MacCrabCore/Enrichment/AttestationEnricher.swift`** —
+  Sigstore + PEP 740 + OIDC provenance verifier. Detects
+  publishing-method mismatch when supplied a prior builder
+  identity. Status enum: `.verified` / `.absent` / `.mismatched`
+  / `.fetchFailed`. Also injectable fetcher.
+
+### HoneyfileManager extension
+
+- New `HoneyfileType` cases: `.npmrc`, `.pypirc`, `.gitConfig`,
+  `.githubHosts`, `.cargoCredentials`.
+- Default deploy set extends to plant `.bak`-suffixed canaries
+  at `~/.npmrc.bak`, `~/.pypirc.bak`, `~/.gitconfig.bak`,
+  `~/.config/gh/hosts.yml.bak`, `~/.cargo/credentials.toml.bak`.
+  Content uses the canonical `_authToken=npm_...` /
+  `ghp_...` / `pypi-...` token shapes that Shai-Hulud family
+  scrapes by-glob. Existing
+  `Rules/persistence/honeyfile_accessed.yml` decoy-read rule
+  fires on any read of these paths via the `IsHoneyfile`
+  enrichment — no new rule needed.
+
+### Tests
+
+- **`WormSelfPropagationRuleCompilationTests`** — extended slug
+  list now covers all 36 v1.12.0 single-event rules (Waves 1-4).
+- **`TyposquatDatabaseTests`** (new suite, 8 tests) — Damerau-
+  Levenshtein behaviour, Cyrillic/Greek confusable fold, axios /
+  react / requests typosquat catches, homoglyph attack score 100,
+  exact match not flagged.
+- **`PackageContentAnalyzerTests`** (new suite, 6 tests) — Mach-O
+  magic detection, obfuscator-marker scan, single-line bundle
+  detection, PyPI cross-ecosystem mismatch, clean package
+  scoring, obfuscated bundle scoring.
+- **`PackageMetadataAnalyzerTests`** (new suite, 7 tests) — top-
+  version squat heuristic, homepage host classification, full
+  high-risk npm fixture, clean npm fixture, boilerplate match,
+  PyPI high-risk, fetcher cache.
+- **`AttestationEnricherTests`** (new suite, 6 tests) — npm
+  verified / absent / fetch-failed / builder-mismatched, PyPI
+  verified / absent.
+- **`HoneyfileManagerExtensionTests`** (new suite, 5 tests) —
+  five new HoneyfileType cases defined, default deploy set
+  contains all v1.12.0 bait paths, deploy plants and
+  `isHoneyfile` resolves them, `.npmrc.bak` uses the canonical
+  worm-scrape token format.
+
+### Numbers
+
+- Rules: 463 YAML rules total under `Rules/` — that's 424
+  single-event rules + 39 sequence rules (after Round-3
+  deletions + Round-4 surgical fixes). Plus 6 graph rules
+  under `Rules/graph/*.json`.
+- Tests: 1490 (+87 over v1.11.1's 1404).
+- Test suites: 284 (+18).
+- New Swift LOC: ~3500 across 10 new actors (TyposquatDatabase,
+  PackageContentAnalyzer, PackageMetadataAnalyzer,
+  AttestationEnricher, IntentClassifier, PromptIntentBridge,
+  BayesianIntentEngine, NextTechniquePredictor,
+  CounterfactualReasoner, StylometricFingerprinter) plus
+  HoneyfileManager / HoneyPromptManager extensions and 8 new
+  MCP tools (~700 LOC of tool definitions + handlers).
+
+### Pre-RC1 hardening pass
+
+A five-domain audit (detection-quality, security, performance,
+code-quality, test-quality) caught a number of issues across the
+five-wave drop above. All blocker-class findings closed before
+RC1:
+
+**Security (5 fixes):**
+- **SEC-01 CRITICAL (URL host-injection)** —
+  `PackageMetadataAnalyzer` and `AttestationEnricher` previously
+  used `CharacterSet.urlPathAllowed` for name encoding, which
+  doesn't escape `/`, `:`, `@`, `;`. A package name `evil.com/x`
+  produced an HTTP GET to `evil.com`. Replaced with a new
+  `SafeRegistryURL` helper that regex-validates names against
+  the registry's own rules (npm: `^@?[a-z0-9][a-z0-9._-]{0,213}
+  (/...)?$`; PyPI: `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,213}$`) before
+  URL construction, then uses `URLComponents` so reserved
+  characters get encoded.
+- **SEC-02 HIGH (unrestricted HTTP redirects)** — both registry
+  fetchers used default URLSession redirect-follow, so a 302
+  from `registry.npmjs.org` to `localhost:9000/internal-api`
+  would be followed silently. Replaced with a new
+  `HardenedRegistrySession` factory whose
+  `URLSessionTaskDelegate` validates the redirect host against
+  a 4-entry allow-list (`registry.npmjs.org`, `pypi.org`,
+  `files.pythonhosted.org`, `api.github.com`) and refuses
+  anything else. Also: generic `User-Agent`, no cookies,
+  response-size cap (16 MB).
+- **SEC-03 HIGH (`PackageContentAnalyzer` path traversal)** —
+  `analyze(packagePath:)` previously enumerated any URL, so
+  the MCP `scan_package_content` handler could walk
+  `~/.ssh/`, `/etc/`, or `/Library/Application Support/
+  MacCrab/`. Added an `allowedScopes` parameter on the actor;
+  callers pass `defaultPackageScopes` (`~/node_modules/`,
+  `~/.npm/`, `~/Library/Python/`, `/opt/homebrew/Cellar/`,
+  `/usr/local/Cellar/`, tmpdir). Out-of-scope paths return
+  an empty result with `"path outside allowed scope"`
+  reason. Also bounded: max 50K files, max 8 levels deep,
+  max 2 GB total bytes scanned.
+- **SEC-04 HIGH (`PromptIntentBridge` arbitrary read)** —
+  `defaultFileReader` read any path appearing in agent
+  fileRead events with no scope check. Now scoped to
+  `NSHomeDirectory()` via `SecureFileIO.readBytes(scope:)`.
+- **SEC-05 HIGH (`HoneyfileManager` / `HoneyPromptManager`
+  TOCTOU)** — both used `FileManager.fileExists` + atomic
+  write, a classic race. An attacker who wins a sub-ms race
+  in `~/.aws/` could plant a symlink to `~/.aws/credentials`
+  and have the bait write clobber the real credentials.
+  Replaced with a new `SecureFileIO` helper that uses POSIX
+  `open(2)` with `O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC`
+  for writes (kernel-atomic existence+symlink check) and
+  `O_RDONLY | O_NOFOLLOW` for reads.
+
+**Detection (4 broken-rule rewrites + 3 FP-machine tightenings):**
+- `adhoc_signed_app_execution_from_user_dir.yml` —
+  `CodeSigningFlags|contains: 'ADHOC'` matched a stringified
+  integer not a flag name. Switched to `IsAdhocSigned: 'true'`
+  which RuleEngine actually resolves.
+- `github_user_repos_post_from_non_git.yml` /
+  `registry_oidc_token_exchange_from_non_interactive.yml` /
+  `token_revocation_polling_loop.yml` — used
+  `CommandLine|contains` on `network_connection` events to
+  match HTTP URIs, but the engine populates CommandLine with
+  process argv, not HTTP URIs. Rewrote each as hostname +
+  node-class Image + parent-lineage filter.
+- `llm_classifier_high_risk_intent.yml` declared
+  `logsource.category: maccrab_internal` which RuleEngine
+  cannot produce — rewritten to gate on
+  `process_creation` for package-manager Images carrying the
+  `IntentLabel` enrichment that the daemon-side
+  `IntentClassifier` writes onto install lineage.
+- `maintainer_publish_hour_anomaly.yml` description claimed
+  00:00-05:00 time-of-day matching that the Sigma predicate
+  doesn't implement; renamed + reframed as a
+  drift-detection-input rule.
+- `canary_skill_or_rules_read.yml` — bait was previously
+  planted at `~/CLAUDE.md.canary` (Spotlight-indexed) and
+  `~/.claude/skills/maccrab-decoy/SKILL.md` (Claude Code's
+  own skill discovery path) — both self-tripping FP
+  generators. Relocated all bait under `~/Library/
+  Application Support/MacCrab/decoys/` (not indexed by
+  default). Added `filter_apple_indexers` (mdworker_shared,
+  mds, backupd, etc.) and `filter_backup_sync` (Backblaze,
+  Carbon Copy Cloner, Arq, Dropbox, iCloud) so legitimate
+  indexers don't fire.
+- `pip_wheel_drops_javascript_runtime_files.yml` previously
+  matched any `*.js` / `*.mjs` / `*.cjs` under
+  `site-packages/` — continuous-fire on every Jupyter
+  widget / Plotly / Bokeh wheel. Dropped the broad branch;
+  kept only the specific Mini Shai-Hulud / Lightning IOC
+  filenames.
+- `package_drops_native_binary_in_pure_js_pkg.yml` — added
+  a `filter_legitimate_native_addons` allowlist for
+  bcrypt / sharp / sqlite3 / better-sqlite3 / canvas /
+  esbuild / swc / vips / fsevents / node-gyp-build /
+  keytar / zeromq / sodium-native (the long tail of
+  every modern Node project's native addons). Severity
+  dropped from high to medium.
+
+**`FileContentEnricher` (new) — closes the 10-rule engine gap:**
+
+The pre-RC audit caught that 10 rules use `FileContent|contains`
+selectors but no enricher previously populated the field. The
+new `Sources/MacCrabCore/Enrichment/FileContentEnricher.swift`
+reads the first 64 KB of `close`-write events for a tight
+allowlist of "interesting" file types (`Info.plist`, `CHANGELOG`,
+`README.md`, `.gitconfig`, `*.rb` under `Library/Taps`, plist
+files under `LaunchAgents/`, specific IOC filenames like
+`bun_environment.js`). Uses `SecureFileIO` (O_NOFOLLOW) for the
+read; size pre-flight via `lstat` so giant binaries are skipped.
+Always-on (the allowlist is tight enough that the cost is
+trivial vs the detection value).
+
+Wired into `EventEnricher` alongside the existing honeyfile
+enrichment path; `RuleEngine`'s default `resolveField` already
+falls through to `event.enrichments[path]` so the existing
+`FileContent|contains` predicates now match.
+
+**`HoneyPromptManager` wired into daemon + maccrabctl:**
+
+The audit caught that `HoneyPromptManager.deploy()` was never
+called — bait files were never planted, so the
+canary-package-install / canary-file-read rules could never
+fire. Now wired alongside `HoneyfileManager` in `DaemonSetup`
+under the same `MACCRAB_DECEPTION=1` gate, and exposed via
+`maccrabctl deception deploy / status / remove`. Bait files
+relocated under `~/Library/Application Support/MacCrab/decoys/`
+to avoid self-tripping Claude Code's skill discovery and
+Spotlight indexing.
+
+**Performance:**
+- `PromptIntentBridge.packageNameRegex` is now a
+  `nonisolated static let` instead of being recompiled per
+  call (audit caught the ~1 ms-per-call hit).
+- `PackageContentAnalyzer` walk is bounded (50K files, 8
+  levels deep, 2 GB total) as part of the SEC-03 fix.
+
+**Test additions:**
+
+`HoneyPromptManagerTests` updated to verify the new decoy-
+relocation invariant: no bait under `~/.claude/skills/` or
+at `~/CLAUDE.md.canary`; all under `~/Library/Application
+Support/MacCrab/decoys/`. All 1490 tests in 284 suites pass.
+
+**Deliberately deferred to v1.13.x (documented in memory):**
+- Full daemon-side wiring of `BayesianIntentEngine` +
+  `IntentClassifier` into the rule-fire path (currently
+  reachable only via MCP tools — the v1.12.0 surface is
+  honest about this).
+- `PackageContentAnalyzer` / `PackageMetadataAnalyzer` /
+  `AttestationEnricher` integration into `PackageScanner`
+  for the dashboard's Package Freshness tab (still serves
+  stub data).
+- `StylometricFingerprinter` single-pass optimization
+  (current implementation is correct but allocates
+  ~5 MB transient per 100 KB input — low daily call rate
+  makes it non-blocking).
+- Full top-1000 npm + PyPI typosquat corpora as bundled
+  JSON resources (currently ships starter top-50;
+  initializer accepts explicit corpora).
+
+### Pre-RC1 rule-quality audit (round 2)
+
+A methodology-driven 470-rule audit using a 10-question
+rubric (synthesised from SigmaHQ spec + Palantir ADS +
+Florian Roth + SpecterOps + Chuvakin alert-fatigue
+research) caught additional surgical issues missed by the
+first audit pass. Fixes:
+
+**Rule-corpus fixes:**
+- `sequences/rosetta_download_execute_c2.yml` missed
+  `attack.t1027` (Obfuscated Files) + `attack.t1059.004`
+  (Unix Shell) sub-technique tags despite covering both
+  techniques. Added.
+- **10 rules demoted from `status: stable` to
+  `status: test`** — they had recent dates (2026-04 /
+  2026-05) inconsistent with the "battle-tested"
+  semantics the Sigma spec attaches to "stable". The
+  rules are correct, but the status was over-claimed.
+  Affected: `ai_safety/ai_tool_spawns_shell`,
+  `ai_safety/ai_tool_reads_env_file`,
+  `ai_safety/agent_traceparent_credential_access`,
+  `ai_safety/mcp_server_suspicious_command`,
+  `ai_safety/ai_tool_prompt_injection`,
+  `ai_safety/mcp_server_tool_poisoning`,
+  `ai_safety/ai_tool_modifies_shell_profile`,
+  `ai_safety/ai_tool_writes_persistence`,
+  `ai_safety/ai_tool_downloads_script`,
+  `collection/usb_mass_storage_connected`.
+- **Graph rules: caught unwired by Round-2 audit, fixed
+  in the same release.** The audit caught that the 6
+  graph rules in `Rules/graph/` (including
+  `maccrab_worm_self_propagation`) compiled and decoded in
+  tests but had no production caller. The post-audit fix
+  wave (see "v1.12.0 wiring note" in the Wave-1 graph-
+  rule listing above) wires `GraphRuleEvaluator` into
+  `EventLoop` against every materialized Trace AND adds
+  the staging step in `scripts/build-release.sh` that
+  copies `Rules/graph/*.json` into the DMG. Both fixes
+  ship in the v1.12.0 tag. The earlier audit-deferral
+  text said graph rules would land in v1.13.x — that
+  text is stale; the deferral was closed in the same
+  release.
+
+**Full 470-rule rubric audit (Round 3):**
+
+Seven parallel auditors applied a 10-question rubric (Q1 goal
+clarity / Q2 logsource correctness / Q3 capability abstraction /
+Q4 selector specificity / Q5 condition correctness / Q6 FP
+discipline / Q7 severity calibration / Q8 ATT&CK tag discipline /
+Q9 actionability / Q10 validation evidence) to every YAML rule
+across the 19 tactic directories. Distribution across the corpus:
+
+- **KEEP (score ≥18/20)**: ~200 rules. Solid as shipped.
+- **FIX (14-17/20)**: ~200 rules. One identified weakness each
+  — most commonly: missing test fixture (Q10), generic FP
+  scenarios (Q6), or filter list incompleteness on dev-tool
+  parents (Q4). These do not block RC1; queued for v1.13.x.
+- **QUARANTINE (9-13/20)**: ~60 rules. Already at `status:
+  experimental` or being demoted there. Detection is loose, but
+  the threat model is right; rewrites pending.
+- **REWRITE / DELETE (≤8/20)**: 7 rules. Surgical action below.
+
+Per-tactic averages: **17.4/20** for impact/privilege_escalation
+(strongest), **15.8/20** for discovery (weakest — daily admin
+commands like `ps`, `lsof`, `defaults read` are over-rated).
+
+**Surgical Round-3 fixes (Tier 1: structural):**
+
+- **4 rules DELETED** — broken-by-construction, unsalvageable:
+  - `collection/clipboard_sensitive_data.yml` —
+    `process_creation` logsource can't inspect clipboard
+    content; rule never fires.
+  - `collection/usb_hid_keyboard_emulation.yml` — matches the
+    string `IOHIDDevice` in CommandLine; fires on every USB
+    keyboard.
+  - `tcc/multiple_tcc_grants_rapid.yml` — title claims "rapid"
+    but Sigma has no temporal evaluator; rule fires on any
+    single grant.
+  - `defense_evasion/endpoint_security_slot_exhaustion.yml`
+    — text-matches `IOServiceOpen` / `es_new_client` in
+    CommandLine; the strings appear in source code and docs,
+    not actual API events.
+
+**Surgical Round-3 fixes (Tier 2: severity calibration):**
+
+- **7 rules dropped one severity tier** because their own FP
+  sections admit dev / admin overlap incompatible with the
+  declared severity (per the rubric's <1/quarter critical /
+  <1/month high / <1/week medium / <1/day low table):
+  - `credential_access/password_manager_db.yml`:
+    critical → high
+  - `credential_access/messages_database_access.yml`:
+    critical → high
+  - `supply_chain/npm_publish_from_ci.yml`: critical → high
+  - `credential_access/token_files_accessed.yml`:
+    high → medium
+  - `credential_access/ssh_key_file_read.yml`:
+    high → medium (git operations legitimately read
+    `~/.ssh/`)
+  - `execution/curl_wget_download_execute.yml`:
+    high → medium (`curl | bash` is daily for Homebrew,
+    Rustup, NVM)
+  - `discovery/mdm_enrollment_check.yml`: medium → low
+    (`profiles status` is daily IT admin work)
+
+The audit's broader **~60 FIX-tier and ~60 QUARANTINE-tier**
+findings are tracked but not all applied in this RC. They
+fall into three recurring patterns the v1.13.x cycle will
+address systematically:
+
+1. **Dev-tool parent allowlist** — many discovery + execution
+   rules need a global "package-manager descendant" filter
+   to skip Homebrew / npm / pip / yarn child processes. Add
+   once, apply broadly.
+2. **Network-event HTTP-URI matching** — multiple rules try
+   to match HTTP URIs in `CommandLine` on `network_connection`
+   logsources; that field doesn't carry HTTP URIs. v1.12.0
+   fixed 3 such rules; v1.13.x audit found 2 more
+   (`dns_over_https_manual.yml`, `tor_proxy_connection.yml`
+   marginal) — fix in next pass.
+3. **Single-event detection of inherently-temporal threats**
+   — `auth_brute_force.yml` title says "brute force" but
+   fires on single commands; `mass_ssh_from_single_process.yml`
+   claims "mass" but is single-event. These need either
+   sequence-engine implementation or honest title rewrites.
+
+Final v1.12.0 corpus: **463 YAML rules total** — 424 single-
+event + 39 sequence. Plus 6 graph rules. Tests still pass:
+**1490 / 1490 green across 284 suites**.
+
+**Round 4 — surgical fix pass on every QUARANTINE / FIX-tier
+finding (~80 rules touched):**
+
+After the Round-3 audit identified 70+ rules needing surgical
+work, a follow-up pass attempted to repair every one (with
+deletion only as last resort). Eight parallel fix agents
+worked across the corpus by tactic, applying the rubric's
+prescribed remedies: tighter selectors, dev-tool parent
+filters, severity calibration, title/description alignment,
+sub-technique tagging.
+
+**Net rule-corpus changes this round:**
+- ~80 rules **TIGHTENED** with stronger filters / context
+- **3 rules DELETED** (all because a superior implementation
+  of the same detection already shipped):
+  - `defense_evasion/code_sign_adhoc.yml` — fired on every
+    Xcode build / Swift build / `make dev`. The proper
+    detection (executing ad-hoc-signed binary from
+    user-writable path) is already implemented as
+    `execution/adhoc_signed_app_execution_from_user_dir.yml`
+    via the engine's `IsAdhocSigned: 'true'` selector.
+  - `defense_evasion/rogue_mdm_profile.yml` — duplicate of
+    `mdm_profile_installed_unexpected.yml` which has the
+    richer MDM-agent allowlist (Jamf, Mosyle, Kandji,
+    Hexnode, Munki, Addigy, FileWave, SimpleMDM,
+    mdmclient).
+  - `persistence/at_job_created.yml` — duplicate of
+    `at_job_creation.yml` (which was hardened in this
+    round and promoted to severity high since modern macOS
+    effectively never invokes `at(1)`).
+- **2 rules DEPRECATED** (status: deprecated; kept as stubs
+  preserving rule ids for legacy suppressions):
+  - `exfiltration/airdrop_file_transfer.yml` — AirDrop
+    invocation happens through NSSharingService XPC, never
+    via CLI. `collection/airdrop_file_staging.yml` covers
+    the actual file-event signal.
+  - `privilege_escalation/sandbox_escape_indicators.yml` —
+    detected API call NAMES in CommandLine
+    (`mach_port_allocate`, `IOServiceOpen`) but those
+    strings only appear in compiled binary segments, never
+    in argv. v1.13.x ES-based sandbox-violation detection
+    will replace it.
+
+**Common patterns established across the fix pass:**
+
+1. **Dev-tool ancestry filter** — the dominant FP source in
+   discovery + execution + persistence rules. Added a
+   shared filter pattern across ~25 rules covering shells
+   (bash/zsh/sh/fish/dash), terminals (Terminal /
+   iTerm2 / Alacritty / kitty / WarpTerminal / Ghostty /
+   Hyper / tmux / screen / zellij), editors (Cursor / Code
+   / VS Code / nvim / vim / emacs / JetBrains), runtimes
+   (node / ruby / python / python3), package managers
+   (brew / npm / yarn / pnpm / pip / pip3 / uv / poetry /
+   bun / deno / cargo / rustup), CI runners (runner /
+   buildkite-agent / circleci / Runner.Listener /
+   gitlab-runner), env managers (asdf / mise / nvm / pyenv
+   / rbenv / direnv), and dotfile managers (chezmoi /
+   stow / yadm / dotbot).
+
+2. **PlatformBinary > SignerType** — switched the Apple-
+   filter idiom in ~10 rules. `SignerType` returns nil for
+   short-lived processes (launchctl, system_profiler);
+   `PlatformBinary` comes from the kernel and is reliable.
+
+3. **High-signal-token discipline** — multiple
+   over-broad-selector rules tightened. Examples:
+   `defaults_read_sensitive` no longer matches
+   `com.apple.dock` / `com.apple.finder` / Spotlight
+   queries; `mdfind_spotlight_recon` no longer matches
+   bare `password` / `ssh` / `wallet` which collide with
+   product names; `ioreg_hardware_enum` no longer matches
+   bare `model` or `-rd1` (the most common output flag).
+
+4. **Title/body alignment** — multiple rules with
+   misleading titles were renamed to match what they
+   actually detect:
+   - `mass_ssh_from_single_process.yml` → "Suspicious
+     SSH from Script-like or Non-Interactive Parent"
+     (Sigma single-event rules can't detect "mass");
+   - `auth_brute_force.yml` → "Sudo Stdin Password or
+     Keychain Unlock by Non-Apple Process";
+   - `developer_credential_bulk_harvest.yml` →
+     "Developer Credential File Read by Untrusted
+     Process";
+   - `system_enumeration_burst.yml` description now
+     explicitly states burst-style detection belongs in
+     the sequence engine, not this rule;
+   - `kernel_exploit_crash_indicator.yml` →
+     "Crash Reporter Invoked Against Kernel or
+     Privileged Subsystem (Precursor)";
+   - `xpc_service_enumeration.yml` → "Privileged XPC
+     Service Enumeration (Discovery Precursor)";
+   - `browser_extension_suspicious.yml` → "Browser
+     Extension Manifest or Package Modified Outside
+     Browser Process".
+
+5. **Severity recalibration** — ~15 rules dropped one tier
+   per the rubric's severity table (critical <1/quarter,
+   high <1/month, medium <1/week, low <1/day). Examples:
+   `csrutil_status_check`: low → informational;
+   `file_flag_hidden`: medium → low; `process_suspension`:
+   medium → low; `osascript_from_non_apple`: medium → low;
+   `shell_spawned_by_browser`: medium → low;
+   `dmg_mounted_from_suspicious_location`: medium → low;
+   `xpc_service_enumeration`: medium → low;
+   `ai_tool_prompt_injection`: high → low;
+   `ai_tool_spawns_shell`: low → informational.
+
+6. **Allowlist taxonomy** — cross-app FP-suppression
+   classes that recur across rules:
+   - `filter_conferencing` (Zoom, Teams, Slack, Webex,
+     Discord, browsers — Q audio/video/screencap context)
+   - `filter_password_managers` (1Password, Bitwarden,
+     Dashlane, NordPass, KeePassXC, RoboForm, LastPass,
+     ProtonPass — credential-store reads)
+   - `filter_backup_sync` (Backblaze, Carbon Copy
+     Cloner, SuperDuper!, Arq, Time Machine, Migration
+     Assistant — sensitive-file reads)
+   - `filter_sync_clients` (Dropbox, iCloud Drive,
+     OneDrive, Google Drive, Box, iCloudPhotos)
+   - `filter_secret_scanners` (gitleaks, trufflehog,
+     detect-secrets, ggshield, talisman, whispers — for
+     `find -name "*.pem"`-style queries)
+   - `filter_mdm` (Jamf, Mosyle, Kandji, Hexnode,
+     Addigy, Munki, FileWave, ManagedClient)
+
+**Validation:** all 463 rules compile cleanly (`make
+compile-rules` returns OK on every rule). The full Swift
+test suite (1490 tests in 284 suites) still passes green
+with the new rule corpus.
+
+**`MACCRAB_DEV_MODE=1` env-var gate (new):**
+
+Per the audit, `CampaignDetector` + `BehaviorScoring`
+thresholds were calibrated for production attacker
+signals, and the v1.4.1 / v1.4.2 / v1.6.4 CHANGELOG
+entries documented reactive fixes for developer-machine
+false positives. The new gate is a formal opt-in:
+
+- `CampaignDetector.minTacticsForKillChain` lifts from
+  4 to 5 when set. A developer running CI tests, build
+  pipelines, or `make test-campaign` touches 4 tactics
+  in 10 minutes routinely; 5 is closer to a real attack
+  signature.
+- `CampaignDetector.campaignDedupWindow` lifts from
+  600 s to 1200 s — iterative test runs of similar
+  tactic patterns no longer generate repeated alerts.
+- `BehaviorScoring` halves the contribution of
+  `ai_tool_*` indicators when set. Rationale: Claude
+  Code / Cursor / Cline / Continue / Windsurf legitimately
+  spawn shells, run sudo, install packages, and modify
+  shell rc files all day on a developer's machine. Full
+  weights walk the score past the 10/20 alert/critical
+  thresholds in normal operation. Halved weights still
+  catch genuinely adversarial AI-agent behavior
+  (cumulative 2-3 hits) but don't fire on the operator's
+  everyday agent use.
+
+Set in the daemon's launchd plist or the shell where
+`maccrabd` is launched. Off by default (production
+defaults preserved); developers running MacCrab on their
+own workstation should turn it on.
+
+### Scope deliberately *not* in this release
+
+- No auto-response. Every new rule fires an alert; freezing
+  `.npmrc` / `.pypirc`, killing descendants, or sinkholing the
+  registry are explicit non-goals for v1.12.0 so the FP rate
+  can be measured against real devloops first.
+- No tarball pre-flight scan, no Sigstore / SLSA / PEP 740
+  attestation verification, no Levenshtein-based slopsquat DB —
+  those are the next wedges, planned for v1.13.x as the
+  `PackageContentAnalyzer`, `AttestationEnricher`, and
+  `TyposquatDatabase` actors respectively.
+- No fleet-wide IOC broadcast — also a later wedge.
+
 ## [1.11.1] — 2026-05-13
 
 First-launch beachball hotfix. Three things ran on the main thread

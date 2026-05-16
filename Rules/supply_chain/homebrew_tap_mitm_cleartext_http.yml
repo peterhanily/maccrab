@@ -1,0 +1,40 @@
+title: Homebrew Process Fetches Over Cleartext HTTP (Tap MITM)
+id: d1a2b3c4-0302-4000-a000-000000000020
+status: experimental
+description: >
+    Detects a brew install / curl / wget process descending from brew that
+    fetches over cleartext HTTP (port 80) instead of HTTPS. The Koi Brew
+    Hijack research (May 2026) documented ~20 Homebrew Cask formulas that
+    used http:// upstream URLs with sha256 :no_check, allowing an
+    on-path attacker to substitute a malicious binary. Legitimate brew
+    installs in 2026 should be exclusively HTTPS; cleartext fetches by
+    brew lineage are high-signal.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://www.koi.ai/blog/brew-hijack-serving-malware
+    - https://attack.mitre.org/techniques/T1195/002/
+    - https://attack.mitre.org/techniques/T1557/
+tags:
+    - attack.initial_access
+    - attack.t1195.002
+    - attack.t1557
+    - attack.command_and_control
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection_brew_lineage:
+        ParentImage|endswith:
+            - '/brew'
+            - '/curl'
+            - '/wget'
+        GrandparentImage|endswith:
+            - '/brew'
+    selection_cleartext:
+        DestinationPort: 80
+    condition: selection_brew_lineage and selection_cleartext
+falsepositives:
+    - Legacy formulas with intentional HTTP-only upstreams (rare in modern Homebrew); verify the tap and formula before assuming compromise
+    - Internal/self-hosted Homebrew mirrors on private networks (DestinationIsPrivate=true filters these via downstream enrichment)
+level: high

@@ -1,11 +1,19 @@
-title: osascript Loading Script from Network or Temp Path
+title: osascript Loading Script from Mounted Volume or Network URL
 id: d1a2b3c4-0206-4000-a000-000000000206
 status: experimental
-description: Detects osascript executing scripts loaded from network volumes, temp directories, or other suspicious locations. This may indicate remote script loading for payload execution.
+description: >
+    Detects osascript loading a script file (`.scpt`, `.applescript`,
+    `.js`) from a mounted external/removable volume (`/Volumes/`) or
+    a remote URL (`smb://`, `afp://`, `http(s)://`). DMG-resident
+    AppleScript loaders are a known macOS social-engineering vector
+    (fake installer DMG mounts, then a "double-click to verify" .scpt
+    runs the real payload). Excludes Apple-signed deployment tooling
+    and /tmp-only locations (covered by other rules).
 author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1059/002/
+    - https://www.sentinelone.com/labs/macos-malware-2023-a-deep-dive-into-emerging-trends-and-evolving-techniques/
 tags:
     - attack.execution
     - attack.t1059.002
@@ -15,22 +23,35 @@ logsource:
 detection:
     selection:
         Image|endswith: '/osascript'
-    selection_network_path:
+    selection_external_source:
         CommandLine|contains:
             - '/Volumes/'
-            - '/tmp/'
-            - '/private/tmp/'
-            - '/var/tmp/'
-            - '/var/folders/'
             - 'smb://'
             - 'afp://'
+            - 'http://'
+            - 'https://'
             - '/net/'
+    selection_script_file:
+        CommandLine|contains:
+            - '.scpt'
+            - '.applescript'
+            - '.js'
+            - '.jxa'
     filter_apple:
+        PlatformBinary: 'true'
+    filter_apple_parent:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection and selection_network_path and not filter_apple
+    filter_app_bundle_volume:
+        # /Volumes/AppName/AppName.app/... is the normal mount layout
+        # for first-launch from a DMG; rule should only fire on loose
+        # .scpt files at the volume root, not bundled scripts inside
+        # the .app being installed.
+        CommandLine|contains:
+            - '.app/Contents/'
+    condition: selection and selection_external_source and selection_script_file and not filter_apple and not filter_apple_parent and not filter_app_bundle_volume
 falsepositives:
-    - Network-based deployment scripts
-    - Legitimate Automator workflows on shared volumes
+    - MDM/Jamf deployment scripts loading from a shared volume — filter on signed parent or extend `filter_apple_parent`
+    - Legitimate installers that ship a verification script at the DMG root (rare; review first)
 level: high

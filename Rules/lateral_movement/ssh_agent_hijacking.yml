@@ -2,13 +2,16 @@ title: SSH Agent Socket Access by Unexpected Process
 id: a1b2c3d4-1002-4000-b000-000000001002
 status: experimental
 description: |
-  Detects non-system processes accessing the SSH_AUTH_SOCK socket, which grants
-  the ability to use all identities loaded into the SSH agent without knowing
-  their passphrases. Attackers with access to the SSH agent socket can pivot to
-  any host the victim can SSH to, achieving silent lateral movement with no
-  additional credentials.
+  Detects non-system, non-development processes accessing the SSH_AUTH_SOCK
+  socket. Whoever can reach that socket can use every identity loaded in the
+  SSH agent without knowing their passphrases, enabling silent lateral
+  movement to any host the victim can SSH to. SSH_AUTH_SOCK is referenced by
+  many legitimate tools (Docker for build secrets, Vagrant, tmux/screen
+  session restoration, Code/Cursor remote-SSH extensions), so this rule
+  filters those before firing.
 author: MacCrab Community
 date: 2026/04/08
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1563/001/
     - https://attack.mitre.org/techniques/T1021/004/
@@ -29,6 +32,8 @@ detection:
         SignerType:
             - 'apple'
             - 'appStore'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
     filter_ssh:
         Image|endswith:
             - '/ssh'
@@ -36,8 +41,40 @@ detection:
             - '/ssh-add'
             - '/scp'
             - '/sftp'
-    condition: selection and not filter_apple and not filter_ssh
+            - '/git'
+    filter_dev_tools:
+        # Common legitimate consumers of SSH_AUTH_SOCK: container/VM tooling,
+        # multiplexers, and IDE remote-shell features.
+        Image|endswith:
+            - '/docker'
+            - '/dockerd'
+            - '/com.docker.backend'
+            - '/com.docker.cli'
+            - '/vagrant'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+            - '/Xcode'
+            - '/orbctl'
+            - '/podman'
+            - '/limactl'
+    filter_dev_parents:
+        ParentImage|endswith:
+            - '/docker'
+            - '/dockerd'
+            - '/com.docker.backend'
+            - '/vagrant'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+            - '/Xcode'
+    condition: selection and not filter_apple and not filter_apple_parent and not filter_ssh and not filter_dev_tools and not filter_dev_parents
 falsepositives:
-    - Development environments forwarding SSH agent (e.g., Docker, Vagrant)
+    - Development environments forwarding SSH agent that aren't covered by the filter list above
     - Ansible, Fabric, Capistrano and other deployment tools
+    - 1Password CLI / Bitwarden SSH agent bridges
 level: medium

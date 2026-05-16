@@ -1,13 +1,16 @@
-title: At Job Created for Scheduled Execution
+title: At Job Scheduled (Legacy macOS Scheduler)
 id: d1a2b3c4-0440-4000-b000-000000000440
 status: experimental
 description: >
-    Detects creation of at(1) jobs which schedule commands for one-time
-    future execution. While less common than cron or launchd, the at
-    scheduler can be abused as an alternative persistence mechanism that
-    may evade detection focused on more common scheduling methods.
+    Detects use of the at(1) scheduler to queue one-time future command
+    execution. Modern macOS very rarely uses at — atrun is disabled by
+    default on recent releases and most automation uses launchd. Attackers
+    sometimes prefer at(1) precisely because monitoring tools focus on
+    cron/launchd. This rule excludes status queries (-l, atq) and
+    Apple-signed system tooling.
 author: MacCrab Community
 date: 2026/04/05
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1053/002/
 tags:
@@ -22,15 +25,19 @@ detection:
         Image|endswith:
             - '/at'
             - '/batch'
-            - '/atq'
-    filter_list:
+    filter_list_queries:
         CommandLine|contains:
-            - 'atq'
-            - '-l'
-    filter_apple:
-        SignerType: 'apple'
-    condition: selection_at and not filter_list and not filter_apple
+            - ' -l'
+            - 'atq '
+            - '/atq'
+            - ' -c '
+    filter_apple_parent:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    condition: selection_at and not filter_list_queries and not filter_apple_parent
 falsepositives:
-    - System administrators scheduling one-time maintenance tasks
-    - Backup scripts using at for delayed execution
-level: medium
+    - Administrators manually scheduling one-time maintenance tasks
+    - Legacy backup scripts using at for delayed execution
+level: high

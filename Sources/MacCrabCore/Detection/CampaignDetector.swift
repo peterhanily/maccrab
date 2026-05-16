@@ -143,22 +143,43 @@ public actor CampaignDetector {
         // a stronger signal while still catching real multi-stage
         // attacks, which typically go discovery → credential_access →
         // persistence → exfiltration (four tactics, by design).
-        minTacticsForKillChain: Int = 4,
+        // v1.12.0: `MACCRAB_DEV_MODE=1` raises this to 5 — on developer
+        // machines running `make test-campaign`, lots of legitimate
+        // dev activity touches 4 tactics in 10 min. 5 catches real
+        // attacks while leaving room for dev workflows.
+        minTacticsForKillChain: Int? = nil,
         // v1.6.22: 50_000 → 5_000. Each AlertSummary ~2 KB (paths, tactic
         // sets, timestamps); the old cap allowed ~100 MB resident. Kill-chain
         // detection operates on the recent window (`campaignWindow`, default
         // 10 min) — beyond that the alerts are evicted by time anyway. The
         // larger cap was buying nothing for detection and a lot for memory.
         maxRecentAlerts: Int = 5_000,
-        campaignDedupWindow: TimeInterval = 600
+        campaignDedupWindow: TimeInterval? = nil
     ) {
+        // v1.12.0 post-audit (M-Sec2): MACCRAB_DEV_MODE is honored only
+        // on DEBUG builds. Release-build daemons ignore the env var
+        // so a root attacker can't lower kill-chain thresholds via
+        // launchd plist injection.
+        #if DEBUG
+        let devMode = Foundation.ProcessInfo.processInfo.environment["MACCRAB_DEV_MODE"] == "1"
+        #else
+        let devMode = false
+        #endif
         self.campaignWindow = campaignWindow
         self.stormThreshold = stormThreshold
         self.stormCriticalThreshold = stormCriticalThreshold
         self.stormWindow = stormWindow
-        self.minTacticsForKillChain = minTacticsForKillChain
+        // v1.12.0 dev-mode gate — when MACCRAB_DEV_MODE=1, raise the
+        // kill-chain tactic floor from 4 to 5. The audit observed that
+        // developer machines running CI tests, build pipelines, and
+        // package-install lineages touch 4 tactics regularly; 5 is
+        // closer to a real attack signature.
+        self.minTacticsForKillChain = minTacticsForKillChain ?? (devMode ? 5 : 4)
         self.maxRecentAlerts = maxRecentAlerts
-        self.campaignDedupWindow = campaignDedupWindow
+        // v1.12.0 dev-mode gate — wider dedup window (1200 s = 20 min)
+        // when MACCRAB_DEV_MODE=1, so iterative test runs of similar
+        // tactic patterns don't generate repeated campaign alerts.
+        self.campaignDedupWindow = campaignDedupWindow ?? (devMode ? 1200 : 600)
     }
 
     // MARK: - Public API

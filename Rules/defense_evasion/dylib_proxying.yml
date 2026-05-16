@@ -1,15 +1,22 @@
-title: Potential Dylib Proxying via LC_REEXPORT
+title: install_name_tool Modifying Dylib From User-Writable Path
 id: d1a2b3c4-0438-4000-a000-000000000438
 status: experimental
 description: >
-    Detects use of install_name_tool to modify a dylib's load commands,
-    which can be used for dylib proxying attacks. The attacker creates a
-    malicious dylib that re-exports the original library while injecting
-    additional code, then replaces the original on disk.
+    Detects `install_name_tool -reexport_library` (or `-change`/`-id`)
+    being run against a target under a user-writable path, which is
+    the build step of a dylib proxying attack: the attacker creates a
+    malicious dylib that re-exports the original library and patches
+    it onto disk in place of the genuine one. install_name_tool is a
+    routine Xcode/CMake build artefact, so the rule is narrowed to
+    non-Apple, non-Xcode parents and downgraded to low. Pair with
+    `dylib_hijack_writable_path.yml` (file-event) for stronger
+    signal: build-then-stage in user paths.
 author: MacCrab Community
 date: 2026/04/08
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1574/004/
+    - https://blog.malwarebytes.com/threat-analysis/2020/11/dylib-hijacking-on-osx/
 tags:
     - attack.persistence
     - attack.defense_evasion
@@ -25,13 +32,29 @@ detection:
             - '-reexport_library'
             - '-change'
             - '-id'
-    filter_apple:
-        SignerType: 'apple'
+    selection_user_path_target:
+        CommandLine|contains:
+            - '/Users/'
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/folders/'
+            - '/Volumes/'
+    filter_xcode_parent:
         ParentImage|contains:
             - '/Xcode.app/'
             - '/Developer/'
-    condition: selection and selection_reexport and not filter_apple
+            - '/DerivedData/'
+            - '/xcodebuild'
+    filter_homebrew_parent:
+        ParentImage|contains:
+            - '/Cellar/'
+            - '/opt/homebrew/'
+            - '/Homebrew/'
+            - '/brew'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection and selection_reexport and selection_user_path_target and not filter_xcode_parent and not filter_homebrew_parent and not filter_apple_parent
 falsepositives:
-    - Legitimate Xcode build processes
-    - Developer toolchain operations
-level: medium
+    - Developers running custom build scripts that rewrite dylib load commands outside Xcode/Homebrew
+    - Reverse-engineering / patching workflows on dev workstations
+level: low

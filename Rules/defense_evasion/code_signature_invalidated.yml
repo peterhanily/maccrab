@@ -24,9 +24,20 @@ detection:
         Image|endswith:
             - '/Electron'
             - '/electron'
+            - '/Electron Helper'
+            - '/Electron Helper (Renderer)'
+            - '/Electron Helper (GPU)'
+            - '/Electron Helper (Plugin)'
+            - '/Chromium Helper'
+            - '/node'
+            - '/java'
+    filter_electron_path:
+        Image|contains:
+            - '.app/Contents/Frameworks/Electron Framework.framework/'
+            - '.app/Contents/Frameworks/Chromium Embedded Framework.framework/'
     filter_apple:
         SignerType: 'apple'
-    condition: selection and not filter_known_tools and not filter_apple
+    condition: selection and not filter_known_tools and not filter_electron_path and not filter_apple
 falsepositives:
     - Electron-based applications with JIT compilation
     - Java applications with dynamic class loading

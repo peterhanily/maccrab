@@ -1,11 +1,20 @@
-title: JXA (JavaScript for Automation) Execution
+title: Suspicious JXA (JavaScript for Automation) Invocation
 id: d1a2b3c4-0007-4000-a000-000000000007
 status: experimental
-description: Detects osascript executing JavaScript for Automation (JXA), increasingly used for macOS malware.
+description: >
+    Detects `osascript -l JavaScript` paired with one of: an inline
+    `-e` payload, an `eval` / `Function()` constructor, a download
+    primitive (curl, wget, NSURLSession, ObjC.bridgePropertyType),
+    or a base64 / hex decoded blob. Plain JXA automation is legitimate
+    and frequent — this rule only fires when an unusual-for-automation
+    primitive is present. Tracks the OSAMiner, GIMMICK, and DazzleSpy
+    families which all execute JXA via these specific shapes.
 author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/007/
+    - https://objective-see.org/blog/blog_0x53.html
+    - https://www.welivesecurity.com/2022/01/25/watering-hole-deploys-new-macos-malware-dazzlespy-asia/
 tags:
     - attack.execution
     - attack.t1059.007
@@ -13,13 +22,33 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection:
+    selection_jxa:
         Image|endswith: '/osascript'
         CommandLine|contains:
             - '-l JavaScript'
             - '-l javascript'
             - 'JsOsaDas1'
-    condition: selection
+    selection_suspicious:
+        CommandLine|contains:
+            - 'ObjC.import'
+            - '$.NSURLSession'
+            - '$.NSAppleScript'
+            - 'eval('
+            - 'Function('
+            - 'curl '
+            - 'wget '
+            - 'base64'
+            - 'fromCharCode'
+            - 'String.fromCharCode'
+            - '$.NSData.alloc'
+            - 'shellScript'
+            - 'do shell script'
+    filter_apple:
+        PlatformBinary: 'true'
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    condition: selection_jxa and selection_suspicious and not filter_apple
 falsepositives:
-    - Legitimate JXA automation scripts
+    - Automation scripts that legitimately bridge to Objective-C (rare in user space, expected from MDM/management tools — filter on signed parent if observed)
 level: medium

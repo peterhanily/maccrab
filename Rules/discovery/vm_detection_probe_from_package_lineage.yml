@@ -1,0 +1,69 @@
+title: VM / Sandbox Detection Probe From Package-Manager Lineage
+id: d1a2b3c4-0500-4000-a000-000000000504
+status: experimental
+description: >
+    Detects a process descending from a package manager executing
+    `sysctl hw.model`, `ioreg -l`, or `system_profiler SPHardwareDataType`
+    — the canonical VM / sandbox check used by Atomic Stealer (AMOS,
+    2024-2025), KandyKorn (Lazarus, 2023), and several PyPI droppers
+    that exit silently when run inside a Mac analyst's VM. As with
+    locale probing, even if a current wave drops the guard the early
+    waves still trip this rule and feed campaign-level scoring.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://www.elastic.co/security-labs/dprk-code-of-conduct
+    - https://attack.mitre.org/techniques/T1497/001/
+    - https://attack.mitre.org/techniques/T1082/
+tags:
+    - attack.discovery
+    - attack.t1082
+    - attack.defense_evasion
+    - attack.t1497.001
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_vm_probe:
+        Image|endswith:
+            - '/sysctl'
+            - '/ioreg'
+            - '/system_profiler'
+        CommandLine|contains:
+            - 'hw.model'
+            - 'SPHardwareDataType'
+            - 'IOPlatformExpertDevice'
+            - 'VBoxGuest'
+            - 'VMware'
+            - 'Parallels'
+            - 'QEMU'
+            # v1.12.0 RC3 fix (Det-H4): `hw.optional.arm64` removed
+            # — sharp, node-sass, @swc, and many other native-addon
+            # install scripts legitimately probe this to pick an
+            # arch-specific binary. The remaining markers (VM-
+            # discriminating sysctls + ioreg keys) are tight enough.
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+            - '/bun'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'postinstall'
+            - 'preinstall'
+    condition: selection_vm_probe and selection_lineage
+falsepositives:
+    - Cross-platform native build tooling that legitimately probes hardware capabilities (e.g., `node-sass` / `sharp` build scripts checking arch + Rosetta) — these read `hw.optional.arm64` and `sysctl machdep` which are softer signals; the `hw.model`/`SPHardwareDataType` strings are more specifically VM-discriminating
+level: high

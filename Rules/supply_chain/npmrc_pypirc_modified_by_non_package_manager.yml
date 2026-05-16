@@ -1,0 +1,82 @@
+title: Package-Manager Config File Modified by Non-Package-Manager Process
+id: d1a2b3c4-0302-4000-a000-000000000029
+status: experimental
+description: >
+    Detects writes to package-manager configuration files (`.npmrc`,
+    `.pypirc`, `pip.conf`, `.yarnrc.yml`, `.cargo/config.toml`,
+    `.gem/credentials`) by a process that is not the corresponding
+    package manager itself or a recognised dotfile manager. The write
+    can be (a) a registry-redirect attack — silently swapping the
+    upstream index to an attacker-controlled mirror, or (b) credential
+    theft prep — staging a token before exfiltration. Both are
+    pre-attack signals that fire before any malicious package install
+    completes, so this rule is a useful early-warning catch ahead of
+    the worm-self-propagation kill chain.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://medium.com/@alex.birsan/dependency-confusion-4a5d60fec610
+    - https://socket.dev/blog/dependency-confusion-attack
+    - https://attack.mitre.org/techniques/T1195/002/
+    - https://attack.mitre.org/techniques/T1565/001/
+tags:
+    - attack.initial_access
+    - attack.t1195.002
+    - attack.defense_evasion
+    - attack.t1565.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target:
+        TargetFilename|endswith:
+            - '/.npmrc'
+            - '/.pypirc'
+            - '/.yarnrc'
+            - '/.yarnrc.yml'
+            - '/pip.conf'
+            - '/.cargo/config.toml'
+            - '/.cargo/credentials'
+            - '/.gem/credentials'
+        FileAction:
+            - 'modify'
+            - 'create'
+    filter_package_managers:
+        Image|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/twine'
+            - '/cargo'
+            - '/gem'
+            - '/bundle'
+            - '/poetry'
+            - '/uv'
+    filter_dotfile_managers:
+        Image|endswith:
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
+            - '/dotbot'
+    filter_editors:
+        Image|endswith:
+            - '/vim'
+            - '/nvim'
+            - '/code'
+            - '/cursor'
+            - '/nano'
+            - '/emacs'
+    filter_system:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+        PlatformBinary: 'true'
+    condition: selection_target and not filter_package_managers and not filter_dotfile_managers and not filter_editors and not filter_system
+falsepositives:
+    - First-time setup wizards (devcontainer init, project scaffold) that legitimately write a fresh config
+    - CI bootstrap scripts that drop a `.npmrc` with `_authToken` before publish; allowlist by Image or restrict to interactive sessions
+    - Internal corporate tooling that auto-rotates registry tokens; allowlist the rotation binary
+level: high

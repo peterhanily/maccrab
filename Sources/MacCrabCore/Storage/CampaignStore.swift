@@ -211,7 +211,16 @@ public actor CampaignStore {
         }
 
         if !isReadOnly {
-            try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
+            // v1.12.0 RC27 (perf): consistency with EventStore /
+            // AlertStore / SQLiteCausalGraphStore — skip per-init
+            // quick_check on the boot path. Round-10 perf audit caught
+            // this as the only store still doing PRAGMA quick_check
+            // synchronously.
+            try SchemaMigrator.run(
+                on: handle,
+                migrations: Self.schemaMigrations,
+                skipQuickCheck: true
+            )
         }
 
         let insertSQL = """

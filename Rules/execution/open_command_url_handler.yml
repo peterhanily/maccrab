@@ -1,11 +1,18 @@
-title: Open Command URL Handler Abuse
+title: macOS `open` Command Invoking Custom or File URL Handler
 id: d1a2b3c4-0201-4000-a000-000000000201
 status: experimental
-description: Detects use of the macOS open command with URL schemes to launch applications or execute actions. Adversaries may abuse custom URL handlers to trigger application execution or bypass Gatekeeper.
+description: >
+    Detects `open` invoking a custom URL scheme (`vscode://`,
+    `slack://`, etc.) or a `file://` URI — used by adversaries to
+    invoke handler-registered apps for payload execution or to launch
+    an unsigned binary by URL. Excludes the common `http(s)://` browser
+    handoff and Apple-signed parents. Useful when paired with the
+    deeper bundle-ID and registration-time rules.
 author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1204/001/
+    - https://wojciechregula.blog/post/abusing-custom-url-schemes-on-macos/
 tags:
     - attack.execution
     - attack.t1204.001
@@ -15,20 +22,27 @@ logsource:
 detection:
     selection:
         Image|endswith: '/open'
-    selection_url_scheme:
+    selection_suspicious_scheme:
         CommandLine|contains:
-            - '://'
-            - '--url'
-    filter_http:
-        CommandLine|contains:
-            - 'https://developer.apple.com'
-            - 'https://support.apple.com'
-    filter_parent:
+            - 'file://'
+            - 'maccrab://'
+            - 'x-apple.systempreferences:'
+            - 'icloud-sharing:'
+            - 'remoteapp:'
+            - 'vnc://'
+            - 'ssh://'
+            - 'jamf://'
+            - 'munki://'
+            - 'ftp://'
+            - 'smb://'
+            - 'afp://'
+    filter_apple_parent:
+        PlatformBinary: 'true'
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection and selection_url_scheme and not filter_http and not filter_parent
+    condition: selection and selection_suspicious_scheme and not filter_apple_parent
 falsepositives:
-    - Legitimate URL handler invocations from scripts
-    - Browser-related open calls
-level: medium
+    - IT/MDM workflows that legitimately invoke jamf:// or munki:// — filter on signed parent if needed
+    - User-driven 'open file://' for local document handoff from scripts
+level: low

@@ -1,13 +1,17 @@
-title: Process Suspended by Another Process
+title: Process Suspended via SIGSTOP From Non-Platform Parent
 id: d1a2b3c4-0434-4000-a000-000000000434
 status: experimental
 description: >
-    Detects a process being suspended via SIGSTOP or the proc_suspend API.
-    Attackers may suspend security tools, logging daemons, or monitoring
-    processes as an anti-analysis or defense evasion technique to prevent
-    detection while performing malicious actions.
+    Detects `kill`/`killall` issuing SIGSTOP (signal 19) against a
+    process. Attackers may suspend monitoring daemons, AV agents, or
+    logging services as a defense-evasion tactic. Job control in
+    terminals and batch schedulers also legitimately sends SIGSTOP,
+    so the rule is narrowed to non-Apple parents and downgraded to
+    low. Use in correlation with security_tool_disabled.yml /
+    sequence rules for higher-confidence campaigns.
 author: MacCrab Community
 date: 2026/04/05
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1562/001/
 tags:
@@ -20,20 +24,24 @@ detection:
     selection_kill_stop:
         Image|endswith: '/kill'
         CommandLine|contains:
-            - '-STOP'
-            - '-SIGSTOP'
-            - '-19 '
-            - '-s STOP'
+            - ' -STOP '
+            - ' -SIGSTOP '
+            - ' -s STOP'
+            - ' -s SIGSTOP'
     selection_killall_stop:
         Image|endswith: '/killall'
         CommandLine|contains:
-            - '-STOP'
-            - '-SIGSTOP'
-            - '-19 '
+            - ' -STOP '
+            - ' -SIGSTOP '
+            - ' -s STOP'
+            - ' -s SIGSTOP'
     filter_apple:
         SignerType: 'apple'
-    condition: (selection_kill_stop or selection_killall_stop) and not filter_apple
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: (selection_kill_stop or selection_killall_stop) and not filter_apple and not filter_apple_parent
 falsepositives:
-    - Job control in terminal sessions
+    - Job control in interactive terminal sessions
     - Process management scripts pausing batch jobs
-level: medium
+    - Build systems suspending child processes
+level: low

@@ -4,8 +4,9 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-1404%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-1.11.1-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Tests](https://img.shields.io/badge/tests-1490%20passing-brightgreen)]()
+[![Rules](https://img.shields.io/badge/rules-463%20%2B%2039%20seq%20%2B%206%20graph-blueviolet)]()
+[![Version](https://img.shields.io/badge/version-1.12.0-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -208,7 +209,7 @@ MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 Build the MCP binary with `swift build --target maccrab-mcp`.
 
-**Available tools (17):**
+**Available tools (25):**
 
 | Tool | Purpose |
 |------|---------|
@@ -229,6 +230,14 @@ Build the MCP binary with `swift build --target maccrab-mcp`.
 | `hunt_trace` | (v1.10) Substring search across traces |
 | `verify_bundle` | (v1.10) Verify a `.maccrabtrace` bundle (schema, Merkle, signature) |
 | `trace_from_event` | (v1.10) Pivot from an event id to its containing trace |
+| `check_typosquat_score` | (v1.12) Score a package name against bundled top corpora (Damerau-Levenshtein + Unicode confusable fold) |
+| `scan_package_content` | (v1.12) Walk an installed package dir for obfuscation markers / single-line bundles / Mach-O drops |
+| `analyze_package_metadata` | (v1.12) Inspect a package's registry metadata (versions, maintainer age, download anomalies) |
+| `verify_package_attestation` | (v1.12) Check Sigstore / PEP 740 provenance attestations |
+| `classify_package_intent` | (v1.12) LLM-backed verdict over a package-install BehaviorBrief |
+| `predict_next_technique` | (v1.12) Markov-1 forecast over MITRE tactics |
+| `score_text_style` | (v1.12) Stylometric / urgency / LLM-tells score on a commit message or PR body |
+| `get_intent_posterior` | (v1.12) Bayesian posterior over attacker goals for a tree key (MCP-local; see daemon alerts for live posterior) |
 
 **Slash commands** (`.claude/commands/`): `/security-check`, `/threat-hunt <query>`, `/alerts`.
 
@@ -495,7 +504,7 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **427 rules** (389 single-event + 38 sequence)
+release ships **469 rules** (424 single-event + 39 sequence + 6 graph)
 covering **154 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 
@@ -513,8 +522,9 @@ tactics:
 | `TA0010` | Exfiltration | 31 |
 | `TA0011` | Command and Control | 42 |
 | `TA0040` | Impact | 20 |
-| — | **Sequences** (temporal multi-step) | **38** |
-| — | **Total** | **427** |
+| — | **Sequences** (temporal multi-step) | **39** |
+| — | **Graph** (multi-entity TraceGraph, v1.12.0) | **6** |
+| — | **Total** | **469** |
 
 Counts are derived from the YAML tree at release time — see
 [`docs/COVERAGE.md`](docs/COVERAGE.md) for the rule-by-technique
@@ -568,6 +578,29 @@ Additional views: Settings > AI Backend (LLM provider configuration), Response A
 ---
 
 ## What's New
+
+<details>
+<summary><strong>v1.12 — supply-chain detection wave, intent posterior, TURBO daemon boot, in-dashboard Sigma editor (2026-05)</strong></summary>
+
+v1.12 ships detection coverage for the September 2025 Shai-Hulud worm class and the April–May 2026 follow-on incidents (Mini Shai-Hulud, Lightning PyPI, TanStack CVE-2026-45321), plus an intent-based detection layer that sits on top of the rule layer: a Bayesian belief network maintains a per-process-tree posterior over attacker goals, and an LLM-backed `IntentClassifier` produces a categorical verdict on `npm install` / `pip install` exec events. Both are detection-only; single-event Sigma rules still fire on the same events. Two pre-ship audit cycles (10 parallel domains across security, performance, detection FP, integration, release engineering, data safety, resiliency, stability, secrets, and UX) cleared a ~24-fix queue before tag.
+
+- **Wave 5 actors** — `IntentClassifier`, `PromptIntentBridge`, `CounterfactualReasoner`, `StylometricMaintainerDriftAnalyzer`, `HoneyPromptDeception`, `BayesianIntentPosterior`. Six new graph rules in `Rules/graph/` evaluate against materialized TraceGraph traces. Eight new MCP tools (`check_typosquat_score`, `scan_package_content`, `analyze_package_metadata`, `verify_package_attestation`, `classify_package_intent`, `predict_next_technique`, `score_text_style`, `get_intent_posterior`).
+- **Worm self-propagation detection** — the canonical Shai-Hulud signature (credential read + GitHub publish-endpoint egress, both from the same `node` lineage within a 60-s window) fires as both a sequence rule (`Rules/sequences/`) and a graph rule with O(1) tactic-indexed dispatch. Heuristic intent classifier catches it even without an LLM configured.
+- **Daemon cold-start: 114 s → 118 ms (~1000×).** Seven sources of synchronous main-thread work deferred behind `Task.detached` after the first heartbeat: `tracegraph.db` quick_check on a 7 GB store, `SelfDefense` self-SHA-256, `BaselineEngine.load`, `ThreatIntelFeed`, `BundledThreatIntel`, `ESClientMonitor`, polled monitors (USB / clipboard / browser-extension / rootkit / EDR / TEMPEST). `boot_phase` breadcrumbs stamped at 14 milestones so future regressions surface immediately.
+- **In-dashboard Sigma YAML editor.** The Detection workspace now ships a read-only viewer + a TextEditor save flow that pipes the edited YAML through the bundled `compile_rules.py` and writes the resulting JSON to `/Library/Application Support/MacCrab/user_rules/<uuid>.json`. Daemon picks up the change via a `.reload_tick` mtime watcher; no restart needed. Disable / re-enable actions write the same overlay with `enabled=false`. First write fires a single AppleScript admin prompt to create the override directory `root:admin 0775`; subsequent edits don't prompt.
+- **Privacy hardening.** Webhook + syslog default hostname is now `maccrab-host` instead of the machine hostname (overrideable via `MACCRAB_WEBHOOK_HOSTNAME` / `MACCRAB_SYSLOG_HOSTNAME`). MCP `get_alerts` / `get_alert_detail` / `scan_text` payloads route through `LLMSanitizer.sanitize()` before returning to the agent, matching the redaction guarantees of the cloud-LLM backends.
+- **LLM-backend allowlist tightening.** OpenAI host check replaced `hasSuffix("api.openai.com")` (which let `evilapi.openai.com` through) with a dot-anchored exact-host Set plus `.openai.azure.com` dot-suffix with a `count > suffix.count` guard. Gemini model-name allowlist is now a `[a-z0-9._-]+` regex capped at 64 chars. Ollama plaintext-remote detection now explicitly nil-checks the host.
+
+</details>
+
+<details>
+<summary><strong>v1.11 — 79-finding audit-fix wave + v1.10.x backlog clear + first-launch beachball hotfix (2026-05)</strong></summary>
+
+v1.11.0 was a feature release combined with a sustained audit-fix pass. A six-domain pre-release audit (security / stability / performance / functionality / scalability+UX-L10n / ship-readiness) on the v1.10.1 baseline surfaced 8 BLOCKERs + 24 HIGHs + 25 MEDIUMs + 22 LOWs (79 findings total). v1.11.0 closes every BLOCKER, the high-impact HIGHs, the wire-the-orphans HIGHs (alertNotifications + inbox poller reentrancy), the bulk of the MEDIUMs, AND ships the deferred v1.10.x backlog: M2 live data wiring across collectors / permissions / packages / integrations, AlertStore phantom-field schema migration, force-directed TraceGraph canvas, YAML compilation for graph rules, `maccrabctl trace replay --compare-rules`, and sidebar consolidation.
+
+- **v1.11.1** — First-launch beachball hotfix. Three things ran on the main thread before SwiftUI rendered the dashboard's first frame; all three are now deferred. `RuleBundleInstaller.syncIfNeeded()` moved off `MacCrabApp.init()`. `V2LiveDataProvider()` SQLite opens parallelized + detached. `AppState.loadSuppressPatterns()` + `loadSuppressedIDs()` deferred. Net result: dashboard window should paint in well under 200 ms on cold launch.
+
+</details>
 
 <details>
 <summary><strong>v1.10 — workspace dashboard, visual TraceGraph, Agent Traces, hardened mutation IPC (2026-05)</strong></summary>

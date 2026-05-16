@@ -1,41 +1,58 @@
-title: Mount or Diskutil noexec Flag Manipulation
+title: Mount noexec Flag Manipulation
 id: d1a2b3c4-0227-4000-a000-000000000227
 status: experimental
-description: Detects mount or diskutil commands that manipulate noexec flags on volumes. Adversaries may remount volumes without noexec to enable execution from those volumes.
+description: >
+    Detects explicit attempts to remount a volume with the noexec flag
+    removed, or hdiutil attaching a disk image with -noexec disabled.
+    Adversaries remount volumes without noexec to enable execution of
+    payloads staged from those volumes (T1564.009 / T1562.001). The
+    bare `mount` and `diskutil`/`hdiutil` lifecycle commands fire
+    constantly during normal Finder, installer, and Time Machine
+    activity, so this rule narrows to the noexec-toggling flag form
+    and excludes platform parents.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1562/001/
+    - https://attack.mitre.org/techniques/T1564/009/
 tags:
     - attack.defense_evasion
     - attack.t1562.001
+    - attack.t1564.009
 logsource:
     category: process_creation
     product: macos
 detection:
-    selection_mount:
+    selection_mount_remount:
+        # `mount -u -o exec` / `mount -o exec` -- explicit remount
+        # toggling noexec off. `mount` invoked without these flags is
+        # ignored (covers Finder/disk-arbitration calls).
         Image|endswith: '/mount'
         CommandLine|contains:
-            - 'noexec'
-            - 'exec'
-    selection_diskutil:
-        Image|endswith: '/diskutil'
-        CommandLine|contains:
-            - 'mount'
-            - 'unmount'
-            - 'mountDisk'
-    selection_hdiutil:
+            - '-o exec'
+            - '-o rw,exec'
+            - '-o exec,rw'
+            - 'noexec=0'
+    selection_hdiutil_noexec_off:
+        # hdiutil attach with -noexec explicitly disabled. hdiutil
+        # attach in general is benign (every .dmg double-click hits
+        # this codepath), so we require BOTH 'attach' and the noexec
+        # flag being explicitly set to false on the same command line.
         Image|endswith: '/hdiutil'
-        CommandLine|contains:
-            - '-noexec'
+        CommandLine|contains|all:
             - 'attach'
-            - 'mount'
+            - '-noexec'
+            - 'false'
     filter_system:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: (selection_mount or selection_diskutil or selection_hdiutil) and not filter_system
+            - '/usr/sbin/'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: (selection_mount_remount or selection_hdiutil_noexec_off) and not filter_system and not filter_apple_parent
 falsepositives:
-    - Legitimate disk management operations
-    - Backup and recovery tools
-level: medium
+    - Admins manually remounting a filesystem with exec enabled for legitimate troubleshooting
+    - Disk imaging utilities that explicitly toggle the noexec attach flag
+level: low

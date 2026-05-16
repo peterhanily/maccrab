@@ -1,7 +1,17 @@
-title: Rapid System Information Enumeration
+title: System Information Enumeration by Suspicious Process
 id: d1a2b3c4-0050-4000-a000-000000000050
 status: experimental
-description: Detects execution of multiple system discovery commands, commonly seen in post-exploitation reconnaissance.
+description: |
+  Detects execution of a system discovery command (whoami, id, uname,
+  sw_vers, system_profiler, ifconfig, networksetup, scutil, dscl, sysctl,
+  launchctl) by a process whose lineage isn't a normal terminal/editor/
+  IDE/CI runner and whose binary isn't a platform/Apple binary.
+  Adversaries commonly chain these in post-exploitation reconnaissance,
+  but each individual call is benign in isolation. Note: the file name
+  previously said "burst" but Sigma single-event rules cannot express
+  temporal multi-event semantics — burst-style detection is handled by
+  the sequence engine (`Rules/sequences/`) and the campaign detector,
+  not by this single-event rule.
 author: MacCrab Community
 date: 2026/03/31
 references:

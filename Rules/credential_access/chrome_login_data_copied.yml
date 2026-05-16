@@ -26,7 +26,25 @@ detection:
     filter_system:
         Image|startswith: '/System/'
         SignerType: 'apple'
-    condition: selection and not filter_chrome and not filter_system
+    # Documented backup and sync utilities that legitimately read the
+    # Chrome profile. Spotlight (`mds`, `mdworker_shared`) also touches
+    # the directory during indexing.
+    filter_backup_sync:
+        Image|contains:
+            - '/Backblaze.app/'
+            - '/Carbon Copy Cloner.app/'
+            - '/SuperDuper!.app/'
+            - '/Arq.app/'
+            - '/Arq 7.app/'
+            - '/Time Machine'
+            - '/backupd'
+            - '/backupd-helper'
+            - '/Migration Assistant.app/'
+            - '/MigrationAssistant'
+            - '/mds'
+            - '/mdworker_shared'
+            - '/com.apple.MobileFileIntegrity'
+    condition: selection and not filter_chrome and not filter_system and not filter_backup_sync
 falsepositives:
     - Browser data migration tools
     - Legitimate backup utilities backing up Chrome profiles

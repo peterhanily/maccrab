@@ -1,7 +1,14 @@
-title: Swift REPL Execution from Non-Xcode Parent
+title: Swift Inline Evaluation From Non-Developer, Non-Terminal Parent
 id: d1a2b3c4-0101-4000-a000-000000000101
 status: experimental
-description: Detects the Swift REPL being invoked by a process other than Xcode or related developer tools. Attackers may abuse the Swift REPL to execute arbitrary code on macOS without compiling a binary.
+description: >
+    Detects `swift -e` or `swift -` (read from stdin) invoked by a
+    parent that is neither a known developer toolchain nor a known
+    interactive terminal emulator. Interactive `swift repl` use from
+    a real TTY is excluded. Adversaries occasionally invoke `swift`
+    in non-interactive mode to evaluate downloaded scriptlets without
+    leaving a Mach-O on disk; legitimate developer interactive use
+    almost always launches from a known terminal.
 author: MacCrab Community
 date: 2026/03/31
 references:
@@ -13,14 +20,24 @@ logsource:
     category: process_creation
     product: macos
 detection:
+    # NOTE: `swift` / `swift-frontend` are Apple-shipped Xcode binaries;
+    # the standard `not PlatformBinary` filter would disable this rule
+    # entirely. FP control lives in the parent-lineage filters below.
     selection:
         Image|endswith:
             - '/swift'
             - '/swift-frontend'
+    selection_non_interactive:
+        # Only fire on stdin-fed (`swift -`) or inline-eval (`swift -e`)
+        # invocations — `swift repl` from a terminal is filtered below
+        # via the parent allowlist anyway, but excluding it here removes
+        # the dev-laptop noise entirely.
         CommandLine|contains:
-            - 'swift repl'
-            - 'swift -e'
-            - 'swift -'
+            - 'swift -e '
+            - 'swift -e"'
+            - "swift -e'"
+            - 'swift - '
+            - 'swift -<'
     filter_xcode:
         ParentImage|contains:
             - '/Xcode'
@@ -29,6 +46,10 @@ detection:
             - '/xcodebuild'
             - '/SwiftPM'
             - '/sourcekit-lsp'
+            - '/swift-build'
+            - '/swift-package'
+            - '/swift-driver'
+            - '/swift-test'
     filter_terminal:
         ParentImage|endswith:
             - '/Terminal'
@@ -36,8 +57,22 @@ detection:
             - '/Alacritty'
             - '/kitty'
             - '/WarpTerminal'
-    condition: selection and not filter_xcode and not filter_terminal
+            - '/Ghostty'
+            - '/Hyper'
+            - '/tmux'
+            - '/screen'
+            - '/zellij'
+    filter_dev_runners:
+        ParentImage|endswith:
+            - '/make'
+            - '/gmake'
+            - '/ninja'
+            - '/cmake'
+            - '/brew'
+            - '/cargo'
+            - '/just'
+    condition: selection and selection_non_interactive and not filter_xcode and not filter_terminal and not filter_dev_runners
 falsepositives:
-    - Swift Playgrounds application
-    - CI/CD build agents invoking Swift directly
+    - CI/CD agents shelling into `swift -e` from inside a container (rare on macOS) — filter on parent if observed
+    - Editor-integrated playgrounds that pipe via `swift -` (Nova, BBEdit) — extend `filter_terminal` to include the editor
 level: medium

@@ -1,11 +1,19 @@
-title: Binary Executed from Temporary Directory
+title: Ad-Hoc or Unsigned Binary Executed from /tmp
 id: d1a2b3c4-0006-4000-a000-000000000006
 status: experimental
-description: Detects execution of binaries from /tmp, /private/tmp, or /var/folders staging areas.
+description: >
+    Detects execution of an ad-hoc-signed or unsigned binary from
+    `/tmp` or `/private/tmp`. Legitimate macOS software is Developer ID
+    signed and notarized; ad-hoc + /tmp is the classic AMOS / Atomic
+    Stealer drop pattern. Apple-signed helpers and Xcode-derived
+    intermediates are filtered. Note: scoped to `/tmp` only — Xcode and
+    Swift Package Manager actually write derived binaries under
+    `/var/folders/` (filtered elsewhere via `selection`'s narrow paths).
 author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1204/002/
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
 tags:
     - attack.execution
     - attack.t1204.002
@@ -17,14 +25,20 @@ detection:
         Image|startswith:
             - '/tmp/'
             - '/private/tmp/'
+    selection_unsigned:
+        IsAdhocSigned: 'true'
     filter_apple:
-        SignerType: 'apple'
-    filter_xcode:
+        PlatformBinary: 'true'
+    filter_dev_intermediates:
+        # Toolchain-managed temp dirs that hold legitimately-built binaries.
         Image|contains:
-            - 'Xcode'
+            - '/Xcode'
             - 'DerivedData'
-    condition: selection and not filter_apple and not filter_xcode
+            - '/.build/'
+            - '/swift-package-manager/'
+            - '/com.apple.dt.'
+    condition: selection and selection_unsigned and not filter_apple and not filter_dev_intermediates
 falsepositives:
-    - Build systems using /tmp for compilation
-    - Installer packages
+    - Hand-built local binaries copied to /tmp for ad-hoc testing — add allowlist if your workflow needs this
+    - Compiler toolchains writing temporary self-tests under /tmp before exec — filter on parent if observed
 level: medium

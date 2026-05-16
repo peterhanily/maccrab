@@ -1,0 +1,70 @@
+title: MacCrab IntentClassifier Returned High-Risk Verdict
+id: d1a2b3c4-2059-4000-a000-000000002059
+status: experimental
+description: >
+    A downstream alert that fires when MacCrab's IntentClassifier
+    (LLM-driven, falls back to deterministic heuristic) labels a
+    package-install behavior brief as one of the high-risk classes
+    — `credentialHarvest`, `exfiltration`, `destructive`,
+    `lateralMovement`. Distinct from the rule layer (which fires on
+    individual primitives) because the classifier weighs the *whole
+    brief* into a single verdict: per NDSS 2025 "Mind the Gap"
+    benchmarks, LLM classifiers (Llama 3.3 70B local, F1 0.77 / GPT-
+    4.1 cloud, F1 0.99) routinely catch full kill-chain shapes that
+    no single rule sees. Treat this alert as "the classifier says
+    this looks like Goal X" rather than as proof of a specific
+    technique.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.ndss-symposium.org/wp-content/uploads/2025-1491-paper.pdf
+    - https://arxiv.org/abs/2601.12148
+    - https://attack.mitre.org/
+tags:
+    - attack.initial_access
+    - attack.t1195
+    - maccrab.intent_classifier
+    - maccrab.llm_verdict
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    # v1.12.0 rewrite: the previous `category: maccrab_internal`
+    # logsource could never be produced by RuleEngine. Replaced with
+    # process_creation gated by the IntentLabel enrichment that the
+    # daemon-side IntentClassifier writes onto package-install
+    # exec events (see EventEnricher.swift). The IntentLabel +
+    # IntentConfidence keys are resolved as enrichments at evaluation
+    # time, with confidence carried as a stringified double for
+    # Sigma comparison.
+    selection_install:
+        Image|endswith:
+            - '/npm'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/bun'
+    selection_intent_label:
+        IntentLabel:
+            - 'credentialHarvest'
+            - 'exfiltration'
+            - 'destructive'
+            - 'lateralMovement'
+    # v1.12.0 RC6 fix (Int-R6-N1) + RC7 fix (Int-R7-N1): gate on
+    # confidence threshold. EventLoop stamps a boolean
+    # `IntentHighConfidence: 'true'` enrichment when the heuristic /
+    # LLM verdict crosses 0.5, so the rule can express the threshold
+    # via plain Sigma string equality. RC7 lowered the gate from 0.7
+    # to 0.5 because the heuristic's max single-label score is 4–5/8
+    # = confidence 0.5–0.625 — a 0.7 gate would have been unreachable
+    # by the headline credentialHarvest-only worm scenario.
+    selection_high_confidence:
+        IntentHighConfidence: 'true'
+    condition: selection_install and selection_intent_label and selection_high_confidence
+falsepositives:
+    - LLM classifier produces a high-risk label with ≥ 0.5 confidence on an ambiguous brief — review the BehaviorBrief contents (`maccrabctl alerts show <id> --include-brief`) before suppressing
+    - Legitimate package whose install legitimately matches a high-risk profile at moderate confidence (e.g., `awscli` install which legitimately reads `~/.aws/credentials`); allowlist by package name + IntentLabel
+level: high

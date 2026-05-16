@@ -14,13 +14,48 @@ logsource:
     category: file_event
     product: macos
 detection:
-    selection_la:
-        TargetFilename|contains: '/Library/LaunchAgents/'
-    selection_ld:
-        TargetFilename|contains: '/Library/LaunchDaemons/'
-    selection_cron:
-        TargetFilename|contains: '/var/at/tabs/'
-    condition: selection_la or selection_ld or selection_cron
+    selection_persistence_path:
+        TargetFilename|contains:
+            - '/Library/LaunchAgents/'
+            - '/Library/LaunchDaemons/'
+            - '/var/at/tabs/'
+    # v1.12.0 RC6 fix (Det-R6-HIGH1): pre-fix the rule had NO AI-tool
+    # gate and would fire on EVERY process writing to a persistence
+    # path — Homebrew install scripts, MS AutoUpdate, Docker Desktop,
+    # Karabiner-Elements, MDM agents (Jamf, Kandji, Mosyle), Xcode
+    # helper installs, and so on. The rule's title and description
+    # claim AI-tool framing but the predicate didn't enforce it.
+    # Gate on either:
+    #   (a) the writer is itself an AI tool binary, OR
+    #   (b) the writer's parent / ancestor is an AI tool (caught
+    #       via the AgentTool / ai_tool enrichments stamped by
+    #       EventLoop.swift lines 89/97).
+    # That way Homebrew etc. don't fire; an AI agent's npm install
+    # postinstall dropping a LaunchAgent does.
+    selection_ai_writer:
+        Image|endswith:
+            - '/claude'
+            - '/claude-code'
+            - '/cursor'
+            - '/Cursor Helper'
+            - '/codex'
+            - '/aider'
+            - '/zed'
+            - '/continue'
+            - '/copilot'
+            - '/windsurf'
+    selection_ai_enrichment:
+        AgentTool|contains:
+            - 'claude'
+            - 'cursor'
+            - 'codex'
+            - 'aider'
+            - 'zed'
+            - 'continue'
+            - 'copilot'
+            - 'windsurf'
+    condition: selection_persistence_path and (selection_ai_writer or selection_ai_enrichment)
 falsepositives:
-    - Legitimate service installation at user's explicit request
+    - Legitimate service installation at user's explicit request via Claude/Cursor (rare; allowlist by service name)
+    - AI-attributed legitimate developer workflow (e.g., user instructs Claude to set up a launchd job for their own daemon) — investigate via `maccrabctl alerts show <id>` and allowlist
 level: high

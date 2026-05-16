@@ -26,4 +26,10 @@ detection:
 falsepositives:
     - Legitimate automation workflows using osascript
     - Homebrew and package managers
-level: medium
+    - Hammerspoon, Alfred, Keyboard Maestro, BetterTouchTool, Raycast, Karabiner-Elements automation triggers
+    - Slack / Zoom / Microsoft Teams invoking osascript for "Open in Calendar" or notification flows
+# v1.11.x: demoted medium → low. osascript is the canonical macOS
+# automation hook for productivity apps (Alfred, Hammerspoon, Keyboard
+# Maestro, Raycast). Real social-engineering payloads still surface via
+# sequence + JXA rules; this single-event rule is a weak indicator.
+level: low

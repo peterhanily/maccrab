@@ -59,14 +59,15 @@ enum RuleBundleInstaller {
     /// Also verifies the installed tree after sync and writes a
     /// tamper-state file the dashboard polls to raise a banner.
     static func syncIfNeeded() {
+        logger.notice("syncIfNeeded invoked")
         guard let bundledDir = locateBundledRules() else {
-            logger.debug("No bundled rules found — dev build or Sparkle stub; skipping sync")
+            logger.notice("No bundled rules found — dev build or Sparkle stub; skipping sync")
             return
         }
 
         let bundledVersion = readVersion(at: bundledDir) ?? ""
         guard !bundledVersion.isEmpty else {
-            logger.debug("Bundled rules missing \(markerFile, privacy: .public) marker; skipping")
+            logger.notice("Bundled rules missing \(markerFile, privacy: .public) marker; skipping (dir=\(bundledDir, privacy: .public))")
             return
         }
 
@@ -89,9 +90,27 @@ enum RuleBundleInstaller {
         let installedDir = bestInstalledDir()
         let installedVersion = readVersion(at: installedDir) ?? ""
 
-        if bundledVersion == installedVersion {
-            // Same version — still verify the installed tree. Tamper
-            // AFTER sync is a separate class of attack.
+        // v1.12.0 RC18: ALSO compare bundled vs installed manifest.json
+        // content. Pre-fix the version-only check was too coarse: every
+        // 1.12.0 RC build wrote bundle_version="1.12.0", so once the
+        // first RC successfully synced, every subsequent RC install
+        // saw "same version" and skipped the sync — meaning Sparkle
+        // updates that change the rule corpus within a patch version
+        // wouldn't land either. The manifest.json is byte-different
+        // across builds (it contains SHA-256 of every compiled rule),
+        // so a content compare catches all real corpus changes.
+        let bundledManifestData = (try? Data(
+            contentsOf: URL(fileURLWithPath: bundledDir + "/\(manifestFile)")
+        )) ?? Data()
+        let installedManifestData = (try? Data(
+            contentsOf: URL(fileURLWithPath: installedDir + "/\(manifestFile)")
+        )) ?? Data()
+        let manifestsMatch = !bundledManifestData.isEmpty
+            && bundledManifestData == installedManifestData
+
+        if bundledVersion == installedVersion && manifestsMatch {
+            // Same version AND same manifest content. Verify the
+            // installed tree against its manifest in case of tamper.
             let installedCheck = verifyManifest(at: installedDir)
             if case .mismatch(let paths) = installedCheck {
                 logger.critical("Installed rules tamper detected (\(paths.count, privacy: .public) files differ from manifest). Re-syncing from bundle.")
@@ -191,22 +210,31 @@ enum RuleBundleInstaller {
         return url.path
     }
 
-    /// Pick the installed rules dir we'll write to. Prefer the system
-    /// path when we can write to it; otherwise fall back to user-home
-    /// (which the sysext also reads). Non-root app → usually writes to
-    /// user-home.
+    /// Pick the installed rules dir we'll write to. The production
+    /// sysext (running as root) only reads `/Library/Application
+    /// Support/MacCrab/compiled_rules` — the user-home fallback is only
+    /// useful for a `swift run maccrabd` dev daemon (NSHomeDirectory ==
+    /// the daemon-uid's home). v1.12.0 fix: prior code silently fell
+    /// back to user-home when the system path wasn't writable, leaving
+    /// production sysext daemons running the previously-installed rule
+    /// corpus indefinitely. The new behavior is loud — see
+    /// `copyRulesWithElevation` below for the privileged path.
     private static func bestInstalledDir() -> String {
-        let system = "/Library/Application Support/MacCrab/compiled_rules"
-        if FileManager.default.isWritableFile(atPath: system) {
-            return system
+        return "/Library/Application Support/MacCrab/compiled_rules"
+    }
+
+    /// True when we expect to need admin authorization to write the
+    /// system rules dir. The cask postflight runs as root so it never
+    /// hits this; Sparkle in-place upgrades and manual drag-replace
+    /// installs always hit this.
+    private static func needsAuthorization(for dst: String) -> Bool {
+        if dst.hasPrefix("/Library/") {
+            return !FileManager.default.isWritableFile(atPath: dst)
+                && !FileManager.default.isWritableFile(
+                    atPath: (dst as NSString).deletingLastPathComponent
+                )
         }
-        // Check if the parent is writable — we may need to create the dir.
-        let systemParent = "/Library/Application Support/MacCrab"
-        if FileManager.default.isWritableFile(atPath: systemParent) {
-            return system
-        }
-        let home = NSHomeDirectory()
-        return "\(home)/Library/Application Support/MacCrab/compiled_rules"
+        return false
     }
 
     private static func readVersion(at dir: String) -> String? {
@@ -221,22 +249,79 @@ enum RuleBundleInstaller {
     /// Copy the contents of `src/` into `dst/` with file-by-file
     /// overwrite. Removes `dst/` and recreates to guarantee the
     /// final tree exactly matches `src/` — no stale deprecated rules
-    /// linger if the new bundle removed them.
+    /// linger if the new bundle removed them. v1.12.0: when the
+    /// destination is the system path and we can't write to it,
+    /// re-attempts via `copyRulesWithElevation` (AppleScript admin
+    /// prompt). Returns false only if both unprivileged AND elevated
+    /// copies fail.
     private static func copyRules(from src: String, to dst: String) -> Bool {
         let fm = FileManager.default
-        do {
-            // Ensure parent exists
-            let parent = (dst as NSString).deletingLastPathComponent
-            try fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
-
-            // Remove stale tree if present
-            if fm.fileExists(atPath: dst) {
-                try fm.removeItem(atPath: dst)
+        if !needsAuthorization(for: dst) {
+            do {
+                let parent = (dst as NSString).deletingLastPathComponent
+                try fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
+                if fm.fileExists(atPath: dst) {
+                    try fm.removeItem(atPath: dst)
+                }
+                try fm.copyItem(atPath: src, toPath: dst)
+                return true
+            } catch {
+                logger.error("copyRules \(src, privacy: .public) → \(dst, privacy: .public) failed unprivileged: \(error.localizedDescription, privacy: .public); attempting privileged copy")
             }
-            try fm.copyItem(atPath: src, toPath: dst)
-            return true
+        }
+        return copyRulesWithElevation(from: src, to: dst)
+    }
+
+    /// Privileged path. Prompts the user for admin credentials via
+    /// AppleScript and runs the `rm -rf + cp -R + chown` sequence as
+    /// root. Called when the unprivileged copy fails — which is the
+    /// expected path for Sparkle in-place upgrades and drag-replace
+    /// installs (the cask postflight covers the brew install path).
+    /// Quoting follows osascript conventions: single-quoted inside the
+    /// shell command, double-quoted around the script argument; src/dst
+    /// paths are built-in constants and bundle paths (no user input),
+    /// so command injection isn't reachable here.
+    private static func copyRulesWithElevation(from src: String, to dst: String) -> Bool {
+        let parent = (dst as NSString).deletingLastPathComponent
+        // Single-line shell command: AppleScript's `do shell script`
+        // interprets backslashes inside the quoted string as escapes,
+        // so any literal `\;` (find -exec terminator) and any
+        // continuation `\<newline>` blew up with a -2741 parse error
+        // on the v1.12.0 RC10. We use `chmod -R u=rwX,go=rX` instead
+        // of find+exec; the `X` form sets `x` on directories only,
+        // which is exactly the dir=755 / file=644 we want. `cp -R`
+        // already preserves source perms, so the chmod is belt-and-
+        // suspenders — keeps the on-disk perms predictable even if a
+        // future change to the .app's compiled_rules ships with
+        // different bits.
+        let shell = "mkdir -p '\(parent)' && rm -rf '\(dst)' && cp -R '\(src)' '\(dst)' && chown -R root:admin '\(dst)' && chmod -R u=rwX,go=rX '\(dst)'"
+        let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to update its detection rules.\""
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        task.standardOutput = FileHandle.nullDevice
+        let errPipe = Pipe()
+        task.standardError = errPipe
+        do {
+            try task.run()
+            task.waitUntilExit()
+            if task.terminationStatus == 0 {
+                logger.notice("Rules synced to \(dst, privacy: .public) via privileged copy")
+                return true
+            }
+            let errData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+            let errStr = String(data: errData, encoding: .utf8) ?? "(no stderr)"
+            // -128 is the AppleScript "user cancelled" exit code. Log
+            // softer so a dismissed prompt doesn't look like a fault.
+            if errStr.contains("(-128)") {
+                logger.notice("User declined the admin prompt for rule sync; continuing with previously-installed rules")
+            } else {
+                logger.error("Elevated copy failed (rc=\(task.terminationStatus, privacy: .public)): \(errStr, privacy: .public)")
+            }
+            return false
         } catch {
-            logger.error("copyRules \(src, privacy: .public) → \(dst, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("Failed to launch osascript: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }

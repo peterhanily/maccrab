@@ -1,9 +1,15 @@
-title: Clipboard Access by Non-Terminal Process
+title: Clipboard Access By Non-Terminal Process
 id: d1a2b3c4-0124-4000-a000-000000000124
 status: experimental
-description: Detects pbpaste or pbcopy being executed by a non-terminal parent process. Clipboard monitoring is used by malware to steal copied passwords, cryptocurrency addresses, and other sensitive data.
+description: >
+    Detects pbpaste or pbcopy being executed by a non-terminal parent process.
+    Clipboard monitoring is a known malware primitive for stealing copied
+    passwords, crypto addresses, and 2FA codes. Excludes well-known clipboard
+    managers and launcher utilities (Alfred, Raycast, Maccy, CopyClip, PopClip,
+    Paste, Pastebot, Flycut) — those legitimately poll the clipboard.
 author: MacCrab Community
 date: 2026/03/31
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1115/
 tags:
@@ -26,18 +32,40 @@ detection:
             - '/WarpTerminal'
             - '/tmux'
             - '/screen'
+            - '/Hyper'
+            - '/wezterm-gui'
     filter_shell_direct:
         ParentImage|endswith:
             - '/bash'
             - '/zsh'
             - '/sh'
             - '/fish'
+            - '/dash'
     filter_apple:
         SignerType: 'apple'
         ParentImage|startswith: '/System/'
-    condition: selection and not filter_terminal and not filter_shell_direct and not filter_apple
+    filter_clipboard_managers:
+        ParentImage|contains:
+            - '/Alfred'
+            - '/Raycast'
+            - '/Maccy'
+            - '/CopyClip'
+            - '/PopClip'
+            - '/Paste.app'
+            - '/Pastebot'
+            - '/Flycut'
+            - '/LaunchBar'
+            - '/Keyboard Maestro'
+            - '/BetterTouchTool'
+    filter_devtools:
+        ParentImage|contains:
+            - '/Visual Studio Code'
+            - '/Cursor.app'
+            - '/Windsurf.app'
+            - '/JetBrains'
+            - '/Sublime Text'
+    condition: selection and not filter_terminal and not filter_shell_direct and not filter_apple and not filter_clipboard_managers and not filter_devtools
 falsepositives:
-    - Clipboard manager applications
-    - Automation tools (Alfred, Raycast) accessing clipboard
-    - Custom scripts using clipboard for inter-app communication
-level: medium
+    - Less common clipboard managers not in the allowlist (extend filter_clipboard_managers)
+    - Custom scripts using pbpaste/pbcopy for inter-app glue
+level: low

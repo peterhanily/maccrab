@@ -26,6 +26,26 @@ enum SignalHandlers {
                     print("[SIGHUP] Single-event rules: \(singleCount)")
                     let seqCount = try await state.sequenceEngine.loadRules(from: URL(fileURLWithPath: state.sequenceRulesDir))
                     print("[SIGHUP] Reloaded \(singleCount) single + \(seqCount) sequence rules")
+
+                    // v1.12.0 RC3 (Int-HSig1): also reload graph rules so
+                    // an operator can edit Rules/graph/*.json and have
+                    // them picked up without a daemon restart. The
+                    // evaluator holds its rules immutably, so swap in a
+                    // freshly-constructed instance.
+                    let graphRulesDir = URL(fileURLWithPath: state.supportDir + "/compiled_rules/graph")
+                    var graphRules = GraphRuleLoader.loadRules(from: graphRulesDir)
+                    if graphRules.isEmpty {
+                        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                        graphRules = GraphRuleLoader.loadFromProjectSource(projectRoot: cwd)
+                    }
+                    // v1.12.0 RC4 fix (Sec-R4-N3): always swap the
+                    // evaluator, even when the new ruleset is empty.
+                    // Pre-fix an operator who deleted all graph rules
+                    // and SIGHUPed would still see the old rules
+                    // fire silently — inconsistent with
+                    // ruleEngine.reloadRules which fully replaces.
+                    state.graphEvaluator = GraphRuleEvaluator(rules: graphRules)
+                    print("[SIGHUP] Graph rules: \(graphRules.count)")
                     await state.suppressionManager.load()
                     let stats = await state.suppressionManager.stats()
                     print("[SIGHUP] Suppressions: \(stats.pathCount) paths across \(stats.ruleCount) rules")

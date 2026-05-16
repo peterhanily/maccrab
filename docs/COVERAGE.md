@@ -10,7 +10,7 @@ ATT&CK technique tags from each rule's `tags:` block.
 
 | Metric | Count |
 |---|---|
-| Rules total | **427** |
+| Rules total | **463** (424 single-event + 39 sequence) + **6** graph |
 | Status: stable | 96 |
 | Status: experimental | 331 |
 | Severity: critical | 77 |

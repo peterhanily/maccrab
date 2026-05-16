@@ -1,11 +1,20 @@
-title: Quarantine Attribute Check Followed by Execution
+title: xattr Removes Quarantine on User-Writable Path From Non-Toolchain Parent
 id: d1a2b3c4-0204-4000-a000-000000000204
 status: experimental
-description: Detects xattr used to inspect or remove quarantine attributes, which may indicate an attempt to bypass Gatekeeper before executing a downloaded file.
+description: >
+    Detects `xattr -d com.apple.quarantine` (or `-c` clearing all
+    xattrs, or `-r -d` recursive clear) targeting a user-writable
+    download path, with a parent that is **not** a known macOS
+    package/toolchain manager. Plain manual quarantine clears by
+    developers are filtered by excluding the common toolchains
+    (Homebrew, Cargo, npm, pip, etc.). Calibrated low: a malicious
+    installer or persistence script will trigger here but a typical
+    dev-Mac quarantine clear via `brew` will not.
 author: MacCrab Community
 date: 2026/03/30
 references:
     - https://attack.mitre.org/techniques/T1553/001/
+    - https://theevilbit.github.io/posts/macos_quarantine_xattr/
 tags:
     - attack.execution
     - attack.defense_evasion
@@ -16,18 +25,56 @@ logsource:
 detection:
     selection:
         Image|endswith: '/xattr'
-    selection_quarantine:
+    selection_quarantine_clear:
         CommandLine|contains:
             - 'com.apple.quarantine'
+            - 'xattr -c'
+            - 'xattr -cr'
     selection_locations:
         CommandLine|contains:
             - '/Downloads/'
             - '/tmp/'
             - '/var/tmp/'
             - '/private/tmp/'
-            - '/Users/'
-    condition: selection and selection_quarantine and selection_locations
+            - '/var/folders/'
+    filter_package_managers:
+        # Common macOS toolchains that legitimately strip quarantine
+        # on downloaded artifacts.
+        ParentImage|endswith:
+            - '/brew'
+            - '/cargo'
+            - '/rustup'
+            - '/rustup-init'
+            - '/pip'
+            - '/pip3'
+            - '/npm'
+            - '/pnpm'
+            - '/yarn'
+            - '/bun'
+            - '/uv'
+            - '/poetry'
+            - '/conda'
+            - '/mamba'
+            - '/installer'
+            - '/Installer'
+            - '/package_script_service'
+            - '/softwareupdate'
+            - '/xcode-select'
+    filter_toolchain_grandparent:
+        # `brew install` -> `bash` -> `xattr` is the common indirect path.
+        GrandparentImage|endswith:
+            - '/brew'
+            - '/cargo'
+            - '/rustup'
+            - '/pip'
+            - '/pip3'
+            - '/npm'
+            - '/pnpm'
+            - '/yarn'
+            - '/bun'
+            - '/installer'
+            - '/package_script_service'
+    condition: selection and selection_quarantine_clear and selection_locations and not filter_package_managers and not filter_toolchain_grandparent
 falsepositives:
-    - Users manually clearing quarantine on trusted downloads
-    - Homebrew and package manager installations
-level: medium
+    - Hand-run `xattr -d` by developers on individually-downloaded binaries (not from a package manager). If frequent on a host, consider the host trusted-developer; review the executable that follows
+level: low

@@ -1,9 +1,17 @@
-title: Contacts Database Accessed by Non-Contacts Process
+title: Contacts Database Accessed By Non-Contacts Process
 id: d1a2b3c4-0261-4000-a000-000000000261
 status: experimental
-description: Detects access to the AddressBook/Contacts database by processes other than Contacts.app. Adversaries may harvest contact data for social engineering, spamming, or reconnaissance.
+description: >
+    Detects access to the AddressBook/Contacts database by processes other
+    than Contacts.app and the system contacts daemons. Allowlists common
+    CRMs (Salesforce, HubSpot, Pipedrive, Zoho), mail clients (Mail.app,
+    Outlook, Spark, Airmail), messaging apps (Slack, Discord, Signal,
+    Telegram, WhatsApp) that surface contact suggestions, sync agents
+    (iCloud, Google, Dropbox), and backup tooling. Adversaries may harvest
+    contact data for social engineering, spamming, or reconnaissance.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1005/
 tags:
@@ -24,14 +32,73 @@ detection:
             - '/Contacts'
             - 'AddressBookSourceSync'
             - 'contactsd'
+            - 'AddressBookSync'
+            - 'dataaccessd'
+            - 'accountsd'
+    filter_mail_clients:
+        Image|contains:
+            - '/Mail.app'
+            - '/Microsoft Outlook'
+            - '/Outlook.app'
+            - '/Spark Desktop'
+            - '/Airmail'
+            - '/Mimestream'
+            - '/Postbox'
+            - '/Thunderbird'
+    filter_messaging:
+        Image|contains:
+            - '/Slack.app'
+            - '/Discord.app'
+            - '/Signal.app'
+            - '/Telegram'
+            - '/WhatsApp'
+            - '/Messenger.app'
+            - '/Skype.app'
+            - '/Microsoft Teams'
+            - '/zoom.us'
+    filter_sync_clients:
+        Image|contains:
+            - '/Google Drive'
+            - '/Dropbox.app'
+            - '/OneDrive.app'
+            - '/Box.app'
+            - '/bird'
+            - '/cloudd'
+            - 'GoogleSoftwareUpdateAgent'
+    filter_crm:
+        Image|contains:
+            - '/Salesforce'
+            - '/HubSpot'
+            - '/Pipedrive'
+            - '/Zoho'
+            - '/Notion.app'
+            - '/Cardhop'
+            - '/BusyContacts'
     filter_system:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
+    filter_apple:
+        SignerType: 'apple'
     filter_spotlight:
-        Image|contains: 'mdworker'
-    condition: selection and not filter_contacts and not filter_system and not filter_spotlight
+        Image|contains:
+            - 'mdworker'
+            - 'mds_stores'
+            - 'corespotlightd'
+    filter_backup:
+        Image|endswith:
+            - '/rsync'
+            - '/tar'
+            - '/cp'
+            - '/ditto'
+        Image|contains:
+            - '/backupd'
+            - 'TimeMachine'
+            - '/CarbonCopyCloner'
+            - '/SuperDuper'
+            - '/Arq'
+    condition: selection and not filter_contacts and not filter_mail_clients and not filter_messaging and not filter_sync_clients and not filter_crm and not filter_system and not filter_apple and not filter_spotlight and not filter_backup
 falsepositives:
-    - Address book sync tools
-    - CRM integration applications
+    - Address book sync tools not yet allowlisted
+    - CRM integration apps not yet in filter_crm
 level: high

@@ -1,7 +1,14 @@
 title: Outbound Connection on Unusual Port from Unsigned Binary
 id: d1a2b3c4-0041-4000-a000-000000000041
 status: experimental
-description: Detects outbound network connections on non-standard ports from unsigned or ad-hoc signed binaries.
+description: >
+    Detects outbound network connections to non-standard ports from unsigned
+    or ad-hoc signed binaries. This is a weak signal on its own — many P2P,
+    gaming, and self-hosted services use uncommon ports — so the rule is
+    intended as a low-severity correlation input for sequence/campaign
+    detectors rather than a standalone alert. network_connection events do
+    not carry CommandLine, so selection is by destination port and Image
+    signing only.
 author: MacCrab Community
 date: 2026/03/31
 references:
@@ -59,4 +66,4 @@ falsepositives:
     - Development servers on custom ports
     - VPN or P2P applications
     - Database clients (PostgreSQL, MongoDB, Redis)
-level: medium
+level: low

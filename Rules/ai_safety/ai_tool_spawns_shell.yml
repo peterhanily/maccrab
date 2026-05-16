@@ -1,12 +1,19 @@
-title: AI Coding Tool Spawns Shell Process
+title: AI Coding Tool Spawns Shell Process (Enrichment)
 id: d1a2b3c4-2001-4000-a000-000000002001
-status: stable
+status: test
 description: >
-    Detects when an AI coding tool (Claude Code, Codex, OpenClaw, Cursor)
-    spawns a shell process. While normal for executing commands, this should
-    be monitored for suspicious command lines.
+    Tags shell processes (bash, zsh, sh) spawned by AI coding tools
+    (Claude Code, Codex, OpenClaw, Cursor, Cline, Aider, Continue).
+    This is NORMAL behaviour for AI agents that execute build/test
+    commands and is INTENDED as enrichment metadata rather than an
+    alert — severity is informational. The value lies in tagging
+    downstream events so higher-severity rules (sudo, credential reads,
+    persistence writes, network egress) can reason about whether their
+    parent chain includes an AI tool. Treat any match here as a
+    breadcrumb, not an incident.
 author: MacCrab Community
 date: 2026/04/04
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1059/004/
 tags:
@@ -21,13 +28,18 @@ detection:
             - '/bash'
             - '/zsh'
             - '/sh'
+            - '/dash'
     selection_ai_parent:
         ParentImage|contains:
             - 'claude'
             - 'codex'
             - 'openclaw'
             - 'Cursor'
+            - 'cline'
+            - 'aider'
+            - 'continue'
     condition: selection_shell and selection_ai_parent
 falsepositives:
-    - Normal AI tool operation executing build/test commands
-level: low
+    - Normal AI tool operation executing build/test commands — this rule
+      is informational by design
+level: informational

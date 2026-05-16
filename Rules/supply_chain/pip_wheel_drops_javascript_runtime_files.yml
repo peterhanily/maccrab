@@ -1,0 +1,66 @@
+title: pip-Installed Wheel Drops JavaScript / Bun Runtime Files (Cross-Ecosystem Smuggle)
+id: d1a2b3c4-0302-4000-a000-000000000031
+status: experimental
+description: >
+    Detects creation of JavaScript or Bun-runtime files under
+    `site-packages/` during a `pip install` / `uv pip install` /
+    `poetry install` lineage. The Lightning PyPI compromise
+    (April 30 2026) shipped versions 2.6.2 / 2.6.3 as wheels
+    containing a `_runtime/router_runtime.js` (~11MB obfuscated
+    bundle) and `_runtime/start.py`, then downloaded Bun to execute
+    the JS at import time. A Python wheel writing `.js` / `.mjs` /
+    `bun` / `setup_bun.js` / `router_init.js` into site-packages is
+    a defining cross-ecosystem smuggle signature and almost never
+    legitimate.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://socket.dev/blog/lightning-pypi-package-compromised
+    - https://www.stepsecurity.io/blog/lightning-obfuscated-javascript-credential-stealer-bundled-in-pypi-wheel
+    - https://snyk.io/blog/lightning-pypi-compromise-bun-based-credential-stealer/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.defense_evasion
+    - attack.t1027
+    - attack.execution
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_site_packages_path:
+        TargetFilename|contains:
+            - '/site-packages/'
+            - '/dist-packages/'
+    # Narrowed in v1.12.0 RC: dropping the broad `*.js` / `*.mjs` /
+    # `*.cjs` branch eliminates continuous-fire on every Jupyter
+    # widget / Plotly / Bokeh / ipywidgets wheel install. The
+    # remaining filenames are documented Mini Shai-Hulud / Lightning
+    # IOCs; their presence inside a Python wheel is diagnostic.
+    selection_js_runtime_file:
+        TargetFilename|endswith:
+            - '/router_runtime.js'
+            - '/router_init.js'
+            - '/bun_environment.js'
+            - '/setup_bun.js'
+            - '/execution.js'
+            - '/start.py'
+        FileAction:
+            - 'create'
+            - 'close'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+        ParentCommandLine|contains:
+            - 'install'
+    condition: selection_site_packages_path and selection_js_runtime_file and selection_lineage
+falsepositives:
+    - Python packages that legitimately ship bundled web assets (Jupyter widget bundles, Sphinx theme JavaScript, Plotly / Bokeh / ipywidgets static JS) — these typically land in `package_name/static/` or `package_name/js/`; the `_runtime/` and `bun_*` filenames are the Lightning-specific tell
+    - dev-side build tools wrapping a JS bundler (rstudio, datasette plugins) — allowlist by package
+level: critical

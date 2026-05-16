@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (1355 tests in 261 suites)
+swift test                     # Unit tests (1490 tests in 284 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -34,7 +34,7 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 - **MacCrabAgent** (`Sources/MacCrabAgent/`) -- System Extension executable. Wrapped into `com.maccrab.agent.systemextension` bundle by `scripts/build-release.sh` and activated via `OSSystemExtensionRequest`. Ships in release DMGs
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 17 tools for AI agent integration (includes v1.10 trace tools)
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 25 tools for AI agent integration (v1.10 trace tools + 8 v1.12.0 supply-chain / intent tools)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -57,19 +57,20 @@ Sources/MacCrabCore/
   Utilities/      LockedCounter, PowerGate (battery/thermal gating), shared primitives
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            427 Sigma-compatible YAML detection rules (19 tactic directories)
-  sequences/      38 multi-step sequence rules
+Rules/            424 single-event Sigma-compatible YAML rules (19 tactic directories)
+  sequences/      39 multi-step sequence rules
+  graph/          6 multi-entity TraceGraph rules (v1.12.0)
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (1355 tests in 261 suites)
+Tests/            Swift Testing unit tests (1490 tests in 284 suites)
 ```
 
 ## Detection Stack (5 tiers)
 
-1. **Rules** -- 389 single-event Sigma-compatible YAML rules compiled to JSON predicates (plus 38 sequence rules across 19 tactic dirs). Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
+1. **Rules** -- 424 single-event Sigma-compatible YAML rules compiled to JSON predicates, plus 39 sequence rules across 19 tactic dirs, plus 6 graph rules (Rules/graph/*.json) evaluated against materialized TraceGraph traces. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
-3. **Sequences** -- 38 temporal multi-step rules with process lineage correlation, 10K partial match cap.
+3. **Sequences** -- 39 temporal multi-step rules with process lineage correlation, 10K partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.
 5. **Cross-process** -- Correlation across process lineage graph.
 
@@ -192,7 +193,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed (17):**
+**Tools exposed (25):**
 
 | Tool | Purpose |
 |------|---------|

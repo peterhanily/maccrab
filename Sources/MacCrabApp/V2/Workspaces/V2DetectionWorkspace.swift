@@ -2,6 +2,10 @@
 // Spec §7.4 — rules + AI Guard + browser + MCP + prevention.
 
 import SwiftUI
+// v1.12.0: CompiledRule is used by the user-rule override path to
+// re-serialize the bundled rule JSON with `enabled: false` (and other
+// override fields, post-v1.12.1).
+import MacCrabCore
 
 public struct V2DetectionWorkspace: View {
     @ObservedObject var state: V2DashboardState
@@ -25,6 +29,19 @@ public struct V2DetectionWorkspace: View {
     @State private var extensions: [V2MockExtension] = []
     @State private var selectedExtension: V2MockExtension? = nil
     @State private var mcpServers: [V2MockMCP] = []
+    /// v1.12.0: in-app YAML viewer sheet. Replaces the v1.11.x
+    /// external-editor opener which exposed the read-only bundled
+    /// YAML in TextEdit and confused users when Cmd+S failed.
+    @State private var yamlViewerRule: V2MockRule?
+    /// v1.12.0 RC16: in-app YAML editor sheet. Save compiles the
+    /// edited YAML via the bundled Python compiler and writes the
+    /// resulting JSON to user_rules/<uuid>.json, then touches
+    /// .reload_tick so the daemon's mtime watcher picks it up.
+    @State private var yamlEditorRule: V2MockRule?
+    /// IDs of rules the user has overridden to disabled via
+    /// /Library/Application Support/MacCrab/user_rules/<id>.json.
+    /// Refreshed at .task and after each Disable / Enable action.
+    @State private var userDisabledRuleIDs: Set<String> = []
 
     public init(state: V2DashboardState) { self.state = state }
 
@@ -133,62 +150,177 @@ public struct V2DetectionWorkspace: View {
 
     // MARK: - Rules
 
-    /// Open a rule's YAML source in the user's default editor.
-    /// Searches:
-    ///   1. App-bundled rules at MacCrab.app/Contents/Resources/rules/
-    ///   2. The dev-tree at <repo>/Rules/<tactic>/<id>.yml — fall back
-    ///      via shell `find` since rules can live in any tactic dir.
-    /// On failure, fires an error toast pointing the user to the CLI.
-    private func openRuleYAML(_ rule: V2MockRule) {
-        let candidates: [String] = [
-            // Bundled rules in the .app
-            Bundle.main.path(forResource: rule.id, ofType: "yml", inDirectory: "rules"),
-            Bundle.main.path(forResource: rule.id, ofType: "yml"),
-            // Dev tree — common case
-            FileManager.default.currentDirectoryPath + "/Rules/\(rule.category.lowercased().replacingOccurrences(of: " ", with: "_"))/\(rule.id).yml",
-        ].compactMap { $0 }
+    // MARK: - User-rule overrides (v1.12.0)
 
-        for path in candidates where FileManager.default.fileExists(atPath: path) {
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
-            state.showToast(V2Toast(
-                kind: .info,
-                title: "Opened \(rule.id).yml",
-                detail: path
-            ))
-            return
+    /// System-wide override dir. Written by the dashboard, read by the
+    /// daemon at boot and on its `.reload_tick` mtime watcher. Lives
+    /// alongside the bundled `compiled_rules/` tree but is NEVER touched
+    /// by `RuleBundleInstaller` on Sparkle updates — so user overrides
+    /// persist across version bumps.
+    private static let userRulesDir = "/Library/Application Support/MacCrab/user_rules"
+    private static let reloadTickPath = userRulesDir + "/.reload_tick"
+
+    /// Refresh `userDisabledRuleIDs` from on-disk overrides so the
+    /// Disable / Enable button shows the right label after a fresh
+    /// workspace open or after another window's edit. Cheap: at most a
+    /// few-hundred-byte directory scan.
+    private func refreshUserDisabledRuleIDs() {
+        var ids: Set<String> = []
+        if let urls = try? FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: Self.userRulesDir),
+            includingPropertiesForKeys: nil
+        ) {
+            for url in urls where url.pathExtension == "json" {
+                guard let data = try? Data(contentsOf: url) else { continue }
+                struct StubRule: Decodable { let id: String; let enabled: Bool }
+                if let stub = try? JSONDecoder().decode(StubRule.self, from: data),
+                   !stub.enabled {
+                    ids.insert(stub.id)
+                }
+            }
         }
+        userDisabledRuleIDs = ids
+    }
 
-        // Last resort: shell out to `find` rooted at the cwd. Cheap;
-        // fewer than 500 rule files.
+    /// Toggle a rule between bundled-default and user-override disabled.
+    /// First disable in a session bootstraps the override directory
+    /// (admin prompt). Subsequent toggles write directly — the dir is
+    /// chmod'd 0775 root:admin during bootstrap so any admin user can
+    /// edit overrides without re-prompting.
+    private func toggleRuleDisabled(_ rule: V2MockRule) async {
+        let currentlyDisabled = userDisabledRuleIDs.contains(rule.id) || !rule.isEnabled
+        if currentlyDisabled {
+            await removeUserOverride(rule: rule)
+        } else {
+            await writeDisabledOverride(rule: rule)
+        }
+        refreshUserDisabledRuleIDs()
+    }
+
+    /// Locate the bundled compiled JSON for a rule and return the
+    /// in-memory `CompiledRule`. Used to clone the canonical rule
+    /// definition before mutating fields for an override.
+    ///
+    /// v1.12.0 RC30 fix: bundled compiled JSONs are slug-named (e.g.
+    /// `maccrab_tamper_attempt.json`), not UUID-named — only the YAMLs
+    /// are duplicated under both keys in build-release.sh. The old
+    /// UUID-by-filename lookup failed every Disable click. Fall back to
+    /// a one-time scan of compiled_rules/ that indexes UUID → path by
+    /// each JSON's internal `id` field.
+    private func loadBundledCompiledRule(id: String) -> CompiledRule? {
+        // Fast path: UUID-named file (works if build-release.sh has
+        // started shipping UUID copies in a later release).
+        let direct: [String?] = [
+            Bundle.main.path(forResource: id, ofType: "json", inDirectory: "compiled_rules"),
+            Bundle.main.path(forResource: id, ofType: "json"),
+        ]
+        for path in direct.compactMap({ $0 }) {
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+               let rule = try? JSONDecoder().decode(CompiledRule.self, from: data) {
+                return rule
+            }
+        }
+        // Slow path: scan compiled_rules/ and match by internal `id`.
+        guard let dir = Bundle.main.resourcePath.map({ $0 + "/compiled_rules" }),
+              let entries = try? FileManager.default.contentsOfDirectory(atPath: dir) else {
+            return nil
+        }
+        for entry in entries where entry.hasSuffix(".json") && entry != "manifest.json" {
+            let path = dir + "/" + entry
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let rule = try? JSONDecoder().decode(CompiledRule.self, from: data) else {
+                continue
+            }
+            if rule.id == id { return rule }
+        }
+        return nil
+    }
+
+    /// Ensure the override directory exists and is writable. Returns
+    /// true if writable after the call. First time through fires an
+    /// AppleScript admin prompt to mkdir + chmod 0775 root:admin. On
+    /// the user's choice of decline we surface a toast and bail.
+    private func ensureOverrideDirWritable() -> Bool {
+        let fm = FileManager.default
+        let dir = Self.userRulesDir
+        if fm.isWritableFile(atPath: dir) { return true }
+        // Build the script outside the AppleScript double-quotes so
+        // the same chmod-only / no-find pattern that fixed the RC11
+        // -2741 parse error keeps holding.
+        let shell = "mkdir -p '\(dir)' && chown root:admin '\(dir)' && chmod 0775 '\(dir)'"
+        let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to create the user-rules directory once so you can override rules without entering your password every time.\""
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/find")
-        task.arguments = ["Rules", "-name", "\(rule.id).yml"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         do {
             try task.run()
             task.waitUntilExit()
-            if let data = try? pipe.fileHandleForReading.readToEnd(),
-               let out = String(data: data, encoding: .utf8) {
-                let lines = out.split(separator: "\n").map(String.init)
-                if let path = lines.first {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
-                    state.showToast(V2Toast(
-                        kind: .info,
-                        title: "Opened \(rule.id).yml",
-                        detail: path
-                    ))
-                    return
-                }
-            }
-        } catch { /* fall through to error toast */ }
+            return task.terminationStatus == 0 && fm.isWritableFile(atPath: dir)
+        } catch {
+            return false
+        }
+    }
 
+    private func writeDisabledOverride(rule: V2MockRule) async {
+        guard ensureOverrideDirWritable() else {
+            state.showToast(V2Toast(
+                kind: .error,
+                title: "Couldn't create override directory",
+                detail: "Admin password is required the first time you disable a rule."
+            ))
+            return
+        }
+        guard var compiled = loadBundledCompiledRule(id: rule.id) else {
+            state.showToast(V2Toast(
+                kind: .error,
+                title: "Couldn't load bundled rule",
+                detail: "Rule \(rule.id) wasn't found in the .app bundle."
+            ))
+            return
+        }
+        compiled.enabled = false
+        let outPath = Self.userRulesDir + "/\(rule.id).json"
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(compiled),
+              (try? data.write(to: URL(fileURLWithPath: outPath))) != nil else {
+            state.showToast(V2Toast(
+                kind: .error,
+                title: "Couldn't write override",
+                detail: outPath
+            ))
+            return
+        }
+        touchReloadTick()
         state.showToast(V2Toast(
-            kind: .error,
-            title: "Couldn't find \(rule.id).yml",
-            detail: "Try: maccrabctl rules list | grep \(rule.id)"
+            kind: .info,
+            title: "Rule disabled",
+            detail: rule.title + " — daemon will reload in ~5 s"
         ))
+    }
+
+    private func removeUserOverride(rule: V2MockRule) async {
+        let path = Self.userRulesDir + "/\(rule.id).json"
+        try? FileManager.default.removeItem(atPath: path)
+        touchReloadTick()
+        state.showToast(V2Toast(
+            kind: .info,
+            title: "Rule re-enabled",
+            detail: rule.title + " — daemon will reload in ~5 s"
+        ))
+    }
+
+    /// Update the reload-tick file's mtime so the daemon's polling
+    /// watcher (DaemonSetup.swift) notices and reloads. We rewrite a
+    /// timestamp string rather than `utimes` so the dir is touched
+    /// atomically and we don't need a separate helper.
+    private func touchReloadTick() {
+        let path = Self.reloadTickPath
+        let data = "\(Date().timeIntervalSince1970)\n".data(using: .utf8) ?? Data()
+        try? data.write(to: URL(fileURLWithPath: path))
     }
 
     private var rulesTab: some View {
@@ -205,6 +337,32 @@ public struct V2DetectionWorkspace: View {
                 ruleInspector(rule)
             }
         }
+        .sheet(item: $yamlViewerRule) { rule in
+            RuleYAMLViewerSheet(rule: rule, onClose: { yamlViewerRule = nil })
+        }
+        .sheet(item: $yamlEditorRule) { rule in
+            RuleYAMLEditorSheet(
+                rule: rule,
+                onClose: { yamlEditorRule = nil },
+                onSaved: {
+                    yamlEditorRule = nil
+                    refreshUserDisabledRuleIDs()
+                    state.showToast(V2Toast(
+                        kind: .info,
+                        title: "Rule saved",
+                        detail: rule.title + " — daemon will reload in ~5 s"
+                    ))
+                },
+                onError: { detail in
+                    state.showToast(V2Toast(
+                        kind: .error,
+                        title: "Save failed",
+                        detail: detail
+                    ))
+                }
+            )
+        }
+        .task { refreshUserDisabledRuleIDs() }
     }
 
     private var rulesStatsRow: some View {
@@ -358,9 +516,24 @@ public struct V2DetectionWorkspace: View {
                 V2InspectorKeyValue("Category", r.category)
             }
             V2InspectorSection("Actions") {
+                V2ActionButton("View YAML", icon: "doc.text", style: .secondary,
+                               tooltip: "Show the rule's source YAML in-app") {
+                    yamlViewerRule = r
+                }
                 V2ActionButton("Edit YAML", icon: "pencil", style: .secondary,
-                               tooltip: "Open the rule's source YAML in your default editor") {
-                    openRuleYAML(r)
+                               tooltip: "Open the YAML in an in-app editor. Save writes a user-rule override that survives Sparkle updates.") {
+                    yamlEditorRule = r
+                }
+                let isDisabled = userDisabledRuleIDs.contains(r.id) || !r.isEnabled
+                V2ActionButton(
+                    isDisabled ? "Enable rule" : "Disable rule",
+                    icon: isDisabled ? "checkmark.circle" : "minus.circle",
+                    style: .secondary,
+                    tooltip: isDisabled
+                        ? "Re-enable this rule (removes the user override)"
+                        : "Disable this rule without editing the bundled YAML. First disable in this session may prompt for your admin password to create the override directory; subsequent disables don't."
+                ) {
+                    Task { await toggleRuleDisabled(r) }
                 }
                 V2ActionButton("View fires", icon: "list.bullet", style: .secondary) {
                     state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
@@ -660,4 +833,456 @@ public struct V2DetectionWorkspace: View {
         }
     }
 
+}
+
+/// In-dashboard read-only YAML viewer (v1.12.0).
+/// Replaces v1.11.x's external-editor opener — that path exposed the
+/// signed, read-only bundled YAML file in TextEdit and confused users
+/// when Cmd+S failed. View-only here is honest about the constraint:
+/// to actually customise a rule, use the inspector's "Disable rule"
+/// override. Full raw-YAML editing with user-rules is targeted for
+/// v1.12.1, which needs a Swift port of compile_rules.py.
+private struct RuleYAMLViewerSheet: View {
+    let rule: V2MockRule
+    let onClose: () -> Void
+
+    @State private var content: String = ""
+    @State private var sourcePath: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(rule.title)
+                        .font(V2Theme.sectionTitle())
+                        .foregroundStyle(V2Theme.primaryText)
+                    Text(rule.id)
+                        .font(V2Theme.mono())
+                        .foregroundStyle(V2Theme.mutedText)
+                }
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(content, forType: .string)
+                } label: {
+                    Label("Copy YAML", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .disabled(content.isEmpty)
+                Button("Close", action: onClose)
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(16)
+            Divider()
+            ScrollView {
+                Text(content.isEmpty ? "Loading…" : content)
+                    .font(V2Theme.mono())
+                    .foregroundStyle(V2Theme.primaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .textSelection(.enabled)
+            }
+            .background(V2Theme.sidebarBackground.opacity(0.4))
+            if !sourcePath.isEmpty {
+                HStack {
+                    Text("Source: \(sourcePath)")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                        .textSelection(.enabled)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+        }
+        .frame(minWidth: 700, minHeight: 500)
+        .task { load() }
+    }
+
+    private func load() {
+        // Prefer the UUID-named copy bundled by build-release.sh; fall
+        // back to a slug-named lookup. Dev tree probe stays for `swift
+        // run MacCrabApp` workflows where cwd is the repo root.
+        let candidates: [String?] = [
+            Bundle.main.path(forResource: rule.id, ofType: "yml", inDirectory: "rules"),
+            Bundle.main.path(forResource: rule.id, ofType: "yml"),
+            FileManager.default.currentDirectoryPath + "/Rules/\(rule.category.lowercased().replacingOccurrences(of: " ", with: "_"))/\(rule.id).yml",
+        ]
+        for path in candidates.compactMap({ $0 }) where FileManager.default.fileExists(atPath: path) {
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+               let text = String(data: data, encoding: .utf8) {
+                content = text
+                sourcePath = path
+                return
+            }
+        }
+        content = "# Couldn't find YAML for \(rule.id)\n# This usually means the .app was built without the rules/ bundle step."
+    }
+}
+
+/// In-dashboard YAML editor (v1.12.0 RC16).
+/// Loads the bundled rule's YAML into a TextEditor; the Save button
+/// writes the edited YAML to `/Library/Application Support/MacCrab/
+/// user_rules/<uuid>.yml`, spawns the bundled Python compiler with a
+/// vendored PyYAML on PYTHONPATH to produce `<uuid>.json` alongside,
+/// then touches `<dir>/.reload_tick` to trigger the daemon's mtime
+/// watcher (DaemonSetup.swift). User overrides live under user_rules/
+/// which RuleBundleInstaller never touches, so they survive Sparkle
+/// updates. First save in a session may prompt for admin to create
+/// the dir at 0775 root:admin; subsequent saves don't need elevation.
+private struct RuleYAMLEditorSheet: View {
+    let rule: V2MockRule
+    let onClose: () -> Void
+    let onSaved: () -> Void
+    let onError: (String) -> Void
+
+    @State private var content: String = ""
+    @State private var sourcePath: String = ""
+    @State private var saving: Bool = false
+    @State private var validating: Bool = false
+    /// Most recent compile error, surfaced inline so the user can fix
+    /// YAML / Sigma mistakes without dismissing the editor. Cleared on
+    /// successful Validate or Save.
+    @State private var lastError: String = ""
+    /// v1.12.0 RC27 audit fix (UX-B1): track the original content
+    /// loaded at task time so Cancel can warn before discarding edits.
+    @State private var originalContent: String = ""
+    @State private var showDiscardConfirm: Bool = false
+
+    private static let userRulesDir = "/Library/Application Support/MacCrab/user_rules"
+    private static let reloadTickPath = userRulesDir + "/.reload_tick"
+
+    /// True when the user has typed edits that aren't yet saved.
+    /// `originalContent` is populated by `load()`; if save() succeeds
+    /// it gets updated so the user can keep editing without re-prompts.
+    private var hasUnsavedChanges: Bool {
+        !originalContent.isEmpty && content != originalContent
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Edit YAML — \(rule.title)")
+                        .font(V2Theme.sectionTitle())
+                        .foregroundStyle(V2Theme.primaryText)
+                    Text(rule.id)
+                        .font(V2Theme.mono())
+                        .foregroundStyle(V2Theme.mutedText)
+                }
+                Spacer()
+                // v1.12.0 RC29 audit fix (UX-M2): in-app help link to
+                // Sigma syntax docs. Pre-fix a user hitting a compile
+                // error had no in-app path to look up correct YAML.
+                Button {
+                    if let url = URL(string: "https://sigmahq.io/docs/basics/rules.html") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.borderless)
+                .help("Open Sigma rule reference (sigmahq.io)")
+                Button("Cancel") {
+                    if hasUnsavedChanges {
+                        showDiscardConfirm = true
+                    } else {
+                        onClose()
+                    }
+                }
+                .keyboardShortcut(.cancelAction)
+                Button {
+                    Task { await save() }
+                } label: {
+                    if saving {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Save")
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(saving || content.isEmpty || !hasUnsavedChanges)
+            }
+            .padding(16)
+            Divider()
+            TextEditor(text: $content)
+                .font(V2Theme.mono())
+                .scrollContentBackground(.hidden)
+                .background(V2Theme.sidebarBackground.opacity(0.4))
+                .padding(8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack {
+                // v1.12.0 RC28 audit fix (UX-M2): show a "Saving…"
+                // indicator while the Python compile subprocess is in
+                // flight. Editor save is 65-160ms wall-clock; without
+                // feedback the user can't tell saved vs. hung.
+                if saving {
+                    ProgressView().controlSize(.small)
+                    Text("Compiling rule…")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                } else {
+                    Text("Saves to \(Self.userRulesDir)/\(rule.id).{yml,json} — survives Sparkle updates.")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+        .frame(minWidth: 800, minHeight: 600)
+        .task { load() }
+        .confirmationDialog(
+            "Discard unsaved changes?",
+            isPresented: $showDiscardConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Discard changes", role: .destructive) { onClose() }
+            Button("Keep editing", role: .cancel) {}
+        } message: {
+            Text("Your YAML edits to \(rule.title) haven't been saved. Closing now will discard them.")
+        }
+    }
+
+    private func load() {
+        // Prefer an existing user override (so the user can iterate on
+        // their own edits). Fall back to the bundled rule.
+        let userPath = Self.userRulesDir + "/\(rule.id).yml"
+        if FileManager.default.fileExists(atPath: userPath),
+           let data = try? Data(contentsOf: URL(fileURLWithPath: userPath)),
+           let text = String(data: data, encoding: .utf8) {
+            content = text
+            originalContent = text
+            sourcePath = userPath
+            return
+        }
+        let candidates: [String?] = [
+            Bundle.main.path(forResource: rule.id, ofType: "yml", inDirectory: "rules"),
+            Bundle.main.path(forResource: rule.id, ofType: "yml"),
+        ]
+        for path in candidates.compactMap({ $0 }) where FileManager.default.fileExists(atPath: path) {
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+               let text = String(data: data, encoding: .utf8) {
+                content = text
+                originalContent = text
+                sourcePath = path
+                return
+            }
+        }
+        content = "# Couldn't find YAML for \(rule.id)\n# Edit + save will create a new user override at \(Self.userRulesDir)/\(rule.id).yml"
+        originalContent = content
+    }
+
+    @MainActor
+    private func save() async {
+        saving = true
+        defer { saving = false }
+        guard ensureOverrideDirWritable() else {
+            onError("Admin password is required the first time you save a rule edit.")
+            return
+        }
+        let ymlPath = Self.userRulesDir + "/\(rule.id).yml"
+        guard (try? content.data(using: .utf8)?.write(to: URL(fileURLWithPath: ymlPath))) != nil else {
+            onError("Couldn't write YAML to \(ymlPath)")
+            return
+        }
+        let compileResult = await compileYAMLViaBundledPython()
+        switch compileResult {
+        case .success:
+            touchReloadTick()
+            // v1.12.0 RC27: re-baseline originalContent so a follow-up
+            // Cancel doesn't warn about edits we just persisted.
+            originalContent = content
+            onSaved()
+        case .failure(let message):
+            // Keep the YAML on disk so the user doesn't lose their work,
+            // but warn that the daemon won't see it until they fix the
+            // YAML and save again (or delete the broken file via CLI).
+            onError("Compiler error: \(message)")
+        }
+    }
+
+    private enum CompileResult {
+        case success
+        case failure(String)
+    }
+
+    /// Run the bundled `compile_rules.py` on JUST the rule being saved,
+    /// using a fresh tmp directory as both input AND output so the
+    /// compiler's `_snapshot_previous_output` step (which tries to
+    /// create `<output_dir>.archive/`) doesn't trip over the
+    /// /Library parent dir's root-only write permissions. The
+    /// produced JSON is then copied back into user_rules/.
+    private func compileYAMLViaBundledPython() async -> CompileResult {
+        guard let compilerPath = Bundle.main.path(forResource: "compile_rules", ofType: "py", inDirectory: "Compiler") else {
+            return .failure("Bundled compiler not found in MacCrab.app/Contents/Resources/Compiler/")
+        }
+        let pythonPath = (compilerPath as NSString).deletingLastPathComponent
+        // Stage YAML in a tmp dir so `_snapshot_previous_output` runs
+        // inside a writable parent. Without this the compiler errors
+        // with "PermissionError: '/Library/.../user_rules.archive'"
+        // since /Library/Application Support/MacCrab/ is root-owned.
+        let tmpRoot = NSTemporaryDirectory() + "maccrab-compile-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: tmpRoot) }
+        do {
+            try FileManager.default.createDirectory(
+                atPath: tmpRoot, withIntermediateDirectories: true
+            )
+        } catch {
+            return .failure("Couldn't create tmp dir: \(error.localizedDescription)")
+        }
+        let ymlSrc = Self.userRulesDir + "/\(rule.id).yml"
+        let ymlStaged = tmpRoot + "/\(rule.id).yml"
+        do {
+            try FileManager.default.copyItem(atPath: ymlSrc, toPath: ymlStaged)
+        } catch {
+            return .failure("Couldn't stage YAML for compile: \(error.localizedDescription)")
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        task.arguments = [
+            compilerPath,
+            "--input-dir", tmpRoot,
+            "--output-dir", tmpRoot,
+        ]
+        var env = ProcessInfo.processInfo.environment
+        env["PYTHONPATH"] = pythonPath
+        task.environment = env
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        task.standardOutput = stdoutPipe
+        task.standardError = stderrPipe
+        // v1.12.0 RC27 audit fix (Stab-B3): drain pipes in real time
+        // via readabilityHandler. Pre-fix the code waitUntilExit'd
+        // before reading, which deadlocks if the child writes more
+        // than 64 KB to stderr (macOS pipe buffer is 64 KB; child
+        // blocks on write, parent never wakes from wait). A verbose
+        // PyYAML traceback can exceed that on a malformed rule.
+        var outBytes = Data()
+        var errBytes = Data()
+        let drainLock = NSLock()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            drainLock.lock(); outBytes.append(chunk); drainLock.unlock()
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            drainLock.lock(); errBytes.append(chunk); drainLock.unlock()
+        }
+        do {
+            try task.run()
+        } catch {
+            return .failure("Couldn't run python3: \(error.localizedDescription)")
+        }
+        // v1.12.0 RC27 audit fix (Stab-B2): 10 s timeout on the
+        // subprocess. Pre-fix a hung compile_rules.py would hang the
+        // editor sheet indefinitely with no cancellation. Compiling
+        // a single rule should take <100 ms; 10 s is 100× safety
+        // margin for cold disk / Python startup / vendored-PyYAML
+        // import latency.
+        let deadline = DispatchTime.now() + .seconds(10)
+        let timeoutQueue = DispatchQueue.global(qos: .utility)
+        let timeoutItem = DispatchWorkItem {
+            if task.isRunning {
+                task.terminate()
+                // Give SIGTERM a second to land; then SIGKILL.
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                    if task.isRunning { kill(task.processIdentifier, SIGKILL) }
+                }
+            }
+        }
+        timeoutQueue.asyncAfter(deadline: deadline, execute: timeoutItem)
+        task.waitUntilExit()
+        timeoutItem.cancel()
+        // Final flush in case the handlers haven't drained the EOF yet.
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        if let finalOut = try? stdoutPipe.fileHandleForReading.readToEnd() {
+            drainLock.lock(); outBytes.append(finalOut); drainLock.unlock()
+        }
+        if let finalErr = try? stderrPipe.fileHandleForReading.readToEnd() {
+            drainLock.lock(); errBytes.append(finalErr); drainLock.unlock()
+        }
+        if task.terminationStatus != 0 {
+            let errData = errBytes
+            let outData = outBytes
+            let stderr = String(data: errData, encoding: .utf8) ?? ""
+            let stdout = String(data: outData, encoding: .utf8) ?? ""
+            let detail = (stderr + "\n" + stdout)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: "\n")
+                .filter { !$0.isEmpty }
+                .suffix(8)
+                .joined(separator: "\n")
+            return .failure(detail.isEmpty ? "compile_rules.py exited \(task.terminationStatus)" : detail)
+        }
+        // Move the produced JSON back into user_rules/ ATOMICALLY.
+        // v1.12.0 RC25 (race fix): pre-fix used removeItem + copyItem,
+        // which created a window where the daemon's mtime watcher could
+        // poll .reload_tick between the two calls and see jsonDst
+        // either missing or partial — leaving the user override un-
+        // loaded on the daemon side. Switch to a single rename, which
+        // is atomic on the same filesystem. Also: ensure .reload_tick
+        // is touched AFTER the JSON is durably in place (handled by
+        // touchReloadTick() being called from save() after compile
+        // returns .success).
+        let jsonStaged = tmpRoot + "/\(rule.id).json"
+        let jsonDst = Self.userRulesDir + "/\(rule.id).json"
+        guard FileManager.default.fileExists(atPath: jsonStaged) else {
+            return .failure("Compiler ran cleanly but produced no JSON at \(jsonStaged) — rule may be malformed or product != macos")
+        }
+        // POSIX rename is atomic when both paths are on the same
+        // filesystem. /tmp and /Library are both on / so this holds.
+        // We use a low-level rename() to avoid Foundation copy-then-
+        // unlink fallback for cross-volume moves.
+        let renamed = jsonStaged.withCString { src in
+            jsonDst.withCString { dst in
+                rename(src, dst) == 0
+            }
+        }
+        guard renamed else {
+            return .failure("Atomic rename failed: \(String(cString: strerror(errno)))")
+        }
+        return .success
+    }
+
+    /// Same bootstrap as the Disable-rule button: if the override dir
+    /// doesn't exist or isn't writable, prompt for admin once and chmod
+    /// it 0775 root:admin so this user (admin group) can write without
+    /// elevation on subsequent saves.
+    private func ensureOverrideDirWritable() -> Bool {
+        let fm = FileManager.default
+        let dir = Self.userRulesDir
+        if fm.isWritableFile(atPath: dir) { return true }
+        let shell = "mkdir -p '\(dir)' && chown root:admin '\(dir)' && chmod 0775 '\(dir)'"
+        let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to create the user-rules directory once so you can save rule edits without entering your password every time.\""
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0 && fm.isWritableFile(atPath: dir)
+        } catch {
+            return false
+        }
+    }
+
+    private func touchReloadTick() {
+        let data = "\(Date().timeIntervalSince1970)\n".data(using: .utf8) ?? Data()
+        try? data.write(to: URL(fileURLWithPath: Self.reloadTickPath))
+    }
 }

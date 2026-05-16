@@ -275,9 +275,21 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             throw CausalGraphStoreError.databaseOpenFailed("nil handle at migration time")
         }
         do {
-            try SchemaMigrator.run(on: db, migrations: Self.schemaMigrations) { msg in
-                self.logger.debug("\(msg, privacy: .public)")
-            }
+            // v1.12.0 RC23: skip the per-init quick_check. Field-measured
+            // boot path: tracegraph.db reached 7 GB on a long-running
+            // install, and PRAGMA quick_check on a 7 GB SQLite file took
+            // ~27 s — eating the whole daemon TraceGraph wiring step.
+            // Same trade-off as EventStore: real corruption surfaces
+            // immediately on actual queries, and an explicit operator
+            // path exists in `maccrabctl maintenance check`.
+            try SchemaMigrator.run(
+                on: db,
+                migrations: Self.schemaMigrations,
+                logger: { msg in
+                    self.logger.debug("\(msg, privacy: .public)")
+                },
+                skipQuickCheck: true
+            )
         } catch let error as SchemaMigrationError {
             throw CausalGraphStoreError.schemaFailed(error.localizedDescription)
         }
@@ -464,16 +476,27 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     public func criticalPath(from source: String, to target: String, maxDepth: Int) async throws -> [TraceEdge] {
         // Unweighted BFS shortest path (PR-8 will layer
         // confidence-weighted scoring on top).
+        //
+        // v1.12.0 RC4 fix (Perf-NEW-2): cap the frontier per BFS
+        // level. Pre-fix this was the same unbounded-fan-out shape
+        // that Perf-H2 closed in `walk()`. criticalPath is called
+        // from TraceMaterializer.materialize on EVERY anchor (hot
+        // path), so a widely-fanned process burst would re-introduce
+        // the same actor-starvation symptom on the SQLite causal-
+        // graph store. Frontier cap 256 matches `walk()`'s; we don't
+        // signal truncation back to the caller because path-not-
+        // found returns the same empty result.
         guard maxDepth > 0 else { return [] }
         if source == target { return [] }
 
         var visited: Set<String> = [source]
         var parentEdge: [String: TraceEdge] = [:]   // entityId → edge that reached it
         var frontier: [String] = [source]
+        let frontierCap = 256
 
         for _ in 0 ..< maxDepth {
             var next: [String] = []
-            for current in frontier {
+            outer: for current in frontier {
                 let outgoing = try fetchEdges(
                     pivotId: current,
                     direction: .outgoing,
@@ -489,6 +512,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                         return reconstructPath(target: target, parentEdge: parentEdge)
                     }
                     next.append(neighbor)
+                    if next.count >= frontierCap { break outer }
                 }
             }
             if next.isEmpty { break }
@@ -513,9 +537,18 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         var frontier: Set<String> = [startId]
         var truncated = false
 
+        // v1.12.0 RC3 (Perf-H2): cap the frontier per BFS level. A
+        // widely-fanned process (e.g. a `bun` shell with many
+        // spawned children + many file edges) at depth-3 can pull
+        // thousands of edges per walk. Under adversarial burst this
+        // serializes on the single SQLiteCausalGraphStore actor that
+        // is also handling the hot-path event writes — main pump
+        // starves. Frontier cap of 256/level keeps the walk bounded;
+        // when we hit the cap we set `truncated=true`.
+        let frontierCap = 256
         for _ in 0 ..< depth {
             var nextFrontier: Set<String> = []
-            for pivot in frontier {
+            outer: for pivot in frontier {
                 let edges = try fetchEdges(
                     pivotId: pivot,
                     direction: edgeDirection,
@@ -531,6 +564,10 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                     if let entity = try lookupEntitySync(id: other) {
                         entitiesById[other] = entity
                     }
+                    if nextFrontier.count >= frontierCap {
+                        truncated = true
+                        break outer
+                    }
                 }
             }
             if nextFrontier.isEmpty { break }
@@ -543,21 +580,31 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // out of iterations rather than empty frontier.
         // (For v1.10.0 the simpler heuristic is: if the final frontier
         // had outgoing edges we didn't explore, mark truncated.)
-        for pivot in frontier {
-            let unexplored = try fetchEdges(
-                pivotId: pivot,
-                direction: edgeDirection,
-                window: window,
-                relations: relations
-            )
-            for edge in unexplored {
-                let other = (edgeDirection == .incoming) ? edge.sourceEntityId : edge.targetEntityId
-                if !visited.contains(other) {
-                    truncated = true
-                    break
+        //
+        // v1.12.0 RC4 fix (Perf-NEW-1): skip the post-pass entirely
+        // when `truncated` is already true from the frontier-cap
+        // path. The post-pass re-issues `fetchEdges` against every
+        // node in the final frontier (up to 256 nodes from the
+        // frontierCap) — a hot-path SQLite burst that partially
+        // defeats Perf-H2's bound. If we already know we're
+        // truncated, there's nothing new to learn.
+        if !truncated {
+            for pivot in frontier {
+                let unexplored = try fetchEdges(
+                    pivotId: pivot,
+                    direction: edgeDirection,
+                    window: window,
+                    relations: relations
+                )
+                for edge in unexplored {
+                    let other = (edgeDirection == .incoming) ? edge.sourceEntityId : edge.targetEntityId
+                    if !visited.contains(other) {
+                        truncated = true
+                        break
+                    }
                 }
+                if truncated { break }
             }
-            if truncated { break }
         }
 
         return GraphSubtree(

@@ -1,0 +1,63 @@
+title: Urgency-Lexicon Markers In Package-Install Lineage Content
+id: d1a2b3c4-0302-4000-a000-000000000038
+status: experimental
+description: >
+    Detects social-engineering urgency markers — "urgent", "merge now",
+    "must merge", "security fix", "zero day", "won't compile without",
+    "blocking production" — appearing in install-time fetched content
+    (PR descriptions, release notes, CHANGELOG, README) for a freshly-
+    installed package. The XZ-Utils Jia Tan campaign manufactured
+    urgency via "Jigar Kumar" / "Dennis Ens" personas to pressure the
+    maintainer; the polyfill.io takeover used time-pressure on
+    integrators. The signal is text-content + install-lineage joint:
+    legitimate CVE-fix PRs are urgent, but they don't bury the urgency
+    in CHANGELOG.md fetched by `npm install`.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://securelist.com/xz-backdoor-story-part-2-social-engineering/112476/
+    - https://research.swtch.com/xz-timeline
+    - https://openssf.org/blog/2024/04/15/open-source-security-openssf-and-openjs-foundations-issue-alert-for-social-engineering-takeovers-of-open-source-projects/
+    - https://attack.mitre.org/techniques/T1566/
+tags:
+    - attack.initial_access
+    - attack.t1566
+    - maccrab.linguistic_deception
+    - maccrab.maintainer_drift
+logsource:
+    category: file_event
+    product: macos
+detection:
+    # v1.12.0 RC4 fix (Det-R4-M1): dropped `/.bundle/` — FileContent
+    # Enricher.shouldScan only inspects /node_modules/, /site-packages/,
+    # /.yarn/cache/, /.npm/_cacache/. Ruby's /.bundle/ branch couldn't
+    # ever produce a FileContent payload to match selection_urgency,
+    # making that branch dead. If Ruby coverage is wanted, extend the
+    # enricher allowlist first.
+    selection_install_dir:
+        TargetFilename|contains:
+            - '/node_modules/'
+            - '/site-packages/'
+    selection_text_content_file:
+        TargetFilename|endswith:
+            - '/CHANGELOG.md'
+            - '/CHANGELOG'
+            - '/RELEASE_NOTES.md'
+            - '/SECURITY.md'
+            - '/README.md'
+    selection_urgency:
+        FileContent|contains:
+            - 'merge now'
+            - 'must merge'
+            - 'critical hotfix'
+            - 'zero day'
+            - 'blocking production'
+            - 'breaks ci'
+            - 'security emergency'
+            - 'IMPORTANT: please review and merge ASAP'
+            - 'urgent security'
+    condition: selection_install_dir and selection_text_content_file and selection_urgency
+falsepositives:
+    - Legitimate CVE-disclosure release notes containing genuine urgency text (covered automatically — the urgency phrase alone is not the alert; combined with a fresh package install lineage in the supply_chain tactic is what triggers escalation)
+    - Security-tooling packages that include urgency-related test fixtures in their CHANGELOG
+level: medium

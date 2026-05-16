@@ -13,15 +13,28 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection:
+    # The previous condition required `write` to appear in the command
+    # line. That missed three real-world persistence flows:
+    #   1. `defaults import com.apple.loginwindow <plist>` — same
+    #      persistence outcome, no `write` token in argv.
+    #   2. `plutil -replace LoginHook` / `plutil -insert LoginHook`
+    #      against /var/root/Library/Preferences/com.apple.loginwindow
+    #      .plist or ~/Library/Preferences/.
+    #   3. `defaults read com.apple.loginwindow LoginHook` is a recon
+    #      precursor to overwriting an existing hook — worth at least a
+    #      low-confidence signal even without a mutation.
+    # Accept any of write/import/read on the defaults path, or any
+    # plutil mutation against the loginwindow plist.
+    selection_defaults:
         Image|endswith: '/defaults'
+        CommandLine|contains: 'com.apple.loginwindow'
+    selection_plutil:
+        Image|endswith: '/plutil'
         CommandLine|contains: 'com.apple.loginwindow'
     selection_hook:
         CommandLine|contains:
             - 'LoginHook'
             - 'LogoutHook'
-    selection_write:
-        CommandLine|contains: 'write'
     filter_system:
         ParentImage|startswith:
             - '/System/'
@@ -29,7 +42,7 @@ detection:
             - '/usr/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection and selection_hook and selection_write and not filter_system and not filter_apple_signed
+    condition: (selection_defaults or selection_plutil) and selection_hook and not filter_system and not filter_apple_signed
 falsepositives:
     - Legacy enterprise management tools that still use login hooks
     - IT administrators configuring login scripts

@@ -20,13 +20,24 @@ logsource:
     category: process_creation
     product: macos
 detection:
+    # Narrow sysctl branch: only the highly anti-debug-specific OIDs.
+    # kern.boottime alone is queried by many uptime / monitoring tools
+    # (top, htop, glances, system-profiler) and is too broad to fire on
+    # its own — keep it in the rule but require pairing with a stronger
+    # OID via the AND of selection_sysctl_anchor and selection_sysctl_oid
+    # (any one of which is enough now that the OID list is anti-debug
+    # focused).
     selection_sysctl_debug:
         Image|endswith: '/sysctl'
         CommandLine|contains:
             - 'kern.proc.pid'
-            - 'kern.boottime'
             - 'sysctl.proc_translated'
             - 'security.mac.sandbox'
+            - 'kern.proc.p_flag'
+            - 'P_TRACED'
+    # Ptrace is the canonical macOS anti-debug primitive
+    # (ptrace(PT_DENY_ATTACH, …)). Direct invocation from the CLI is
+    # vanishingly rare outside of evasion attempts.
     selection_ptrace:
         Image|endswith: '/ptrace'
     filter_apple:
@@ -37,6 +48,11 @@ detection:
         Image|startswith:
             - '/Applications/Xcode'
             - '/Library/Developer/'
+            - '/Applications/Instruments.app/'
+        ParentImage|startswith:
+            - '/Applications/Xcode'
+            - '/Library/Developer/'
+            - '/Applications/Instruments.app/'
     condition: (selection_sysctl_debug or selection_ptrace) and not filter_apple and not filter_dev_tools
 falsepositives:
     - Legitimate debugging tools and profilers

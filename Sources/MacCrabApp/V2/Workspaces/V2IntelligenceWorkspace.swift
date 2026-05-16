@@ -561,10 +561,28 @@ public struct V2IntelligenceWorkspace: View {
                 return (s, i)
             }
 
+        // v1.12.0 post-audit (H-Int3): pull the typosquat-enriched
+        // PackageScanner inventory once so the manual "Run scan" path
+        // surfaces the same intelligence fields as the periodic
+        // auto-refresh. Pre-fix this mapper omitted the new fields and
+        // every "Run scan" click wiped the Supply-chain inspector
+        // indicators. Map by `manager:name` key.
+        let intelligenceMap: [String: PackageInfo] = await {
+            let infos = await Self.scanIntelligenceCache.scan()
+            var out: [String: PackageInfo] = [:]
+            for info in infos { out[info.id] = info }
+            return out
+        }()
+
         let mapped = scanned.map { info -> V2MockPackage in
             let key = "\(info.registry.rawValue):\(info.name)"
             let installedVer = installedMap[key] ?? "—"
             let latestVer = info.latestVersion ?? "—"
+            // The v1.12 intelligence fields live on the
+            // PackageScanner-provided `PackageInfo` keyed by
+            // `<manager>:<name>` — same shape as `info.id`. Map by name
+            // since registry namespaces match (npm <-> npm, pypi <-> pip).
+            let intelInfo = intelligenceMap[managerKey(registry: info.registry.rawValue, name: info.name)]
             return V2MockPackage(
                 id: key,
                 name: info.name,
@@ -572,7 +590,11 @@ public struct V2IntelligenceWorkspace: View {
                 latest: latestVer,
                 manager: info.registry.rawValue,
                 vulnCount: info.isFresh ? 1 : 0,
-                staleness: info.ageInDays ?? 0
+                staleness: info.ageInDays ?? 0,
+                typosquatScore: intelInfo?.typosquatScore,
+                typosquatSimilarTo: intelInfo?.typosquatSimilarTo,
+                attestationStatus: intelInfo?.attestationStatus,
+                contentRedFlags: intelInfo?.contentRedFlags
             )
         }
         await MainActor.run {
@@ -700,6 +722,76 @@ public struct V2IntelligenceWorkspace: View {
                     }
                 }
             }
+
+            // v1.12.0 — supply-chain intelligence section. Only renders
+            // when at least one of the four fields is populated. Single
+            // section keeps the inspector compact when none of the
+            // signals fired; bumps a chip when something is concerning.
+            //
+            // v1.12.0 post-audit (M-UI1): "Supply chain", "Typosquat",
+            // "Attestation", "Content flags" are bare-literal English
+            // strings here. The entire V2IntelligenceWorkspace.swift
+            // file does not use `String(localized:)`; adding it to
+            // only these four would create inconsistency. A workspace-
+            // wide localization sweep is queued for v1.12.x — it
+            // should pick these up at the same time.
+            let hasSupplyChainSignal = pkg.typosquatScore != nil
+                || pkg.attestationStatus != nil
+                || (pkg.contentRedFlags?.isEmpty == false)
+            if hasSupplyChainSignal {
+                V2InspectorSection("Supply chain") {
+                    if let score = pkg.typosquatScore {
+                        V2InspectorKeyValue("Typosquat", typosquatDisplay(score: score, similarTo: pkg.typosquatSimilarTo, isLikely: pkg.isLikelyTyposquat))
+                    }
+                    if let status = pkg.attestationStatus {
+                        V2InspectorKeyValue("Attestation", attestationDisplay(status))
+                    }
+                    if let flags = pkg.contentRedFlags, !flags.isEmpty {
+                        V2InspectorKeyValue("Content flags", flags.joined(separator: ", "))
+                    }
+                }
+            }
+        }
+    }
+
+    // v1.12.0 post-audit (H-Int3): shared PackageScanner cache used by
+    // the manual "Run scan" path so the intelligence fields flow
+    // through to V2MockPackage. The 5-minute cache inside PackageScanner
+    // absorbs the cost of repeated scans.
+    private static let scanIntelligenceCache: PackageScanner = PackageScanner()
+
+    /// Map the PackageFreshnessChecker's `registry` field to the
+    /// PackageScanner's `manager:name` id shape.
+    private func managerKey(registry: String, name: String) -> String {
+        let manager: String
+        switch registry.lowercased() {
+        case "npm":     manager = "npm"
+        case "pypi":    manager = "pip"
+        case "homebrew", "brew": manager = "brew"
+        default:        manager = registry.lowercased()
+        }
+        return "\(manager):\(name)"
+    }
+
+    // v1.12.0 — helpers extracted from the inspector ViewBuilder so the
+    // if/else chains don't get parsed as View construction.
+    private func typosquatDisplay(score: Int, similarTo: String?, isLikely: Bool) -> String {
+        let similar = similarTo.map { " (similar to `\($0)`)" } ?? ""
+        if isLikely {
+            return "⚠️ Likely typosquat — score \(score)\(similar)"
+        }
+        if score > 0 {
+            return "Score \(score)\(similar)"
+        }
+        return "Clean (no top-corpus match within range)"
+    }
+
+    private func attestationDisplay(_ status: String) -> String {
+        switch status {
+        case "verified": return "✓ Verified (Sigstore / PEP 740)"
+        case "missing":  return "Not published with provenance"
+        case "invalid":  return "⚠️ Builder mismatch vs prior versions"
+        default:         return status
         }
     }
 

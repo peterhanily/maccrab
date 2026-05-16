@@ -1,13 +1,19 @@
-title: Multiple SSH Connections Spawned Rapidly by Same Parent
+title: Suspicious SSH from Script-like or Non-Interactive Parent
 id: a1b2c3d4-1007-4000-b000-000000001007
 status: experimental
 description: |
-  Detects a shell or script interpreter spawning multiple SSH child processes in
-  quick succession, which is characteristic of automated lateral movement scripts
-  that SSH to many hosts simultaneously to spread malware, install backdoors, or
-  execute commands across an internal network.
+  Detects an SSH client spawned by a shell or scripting interpreter that is
+  itself running non-interactively (no controlling TTY) and whose parent is
+  not an Apple-signed component. This pattern is characteristic of an
+  automated lateral-movement script that SSHes to another host, but is
+  intentionally a SINGLE-EVENT signal: Sigma has no temporal/sequence
+  semantics, so the prior "Multiple SSH Connections Spawned Rapidly by Same
+  Parent" framing was misleading. Real burst/mass detection is delegated to
+  the sequence engine (Rules/sequences/). Rule renamed from
+  "Multiple SSH Connections Spawned Rapidly by Same Parent".
 author: MacCrab Community
 date: 2026/04/08
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1021/004/
     - https://attack.mitre.org/techniques/T1570/
@@ -26,16 +32,41 @@ detection:
             - '/zsh'
             - '/sh'
             - '/fish'
-            - '/python3'
+            - '/dash'
             - '/python'
+            - '/python3'
             - '/ruby'
             - '/perl'
+            - '/osascript'
+            - '/launchd'
+    selection_no_tty:
+        # Non-interactive launches do not have a controlling TTY. The
+        # SessionEnricher leaves SessionTTY empty in that case.
+        SessionTTY: ''
     filter_apple:
         SignerType:
             - 'apple'
             - 'appStore'
-    condition: selection and not filter_apple
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    filter_ide_parent:
+        # IDE-spawned shells frequently run without a /dev/tty even though
+        # a human is driving them. Exclude common dev tools.
+        ParentImage|endswith:
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+            - '/Xcode'
+            - '/iTerm2'
+            - '/Terminal'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+    condition: selection and selection_no_tty and not filter_apple and not filter_apple_parent and not filter_ide_parent
 falsepositives:
-    - Ansible, Fabric, Paramiko-based automation scripts
+    - Ansible, Fabric, Paramiko-based automation scripts run from a deployment host
     - Legitimate parallel SSH tools (pssh, cssh)
+    - CI runners and remote-build steps that SSH to fleet hosts
 level: medium

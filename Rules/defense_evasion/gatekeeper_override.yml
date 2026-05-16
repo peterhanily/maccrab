@@ -21,10 +21,12 @@ detection:
         CommandLine|contains:
             - '--master-disable'
             - '--disable'
-            - '--add'
     selection_xattr:
         Image|endswith: '/xattr'
         CommandLine|contains: '-d com.apple.quarantine'
+    # `spctl --add` adds explicit allow rules — this is a defensive
+    # admin/MDM workflow (allow-listing internal apps), not an evasion
+    # primitive. Excluded from the disable branch.
     condition: selection_spctl or selection_xattr
 falsepositives:
     - Enterprise deployment scripts

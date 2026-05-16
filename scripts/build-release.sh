@@ -97,6 +97,13 @@ done
 echo "  Compiling detection rules..."
 python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir "$STAGING_DIR/compiled_rules" 2>&1 | tail -1
 cp -r Rules/ "$STAGING_DIR/rules_source/"
+# v1.12.0: graph rules (Rules/graph/*.json) are already JSON — no
+# compilation step. Stage them next to the compiled single-event
+# rules so GraphRuleEvaluator can load them at daemon start. Pre-fix
+# the release DMG shipped without these and `maccrab_worm_self_propagation`
+# (the flagship Wave-1 detection) silently never fired in production.
+mkdir -p "$STAGING_DIR/compiled_rules/graph"
+cp Rules/graph/*.json "$STAGING_DIR/compiled_rules/graph/" 2>/dev/null || true
 # v1.4.2: also stamp a bundle version marker so RuleBundle on app
 # launch can compare against the installed rules and copy when newer.
 echo "$VERSION" > "$STAGING_DIR/compiled_rules/.bundle_version"
@@ -138,6 +145,52 @@ APP="$STAGING_DIR/MacCrab.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$STAGING_DIR/bin/MacCrabApp" "$APP/Contents/MacOS/MacCrab"
 
+# v1.12.0 RC16 (in-dashboard Sigma editor): bundle compile_rules.py
+# plus a vendored copy of PyYAML's pure-Python module so the dashboard
+# can compile user-edited YAML to the daemon-readable JSON format on
+# save. macOS ships Python 3 at /usr/bin/python3 but NOT PyYAML, so we
+# vendor PyYAML's source files (~624 KB, no C extension required —
+# the pure-Python fallback works fine for our throughput).
+mkdir -p "$APP/Contents/Resources/Compiler/yaml"
+cp Compiler/compile_rules.py "$APP/Contents/Resources/Compiler/compile_rules.py"
+PYYAML_SRC=$(/usr/bin/python3 -c "import yaml, os; print(os.path.dirname(yaml.__file__))" 2>/dev/null)
+if [ -n "$PYYAML_SRC" ] && [ -d "$PYYAML_SRC" ]; then
+    cp "$PYYAML_SRC"/*.py "$APP/Contents/Resources/Compiler/yaml/"
+    echo "    ✓ Bundled Compiler + PyYAML ($(ls "$APP/Contents/Resources/Compiler/yaml/" | wc -l | tr -d ' ') yaml/ files) → Resources/Compiler/"
+else
+    # v1.12.0 RC25 (release-eng): hard failure when PyYAML is missing.
+    # Pre-fix this was a warning, so a CI machine without PyYAML
+    # silently shipped a DMG whose in-dashboard Sigma editor couldn't
+    # compile rules. Fail loud so the release pipeline never produces
+    # a half-working artifact.
+    echo "    ✗ ERROR: PyYAML not found at build time. The in-dashboard Sigma editor"
+    echo "      requires it. Aborting release build."
+    echo "      Install with: /usr/bin/python3 -m pip install --user pyyaml"
+    exit 1
+fi
+
+# v1.12.0 fix (Edit-YAML): ship the rule YAML sources inside the .app
+# at Resources/rules/, named by the rule's Sigma `id:` UUID. The
+# dashboard's V2DetectionWorkspace passes `rule.id` (the YAML's `id:`
+# UUID like `d1a2b3c4-1003-4000-a000-000000001003`) to
+# `Bundle.main.path(forResource:ofType:"yml", inDirectory:"rules")`,
+# not the filename slug — so we need files named by UUID, not by slug.
+# We also copy the slug name for human browsing / debugging. Bundle
+# size cost: ~1 MB total for 463 rules; negligible vs the 80 MB DMG.
+mkdir -p "$APP/Contents/Resources/rules"
+# Pass 1: slug-named copies (filename-based browsing / debugging).
+find Rules -name '*.yml' -not -path 'Rules/graph/*' -exec cp {} "$APP/Contents/Resources/rules/" \;
+# Pass 2: UUID-named copies (Bundle.main.path lookup target).
+uuid_copied=0
+while IFS= read -r f; do
+    uuid=$(grep -m1 '^id:' "$f" | awk '{print $2}' | tr -d "'\"" | tr -d '[:space:]')
+    if [ -n "$uuid" ]; then
+        cp "$f" "$APP/Contents/Resources/rules/$uuid.yml"
+        uuid_copied=$((uuid_copied + 1))
+    fi
+done < <(find Rules -name '*.yml' -not -path 'Rules/graph/*')
+echo "    ✓ Bundled $(ls "$APP/Contents/Resources/rules/" | wc -l | tr -d ' ') YAML files → Resources/rules/ ($uuid_copied UUID-named)"
+
 # v1.4.2: ship compiled rules INSIDE the .app bundle so Sparkle
 # auto-updates (which replace only the .app, not the cask-postflight
 # state under /Library/Application Support) still refresh rule JSON.
@@ -153,6 +206,27 @@ cp -r "$STAGING_DIR/compiled_rules" "$APP/Contents/Resources/compiled_rules"
 ICON_SRC="$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns"
 if [ -f "$ICON_SRC" ]; then
     cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.icns"
+fi
+
+# v1.12.0 RC2 fix (B9): copy SPM-generated MacCrab_MacCrabCore.bundle
+# into the .app's Resources directory. Without this, Bundle.module
+# returns nil at runtime in the shipped .app, and TyposquatDatabase
+# falls back to its in-source ~30-entry starter corpus instead of the
+# bundled top-200 npm + top-200 PyPI JSON files that
+# Sources/MacCrabCore/Resources/typosquat-top-*.json carry. SPM emits
+# the bundle into .build/<arch>/release/. We probe both Apple-silicon
+# (arm64) and Intel (x86_64) trees so universal builds get coverage.
+for arch in arm64-apple-macosx x86_64-apple-macosx; do
+    SPM_BUNDLE="$PROJECT_DIR/.build/$arch/release/MacCrab_MacCrabCore.bundle"
+    if [ -d "$SPM_BUNDLE" ]; then
+        cp -R "$SPM_BUNDLE" "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle"
+        echo "    ✓ Bundled MacCrab_MacCrabCore resource bundle ($arch) → Resources/"
+        break
+    fi
+done
+if [ ! -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
+    echo "    ✗ WARNING: MacCrab_MacCrabCore.bundle not found in .build/*/release/"
+    echo "      TyposquatDatabase will fall back to in-source starter corpus."
 fi
 
 # v1.10.0: bundle maccrabctl + maccrab-mcp inside the .app at
@@ -417,14 +491,25 @@ if [ -n "$DEVELOPER_ID" ]; then
 
     # 5. App bundle — signs the outer container last so the bundle
     # signature seals the sysext + the profile + the inner executable.
+    # v1.12.0 RC28 audit fix (Release-H2): --deep on the outer bundle
+    # so Resources/compiled_rules/, Resources/rules/, and
+    # Resources/Compiler/ all get sealed into the signature. Pre-fix
+    # those were unsigned data resources — an attacker with write
+    # access to /Applications/MacCrab.app/Contents/Resources/ could
+    # swap a compiled JSON rule with a malicious one and Gatekeeper
+    # wouldn't notice (the outer signature only sealed Mach-O bytes,
+    # not nested resources). RuleBundleInstaller's manifest.json hash
+    # check covers post-install tampering, but bundle-time integrity
+    # is now a layered defense.
     codesign --sign "$DEVELOPER_ID" \
         --identifier "com.maccrab.app" \
         --options runtime \
         --entitlements "$APP_ENT" \
         --timestamp \
+        --deep \
         --force \
         "$APP"
-    echo "    ✓ Signed MacCrab.app (system-extension.install entitlement)"
+    echo "    ✓ Signed MacCrab.app (system-extension.install entitlement, --deep seals Resources)"
 
     # Verify before handing off to notarization — catches staging
     # layout mistakes fast. --deep emits many lines now that

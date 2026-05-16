@@ -1,11 +1,21 @@
-title: Plist Conversion via plutil for Inspection
+title: plutil Reading Sensitive Plist From Non-Platform Parent
 id: d1a2b3c4-0228-4000-a000-000000000228
 status: experimental
-description: Detects use of plutil to convert plist files between formats, which may indicate reconnaissance or tampering of configuration files. Adversaries convert binary plists to XML for inspection and modification.
+description: >
+    Detects `plutil -convert` against LaunchAgents/LaunchDaemons, TCC,
+    Security, or authorization plists when the parent process is not
+    Apple-signed and not a known dev tool. `plutil` is a legitimate
+    inspection tool, so on its own it is benign; the suspicious
+    signal is an unsigned third-party process programmatically reading
+    or rewriting privileged macOS plist state during recon or
+    persistence staging. Low severity because admins and uninstallers
+    also touch these paths.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1562/001/
+    - https://attack.mitre.org/techniques/T1547/011/
 tags:
     - attack.defense_evasion
     - attack.t1562.001
@@ -20,16 +30,27 @@ detection:
         CommandLine|contains:
             - '/LaunchAgents/'
             - '/LaunchDaemons/'
-            - '/Preferences/com.apple.'
+            - '/Library/Preferences/com.apple.'
             - '/TCC/'
-            - '/Security/'
-            - 'authorization'
+            - '/Library/Security/'
+            - '/etc/authorization'
     filter_system:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection and selection_sensitive and not filter_system
+            - '/usr/sbin/'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    filter_dev_tools:
+        ParentImage|contains:
+            - '/Xcode.app/'
+            - '/Developer/'
+            - '/Cellar/'
+            - '/opt/homebrew/'
+            - '/Homebrew/'
+    condition: selection and selection_sensitive and not filter_system and not filter_apple_parent and not filter_dev_tools
 falsepositives:
-    - System administrators inspecting plist configurations
-    - Backup and migration tools
-level: medium
+    - System administrators inspecting plist configuration during troubleshooting
+    - Uninstaller scripts cleaning up LaunchAgents/LaunchDaemons entries
+    - Backup and migration tooling
+level: low

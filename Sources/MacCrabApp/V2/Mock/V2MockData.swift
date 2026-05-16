@@ -275,6 +275,35 @@ public struct V2MockPackage: Identifiable, Sendable, Hashable {
     public let manager: String
     public let vulnCount: Int
     public let staleness: TimeInterval
+    // v1.12.0 supply-chain intelligence fields — optional so older
+    // mock fixtures and PackageFreshnessChecker results still compile.
+    public let typosquatScore: Int?
+    public let typosquatSimilarTo: String?
+    public let isLikelyTyposquat: Bool
+    public let attestationStatus: String?
+    public let contentRedFlags: [String]?
+
+    public init(
+        id: String, name: String, installed: String, latest: String,
+        manager: String, vulnCount: Int, staleness: TimeInterval,
+        typosquatScore: Int? = nil,
+        typosquatSimilarTo: String? = nil,
+        attestationStatus: String? = nil,
+        contentRedFlags: [String]? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.installed = installed
+        self.latest = latest
+        self.manager = manager
+        self.vulnCount = vulnCount
+        self.staleness = staleness
+        self.typosquatScore = typosquatScore
+        self.typosquatSimilarTo = typosquatSimilarTo
+        self.isLikelyTyposquat = (typosquatScore ?? 0) >= 80
+        self.attestationStatus = attestationStatus
+        self.contentRedFlags = contentRedFlags
+    }
 }
 
 // MARK: - Integration

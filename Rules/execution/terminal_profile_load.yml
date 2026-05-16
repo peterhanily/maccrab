@@ -1,11 +1,21 @@
-title: Terminal.app Profile Loading Shell with Suspicious Arguments
+title: Terminal.app Profile Auto-Runs Shell With Network Download Primitive
 id: d1a2b3c4-0100-4000-a000-000000000100
 status: experimental
-description: Detects Terminal.app launching a shell with specific arguments via a terminal profile, which can be abused to execute arbitrary commands on launch.
+description: >
+    Detects Terminal.app spawning a shell with `-c` (non-interactive
+    one-liner) whose command line contains a network-fetch primitive
+    (`curl`, `wget`) **piped** to a shell or interpreter. Malicious
+    `.terminal` profile files have been observed setting a "command
+    to run at startup" that fetches and pipes a payload. This rule
+    intentionally does **not** fire on plain user-typed commands —
+    those go through `zsh -i` / `bash -i`, not `-c`, when Terminal
+    auto-loads them from a profile. Pair with the persistence-tier
+    rule for `.terminal` file writes.
 author: MacCrab Community
 date: 2026/03/31
 references:
     - https://attack.mitre.org/techniques/T1059/004/
+    - https://posts.specterops.io/saving-your-access-d562bf5bf90b
 tags:
     - attack.execution
     - attack.t1059.004
@@ -13,6 +23,10 @@ logsource:
     category: process_creation
     product: macos
 detection:
+    # NOTE: shells are Apple platform binaries; the standard
+    # `not PlatformBinary` filter would disable the rule. FP control
+    # lives in the `selection_oneliner` + `selection_fetch_pipe`
+    # combination, which is intentionally narrow.
     selection_parent:
         ParentImage|endswith: '/Terminal'
     selection_shell:
@@ -20,22 +34,29 @@ detection:
             - '/sh'
             - '/bash'
             - '/zsh'
-    selection_args:
+    selection_oneliner:
+        CommandLine|contains: ' -c '
+    selection_fetch_pipe:
+        # Either a fetch piped to a shell/interpreter, or a base64
+        # decode piped to a shell — both of which are the canonical
+        # download-and-execute shape from a malicious profile.
         CommandLine|contains:
-            - ' -c '
-            - ' -i '
-            - '--login -c'
             - 'curl '
             - 'wget '
-            - 'python'
-            - 'osascript'
-            - 'base64'
-    filter_normal:
+            - '| bash'
+            - '| sh'
+            - '| zsh'
+            - '| python'
+            - '| osascript'
+            - 'base64 -d'
+            - 'base64 --decode'
+            - 'base64 -D'
+    filter_login_shell:
+        # Normal Terminal "Open new window" path: shell -l with no -c.
         CommandLine|endswith:
             - '--login'
             - '-l'
-    condition: selection_parent and selection_shell and selection_args and not filter_normal
+    condition: selection_parent and selection_shell and selection_oneliner and selection_fetch_pipe and not filter_login_shell
 falsepositives:
-    - Custom terminal profiles with legitimate startup commands
-    - Developer automation workflows using Terminal profiles
+    - Developer-authored `.terminal` profile that legitimately fetches an update (`curl ... | sh`) on launch — rare; review
 level: medium

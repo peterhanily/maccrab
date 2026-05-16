@@ -69,6 +69,24 @@ public actor BehaviorScoring {
     /// benign process does not repeatedly stack the same indicator.
     private static let indicatorCooldown: TimeInterval = 120
 
+    /// v1.12.0 dev-mode gate. Resolved once at type-init; flipping
+    /// MACCRAB_DEV_MODE mid-run requires a daemon restart.
+    ///
+    /// v1.12.0 post-audit (M-Sec2): gated behind `#if DEBUG` so a
+    /// release-build daemon ignores `MACCRAB_DEV_MODE` entirely. A
+    /// root attacker dropping `/Library/LaunchDaemons/com.maccrab.plist`
+    /// with `EnvironmentVariables.MACCRAB_DEV_MODE=1` cannot lower
+    /// thresholds on a release build via env var alone — they'd need
+    /// to swap the signed binary, which the System Extension activation
+    /// flow refuses (sysextd checks Team ID + entitlements before load).
+    private static let devMode: Bool = {
+        #if DEBUG
+        return Foundation.ProcessInfo.processInfo.environment["MACCRAB_DEV_MODE"] == "1"
+        #else
+        return false
+        #endif
+    }()
+
     /// A single behavioral indicator added to a process's score.
     public struct Indicator: Sendable {
         public let name: String
@@ -294,8 +312,22 @@ public actor BehaviorScoring {
         }
         entry.indicatorLastAdd[indicator.name] = now
 
+        // v1.12.0 dev-mode gate: when MACCRAB_DEV_MODE=1, halve the
+        // contribution of `ai_tool_*` indicators. Rationale: on a
+        // developer's machine, Claude Code / Cursor / Cline run all
+        // day and legitimately spawn shells, run sudo, install
+        // packages, modify shell rc files. Their full weights walk
+        // the score past the 10/20 alert/critical thresholds in
+        // normal operation. Halved weights still catch genuinely
+        // adversarial AI-agent behavior (cumulative >2-3 hits) but
+        // don't fire on the operator's everyday agent use.
+        var effectiveWeight = indicator.weight
+        if Self.devMode && indicator.name.hasPrefix("ai_tool_") {
+            effectiveWeight = indicator.weight / 2.0
+        }
+
         // Add the new indicator
-        entry.rawScore += indicator.weight
+        entry.rawScore += effectiveWeight
         entry.lastUpdate = now
         entry.indicators.append(indicator)
 

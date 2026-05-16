@@ -1,0 +1,85 @@
+title: Native Binary Dropped Under node_modules Without binding.gyp (Smuggled Mach-O)
+id: d1a2b3c4-0302-4000-a000-000000000030
+status: experimental
+description: >
+    Detects creation of a native binary (Mach-O / ELF / `.dylib` /
+    `.so` / `.node`) under `node_modules/` during an `npm install` /
+    `pnpm install` / `yarn install` lineage. Legitimate native
+    Node addons announce themselves with a `binding.gyp` and a
+    `gypfile: true` manifest entry; the axios npm compromise
+    (March 2026) and the "ambar-src" family hid pre-built Mach-O
+    droppers under `node_modules/.../<pkg>` without any matching
+    `binding.gyp`. This rule is a pure file-event observation —
+    no content scan required — and pairs with
+    `worm_self_propagation_signal` for the egress half of the chain.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://snyk.io/blog/axios-npm-package-compromised-supply-chain-attack-delivers-cross-platform/
+    - https://www.stepsecurity.io/blog/axios-compromised-on-npm-malicious-versions-drop-remote-access-trojan
+    - https://attack.mitre.org/techniques/T1105/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.command_and_control
+    - attack.t1105
+    - attack.defense_evasion
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_node_modules_path:
+        TargetFilename|contains:
+            - '/node_modules/'
+    selection_binary_suffix:
+        TargetFilename|endswith:
+            - '.dylib'
+            - '.so'
+            - '.node'
+            - '.bin'
+            - '.exe'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/node'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'add'
+            - 'postinstall'
+            - 'preinstall'
+    # Tightened in v1.12.0 RC: legitimate native-addon packages
+    # (bcrypt, sharp, sqlite3, node-canvas, better-sqlite3, esbuild,
+    # swc, vips, fsevents, node-gyp-build) routinely drop .dylib /
+    # .so / .node files during install. Allowlist by path-substring
+    # so the rule fires on the long-tail unknown-package case rather
+    # than firing on every Vite/Next/Electron project's first install.
+    filter_legitimate_native_addons:
+        TargetFilename|contains:
+            - '/node_modules/bcrypt/'
+            - '/node_modules/sharp/'
+            - '/node_modules/sqlite3/'
+            - '/node_modules/better-sqlite3/'
+            - '/node_modules/canvas/'
+            - '/node_modules/node-canvas/'
+            - '/node_modules/esbuild/'
+            - '/node_modules/@esbuild/'
+            - '/node_modules/@swc/'
+            - '/node_modules/swc/'
+            - '/node_modules/vips/'
+            - '/node_modules/sharp-libvips/'
+            - '/node_modules/fsevents/'
+            - '/node_modules/node-gyp-build/'
+            - '/node_modules/@vscode/'
+            - '/node_modules/keytar/'
+            - '/node_modules/sodium-native/'
+            - '/node_modules/zeromq/'
+    condition: selection_node_modules_path and selection_binary_suffix and selection_lineage and not filter_legitimate_native_addons
+falsepositives:
+    - 'Native Node addons whose package.json declares gypfile=true and ship a binding.gyp — currently the rule does not check for these, so legitimate addons (bcrypt, sharp, sqlite3, node-canvas, better-sqlite3) will fire and should be allowlisted by package name'
+    - 'Cross-platform binary distributions of native helpers (esbuild per-arch helpers, swc, vips) — same allowlist treatment'
+level: medium
+

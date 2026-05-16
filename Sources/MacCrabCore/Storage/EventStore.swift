@@ -19,12 +19,17 @@ public enum EventStoreError: Error, LocalizedError {
     case stepFailed(String)
     case encodingFailed(String)
     case decodingFailed(String)
+    /// v1.12.0 RC28: distinguish disk-full from generic step failures
+    /// so the daemon's insert path can degrade gracefully instead of
+    /// silently dropping events under storage exhaustion.
+    case diskFull(String)
 
     public var errorDescription: String? {
         switch self {
         case .databaseOpenFailed(let msg):  return "Database open failed: \(msg)"
         case .prepareFailed(let msg):       return "Prepare failed: \(msg)"
         case .stepFailed(let msg):          return "Step failed: \(msg)"
+        case .diskFull(let msg):            return "Disk full: \(msg)"
         case .encodingFailed(let msg):      return "Encoding failed: \(msg)"
         case .decodingFailed(let msg):      return "Decoding failed: \(msg)"
         }
@@ -316,7 +321,17 @@ public actor EventStore {
         // the CLI actually needs for status / events / hunt.
         if !isReadOnly {
             do {
-                try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
+                // v1.12.0: skip the per-init quick_check — it's a 1–2 s
+                // PRAGMA on the 962 MB events.db with FTS5 indexes and
+                // accounts for most of the perceived cold-start cost on
+                // the daemon's boot path. Callers re-invoke
+                // `runQuickCheck()` from a deferred Task once the store
+                // is up.
+                try SchemaMigrator.run(
+                    on: handle,
+                    migrations: Self.schemaMigrations,
+                    skipQuickCheck: true
+                )
             } catch {
                 Logger(subsystem: "com.maccrab.storage", category: "event-store")
                     .warning("Schema migration skipped (likely opened RW but DB is effectively read-only for this uid): \(error.localizedDescription, privacy: .public)")
@@ -446,6 +461,27 @@ public actor EventStore {
     /// this to dial a specific filter into a temp store.
     public func setInsertFilter(_ filter: EventInsertFilter?) {
         self.insertFilter = filter
+    }
+
+    /// Run SQLite `PRAGMA quick_check` on the open handle, deferred
+    /// off the daemon boot path. EventStore.init now constructs with
+    /// `skipQuickCheck: true` — call this from a background Task once
+    /// boot completes. Logs structural-corruption findings; does not
+    /// throw, since the daemon has no recovery path from corruption
+    /// at this layer anyway (real corruption surfaces as SQLITE_CORRUPT
+    /// on actual queries and the daemon's existing error handlers take
+    /// over from there).
+    public func runQuickCheck() {
+        guard let db = self.db else { return }
+        do {
+            try SchemaMigrator.quickCheck(on: db) { msg in
+                Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                    .info("quick_check: \(msg, privacy: .public)")
+            }
+        } catch {
+            Logger(subsystem: "com.maccrab.storage", category: "event-store")
+                .warning("Deferred quick_check failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Snapshot the filter's drop counter. Wired into the daemon's heartbeat
@@ -617,6 +653,15 @@ public actor EventStore {
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            // v1.12.0 RC28 audit fix (Resil-B1): surface SQLITE_FULL
+            // distinctly so EventLoop can stop trying to insert (no
+            // point hammering a full disk) instead of treating it as
+            // a transient step failure. SQLite errors here can also
+            // be SQLITE_IOERR_NOSPC (extended code 0x0D0A) which has
+            // the same semantic.
+            if rc == SQLITE_FULL || (rc & 0xFF) == SQLITE_FULL || rc == 0x0D0A {
+                throw EventStoreError.diskFull(msg)
+            }
             throw EventStoreError.stepFailed(msg)
         }
     }

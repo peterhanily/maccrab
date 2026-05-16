@@ -35,7 +35,26 @@ detection:
             - '/System/'
             - '/usr/libexec/'
             - '/usr/sbin/'
-    condition: selection and not filter_browsers and not filter_apple and not filter_system
+    # Cloud sync and backup engines legitimately read browser profile
+    # directories. Spotlight indexer also opens these files.
+    filter_sync_backup:
+        Image|contains:
+            - '/Dropbox.app/'
+            - '/iCloud Drive/'
+            - '/OneDrive.app/'
+            - '/Google Drive.app/'
+            - '/Backblaze.app/'
+            - '/Carbon Copy Cloner.app/'
+            - '/SuperDuper!.app/'
+            - '/Arq.app/'
+            - '/Arq 7.app/'
+            - '/backupd'
+            - '/backupd-helper'
+            - '/Migration Assistant.app/'
+            - '/MigrationAssistant'
+            - '/mds'
+            - '/mdworker_shared'
+    condition: selection and not filter_browsers and not filter_apple and not filter_system and not filter_sync_backup
 falsepositives:
     - Browser sync utilities
     - Backup software

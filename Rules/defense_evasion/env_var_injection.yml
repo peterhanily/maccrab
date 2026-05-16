@@ -1,16 +1,25 @@
-title: Interpreter Path Hijacking via Environment Variables
+title: Interpreter Search-Path Env Var Set on Non-Platform Process
 id: d1a2b3c4-0454-4000-a000-000000000454
 status: experimental
 description: >
     Detects processes launched with environment variables that hijack
-    interpreter library search paths. Beyond DYLD_INSERT_LIBRARIES,
-    attackers can use PYTHONPATH, PERL5LIB, RUBYLIB, NODE_PATH, and
-    similar variables to inject malicious code into legitimate
-    interpreter processes.
+    interpreter library search paths (PYTHONPATH, PYTHONSTARTUP,
+    PERL5LIB, RUBYLIB, NODE_PATH, CLASSPATH, JAVA_TOOL_OPTIONS,
+    DYLD_*). On its own, setting these vars is normal in dev
+    environments (venv, conda, rbenv, nvm). The rule narrows to
+    target processes that are neither Apple-signed nor a known
+    interactive shell parent, on the theory that an attacker would
+    use these vars to inject into a non-developer binary. Requires
+    `MACCRAB_CAPTURE_ENV=1` so the daemon collects the child env.
+    DYLD_INSERT_LIBRARIES has a dedicated higher-severity rule
+    (dyld_insert_libraries_env.yml) and is excluded here to avoid
+    double-firing.
 author: MacCrab Community
 date: 2026/04/09
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1574/007/
+    - https://attack.mitre.org/techniques/T1574/006/
 tags:
     - attack.defense_evasion
     - attack.persistence
@@ -19,42 +28,60 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection_python:
-        CommandLine|contains:
+    selection_interpreter_env:
+        EnvVarsFlat|contains:
             - 'PYTHONPATH='
             - 'PYTHONSTARTUP='
             - 'PYTHONHOME='
-    selection_perl:
-        CommandLine|contains:
             - 'PERL5LIB='
             - 'PERL5OPT='
             - 'PERLLIB='
-    selection_ruby:
-        CommandLine|contains:
             - 'RUBYLIB='
             - 'RUBYOPT='
-    selection_node:
-        CommandLine|contains:
             - 'NODE_PATH='
             - 'NODE_OPTIONS='
-    selection_generic:
-        CommandLine|contains:
-            - 'LD_PRELOAD='
+            - 'CLASSPATH='
+            - 'JAVA_TOOL_OPTIONS='
             - 'DYLD_FRAMEWORK_PATH='
             - 'DYLD_LIBRARY_PATH='
             - 'DYLD_FALLBACK_LIBRARY_PATH='
-            - 'CLASSPATH='
-            - 'JAVA_TOOL_OPTIONS='
-    filter_dev:
+            - 'LD_PRELOAD='
+    filter_apple_target:
+        SignerType: 'apple'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    filter_dev_parents:
+        # Interactive shells, IDE-launched terminals, ssh sessions,
+        # and CI runners legitimately set these env vars constantly.
         ParentImage|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+            - '/fish'
             - '/Terminal'
             - '/iTerm2'
+            - '/iTerm'
             - '/login'
             - '/sshd'
-    filter_apple:
-        SignerType: 'apple'
-    condition: (selection_python or selection_perl or selection_ruby or selection_node or selection_generic) and not filter_dev and not filter_apple
+            - '/tmux'
+            - '/screen'
+    filter_dev_target:
+        Image|contains:
+            - '/Xcode.app/'
+            - '/Developer/'
+            - '/Cellar/'
+            - '/opt/homebrew/'
+            - '/Library/Frameworks/Python.framework/'
+            - '/Library/Frameworks/Ruby.framework/'
+            - '/.pyenv/'
+            - '/.rbenv/'
+            - '/.nvm/'
+            - '/conda'
+            - '/venv/'
+            - '/virtualenv/'
+    condition: selection_interpreter_env and not filter_apple_target and not filter_apple_parent and not filter_dev_parents and not filter_dev_target
 falsepositives:
-    - Development environments with custom library paths
-    - Virtual environments (Python venv, conda)
+    - Developer environments with custom library paths (venv, conda, rbenv, nvm)
+    - Test runners and CI agents launching with custom interpreter search paths
+    - Application launchers that wrap interpreters with extra paths
 level: medium

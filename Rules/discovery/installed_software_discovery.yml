@@ -45,9 +45,74 @@ detection:
         SignerType:
             - 'apple'
             - 'appStore'
-    condition: (selection_profiler or selection_pkgutil or selection_mdfind_security) and not filter_apple
+            - 'devId'
+    filter_platform:
+        PlatformBinary: 'true'
+    filter_system_path:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/System/'
+    # system_profiler / pkgutil are daily inventory work for IT admins, MDM
+    # agents, license compliance, and dev-tool installers. Filter ancestry
+    # so the rule only fires on unusual lineage (e.g. unsigned dropper).
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/brew'
+            - '/npm'
+            - '/yarn'
+            - '/pnpm'
+            - '/pip'
+            - '/pip3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
+    filter_mdm_parent:
+        # MDM agents (Jamf, Kandji, Mosyle, Hexnode, Munki) routinely
+        # inventory installed software for compliance reporting.
+        ParentImage|contains:
+            - '/Jamf/'
+            - '/jamf'
+            - '/Kandji/'
+            - '/kandji'
+            - '/Mosyle'
+            - '/Hexnode'
+            - '/ManagedClient'
+            - '/munki'
+            - '/Munki'
+            - '/Addigy'
+            - '/FileWave'
+    condition: (selection_profiler or selection_pkgutil or selection_mdfind_security) and not filter_apple and not filter_platform and not filter_system_path and not filter_dev_tools and not filter_mdm_parent
 falsepositives:
-    - Software asset management tools
-    - License compliance checkers
-    - Legitimate system administration scripts
+    - Software asset management tools (filter_mdm_parent)
+    - License compliance checkers (filter_mdm_parent / filter_dev_tools)
+    - Legitimate system administration scripts (filter_dev_tools)
 level: low
+# v1.11.2: added platform-binary / system-path / dev-tool / MDM parent
+# filters. system_profiler SPApplicationsDataType is run by every macOS
+# inventory tool daily so we must require unusual lineage.

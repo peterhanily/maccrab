@@ -1,31 +1,65 @@
-title: Files Written to AirDrop Staging Directory
+title: Credential Or Keystore File Staged In AirDrop Directory
 id: d1a2b3c4-0260-4000-a000-000000000260
 status: experimental
-description: Detects files being written to the AirDrop staging directory by a non-system process. Adversaries may stage data in the AirDrop directory for exfiltration via local wireless transfer.
+description: >
+    Detects a non-system process writing a file with a credential/keystore-
+    looking name into the AirDrop staging directory. AirDrop staging is by
+    itself a benign user action — every legitimate AirDrop transfer touches
+    these paths — so the previous selection on the directory alone fired on
+    every user share. This rewrite requires the staged filename to look like
+    a credential, keystore, dotfile bundle, or bulk-archive name, which keeps
+    the original threat model (local-wireless exfiltration via AirDrop) while
+    eliminating the user-share noise floor.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1011/
+    - https://attack.mitre.org/techniques/T1552/
 tags:
     - attack.collection
     - attack.exfiltration
     - attack.t1011
+    - attack.credential_access
+    - attack.t1552
 logsource:
     category: file_event
     product: macos
 detection:
-    selection:
+    selection_airdrop_path:
         TargetFilename|contains:
             - '/com.apple.AirDrop/'
             - '/.TemporaryItems/'
+    selection_credential_name:
+        TargetFilename|contains:
+            - 'id_rsa'
+            - 'id_ed25519'
+            - 'id_ecdsa'
+            - 'id_dsa'
+            - '.ssh'
+            - '.aws'
+            - '.gnupg'
+            - '.kube'
+            - '.docker'
+            - '.npmrc'
+            - 'credentials'
+            - 'keychain'
+            - 'wallet.dat'
+            - 'Keystore'
+            - 'login.keychain'
+            - '.pem'
+            - '.p12'
+            - '.pfx'
     filter_system:
         Image|startswith:
             - '/System/'
             - '/usr/libexec/'
     filter_sharingd:
         Image|contains: 'sharingd'
-    condition: selection and not filter_system and not filter_sharingd
+    filter_apple:
+        SignerType: 'apple'
+    condition: selection_airdrop_path and selection_credential_name and not filter_system and not filter_sharingd and not filter_apple
 falsepositives:
-    - Legitimate AirDrop file transfers
-    - File management utilities
-level: medium
+    - User intentionally AirDropping a credential file to another device they own
+    - Backup utilities staging dotfile bundles via Finder's AirDrop UI
+level: high

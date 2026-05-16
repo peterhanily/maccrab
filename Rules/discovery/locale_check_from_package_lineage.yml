@@ -1,0 +1,68 @@
+title: AppleLanguages / Locale Probe From Package-Manager Lineage (Geofence Skip)
+id: d1a2b3c4-0500-4000-a000-000000000503
+status: experimental
+description: >
+    Detects a process descending from a package manager reading the
+    user's preferred languages — either via `defaults read NSGlobalDomain
+    AppleLanguages` or by directly opening
+    `~/Library/Preferences/.GlobalPreferences.plist`. Used by
+    Lazarus's `AppleJeus`, BlueNoroff's `ObjCShellz`, and the original
+    Shai-Hulud (Sept 2025) for a CIS / Russian-locale early-exit so
+    the worm doesn't fire on its operators' own machines. A package
+    postinstall has no legitimate reason to read this preference;
+    even if a wave drops the locale guard (as Wave 4 did), early
+    waves will still trip this rule and contribute to the campaign
+    signal.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.kaspersky.com/about/press-releases/2023_kaspersky-discovers-applejeus-campaign-distributed-through-fake-cryptocurrency-app
+    - https://www.jamf.com/blog/objcshellz-bluenoroff-malware/
+    - https://attack.mitre.org/techniques/T1614/001/
+    - https://attack.mitre.org/techniques/T1480/
+tags:
+    - attack.discovery
+    - attack.t1614.001
+    - attack.defense_evasion
+    - attack.t1480
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_defaults_locale:
+        Image|endswith:
+            - '/defaults'
+        CommandLine|contains:
+            - 'AppleLanguages'
+            - 'NSGlobalDomain'
+            - '.GlobalPreferences'
+    selection_locale_read:
+        CommandLine|contains:
+            - 'preferredLanguages'
+            - 'NSLocale'
+            - 'AppleLocale'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+            - '/bun'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'postinstall'
+            - 'preinstall'
+    condition: (selection_defaults_locale or selection_locale_read) and selection_lineage
+falsepositives:
+    - i18n / l10n tooling whose postinstall step inspects the system locale to choose a translation bundle (rare but possible); allowlist by package name on first FP
+    - Locale-aware Node packages run inside an interactive shell; the rule requires a package-manager parent, not interactive shell, so this is naturally filtered
+level: medium

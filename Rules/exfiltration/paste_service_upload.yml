@@ -3,10 +3,14 @@ id: e1f2a3b4-7010-4000-c000-000000007010
 status: experimental
 description: >
     Detects curl or wget posting data to public paste or file-sharing services
-    (Pastebin, Hastebin, Ghostbin, ix.io, transfer.sh, file.io, termbin). Adversaries
-    use these services as anonymous exfiltration channels and dead-drop resolvers
-    because traffic blends with normal browsing, accounts are not required, and
-    content is ephemerally hosted. stdin piping (-d @-) indicates automated use.
+    (Pastebin, Hastebin, Ghostbin, ix.io, transfer.sh, file.io, termbin) from
+    NON-INTERACTIVE contexts. Adversaries use these services as anonymous
+    exfiltration channels and dead-drop resolvers because traffic blends with
+    normal browsing, accounts are not required, and content is ephemerally
+    hosted. Legitimate developer use is dominated by interactive terminal
+    sessions, so this rule filters out processes attached to a TTY and direct
+    shell/IDE parents — what remains is curl/wget invoked from a launchd job,
+    background daemon, or unattended script.
 author: MacCrab Community
 date: 2026/04/22
 references:
@@ -50,7 +54,30 @@ detection:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection_tool and selection_sites and selection_post and not filter_system
+    filter_interactive_shell:
+        # Drop interactive terminal-driven uploads (developer pasting a
+        # snippet). The presence of a controlling TTY indicates a human at
+        # the keyboard, which is the dominant FP source for this rule.
+        SessionTTY|contains: '/dev/'
+    filter_ide_parent:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+            - '/Xcode'
+    condition: selection_tool and selection_sites and selection_post and not filter_system and not filter_interactive_shell and not filter_ide_parent
 falsepositives:
     - Developer scripts sharing code snippets or configuration examples
     - CI/CD pipelines publishing test artifacts

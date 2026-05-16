@@ -26,4 +26,5 @@ detection:
 falsepositives:
     - System utilities managing file visibility
     - Legitimate applications hiding support files
-level: medium
+    - Users hiding personal folders from Finder (chflags hidden ~/Private)
+level: low

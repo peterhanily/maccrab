@@ -17,18 +17,22 @@ detection:
         Image|endswith: '/defaults'
         CommandLine|contains: 'read'
     selection_sensitive:
+        # v1.11.2: removed broad consumer domains that every preference utility
+        # reads daily: com.apple.dock, com.apple.finder, com.apple.Safari,
+        # com.apple.LaunchServices, GlobalPreferences, com.apple.Terminal.
+        # Kept high-signal domains relevant to security posture / lock state:
+        # screensaver/loginwindow (auto-lock policy), security (Gatekeeper /
+        # XProtect), SoftwareUpdate (patch enumeration), TimeMachine (backup
+        # destinations for exfil), MCX (managed prefs / MDM).
         CommandLine|contains:
             - 'com.apple.screensaver'
             - 'com.apple.loginwindow'
             - 'com.apple.security'
-            - 'com.apple.Safari'
-            - 'com.apple.LaunchServices'
-            - 'com.apple.dock'
-            - 'com.apple.finder'
             - 'com.apple.SoftwareUpdate'
-            - 'GlobalPreferences'
-            - 'com.apple.Terminal'
-            - '/Library/Preferences/com.apple'
+            - 'com.apple.TimeMachine'
+            - 'com.apple.MCX'
+            - 'com.apple.commerce'
+            - 'com.apple.crashreporter'
     filter_system:
         ParentImage|startswith:
             - '/System/'
@@ -56,6 +60,21 @@ detection:
             - '/Code'
             - '/node'
             - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/brew'
+            - '/npm'
+            - '/yarn'
+            - '/pnpm'
+            - '/pip'
+            - '/pip3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
     filter_apple_parent:
         ParentSignerType: 'apple'
     # Backstop: Apple ships /usr/bin/defaults as a platform binary.

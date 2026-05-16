@@ -40,6 +40,21 @@ public actor EventEnricher {
     /// so the detection rule engine can fire on canary access.
     private let honeyfileManager: HoneyfileManager?
 
+    /// Optional v1.12.0 honey-prompt manager — AI-agent-context bait
+    /// (canary CLAUDE.md / SKILL.md / cursorrules under MacCrab's
+    /// support dir). Wires the same IsHoneyfile enrichment path used
+    /// by HoneyfileManager so the existing `honeyfile_accessed` rule
+    /// fires on canary reads.
+    private let honeyPromptManager: HoneyPromptManager?
+
+    /// Optional v1.12.0 FileContent enricher. When provided, file
+    /// `close` events whose target path is in the
+    /// `FileContentEnricher.shouldScan` allowlist get the first
+    /// `maxBytes` of text written into
+    /// `enrichments["FileContent"]` for `FileContent|contains`
+    /// rule selectors. Tight allowlist to keep the hot path fast.
+    private let fileContentEnricher: FileContentEnricher?
+
     /// Opt-in: capture a filtered set of env vars from exec/fork processes
     /// via `sysctl(KERN_PROCARGS2)`. Costs a syscall per exec — gated at
     /// daemon startup by `MACCRAB_CAPTURE_ENV=1`.
@@ -74,6 +89,8 @@ public actor EventEnricher {
         codeSigningCache: CodeSigningCache = CodeSigningCache(),
         processHasher: ProcessHasher? = nil,
         honeyfileManager: HoneyfileManager? = nil,
+        honeyPromptManager: HoneyPromptManager? = nil,
+        fileContentEnricher: FileContentEnricher? = nil,
         captureEnv: Bool = false,
         pruneInterval: UInt64 = 5000
     ) {
@@ -81,6 +98,8 @@ public actor EventEnricher {
         self.codeSigningCache = codeSigningCache
         self.processHasher = processHasher
         self.honeyfileManager = honeyfileManager
+        self.honeyPromptManager = honeyPromptManager
+        self.fileContentEnricher = fileContentEnricher
         self.captureEnv = captureEnv
         self.pruneInterval = pruneInterval
     }
@@ -191,6 +210,52 @@ public actor EventEnricher {
             enrichedEvent.enrichments["IsHoneyfile"] = "true"
             if let record = await deception.honeyfile(atPath: filePath) {
                 enrichedEvent.enrichments["HoneyfileType"] = record.type.rawValue
+            }
+        }
+
+        // v1.12.0 honey-prompt tier: same enrichment shape, different
+        // deception primitive (AI-agent context bait). The existing
+        // honeyfile_accessed rule keys off IsHoneyfile so both feed
+        // the same detection.
+        if let filePath = event.file?.path,
+           let promptDeception = honeyPromptManager,
+           await promptDeception.isHoneyPrompt(filePath) {
+            enrichedEvent.enrichments["IsHoneyfile"] = "true"
+            if let record = await promptDeception.honeyPrompt(atPath: filePath) {
+                enrichedEvent.enrichments["HoneyfileType"] = record.type.rawValue
+            }
+        }
+
+        // v1.12.0 FileContent enrichment: read first 64KB of the
+        // target file on close-write events, but only for paths in
+        // the FileContentEnricher allowlist (Info.plist, CHANGELOG,
+        // README, .gitconfig, LaunchAgents plists, specific IOC
+        // filenames). The rule layer uses
+        // `FileContent|contains: '...'` selectors against this.
+        //
+        // v1.12.0 post-audit (M-Perf3, deferred to v1.12.x): this
+        // synchronous file read sits on the enricher actor. Under
+        // disk pressure (slow USB / network mount / encrypted volume)
+        // it can stall enrichment of every other event. The audit
+        // recommended detaching into a Task — but detaching is
+        // incompatible with the rule pipeline's load-bearing
+        // assumption that `enrichments["FileContent"]` is set BEFORE
+        // rule eval on the SAME event. The proper fix is a small
+        // in-memory FileContent cache keyed by (path, mtime) with a
+        // read deadline (~50ms); on deadline-miss the event flows
+        // through without FileContent and the cache picks up the
+        // miss for the next event hitting the same path. Deferred to
+        // v1.12.x — for v1.12.0 the allowlist is tight enough
+        // (Info.plist + LaunchAgents + a handful of installer
+        // filenames + bounded node_modules/site-packages source
+        // files) that the synchronous cost is acceptable.
+        if let scanner = fileContentEnricher,
+           let filePath = event.file?.path,
+           event.eventCategory == .file,
+           event.eventAction == "close",
+           FileContentEnricher.shouldScan(targetPath: filePath) {
+            if let content = await scanner.scan(path: filePath) {
+                enrichedEvent.enrichments["FileContent"] = content
             }
         }
 

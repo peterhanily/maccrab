@@ -79,6 +79,27 @@ final class AppState: ObservableObject {
         /// common IO hiccups without false-positive banner.
         static let staleThreshold: TimeInterval = 120
         var isStale: Bool { Date().timeIntervalSince(writtenAt) > Self.staleThreshold }
+
+        /// v1.12.0 RC15: boot-phase tracker. The daemon writes phase
+        /// updates at milestones during DaemonSetup.initialize: a
+        /// "starting" heartbeat fires immediately at T+~0 s so the
+        /// dashboard can show "Daemon: Starting (loading rules)..."
+        /// instead of "Not running" for the 15-20 s of init work.
+        /// Phase progression: starting → stores_ready → rules_loaded →
+        /// ready. `nil` for v1.11.x and earlier daemons (treated as
+        /// "ready" if liveness:true).
+        var bootPhase: String?
+        /// Wall-clock time at which the daemon started its boot. Used
+        /// to display elapsed time in the dashboard's "starting" banner.
+        var startedAt: Date?
+        /// True when the daemon has finished initialising. Falls back
+        /// to liveness for older daemons that don't write boot_phase.
+        var isReady: Bool {
+            if let phase = bootPhase { return phase == "ready" }
+            // No boot_phase field → pre-RC15 daemon. Fall back to the
+            // legacy liveness signal.
+            return true
+        }
     }
 
     public struct CollectorHealthEntry: Hashable, Codable {
@@ -335,7 +356,7 @@ final class AppState: ObservableObject {
             }
         }
 
-        heartbeat = HeartbeatSnapshot(
+        var snapshot = HeartbeatSnapshot(
             writtenAt: Date(timeIntervalSince1970: writtenAtUnix),
             uptimeSeconds: json["uptime_seconds"] as? Int ?? 0,
             eventsProcessed: (json["events_processed"] as? UInt64)
@@ -347,6 +368,15 @@ final class AppState: ObservableObject {
             collectorHealth: richCollectorHealth,
             eventsDropped: richDropped
         )
+        // v1.12.0 RC15: pull the boot-phase tracker out of the payload
+        // when it's there. Older daemons (v1.11.x and earlier) won't
+        // write this field; snapshot.isReady falls back to liveness for
+        // those.
+        snapshot.bootPhase = json["boot_phase"] as? String
+        if let startedAt = json["started_at_unix"] as? TimeInterval {
+            snapshot.startedAt = Date(timeIntervalSince1970: startedAt)
+        }
+        heartbeat = snapshot
         // Record successful parse so the next call short-circuits when
         // neither heartbeat.json nor heartbeat_rich.json have been
         // re-written by the daemon.
@@ -860,13 +890,19 @@ final class AppState: ObservableObject {
     /// v1.9 PR-5 audit (B3): the dashboard owns attribution_overrides.db
     /// at the user-writable support path. Daemon reads it for stats.
     private var cachedOverrideStore: AttributionOverrideStore?
-    private var alertDbLastChecked: Date = .distantPast
-    private var eventDbLastChecked: Date = .distantPast
     private var traceDbLastChecked: Date = .distantPast
     /// Path the trace store was opened against. When the mtime probe
     /// resolves a different path (user-dir flipped to system-dir or
     /// vice versa) we drop the cache so the next call rebuilds.
     private var cachedTraceStorePath: String?
+    /// v1.12.0 fix: path-tracking caches for alerts.db / events.db.
+    /// Replaces the prior 30-second TTL which paid SchemaMigrator.
+    /// quickCheck() cost on every reopen — on a 962 MB events.db with
+    /// FTS5 that's multi-second main-thread blocking. WAL mode handles
+    /// fresh-read natively; the only legitimate reason to reopen is a
+    /// path change (rare — daemon dir migration).
+    private var cachedAlertStorePath: String?
+    private var cachedEventStorePath: String?
 
     // MARK: - v1.9 PR-4: Agent traces dashboard surface
 
@@ -1031,7 +1067,75 @@ final class AppState: ObservableObject {
         if agentTracesReceiverEnabled {
             agentTracesEnableRequestedAt = Date()
         }
-        Task { await refresh() }
+        // v1.12.0 fix: open the SQLite stores off-MainActor BEFORE
+        // the first refresh() runs. Pre-fix, init's `Task { await
+        // refresh() }` hopped to @MainActor and called alertStore() /
+        // eventStore() synchronously — each runs AlertStore.init /
+        // EventStore.init + SchemaMigrator.quickCheck on @MainActor.
+        // On a 962 MB events.db with FTS5 that's multi-second beachball
+        // before the dashboard window can paint or accept input.
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            await self.warmUpStoresOffMain()
+            await self.refresh()
+        }
+    }
+
+    /// Construct AlertStore + EventStore on a background Task so the
+    /// SQLite open / schema migration / quick_check don't block main.
+    /// Once cached, all subsequent `alertStore()` / `eventStore()`
+    /// calls on @MainActor short-circuit on the cache (path-change
+    /// detection only).
+    private func warmUpStoresOffMain() async {
+        let userDir = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("MacCrab").path
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+        let systemDir = "/Library/Application Support/MacCrab"
+        let alertDir = Self.pickFreshestDir(
+            candidates: [dataDir, userDir, systemDir],
+            fileName: "alerts.db",
+            defaultDir: dataDir
+        )
+        let eventDir = Self.pickFreshestDir(
+            candidates: [dataDir, userDir, systemDir],
+            fileName: "events.db",
+            defaultDir: dataDir
+        )
+        async let alertResult: AlertStore? = Task.detached(priority: .userInitiated) {
+            try? AlertStore(directory: alertDir)
+        }.value
+        async let eventResult: EventStore? = Task.detached(priority: .userInitiated) {
+            try? EventStore(directory: eventDir)
+        }.value
+        let (alert, event) = await (alertResult, eventResult)
+        if let store = alert {
+            cachedAlertStore = store
+            cachedAlertStorePath = alertDir
+        }
+        if let store = event {
+            cachedEventStore = store
+            cachedEventStorePath = eventDir
+        }
+    }
+
+    /// Path-probe helper used by warmUpStoresOffMain (and matches the
+    /// shape of the alertStore() / eventStore() probe). `nonisolated`
+    /// so the background Task can call it without hopping to main.
+    nonisolated private static func pickFreshestDir(
+        candidates rawCandidates: [String],
+        fileName: String,
+        defaultDir: String
+    ) -> String {
+        let candidates = Array(Set(rawCandidates))
+        return candidates
+            .map { (dir: String) -> (String, Date) in
+                let mtime = (try? FileManager.default
+                    .attributesOfItem(atPath: dir + "/" + fileName))?[.modificationDate] as? Date
+                return (dir, mtime ?? .distantPast)
+            }
+            .max(by: { $0.1 < $1.1 })?.0
+            ?? defaultDir
     }
 
     /// Start the 10-second poll. Idempotent: safe to call when the
@@ -1059,14 +1163,15 @@ final class AppState: ObservableObject {
     }
 
     /// Get or create cached alert store.
-    /// Reopens every 30 seconds to pick up new WAL data from the daemon.
-    /// v1.9 hot-fix: same path-probe widening as eventStore() — pick
-    /// whichever alerts.db has the freshest mtime so we don't pin to
-    /// a stale system-dir copy left over by a prior sysext install.
-    /// v1.9.0 (audit Stab-H4): per-store TTL.
+    /// v1.9 hot-fix: probe both system + user paths and pick whichever
+    /// alerts.db has the freshest mtime so we don't pin to a stale
+    /// system-dir copy left over by a prior sysext install.
+    /// v1.12.0 fix: removed 30-second TTL reopen. The reopen paid
+    /// AlertStore.init's full schema migration + quick_check cost on
+    /// every cycle — fine on small DBs, multi-second on the 962 MB
+    /// events.db field-observed. Reopen only when the chosen path
+    /// actually changed; SQLite WAL handles fresh reads natively.
     private func alertStore() throws -> AlertStore {
-        if let store = cachedAlertStore,
-           Date().timeIntervalSince(alertDbLastChecked) < 30 { return store }
         let userDir = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first?.appendingPathComponent("MacCrab").path
@@ -1081,9 +1186,12 @@ final class AppState: ObservableObject {
             }
             .max(by: { $0.1 < $1.1 })?.0
             ?? dataDir
+        if let store = cachedAlertStore, cachedAlertStorePath == chosen {
+            return store
+        }
         let store = try AlertStore(directory: chosen)
         cachedAlertStore = store
-        alertDbLastChecked = Date()
+        cachedAlertStorePath = chosen
         return store
     }
 
@@ -1098,8 +1206,6 @@ final class AppState: ObservableObject {
     /// the running non-root daemon wrote to user-dir → no events
     /// visible). Same shape as the traces.db fix.
     private func eventStore() throws -> EventStore {
-        if let store = cachedEventStore,
-           Date().timeIntervalSince(eventDbLastChecked) < 30 { return store }
         let userDir = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first?.appendingPathComponent("MacCrab").path
@@ -1117,9 +1223,15 @@ final class AppState: ObservableObject {
             }
             .max(by: { $0.1 < $1.1 })?.0
             ?? dataDir
+        // v1.12.0 fix: see alertStore() — reopen only on path change,
+        // not every 30s. FTS5 quick_check on a 962 MB events.db blocks
+        // main thread for seconds.
+        if let store = cachedEventStore, cachedEventStorePath == chosen {
+            return store
+        }
         let store = try EventStore(directory: chosen)
         cachedEventStore = store
-        eventDbLastChecked = Date()
+        cachedEventStorePath = chosen
         return store
     }
 

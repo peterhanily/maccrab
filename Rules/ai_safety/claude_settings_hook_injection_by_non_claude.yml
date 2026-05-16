@@ -1,0 +1,60 @@
+title: ~/.claude/settings.json Modified by Non-Claude Process (Hook Injection)
+id: d1a2b3c4-2055-4000-a000-000000002055
+status: experimental
+description: >
+    Detects a write to ~/.claude/settings.json (or the project-local
+    .claude/settings.local.json) by a process that is not the Claude
+    Code CLI itself. The May 2026 Mini Shai-Hulud Wave 4 (TanStack)
+    weaponised this file by injecting a SessionStart / PreToolUse hook
+    entry that runs on every Claude Code session start — a persistence
+    primitive that hands the attacker code execution in the developer's
+    AI agent context. Any process that is not /claude writing this
+    file should be treated as candidate persistence.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://www.stepsecurity.io/blog/mini-shai-hulud-is-back-a-self-spreading-supply-chain-attack-hits-the-npm-ecosystem
+    - https://attack.mitre.org/techniques/T1546/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.persistence
+    - attack.t1546
+    - attack.initial_access
+    - attack.t1195.001
+    - maccrab.agent_traces
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target:
+        TargetFilename|contains:
+            - '/.claude/settings.json'
+            - '/.claude/settings.local.json'
+            - '/.claude/CLAUDE.md'
+        FileAction: 'close'
+    # v1.12.0 post-audit (H-Det3): the prior filter required Image AND
+    # ParentImage both to end with `/claude` — but Claude Code's
+    # natural parent is the shell that launched it (zsh / bash), not
+    # `/claude` itself. The AND made the filter unreachable, and the
+    # rule alerted on every legitimate Claude write. Drop the
+    # ParentImage clause; the writer being `/claude` is sufficient.
+    filter_claude_writers:
+        Image|endswith:
+            - '/claude'
+            - '/claude-code'
+    # Also exclude editors that legitimately persist settings.json
+    # when the user edits the file directly.
+    filter_known_editors:
+        Image|endswith:
+            - '/vim'
+            - '/nvim'
+            - '/code'
+            - '/cursor'
+            - '/zed'
+    condition: selection_target and not filter_claude_writers and not filter_known_editors
+falsepositives:
+    - The user manually editing settings.json in an editor (vim/nvim/code/cursor) — investigate the parent shell and confirm
+    - A trusted dotfile manager (chezmoi, yadm, stow) syncing settings into ~/.claude/; can be allowlisted by project boundary
+    - Claude Code itself when invoked through a wrapper that obscures the executable basename
+level: high

@@ -196,7 +196,19 @@ public actor SyslogOutput {
         let syslogSeverity = mapSeverity(alert.severity)
         let pri = facility * 8 + syslogSeverity
         let timestamp = Self.iso8601Formatter.string(from: alert.timestamp)
-        let hostname = sanitizeSDValue(Foundation.ProcessInfo.processInfo.hostName)
+        // v1.12.0 RC25 (privacy): default to a generic identifier in the
+        // RFC 5424 HOSTNAME field. Operators that need the real hostname
+        // set MACCRAB_SYSLOG_HOSTNAME at daemon startup.
+        let rawHost: String = {
+            if let override = Foundation.ProcessInfo.processInfo.environment["MACCRAB_SYSLOG_HOSTNAME"],
+               !override.isEmpty,
+               !override.contains("/"),
+               override.allSatisfy({ $0.isASCII && !$0.isNewline }) {
+                return override
+            }
+            return "maccrab-host"
+        }()
+        let hostname = sanitizeSDValue(rawHost)
 
         // Structured data element with alert metadata.
         let ruleIdSD = sanitizeSDValue(alert.ruleId)

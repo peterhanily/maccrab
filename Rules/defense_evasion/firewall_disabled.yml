@@ -15,13 +15,25 @@ logsource:
 detection:
     selection:
         Image|endswith: '/socketfilterfw'
-    selection_disable:
+        # All disable variants in one selection so any single flag fires
+        # the rule. Previously `selection` only anchored on the Image and
+        # required `selection_disable` to AND in — that worked but split
+        # the intent across two selectors and made it easy to miss the
+        # numeric (`0`) and `disable` aliases that older socketfilterfw
+        # builds accept.
         CommandLine|contains:
             - '--setglobalstate off'
+            - '--setglobalstate 0'
+            - '--setglobalstate disable'
             - '--setblockall off'
+            - '--setblockall 0'
             - '--setstealthmode off'
+            - '--setstealthmode 0'
             - '--setallowsigned off'
-    condition: selection and selection_disable
+            - '--setallowsigned 0'
+            - '--setallowsignedapp off'
+            - '--setallowsignedapp 0'
+    condition: selection
 falsepositives:
     - IT administrators adjusting firewall settings for troubleshooting
     - MDM profiles reconfiguring firewall rules

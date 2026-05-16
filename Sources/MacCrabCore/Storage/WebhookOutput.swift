@@ -419,9 +419,22 @@ public actor WebhookOutput {
 
     // MARK: - Host Information
 
-    /// Returns the local hostname.
+    /// Returns the configured hostname for outbound webhook payloads.
+    /// v1.12.0 RC25 (privacy): default redacts the system hostname to
+    /// "maccrab-host" because webhook destinations are frequently
+    /// third-party SIEMs / log aggregators that don't need to know the
+    /// org's host naming convention. Operators who want their real
+    /// hostname (e.g., on internal-only ELK) set `MACCRAB_WEBHOOK_HOSTNAME=$(hostname)`
+    /// at daemon startup. Anything containing path-separators or
+    /// non-printable bytes is rejected to keep the JSON output clean.
     private static func hostname() -> String {
-        Foundation.ProcessInfo.processInfo.hostName
+        if let override = Foundation.ProcessInfo.processInfo.environment["MACCRAB_WEBHOOK_HOSTNAME"],
+           !override.isEmpty,
+           !override.contains("/"),
+           override.allSatisfy({ $0.isASCII && !$0.isNewline }) {
+            return override
+        }
+        return "maccrab-host"
     }
 
     /// Returns the macOS version string (e.g. "14.3.1").

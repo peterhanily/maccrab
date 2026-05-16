@@ -32,8 +32,27 @@ detection:
             - '/usr/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
-    condition: selection_mach_api and selection_securityd_target and not filter_system and not filter_apple_signed
+    # v1.12.0 RC17: belt-and-suspenders path filter — SignerType
+    # enrichment can be nil for the first event of a binary after
+    # daemon start (cache miss), so filter_apple_signed misses /bin/ls
+    # / /bin/chmod etc. on the install-window event burst.
+    filter_apple_paths:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/System/'
+            - '/usr/libexec/'
+    filter_dev_ai_tools:
+        Image|contains:
+            - '/.local/share/claude/'
+            - '/Applications/Cursor.app/'
+            - '/Applications/Visual Studio Code.app/'
+            - '/Applications/Xcode.app/'
+    condition: selection_mach_api and selection_securityd_target and not filter_system and not filter_apple_signed and not filter_apple_paths and not filter_dev_ai_tools
 falsepositives:
     - Security research tools used in controlled testing environments
     - Apple diagnostic utilities with proper entitlements
+    - Documentation / source-code grep / ls in compiled_rules dir (filtered)
 level: critical

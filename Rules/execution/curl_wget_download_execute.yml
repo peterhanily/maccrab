@@ -47,4 +47,4 @@ detection:
     condition: selection_shell and selection_pipe and selection_execute and not filter_system and not filter_apple_signed
 falsepositives:
     - Legitimate install scripts (Homebrew, rustup, nvm)
-level: high
+level: medium

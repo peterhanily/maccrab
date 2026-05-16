@@ -1,0 +1,40 @@
+title: Dead-Man's-Switch Wiper Token Literal Observed
+id: d1a2b3c4-0302-4000-a000-000000000026
+status: experimental
+description: >
+    Detects the literal string
+    "IfYouRevokeThisTokenItWillWipeTheComputerOfTheOwner" in a process
+    command line, environment, or written file content. This is the
+    GitHub PAT description used by the Shai-Hulud 2.0 "Second Coming"
+    wave (November 2025) and reused in subsequent Mini Shai-Hulud
+    waves to coerce victims into not revoking the stolen token: if
+    the worm detects the token has been revoked, a polling loop
+    triggers `rm -rf $HOME`. The literal is so specific that any
+    appearance is essentially diagnostic.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/
+    - https://www.reversinglabs.com/blog/shai-hulud-worm-npm
+    - https://attack.mitre.org/techniques/T1485/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.impact
+    - attack.t1485
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_cmdline:
+        CommandLine|contains:
+            - 'IfYouRevokeThisTokenItWillWipeTheComputerOfTheOwner'
+    selection_file:
+        FileContent|contains:
+            - 'IfYouRevokeThisTokenItWillWipeTheComputerOfTheOwner'
+    condition: selection_cmdline or selection_file
+falsepositives:
+    - A security researcher analysing the worm on the same machine MacCrab is monitoring (in which case the alert is the correct outcome and should be triaged manually)
+    - Documentation copies of this brief or the rule itself loaded into an editor with content indexing
+level: critical

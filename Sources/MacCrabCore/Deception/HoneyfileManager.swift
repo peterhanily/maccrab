@@ -35,6 +35,13 @@ public actor HoneyfileManager {
         case keychainBackup       = "keychain_backup"
         case gcpServiceAccount    = "gcp_service_account"
         case dockerConfig         = "docker_config"
+        // v1.12.0: package-manager credential bait targeting Shai-Hulud /
+        // Mini Shai-Hulud worm scrape paths.
+        case npmrc                = "npmrc"
+        case pypirc               = "pypirc"
+        case gitConfig            = "git_config"
+        case githubHosts          = "github_hosts"
+        case cargoCredentials     = "cargo_credentials"
     }
 
     /// One deployed honeyfile entry. Stored in the on-disk manifest.
@@ -126,27 +133,23 @@ public actor HoneyfileManager {
                 atPath: dir, withIntermediateDirectories: true
             )
 
-            // Refuse to clobber real user data.
-            if FileManager.default.fileExists(atPath: expandedPath),
-               deployed[expandedPath] == nil {
-                throw HoneyfileError.pathExistsWithRealContent(expandedPath)
-            }
-
             let data = entry.content.data(using: .utf8) ?? Data()
+            // SecureFileIO writes with O_CREAT|O_EXCL|O_NOFOLLOW so a
+            // race-planted file or symlink fails the kernel check
+            // atomically. Refuses to clobber real user data.
             do {
-                try data.write(to: URL(fileURLWithPath: expandedPath), options: .atomic)
+                try SecureFileIO.atomicCreate(at: expandedPath, data: data, mode: 0o400)
+            } catch SecureFileIO.Error.fileAlreadyExists, SecureFileIO.Error.symlinkRefused {
+                // If we've previously deployed at this path (manifest
+                // entry exists), it's a re-deploy of our own bait — skip.
+                if deployed[expandedPath] != nil { continue }
+                throw HoneyfileError.pathExistsWithRealContent(expandedPath)
             } catch {
                 throw HoneyfileError.writeFailed(
                     path: expandedPath,
                     reason: error.localizedDescription
                 )
             }
-
-            // 0o400 — read-only for owner; credential files that mode matches
-            // real `chmod 400` AWS/SSH key conventions, strengthening the bait.
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o400], ofItemAtPath: expandedPath
-            )
 
             // Age the mtime so the file looks lived-in (90 days ago).
             try? FileManager.default.setAttributes(
@@ -193,11 +196,19 @@ public actor HoneyfileManager {
         var tampered: [Honeyfile] = []
 
         for entry in deployed.values {
-            guard let data = FileManager.default.contents(atPath: entry.path) else {
+            // v1.12.0 RC2 fix (L-Sec2): O_NOFOLLOW read. Same rationale
+            // as HoneyPromptManager.status — symlink swap muddies the
+            // tamper/missing signal otherwise.
+            let data: Data
+            do {
+                data = try SecureFileIO.readBytes(at: entry.path, maxBytes: 1024 * 1024)
+            } catch {
                 missing.append(entry)
                 continue
             }
-            if Self.sha256Hex(data) == entry.contentSHA256 {
+            // v1.12.0 post-audit (M-Sec3): constant-time hex compare.
+            // Same rationale as HoneyPromptManager.status.
+            if HoneyPromptManager.constantTimeHexEqual(Self.sha256Hex(data), entry.contentSHA256) {
                 present.append(entry)
             } else {
                 tampered.append(entry)
@@ -255,6 +266,21 @@ public actor HoneyfileManager {
     // Each entry uses a recognisable "canary" marker in the value field
     // (e.g. "AKIACANARY..." for AWS) so SIEMs and cloud audit pipelines
     // can alert upstream if the token is ever used.
+    //
+    // v1.12.0 post-audit (M-Misc1, deferred to v1.12.x): MacCrab is
+    // open source, so an attacker reading this file knows the canary
+    // marker substrings (e.g. "CANARY_MACCRAB_HONEYTOKEN_DO_NOT_USE")
+    // and can substring-skip them. A future rotation: generate a
+    // per-install random nonce at first `deploy()` call, persist in
+    // the manifest, splice into the marker strings (keeping the
+    // "CANARY_MACCRAB_" prefix for SIEM compatibility but suffixing
+    // a random nonce). Each install would then have unique marker
+    // values that worm-time pattern-matching could not anticipate.
+    // Structural refactor; not load-bearing for v1.12.0 because the
+    // primary detection lever is path-match on the canary FILE, not
+    // content-match on the canary STRING — the path is also static
+    // but living under user $HOME makes it harder for a worm to skip
+    // without false-negative cost.
 
     nonisolated static func defaultHoneyfileSet(homeDir: String) -> [(path: String, type: HoneyfileType, content: String)] {
         [
@@ -347,6 +373,74 @@ public actor HoneyfileManager {
                   "client_email": "canary@maccrab-honeytoken.invalid",
                   "client_id": "000000000000000000000"
                 }
+                """
+            ),
+            // v1.12.0 — Package-manager credential bait targeting the exact
+            // paths the Shai-Hulud worm family scrapes. These sit alongside
+            // the real `~/.npmrc` / `~/.pypirc` / `~/.gitconfig` with a `.bak`
+            // suffix so a developer never notices them but a worm scraping
+            // by-glob (`*npmrc*`, `*pypirc*`) trips on the bait.
+            (
+                path: "\(homeDir)/.npmrc.bak",
+                type: .npmrc,
+                content: """
+                //registry.npmjs.org/:_authToken=npm_canaryMacCrabHoneytokenDoNotUseFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+                @maccrab-canary:registry=https://registry.canary.invalid
+                always-auth=true
+                """
+            ),
+            (
+                path: "\(homeDir)/.pypirc.bak",
+                type: .pypirc,
+                content: """
+                [distutils]
+                index-servers =
+                    pypi
+                    maccrab-canary
+
+                [pypi]
+                username = __token__
+                password = pypi-CANARY_MACCRAB_HONEYTOKEN_DO_NOT_USE_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+                [maccrab-canary]
+                repository = https://canary.invalid/legacy/
+                username = canary
+                password = CANARY_MACCRAB_HONEYTOKEN
+                """
+            ),
+            (
+                path: "\(homeDir)/.gitconfig.bak",
+                type: .gitConfig,
+                content: """
+                [user]
+                    email = canary@maccrab-honeytoken.invalid
+                    name = MacCrab Canary
+                [credential]
+                    helper = !canary-helper-do-not-use
+                [github]
+                    user = canary-maccrab
+                    token = ghp_CANARYMacCrabHoneyToKEnDoNotUseFFFFFFFFFFFFFFFFFFFF
+                """
+            ),
+            (
+                path: "\(homeDir)/.config/gh/hosts.yml.bak",
+                type: .githubHosts,
+                content: """
+                github.com:
+                    user: canary-maccrab
+                    oauth_token: ghp_CANARYMacCrabHoneyToKEnDoNotUseFFFFFFFFFFFFFFFFFFFF
+                    git_protocol: https
+                """
+            ),
+            (
+                path: "\(homeDir)/.cargo/credentials.toml.bak",
+                type: .cargoCredentials,
+                content: """
+                [registry]
+                token = "cio_canary_maccrab_honeytoken_do_not_use_aaaaaaaa"
+
+                [registries.maccrab-canary]
+                token = "cio_canary_maccrab_honeytoken_do_not_use_bbbbbbbb"
                 """
             ),
         ]

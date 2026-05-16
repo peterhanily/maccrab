@@ -2,10 +2,13 @@ title: High-Entropy DNS Query (Possible DGA or Tunneling)
 id: d1a2b3c4-0052-4000-a000-000000000052
 status: experimental
 description: >
-    Detects DNS queries with high-entropy domain names, indicating DGA
-    (domain generation algorithm) malware or DNS tunneling for data
-    exfiltration. Normal domains have low entropy; randomly generated
-    C2 domains have high entropy.
+    Detects DNS queries with very long, high-entropy domain labels that may
+    indicate DGA (domain generation algorithm) malware or DNS tunneling for
+    data exfiltration. To control the high natural base rate of long opaque
+    hostnames (CDNs, telemetry endpoints, content-addressable storage), the
+    rule requires a label of at least 40 alphanumeric characters that mixes
+    letters AND digits (excluding pure-hex hashes which are common for CDNs)
+    AND is not under a known CDN/cloud zone.
 author: MacCrab Community
 date: 2026/04/06
 references:
@@ -17,12 +20,15 @@ logsource:
     category: network_connection
     product: macos
 detection:
-    selection:
+    selection_port:
         DestinationPort: 53
     selection_entropy:
-        # Match domain queries containing high-entropy segments:
-        # 20+ alphanumeric characters without hyphens or dots (random-looking).
-        DestinationHostname|re: '[a-z0-9]{20,}\.'
+        # Require a label of at least 40 chars containing both letters and
+        # digits. Pure hex blobs (CDN cache keys, like 32/40/64-char hashes)
+        # are dominated by [0-9a-f]; this pattern demands at least one digit
+        # AND letters spanning the full alphabet, biasing toward DGA strings
+        # which tend to use the full a-z space.
+        DestinationHostname|re: '[a-z]*[g-z][a-z0-9]{20,}[0-9][a-z0-9]{15,}\.'
     filter_system:
         Image|startswith:
             - '/System/'
@@ -35,15 +41,34 @@ detection:
         DestinationHostname|endswith:
             - '.cloudfront.net'
             - '.akamaized.net'
+            - '.akamai.net'
+            - '.akamaihd.net'
             - '.fastly.net'
+            - '.fastlylb.net'
             - '.azureedge.net'
+            - '.windows.net'
             - '.googleapis.com'
             - '.gstatic.com'
+            - '.gvt1.com'
+            - '.gvt2.com'
+            - '.googleusercontent.com'
             - '.amazonaws.com'
+            - '.cloudflare.net'
+            - '.cloudflare.com'
             - '.1e100.net'
-    condition: selection and selection_entropy and not filter_system and not filter_apple_signed and not filter_known_cdn
+            - '.icloud.com'
+            - '.apple.com'
+            - '.mzstatic.com'
+            - '.b-cdn.net'
+            - '.cdninstagram.com'
+            - '.fbcdn.net'
+            - '.pinimg.com'
+            - '.githubusercontent.com'
+            - '.dropboxusercontent.com'
+    condition: selection_port and selection_entropy and not filter_system and not filter_apple_signed and not filter_known_cdn
 falsepositives:
-    - CDN domains with hash-based subdomains
+    - CDN domains with hash-based subdomains not covered by the allowlist
     - Cloud services using UUID-based hostnames
     - Content-addressable storage systems
-level: medium
+    - Privacy-preserving DNS over HTTPS resolvers using randomized labels
+level: low

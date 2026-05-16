@@ -1,0 +1,92 @@
+title: LaunchAgent Plist With Distant Future Trigger (Time-Bomb Persistence)
+id: d1a2b3c4-0500-4000-a000-000000000502
+status: experimental
+description: >
+    Detects creation of a LaunchAgent / LaunchDaemon plist whose
+    contents declare a `StartInterval` greater than one hour or
+    contain a `StartCalendarInterval` set days into the future, with
+    `RunAtLoad: false`. The combination delays execution past sandbox
+    detonation windows and beyond an analyst's session — the
+    canonical time-bomb persistence used by XCSSET (2024 variants)
+    with 4-hour `StartInterval` and BlueNoroff `RustBucket` with
+    10-minute sleep-then-fetch staging. Captures a class of
+    persistence that the existing `launch_agent_created_by_unsigned`
+    family does not because the time gate makes the eventual exec
+    look benign.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.trendmicro.com/en_us/research/24/h/xcsset-mac-malware-update.html
+    - https://www.elastic.co/security-labs/the-runt-of-the-litter-bluenoroff-rustbucket
+    - https://attack.mitre.org/techniques/T1543/001/
+    - https://attack.mitre.org/techniques/T1029/
+tags:
+    - attack.persistence
+    - attack.t1543.001
+    - attack.execution
+    - attack.t1029
+    - attack.defense_evasion
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_plist_path:
+        TargetFilename|contains:
+            - '/Library/LaunchAgents/'
+            - '/Library/LaunchDaemons/'
+        TargetFilename|endswith: '.plist'
+        FileAction:
+            - 'create'
+            - 'close'
+    selection_time_bomb_content:
+        FileContent|contains|all:
+            - '<key>StartInterval</key>'
+        FileContent|contains:
+            - '<integer>3600</integer>'
+            - '<integer>7200</integer>'
+            - '<integer>10800</integer>'
+            - '<integer>14400</integer>'
+            - '<integer>21600</integer>'
+            - '<integer>43200</integer>'
+            - '<integer>86400</integer>'
+    selection_calendar_far:
+        FileContent|contains:
+            - '<key>StartCalendarInterval</key>'
+            - '<key>LaunchOnlyOnce</key>'
+    # v1.12.0 RC2 fix (N-Det1): the prior filter used a 2-string OR
+    # which matched every plist because '<true/>' appears in nearly
+    # every LaunchAgent body (KeepAlive, Disabled, AbandonProcessGroup,
+    # etc.). Sigma's `|contains` is OR semantics. We can't reliably
+    # express "RunAtLoad immediately followed by <true/>" as a single
+    # substring because real plists XML-format that with newlines +
+    # indentation between the elements. The filter was actively
+    # suppressing the very plists we wanted to flag, so we drop it
+    # entirely — every other selector in this rule already requires a
+    # time-bomb shape (StartInterval > 12h OR StartCalendarInterval +
+    # LaunchOnlyOnce). A RunAtLoad agent IS the suspicious shape; the
+    # filter was a false-protection that hid real malware. The
+    # falsepositive list below covers the legit cases an analyst
+    # should triage manually.
+    filter_system_writer:
+        Image|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+        SignerType:
+            - 'apple'
+    filter_brew:
+        Image|contains:
+            - '/Cellar/'
+            - '/homebrew/'
+            - '/.brew/'
+    filter_mdm_agent:
+        Image|contains:
+            - '/jamf'
+            - '/Mosyle'
+            - '/Kandji'
+            - '/Hexnode'
+            - '/Addigy'
+    condition: selection_plist_path and (selection_time_bomb_content or selection_calendar_far) and not filter_system_writer and not filter_brew and not filter_mdm_agent
+falsepositives:
+    - System-update agents that legitimately use `StartInterval` for periodic health checks; these are typically Apple-signed and live in `/System/Library/LaunchDaemons/` (this rule restricts to non-system paths)
+    - Backup tooling (Backblaze, Carbon Copy Cloner) with hourly run intervals; allowlist by Image basename of the writer
+level: medium

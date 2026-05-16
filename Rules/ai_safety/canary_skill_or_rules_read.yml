@@ -1,0 +1,71 @@
+title: AI-Agent Honey-Prompt File Read
+id: d1a2b3c4-2058-4000-a000-000000002058
+status: experimental
+description: >
+    Detects any process reading a MacCrab-deployed honey-prompt
+    decoy under the MacCrab support dir
+    (`~/Library/Application Support/MacCrab/decoys/`): the
+    decoys are named `CLAUDE.md.canary`,
+    `maccrab-decoy-skill/SKILL.md`, and `cursorrules.canary`.
+    These files exist only as deception — no legitimate AI agent
+    or backup/index process has any reason to walk into MacCrab's
+    decoys/ folder. Decoys live under the support dir rather than
+    the user's home so that Spotlight / Time Machine / iCloud /
+    the AI agent's own context-discovery flows can't self-trip
+    the canary. The Snyk ToxicSkills study (2026) found 36% of
+    ClawHub skills contained injection payloads scraping CLAUDE.md
+    / project-rules files; this rule catches the scraping itself.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://snyk.io/blog/toxicskills-malicious-ai-agent-skills-clawhub/
+    - https://arxiv.org/abs/2604.13301
+    - https://attack.mitre.org/techniques/T1083/
+    - https://d3fend.mitre.org/technique/d3f:DecoyFile/
+tags:
+    - attack.discovery
+    - attack.t1083
+    - maccrab.deception
+    - maccrab.honey_prompt
+    - d3fend.decoy_file
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_canary_path:
+        TargetFilename|contains:
+            - '/Library/Application Support/MacCrab/decoys/'
+        FileAction:
+            - 'open'
+            - 'close'
+    filter_maccrab:
+        Image|contains:
+            - 'MacCrab.app/Contents/'
+            - 'MacCrabAgent'
+            - 'maccrabd'
+            - 'maccrabctl'
+    filter_apple_indexers:
+        Image|endswith:
+            - '/mdworker_shared'
+            - '/mds'
+            - '/mds_stores'
+            - '/mdworker'
+            - '/Spotlight'
+            - '/backupd'
+            - '/backupd-helper'
+            - '/com.apple.MobileSoftwareUpdate.UpdateBrainService'
+        PlatformBinary: 'true'
+    filter_backup_sync:
+        Image|contains:
+            - '/Backblaze.app/'
+            - '/Carbon Copy Cloner.app/'
+            - '/Arq.app/'
+            - '/Dropbox.app/'
+            - '/iCloudDrive'
+            - '/CommCenter'
+            - '/bird'  # iCloud daemon
+    condition: selection_canary_path and not filter_maccrab and not filter_apple_indexers and not filter_backup_sync
+falsepositives:
+    - User opening a `.canary` file directly in an editor out of curiosity — investigate the parent process; should be rare
+    - Spotlight / mds indexer touching the user's home; already filtered by the platform's default exclusion of `.maccrab` paths, but extend `filter_apple_indexers` if FPs appear
+level: critical

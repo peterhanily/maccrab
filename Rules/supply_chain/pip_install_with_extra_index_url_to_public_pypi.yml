@@ -1,0 +1,54 @@
+title: pip Install Uses --extra-index-url Alongside Public PyPI (Dependency Confusion Risk)
+id: d1a2b3c4-0302-4000-a000-000000000028
+status: experimental
+description: >
+    Detects a `pip install` invocation that combines a private index URL
+    with the public PyPI index, OR uses `--extra-index-url https://pypi.org/simple`
+    as a backstop. pip's resolver picks the highest version across all
+    configured indexes regardless of source, so any package name on the
+    private index that also exists on PyPI (or has a colliding name
+    publicly registered) will silently resolve from PyPI if the public
+    version is higher — Alex Birsan's original dependency-confusion
+    primitive (2021), reused in the AWS Lambda 24712-pl campaign (2025)
+    and the alone5511 campaign (May 2026). PEP 766 ("index priority")
+    was ratified Nov 2024 but pip has not shipped it as default by May
+    2026, so the resolver behavior is still unsafe.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://medium.com/@alex.birsan/dependency-confusion-4a5d60fec610
+    - https://xygeni.io/blog/aws-lambda-npm-dependency-confusion-attack-the-24712-pl-campaign/
+    - https://pip.pypa.io/en/stable/cli/pip_install/
+    - https://attack.mitre.org/techniques/T1195/002/
+tags:
+    - attack.initial_access
+    - attack.t1195.002
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_pip:
+        Image|endswith:
+            - '/pip'
+            - '/pip3'
+            - '/pipenv'
+    # v1.12.0 RC3 fix (Det-H6): pre-fix `selection_extra_index` was
+    # ORed with `selection_explicit_public_alongside_private` in the
+    # condition. The first selector matched ANY `--extra-index-url`,
+    # not just one pointing at public PyPI — so every legit
+    # `pip install --extra-index-url https://my-private-mirror/`
+    # fired the rule. The dep-confusion attack signature is
+    # specifically "private mirror configured AND public PyPI also
+    # configured", which is what selection_explicit_public_alongside_private
+    # already captures. Dropping the standalone branch.
+    selection_explicit_public_alongside_private:
+        CommandLine|contains|all:
+            - '--index-url'
+            - '--extra-index-url'
+            - 'pypi.org/simple'
+    condition: selection_pip and selection_explicit_public_alongside_private
+falsepositives:
+    - Workflows that deliberately fall back to public PyPI for indirect dependencies not on the private mirror; resolve by hosting full transitive closure on the private index
+    - Researcher / reverse-engineering installs that explicitly want both sources
+    - Project bootstrap scripts that always set both URLs out of habit; review the per-project pip.conf and remove if unintentional
+level: high

@@ -41,4 +41,9 @@ falsepositives:
 # on dev machines (devtools terminals fire this dozens of times per
 # session). Real exploitation chains still surface as medium and are
 # correlated by sequence + campaign rules.
-level: medium
+# v1.11.x: further demoted medium → low. Even after the v1.8.0 drop the
+# FP rate on developer laptops swamped the real signal. Sequence rules
+# (downloaded-binary-executes-then-shell, browser-spawns-installer-
+# spawns-curl, etc.) catch the genuine exploit chains at HIGH; a bare
+# browser→shell pairing is too thin on its own.
+level: low

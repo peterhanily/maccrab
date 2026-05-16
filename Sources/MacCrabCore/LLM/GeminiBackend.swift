@@ -13,9 +13,33 @@ public actor GeminiBackend: LLMBackend {
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "gemini")
     private let session: URLSession = SecureURLSession.make(for: .gemini)
 
+    /// Validate that the model string is a plain `[a-z0-9._-]+` token.
+    /// Pre-fix the model was interpolated into the URL path with no
+    /// validation — an attacker-controlled config value of `../../admin`
+    /// would alter the request path and could be used to exfiltrate the
+    /// API key to an attacker domain via redirect or to poison HTTP
+    /// caches in front of the Google endpoint.
+    private static let modelAllowedChars: Set<Character> = {
+        var s = Set<Character>("abcdefghijklmnopqrstuvwxyz0123456789-._")
+        return s
+    }()
+
+    private static func isValidModelName(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= 64 else { return false }
+        return s.allSatisfy { Self.modelAllowedChars.contains($0) }
+    }
+
     public init(apiKey: String, model: String = "gemini-2.0-flash") {
         self.apiKey = apiKey
-        self.model = model
+        if Self.isValidModelName(model.lowercased()) {
+            self.model = model
+        } else {
+            os_log("GeminiBackend: rejecting model name %{public}@ — falling back to gemini-2.0-flash",
+                   log: OSLog(subsystem: "com.maccrab.llm", category: "gemini"),
+                   type: .error,
+                   model)
+            self.model = "gemini-2.0-flash"
+        }
     }
 
     public func isAvailable() async -> Bool {

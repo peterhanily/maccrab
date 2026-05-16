@@ -228,6 +228,17 @@ public actor AgentLineageService {
         )
     }
 
+    /// v1.12.0 RC4 (Int-R4-N2): `endSession` has no production
+    /// caller today — EventLoop's process-EXIT path doesn't invoke
+    /// it. Cleanup is currently handled implicitly by `startSession`'s
+    /// `evictIfNecessary` (32-session LRU cap), keeping the in-memory
+    /// footprint bounded (~19MB worst-case at 2K events/session).
+    /// Stale snapshots are a minor freshness concern for
+    /// PromptIntentBridge — its 300s window naturally bounds the
+    /// data it considers — but a future v1.12.x patch should wire
+    /// EventLoop.swift's process-EXIT handler to call this so we
+    /// release session memory proactively instead of relying on LRU
+    /// eviction under churn.
     public func endSession(aiPid: Int32) {
         sessions[aiPid] = nil
     }
@@ -333,8 +344,16 @@ public actor AgentLineageService {
                 try? FileManager.default.removeItem(atPath: path)
                 try FileManager.default.moveItem(atPath: tmpPath, toPath: path)
             }
+            // v1.12.0 RC3 fix (Sec-H1): mode 0o640 + admin group (gid
+            // 80 on macOS). The snapshot carries per-AI-agent file-
+            // read / network / processSpawn history including private
+            // project paths and internal hostnames. Pre-fix 0o644
+            // made it world-readable — any local user could inspect
+            // another user's AI agent's behavioral history. 0o640
+            // + admin group keeps the menubar app (admin-context
+            // user) able to read while denying non-admin local users.
             try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o644],
+                [.posixPermissions: 0o640, .groupOwnerAccountID: 80],
                 ofItemAtPath: path
             )
         } catch {

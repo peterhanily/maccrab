@@ -1,0 +1,64 @@
+title: Bulk Quarantine-Attribute Strip Across Many Files
+id: d1a2b3c4-0500-4000-a000-000000000515
+status: experimental
+description: >
+    Detects bulk removal of the `com.apple.quarantine` extended
+    attribute across multiple files in a short window — typically
+    `find ... -exec xattr -d com.apple.quarantine {} \;` or a
+    loop over a directory tree. The single-target rule
+    `xattr_execute_from_quarantine.yml` catches one-shot Gatekeeper
+    bypass; this rule catches the "strip everything I downloaded
+    so my next-run anything-goes" pattern used in macOS Sequoia
+    where Apple removed the right-click Gatekeeper bypass and
+    drove malware vendors toward ClickFix-style Terminal
+    instructions that strip a whole download tree at once.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.unit42.paloaltonetworks.com/gatekeeper-bypass-macos/
+    - https://mjtsai.com/blog/2025/07/15/gatekeeper-change-in-macos-15-4/
+    - https://attack.mitre.org/techniques/T1553/001/
+    - https://attack.mitre.org/techniques/T1564/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+    - attack.t1564.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_xattr_strip:
+        Image|endswith:
+            - '/xattr'
+        CommandLine|contains:
+            - '-d com.apple.quarantine'
+            - '-cr'
+            - '-c -r'
+    selection_find_exec_xattr:
+        Image|endswith:
+            - '/find'
+        CommandLine|contains|all:
+            - '-exec'
+            - 'xattr'
+            - 'com.apple.quarantine'
+    selection_loop_strip:
+        Image|endswith:
+            - '/sh'
+            - '/bash'
+            - '/zsh'
+        CommandLine|contains|all:
+            - 'xattr'
+            - 'com.apple.quarantine'
+        CommandLine|contains:
+            - 'find '
+            - 'for '
+            - 'while '
+    filter_xcode:
+        ParentImage|contains:
+            - '/Xcode.app/Contents/'
+            - '/xcodebuild'
+    condition: (selection_xattr_strip or selection_find_exec_xattr or selection_loop_strip) and not filter_xcode
+falsepositives:
+    - The user clearing the quarantine attribute on one app they trust manually — that's a single-target xattr call and is naturally rare to trigger the "bulk" framing
+    - Build systems intentionally stripping quarantine on a tree of downloaded build inputs; covered by `filter_xcode` for Xcode-driven builds; extend filter for other build orchestrators (Bazel, Buck)
+level: high

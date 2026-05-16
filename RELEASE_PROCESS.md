@@ -73,12 +73,14 @@ on the build Mac (Apple Silicon, macOS 14+).
 
 ### Step 1 — tests
 
-`swift test`. 1355 tests across 261 suites. Failure blocks ship.
+`swift test`. 1490 tests across 284 suites (v1.12.0 baseline). Failure blocks ship.
 
 ### Step 2 — rule compilation
 
 `python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir .build/compiled_rules`.
-Reads 427 Sigma-compatible YAML rules and emits JSON predicates.
+Reads 463 Sigma-compatible YAML rules (424 single-event + 39 sequence)
+and emits JSON predicates. Graph rules under `Rules/graph/*.json` (6
+in v1.12.0) ship as-is via `scripts/build-release.sh`.
 Compiler validates duplicate YAML keys, unmapped Sigma fields, and
 boolean-as-value bugs. 0 skips required.
 

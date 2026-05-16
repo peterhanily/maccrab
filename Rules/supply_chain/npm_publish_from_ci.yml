@@ -38,4 +38,4 @@ detection:
 falsepositives:
     - Automated CI/CD release scripts that use temporary directories
     - npm workspace publishing from monorepo build tools
-level: critical
+level: high

@@ -1,15 +1,21 @@
-title: AirPlay Screen Mirroring to Unknown or Non-Apple Receiver
+title: Third-Party AirPlay Receiver or Sender Binary Executed
 id: a1b2c3d4-1091-4000-b000-000000001091
 status: experimental
 description: >
-    Detects AirPlay screen mirroring or audio streaming to non-Apple or
-    unexpected receiver devices. Third-party AirPlay receivers (including
-    open-source implementations like shairplay, airtame, RPiPlay) can be
-    deployed covertly to capture screen content from nearby Macs. This
-    technique has been observed in insider threat scenarios and in physical
-    proximity attacks in shared office environments.
+    Detects execution of a known third-party AirPlay receiver/sender binary
+    (shairplay, shairport, shairport-sync, airtame, RPiPlay, airtool).
+    Third-party AirPlay implementations can be deployed covertly to capture
+    screen or audio content from nearby Macs. Note: AirPlay sessions
+    initiated through Apple's first-party UI go through `AirPlayUIAgent` /
+    `AirPlayXPCHelper` and do NOT appear here. The original rule also tried
+    to match `ffmpeg --airplay` via CommandLine, which was speculative and
+    has been removed (legitimate AirPlay sessions don't surface that string
+    in process_creation events). This rule renamed from "AirPlay Screen
+    Mirroring to Unknown or Non-Apple Receiver" because we cannot determine
+    the receiver IP from process_creation alone.
 author: MacCrab Community
 date: 2026/04/22
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1125/
     - https://attack.mitre.org/techniques/T1565/
@@ -29,22 +35,15 @@ detection:
             - '/shairport-sync'
             - '/airtame'
             - '/rpplay'
+            - '/rpiplay'
             - '/airtool'
-    selection_airplay_cli:
-        CommandLine|contains:
-            - 'AirPlayReceiver'
-            - 'airplay'
-            - '--airplay'
-        Image|endswith:
-            - '/ffmpeg'
-            - '/avconv'
     filter_system:
         SignerType: 'apple'
-    filter_apple_tv:
+    filter_apple_parent:
         ParentImage|contains:
             - 'AirPlayUIAgent'
             - 'AirPlayXPCHelper'
-    condition: (selection_shairplay or selection_airplay_cli) and not filter_system and not filter_apple_tv
+    condition: selection_shairplay and not filter_system and not filter_apple_parent
 falsepositives:
     - Authorized AirPlay receiver software (Reflector, LonelyScreen, AirServer) for presentations
     - Home automation setups using open-source AirPlay receivers

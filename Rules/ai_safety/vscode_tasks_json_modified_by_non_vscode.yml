@@ -1,0 +1,76 @@
+title: .vscode/tasks.json Modified by Non-Editor Process (Folder-Open Hook Injection)
+id: d1a2b3c4-2056-4000-a000-000000002056
+status: experimental
+description: >
+    Detects writes to a project's `.vscode/tasks.json` (or its
+    siblings `settings.json` / `launch.json`) by a process that is
+    not VS Code, Cursor, or another recognised editor / dotfile
+    manager. The May 2026 Mini Shai-Hulud Wave 4 weaponised this
+    file by injecting a `tasks.json` entry with `runOn: folderOpen`
+    that runs an attacker-supplied command every time the developer
+    opens the project — a persistence primitive analogous to the
+    `~/.claude/settings.json` hook injection covered by
+    `claude_settings_hook_injection_by_non_claude.yml`. Pair the
+    two rules for full editor-context persistence coverage.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://code.visualstudio.com/docs/editor/tasks#_runon-events
+    - https://attack.mitre.org/techniques/T1546/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.persistence
+    - attack.t1546
+    - attack.initial_access
+    - attack.t1195.001
+    - maccrab.agent_traces
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target:
+        TargetFilename|endswith:
+            - '/.vscode/tasks.json'
+            - '/.vscode/settings.json'
+            - '/.vscode/launch.json'
+        FileAction:
+            - 'create'
+            - 'modify'
+            - 'close'
+    # v1.12.0 RC3 fix (Det-H9): the rule's own falsepositive list
+    # acknowledged "user editing tasks.json via vim/nvim/emacs",
+    # but pre-fix the filter only listed VSCode-family editors.
+    # Mirror the broader list already present in
+    # claude_settings_hook_injection_by_non_claude.yml.
+    filter_editor_writers:
+        Image|endswith:
+            - '/code'
+            - '/Code Helper'
+            - '/cursor'
+            - '/Cursor Helper'
+            - '/codium'
+            - '/VSCodium'
+            - '/windsurf'
+            - '/vim'
+            - '/nvim'
+            - '/emacs'
+            - '/nano'
+            - '/zed'
+            - '/sublime_text'
+            - '/Sublime Text'
+            - '/helix'
+            - '/hx'
+    filter_dotfile_managers:
+        Image|endswith:
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
+            - '/dotbot'
+    condition: selection_target and not filter_editor_writers and not filter_dotfile_managers
+falsepositives:
+    - Project scaffold tools (create-react-app, vite init, `dotnet new`) that lay down `.vscode/` in fresh projects; investigate the parent shell and confirm
+    - Migration scripts that update tasks.json across a monorepo; allowlist the script's Image
+    - The user editing tasks.json via vim/nvim/emacs outside VS Code — these editors should be allowlisted at the project level if used regularly
+level: high

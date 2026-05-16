@@ -1,0 +1,96 @@
+title: Recursive Unlink Targeting $HOME From Package-Manager Lineage
+id: d1a2b3c4-0500-4000-a000-000000000501
+status: experimental
+description: >
+    Detects the destructive half of the May 2026 Mini Shai-Hulud
+    dead-man's-switch: a process descending from a package manager
+    (npm/pnpm/yarn/pip/uv/poetry/bun/twine) executing `rm -rf` (or
+    `find ... -delete`, `srm -rf`, `mv $HOME /tmp/...`, `dscl . -delete
+    /Users/...`) against a path inside the user's home directory.
+    The literal-string rule
+    `dead_mans_switch_literal_scanner.yml` catches the marker the
+    operator embedded; this rule fires regardless of marker rotation
+    because the destructive primitive itself is the IOC. Treat as
+    critical — a single match is grounds for immediate process kill
+    even though v1.12.0 is detection-only (alert routes to the
+    Worm Activity tab for one-click manual response).
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://attack.mitre.org/techniques/T1485/
+    - https://attack.mitre.org/techniques/T1070/004/
+tags:
+    - attack.impact
+    - attack.t1485
+    - attack.defense_evasion
+    - attack.t1070.004
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_destructive_image:
+        Image|endswith:
+            - '/rm'
+            - '/find'
+            - '/srm'
+            - '/mv'
+            - '/dscl'
+    selection_destructive_cmdline:
+        CommandLine|contains|all:
+            - '-rf'
+            - '/Users/'
+    # v1.12.0 RC2 fix (N-Det2): scope `find -delete` to user-$HOME
+    # targets. Pre-fix the rule fired on `find ./build -delete` and
+    # similar native-addon postinstall cleanup, producing FPs on
+    # every cmake / gyp install. The dangerous case is `find ~/...`
+    # or `find /Users/...`; native-addon postinstall is always
+    # relative to `cwd` of the build dir, never under `/Users/`.
+    selection_find_delete:
+        Image|endswith: '/find'
+        CommandLine|contains|all:
+            - '/Users/'
+        CommandLine|contains:
+            - '-delete'
+            - '-exec rm'
+    selection_dscl_delete_user:
+        Image|endswith: '/dscl'
+        CommandLine|contains:
+            - '-delete /Users/'
+            - 'delete /Users/'
+    selection_home_rename:
+        Image|endswith: '/mv'
+        CommandLine|contains|all:
+            - '/Users/'
+            - '/tmp/'
+    selection_package_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+            - '/bun'
+            - '/twine'
+            - '/gem'
+            - '/cargo'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'postinstall'
+            - 'preinstall'
+            - 'lifecycle'
+            - 'add'
+    condition: (selection_destructive_cmdline or selection_find_delete or selection_dscl_delete_user or selection_home_rename) and selection_destructive_image and selection_package_lineage
+falsepositives:
+    - Legitimate clean-up scripts in postinstall that prune temporary build artifacts under `/Users/<u>/Library/Caches/<pkg>/` — these should target specific cache subdirs, not $HOME root, so a real fire is high-confidence
+    - Test fixtures that intentionally use `rm -rf` in user directories during package CI; should never run on a non-CI workstation
+level: critical

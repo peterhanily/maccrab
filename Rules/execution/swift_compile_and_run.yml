@@ -1,35 +1,65 @@
-title: Swift Compile and Execute from Temp Directory
+title: swiftc Invoked From Non-Developer Parent Against /Downloads or /tmp Source
 id: d1a2b3c4-0207-4000-a000-000000000207
 status: experimental
-description: Detects swiftc compilation of source files from temporary directories followed by execution. Adversaries may compile and run Swift code on-the-fly to evade detection by avoiding pre-compiled binaries.
+description: >
+    Detects `swiftc` compiling sources from `/Downloads/`, `/tmp/`,
+    `/private/tmp/`, or `/var/tmp/` when the parent is **not** part
+    of the macOS Xcode / SwiftPM / Homebrew toolchain. Adversaries
+    sometimes ship a `.swift` file plus a one-liner that compiles
+    and runs it to avoid a pre-built Mach-O on disk. Legitimate use
+    of `swiftc` from `/var/folders/` is broad (SwiftPM, swift script
+    cache) so that path is **deliberately excluded**.
 author: MacCrab Community
 date: 2026/03/30
 references:
+    - https://attack.mitre.org/techniques/T1027.004/
     - https://attack.mitre.org/techniques/T1059/
 tags:
     - attack.execution
     - attack.defense_evasion
+    - attack.t1027.004
     - attack.t1059
 logsource:
     category: process_creation
     product: macos
 detection:
+    # NOTE: `swiftc` is an Apple-shipped Xcode binary; the standard
+    # `not PlatformBinary` filter would disable this rule entirely.
+    # FP control lives in the parent-lineage filters below.
     selection:
         Image|endswith: '/swiftc'
-    selection_temp:
+    selection_user_writable_source:
         CommandLine|contains:
             - '/tmp/'
             - '/private/tmp/'
             - '/var/tmp/'
-            - '/var/folders/'
             - '/Downloads/'
     filter_xcode:
         ParentImage|contains:
             - '/Xcode.app/'
             - '/XCBBuildService'
             - 'SourceKit'
-    condition: selection and selection_temp and not filter_xcode
+            - '/swift-build'
+            - '/swift-package'
+            - '/swift-test'
+            - '/swift-run'
+            - '/swift-driver'
+    filter_developer_tools:
+        # Common build-system / scripting parents that legitimately
+        # invoke swiftc with /tmp sources.
+        ParentImage|endswith:
+            - '/make'
+            - '/gmake'
+            - '/ninja'
+            - '/cmake'
+            - '/xcodebuild'
+            - '/xcrun'
+            - '/swift'
+            - '/swift-frontend'
+            - '/cargo'
+            - '/brew'
+    condition: selection and selection_user_writable_source and not filter_xcode and not filter_developer_tools
 falsepositives:
-    - Swift development and testing workflows
-    - Swift scripting in temporary directories
+    - Hand-run `swiftc /tmp/foo.swift` for one-off experiments — review parent
+    - SwiftPM running outside its usual sandbox (rare) — extend `filter_xcode`
 level: medium

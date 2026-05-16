@@ -90,9 +90,14 @@ public actor PromptInjectionScanner {
 
         self.forensicatePath = found
 
-        if found != nil {
+        // v1.12.0 RC29 audit fix (Stab-H1): replace `found!` force-
+        // unwrap with optional binding. The prior code's `if != nil`
+        // check + `found!` was logically safe in a single-threaded
+        // init context, but the pattern is fragile to future refactors
+        // that introduce concurrency.
+        if let path = found {
             Logger(subsystem: "com.maccrab", category: "prompt-injection")
-                .info("Forensicate scanner available at: \(found!)")
+                .info("Forensicate scanner available at: \(path)")
         } else {
             Logger(subsystem: "com.maccrab", category: "prompt-injection")
                 .info("Forensicate not installed — prompt injection scanning disabled. Install: pip install forensicate")

@@ -225,8 +225,15 @@ public actor AlertStore {
         // Apply versioned schema migrations on top of the baseline tables above.
         // v1 marks "baseline schema present"; later versions add columns for
         // campaign linkage, host context, analyst metadata, etc.
+        // v1.12.0: skip the per-init quick_check — see EventStore for the
+        // boot-path latency rationale. Callers can invoke `runQuickCheck()`
+        // from a deferred Task once the store is up.
         if !isReadOnly {
-            try SchemaMigrator.run(on: handle, migrations: Self.schemaMigrations)
+            try SchemaMigrator.run(
+                on: handle,
+                migrations: Self.schemaMigrations,
+                skipQuickCheck: true
+            )
         }
 
         // Prepare insert statement
@@ -318,6 +325,23 @@ public actor AlertStore {
         if let db { sqlite3_close(db) }
     }
 
+
+    /// Run SQLite `PRAGMA quick_check` on the open handle, deferred off
+    /// the daemon boot path. See `EventStore.runQuickCheck` for the
+    /// rationale — boot-time savings without sacrificing correctness
+    /// (real corruption still surfaces immediately on actual queries).
+    public func runQuickCheck() {
+        guard let db = self.db else { return }
+        do {
+            try SchemaMigrator.quickCheck(on: db) { msg in
+                Logger(subsystem: "com.maccrab.storage", category: "alert-store")
+                    .info("quick_check: \(msg, privacy: .public)")
+            }
+        } catch {
+            Logger(subsystem: "com.maccrab.storage", category: "alert-store")
+                .warning("Deferred quick_check failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
 
     // MARK: - Insert
 

@@ -18,24 +18,86 @@ detection:
         Image|endswith: '/mdfind'
     selection_sensitive:
         CommandLine|contains:
-            - 'kMDItemKind'
-            - 'password'
+            # Removed bare 'password' / 'ssh' / 'wallet' — used by password
+            # managers (1Password, Bitwarden, Dashlane), VPN clients, and
+            # crypto wallet apps daily. Keep file-extension and high-signal
+            # tokens that aren't part of normal product names.
+            - 'kMDItemKind == "Application"'
             - 'credential'
             - '.pem'
             - '.key'
             - '.p12'
             - '.pfx'
             - '.env'
-            - 'wallet'
-            - 'ssh'
-            - 'secret'
+            - 'id_rsa'
+            - 'id_ed25519'
+            - 'keychain-db'
+            - 'secret_access_key'
+            - 'aws_secret'
+            - 'private_key'
     filter_signed:
         SignerType:
             - 'apple'
             - 'appStore'
             - 'devId'
-    condition: selection and selection_sensitive and not filter_signed
+    filter_platform:
+        PlatformBinary: 'true'
+    filter_system_path:
+        Image|startswith:
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/System/'
+    # mdfind is used by password managers, IDE search, backup tools, and
+    # Spotlight indexers. Filter ancestry from common interactive launchers
+    # so we only fire when an unsigned process with unusual lineage queries
+    # for credentials.
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
+    filter_password_manager_parent:
+        # 1Password, Bitwarden, Dashlane, NordPass, RoboForm, KeePassXC all
+        # legitimately enumerate file types via Spotlight.
+        ParentImage|contains:
+            - '1Password'
+            - 'Bitwarden'
+            - 'Dashlane'
+            - 'NordPass'
+            - 'KeePassXC'
+            - 'RoboForm'
+            - 'LastPass'
+            - 'ProtonPass'
+    condition: selection and selection_sensitive and not filter_signed and not filter_platform and not filter_system_path and not filter_dev_tools and not filter_password_manager_parent
 falsepositives:
-    - Legitimate file search utilities
-    - Backup and indexing tools
+    - Password managers (1Password, Bitwarden) cataloguing keychain files
+      (filter_password_manager_parent)
+    - IDE / editor file-search features (filter_dev_tools)
+    - Backup and indexing tools (devId-signed)
 level: medium
+# v1.11.2: dropped bare 'password' / 'ssh' / 'wallet' (matched product names),
+# kept high-signal credential file tokens (.pem/.p12/id_rsa/keychain-db),
+# added platform-binary / system-path / dev-tool / password-manager-parent
+# filters so password managers don't trigger constantly.

@@ -15,22 +15,29 @@ tags:
     - attack.persistence
     - attack.t1547.015
 logsource:
+    # File-event logsource. The Folder Action persistence primitive is
+    # observable as a write under ~/Library/Scripts/Folder Action
+    # Scripts/. The earlier `selection_osa_setup` branch matched on
+    # process fields (Image / CommandLine) under a `file_event`
+    # logsource, which the engine never delivers — that branch was
+    # effectively dead. Process-creation osascript activity is already
+    # covered by `osascript_from_non_apple` and the fileless-attack
+    # rule; here we anchor purely on the persistence file write.
     category: file_event
     product: macos
 detection:
-    selection_folder_actions:
+    selection:
         TargetFilename|contains:
             - '/Library/Scripts/Folder Action Scripts/'
             - '/Folder Action Scripts/'
-    selection_osa_setup:
-        Image|endswith: '/osascript'
-        CommandLine|contains:
-            - 'attach script'
-            - 'folder action'
-            - 'adding folder items'
+        FileAction:
+            - 'create'
+            - 'write'
+            - 'rename'
+            - 'clone'
     filter_apple:
         SignerType: 'apple'
-    condition: selection_folder_actions or (selection_osa_setup and not filter_apple)
+    condition: selection and not filter_apple
 falsepositives:
     - Legitimate Automator folder actions
     - Photography workflows (auto-import on folder add)

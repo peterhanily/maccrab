@@ -1,0 +1,76 @@
+title: Obfuscator-Style Signature in Newly-Installed Package File
+id: d1a2b3c4-0302-4000-a000-000000000037
+status: experimental
+description: >
+    Detects characteristic markers of JavaScript / Python obfuscators
+    (obfuscator.io, javascript-obfuscator, PyArmor v8+) in a file
+    written under `node_modules/` or `site-packages/` during a
+    package install lineage. Real-world May 2026 Mini Shai-Hulud /
+    Lightning PyPI bundles fingerprint as: a large indexed string
+    array, `_0x[0-9a-f]{4,6}` identifiers throughout, the literal
+    sequences `__pyarmor__` / `pyarmor_runtime` for PyArmor, or the
+    classic `eval('quire'['replace'](/^/, 're'))()` greppable Mini
+    Shai-Hulud uses to defeat static `require(` scanners. The
+    signal is per-file and high-precision: legitimate libraries do
+    not ship their bundler artifacts in published source. Severity
+    is medium rather than high because some legitimate packages
+    deliberately distribute minified code; pair with
+    `package_drops_native_binary_in_pure_js_pkg` or
+    `webhook_exfil_url_in_install_content` for high-confidence
+    correlation.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://socket.dev/blog/lightning-pypi-package-compromised
+    - https://cyber.wtf/2025/02/12/unpacking-pyarmor-v8-scripts/
+    - https://www.veracode.com/blog/detecting-obfuscated-malicious-code/
+    - https://www.akamai.com/blog/security/catch-me-if-you-can-javascript-obfuscation
+    - https://attack.mitre.org/techniques/T1027/
+tags:
+    - attack.defense_evasion
+    - attack.t1027
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    # v1.12.0 RC3 fix (Det-H3): `webpackChunk`, `webpack_require`,
+    # `function(_0x` are routine in any minified/bundled JS output
+    # — Vite, Next, Webpack, esbuild all produce them. Pre-fix the
+    # rule fired on every modern frontend project's first install.
+    # Dropped the generic webpack markers; the remaining markers
+    # (PyArmor, eval-quire-replace, _0x prefixed var/const/let
+    # combined with `function(_0x` — i.e. multiple markers required
+    # via |contains|all) actually signal obfuscation, not bundling.
+    # Also trimmed /dist-packages/ since FileContentEnricher doesn't
+    # scan that path on macOS anyway.
+    selection_install_target:
+        TargetFilename|contains:
+            - '/node_modules/'
+            - '/site-packages/'
+    selection_obfuscator_marker:
+        FileContent|contains:
+            - '__pyarmor__'
+            - 'pyarmor_runtime'
+            - "eval('quire'['replace']"
+            - "eval(\"quire\"[\"replace\"]"
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+    condition: selection_install_target and selection_obfuscator_marker and selection_lineage
+falsepositives:
+    - Legitimate packages that ship pre-bundled / minified artifacts (lodash bundle builds, jquery dist files, three.js bundled releases) — the obfuscator-style markers do not always indicate malice; correlate with size / language / network signals before triage
+    - Pre-built distributions of WASM-compiled tooling that legitimately use webpack signatures
+    - Documentation generators that bundle markdown renderers (mkdocs themes, docusaurus)
+level: medium

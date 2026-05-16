@@ -373,6 +373,114 @@ let tools: [[String: Any]] = [
             "required": ["event_id"],
         ] as [String: Any],
     ],
+    // v1.12.0 — Package Intelligence + Intent Classification tools.
+    [
+        "name": "check_typosquat_score",
+        "description": "Score a package name against the top-1000 most-typosquatted npm/PyPI corpora using Damerau-Levenshtein distance and Unicode TR39 confusable folding. Catches AI-hallucinated names (slopsquatting), homoglyph attacks (Cyrillic a vs Latin a), and adjacent-key transpositions. Returns nearest popular name + distance + score 0-100.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "name": ["type": "string", "description": "Package name to check"],
+                "registry": ["type": "string", "description": "Registry: npm or pypi", "enum": ["npm", "pypi"]],
+            ],
+            "required": ["name", "registry"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "scan_package_content",
+        "description": "Walk an installed package directory and compute content-anomaly score: size, language-fingerprint census, single-line >100KB bundle detection, Mach-O magic-byte detection, obfuscator markers (PyArmor, _0x identifiers, Mini Shai-Hulud signatures, webpack), bundled-runtime drop. Returns 0-100 score plus per-factor reasons.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": ["type": "string", "description": "Absolute path to an installed package directory (e.g., /Users/me/node_modules/foo)"],
+                "ecosystem": ["type": "string", "description": "Ecosystem: npm / pypi / homebrew", "enum": ["npm", "pypi", "homebrew"]],
+            ],
+            "required": ["path", "ecosystem"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "analyze_package_metadata",
+        "description": "Fetch one JSON metadata document from the registry (npm registry / PyPI JSON API) and score description length, boilerplate clone, homepage host class (free-host vs corporate), version-history burst, top-version-squat (99.x.x first-publish), and maintainer signals (noreply emails). One HTTP GET per package per 24h. Returns 0-100 score + per-factor reasons.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "name": ["type": "string", "description": "Package name"],
+                "registry": ["type": "string", "description": "Registry: npm or pypi", "enum": ["npm", "pypi"]],
+            ],
+            "required": ["name", "registry"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "verify_package_attestation",
+        "description": "Verify cryptographic provenance via npm Sigstore + GitHub Actions OIDC, or PyPI PEP 740 attestations. Optional prior_builder argument enables publishing-method-mismatch detection — the defining stolen-token republish signal. Returns status (.verified / .absent / .mismatched / .fetchFailed) + builder identity + source repo + warnings.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "name": ["type": "string", "description": "Package name"],
+                "version": ["type": "string", "description": "Version string (semver for npm, PEP 440 for PyPI)"],
+                "registry": ["type": "string", "description": "Registry: npm or pypi", "enum": ["npm", "pypi"]],
+                "prior_builder": ["type": "string", "description": "Optional: builder identity from a prior version to compare against for mismatch detection"],
+            ],
+            "required": ["name", "version", "registry"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "classify_package_intent",
+        "description": "LLM-driven structured-intent classifier. Takes a behavior brief (package name + installer lineage + credential reads + network egress + content anomaly flags + AI-agent attribution) and returns a calibrated IntentLabel (benign / credentialHarvest / exfiltration / persistence / destructive / reconnaissance / lateralMovement / unknown) + confidence + ranked reasons. Falls back to a deterministic heuristic classifier when no LLM is configured.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "package_name": ["type": "string", "description": "Package name"],
+                "registry": ["type": "string", "description": "npm / pypi / brew"],
+                "version": ["type": "string", "description": "Optional version"],
+                "installer_lineage": ["type": "array", "description": "Process basenames in install lineage", "items": ["type": "string"]],
+                "credentials_read": ["type": "array", "description": "Paths of credential files read during install", "items": ["type": "string"]],
+                "network_egress": ["type": "array", "description": "Hosts contacted during install", "items": ["type": "string"]],
+                "files_written": ["type": "array", "description": "Up to 8 representative file paths written", "items": ["type": "string"]],
+                "processes_spawned": ["type": "array", "description": "Process basenames spawned during install", "items": ["type": "string"]],
+                "has_obfuscated_content": ["type": "boolean"],
+                "has_bundled_runtime": ["type": "boolean"],
+                "has_language_mismatch": ["type": "boolean"],
+                "ai_agent_triggered": ["type": "boolean"],
+            ],
+            "required": ["package_name", "registry"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "predict_next_technique",
+        "description": "Given a sequence of MITRE ATT&CK tactic IDs already observed for a process tree, return the top-N most-likely next tactics from MacCrab's shipped kill-chain transition prior. Inspired by KillChainGraph (arXiv 2508.18230) but local-only, no GPU, no online training.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "tactic_prefix": ["type": "array", "description": "ATT&CK tactic IDs (TA0001 etc.) in chronological order", "items": ["type": "string"]],
+                "top_n": ["type": "integer", "description": "Number of predictions to return (default 3, max 14)"],
+            ],
+            "required": ["tactic_prefix"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "score_text_style",
+        "description": "Compute stylometric + LLM-text + urgency scores for a text blob (commit message / PR description / README). Used for: maintainer style-drift detection (mockingbird / persona takeover), LLM-generated text detection (em-dash density + hedge phrases + sentence variance), urgency-lexicon scoring (XZ-Utils Jia Tan / polyfill.io social-engineering pattern).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "text": ["type": "string", "description": "Text to analyse (max 100KB)"],
+                "author": ["type": "string", "description": "Optional author identifier — if provided and a baseline exists, returns a drift result"],
+            ],
+            "required": ["text"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_intent_posterior",
+        "description": "Return the Bayesian-intent-engine posterior for a process tree (by tree key, typically the installer PID). NOTE: the MCP server holds its own process-local BayesianIntentEngine — this is NOT the daemon's posterior. Use this tool to feed evidence (via observe_intent_evidence in the future) and read it back inside an MCP session. For the daemon's per-tree posterior, query the alerts emitted by `maccrab.intent.bayesian-posterior` via get_alerts.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "tree_key": ["type": "string", "description": "Process tree key (anchor PID or lineage identifier)"],
+            ],
+            "required": ["tree_key"],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Tool Handlers
@@ -415,9 +523,220 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleVerifyBundle(args)
     case "trace_from_event":
         return await handleTraceFromEvent(args)
+    // v1.12.0 — Package Intelligence + Intent Classification.
+    case "check_typosquat_score":
+        return await handleCheckTyposquatScore(args)
+    case "scan_package_content":
+        return await handleScanPackageContent(args)
+    case "analyze_package_metadata":
+        return await handleAnalyzePackageMetadata(args)
+    case "verify_package_attestation":
+        return await handleVerifyPackageAttestation(args)
+    case "classify_package_intent":
+        return await handleClassifyPackageIntent(args)
+    case "predict_next_technique":
+        return await handlePredictNextTechnique(args)
+    case "score_text_style":
+        return await handleScoreTextStyle(args)
+    case "get_intent_posterior":
+        return await handleGetIntentPosterior(args)
     default:
         return ["content": [["type": "text", "text": "Unknown tool: \(name)"]]]
     }
+}
+
+// MARK: - v1.12.0 Package Intelligence + Intent handlers
+
+/// Shared intent engine instance for posterior queries within the
+/// MCP server lifetime. Initialised on first use.
+private let sharedIntentEngine = BayesianIntentEngine()
+private let sharedTyposquatDB = TyposquatDatabase()
+private let sharedNextPredictor = NextTechniquePredictor()
+private let sharedStylometric = StylometricFingerprinter()
+
+func handleCheckTyposquatScore(_ args: [String: Any]) async -> Any {
+    guard let name = args["name"] as? String,
+          let registryRaw = args["registry"] as? String,
+          let registry = TyposquatDatabase.Registry(rawValue: registryRaw) else {
+        return ["content": [["type": "text", "text": "Error: 'name' and 'registry' (npm|pypi) required"]]]
+    }
+    let result = await sharedTyposquatDB.score(candidate: name, registry: registry)
+    var lines: [String] = ["Typosquat scan: \(name) (\(registry.rawValue))"]
+    lines.append("Score: \(result.score)/100")
+    if let similar = result.similarTo, let distance = result.distance {
+        lines.append("Closest popular: '\(similar)' (Damerau-Levenshtein \(distance))")
+    } else {
+        lines.append("No nearby popular name in starter top-50 corpus")
+    }
+    lines.append("Homoglyph: \(result.isHomoglyph ? "YES" : "no")")
+    for reason in result.reasons { lines.append("- \(reason)") }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handleScanPackageContent(_ args: [String: Any]) async -> Any {
+    guard let path = args["path"] as? String,
+          let ecosystemRaw = args["ecosystem"] as? String,
+          let ecosystem = PackageContentAnalyzer.Ecosystem(rawValue: ecosystemRaw) else {
+        return ["content": [["type": "text", "text": "Error: 'path' and 'ecosystem' (npm|pypi|homebrew) required"]]]
+    }
+    let analyzer = PackageContentAnalyzer()
+    let result = await analyzer.analyze(packagePath: URL(fileURLWithPath: path), ecosystem: ecosystem)
+    var lines: [String] = ["Content scan: \(path)"]
+    lines.append("Score: \(result.score)/100")
+    lines.append("Total bytes: \(result.totalBytes)")
+    lines.append("File count: \(result.fileCount)")
+    if !result.singleLineLargeFiles.isEmpty {
+        lines.append("Single-line large files: \(result.singleLineLargeFiles.joined(separator: ", "))")
+    }
+    if !result.nativeBinaryFiles.isEmpty {
+        lines.append("Native binaries: \(result.nativeBinaryFiles.joined(separator: ", "))")
+    }
+    if !result.obfuscatorMatches.isEmpty {
+        lines.append("Obfuscator markers: \(result.obfuscatorMatches.joined(separator: "; "))")
+    }
+    if !result.bundledRuntimeFiles.isEmpty {
+        lines.append("Bundled runtime drops: \(result.bundledRuntimeFiles.joined(separator: ", "))")
+    }
+    for reason in result.reasons { lines.append("- \(reason)") }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handleAnalyzePackageMetadata(_ args: [String: Any]) async -> Any {
+    guard let name = args["name"] as? String,
+          let registryRaw = args["registry"] as? String,
+          let registry = PackageMetadataAnalyzer.Registry(rawValue: registryRaw) else {
+        return ["content": [["type": "text", "text": "Error: 'name' and 'registry' (npm|pypi) required"]]]
+    }
+    let analyzer = PackageMetadataAnalyzer()
+    guard let result = await analyzer.analyze(packageName: name, registry: registry) else {
+        return ["content": [["type": "text", "text": "Failed to fetch metadata for \(name) on \(registry.rawValue)"]]]
+    }
+    var lines: [String] = ["Metadata scan: \(name) (\(registry.rawValue))"]
+    lines.append("Score: \(result.score)/100")
+    lines.append("Description length: \(result.descriptionLength)")
+    lines.append("Homepage: \(result.homepage ?? "(missing)") [\(result.homepageHostClass.rawValue)]")
+    lines.append("Repo: \(result.repositoryURL ?? "(missing)")")
+    lines.append("First version: \(result.firstVersion ?? "?")  Latest: \(result.latestVersion ?? "?")")
+    lines.append("Maintainer emails: \(result.maintainerEmails.joined(separator: ", "))")
+    for reason in result.reasons { lines.append("- \(reason)") }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handleVerifyPackageAttestation(_ args: [String: Any]) async -> Any {
+    guard let name = args["name"] as? String,
+          let version = args["version"] as? String,
+          let registryRaw = args["registry"] as? String,
+          let registry = AttestationEnricher.Registry(rawValue: registryRaw) else {
+        return ["content": [["type": "text", "text": "Error: 'name', 'version', and 'registry' (npm|pypi) required"]]]
+    }
+    let priorBuilder = args["prior_builder"] as? String
+    let enricher = AttestationEnricher()
+    let result = await enricher.verify(packageName: name, version: version, registry: registry, priorBuilder: priorBuilder)
+    var lines: [String] = ["Attestation: \(name)@\(version) (\(registry.rawValue))"]
+    lines.append("Status: \(result.status.rawValue)")
+    if let builder = result.builder { lines.append("Builder: \(builder)") }
+    if let repo = result.sourceRepo { lines.append("Source repo: \(repo)") }
+    if let prior = result.priorBuilder { lines.append("Compared against prior builder: \(prior)") }
+    for warning in result.warnings { lines.append("⚠ \(warning)") }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handleClassifyPackageIntent(_ args: [String: Any]) async -> Any {
+    guard let packageName = args["package_name"] as? String,
+          let registry = args["registry"] as? String else {
+        return ["content": [["type": "text", "text": "Error: 'package_name' and 'registry' required"]]]
+    }
+    let brief = IntentClassifier.BehaviorBrief(
+        packageName: packageName,
+        packageRegistry: registry,
+        packageVersion: args["version"] as? String,
+        installerLineage: (args["installer_lineage"] as? [String]) ?? [],
+        credentialsRead: (args["credentials_read"] as? [String]) ?? [],
+        networkEgress: (args["network_egress"] as? [String]) ?? [],
+        filesWritten: (args["files_written"] as? [String]) ?? [],
+        processesSpawned: (args["processes_spawned"] as? [String]) ?? [],
+        hasObfuscatedContent: (args["has_obfuscated_content"] as? Bool) ?? false,
+        hasBundledRuntime: (args["has_bundled_runtime"] as? Bool) ?? false,
+        hasLanguageMismatch: (args["has_language_mismatch"] as? Bool) ?? false,
+        aiAgentTriggered: (args["ai_agent_triggered"] as? Bool) ?? false
+    )
+    // MCP server doesn't hold an LLMService — pass nil to use the
+    // deterministic heuristic classifier. When the daemon-side
+    // integration lands the wiring becomes nilOrShared.
+    let classifier = IntentClassifier(llmService: nil)
+    let result = await classifier.classify(brief)
+    var lines: [String] = ["Intent classification: \(packageName)"]
+    lines.append("Label: \(result.label.rawValue)")
+    lines.append("Confidence: \(String(format: "%.2f", result.confidence))")
+    lines.append("Provider: \(result.provider)")
+    lines.append("Abstained: \(result.abstained)")
+    for reason in result.reasons { lines.append("- \(reason)") }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handlePredictNextTechnique(_ args: [String: Any]) async -> Any {
+    guard let prefix = args["tactic_prefix"] as? [String], !prefix.isEmpty else {
+        return ["content": [["type": "text", "text": "Error: 'tactic_prefix' (array of ATT&CK TA00xx ids) required"]]]
+    }
+    let topN = min(14, max(1, (args["top_n"] as? Int) ?? 3))
+    let tactics = prefix.compactMap { NextTechniquePredictor.Tactic(rawValue: $0) }
+    guard !tactics.isEmpty else {
+        return ["content": [["type": "text", "text": "Error: no recognised ATT&CK tactic IDs in prefix"]]]
+    }
+    let predictions = await sharedNextPredictor.predictNext(after: tactics, topN: topN)
+    var lines: [String] = ["Next-tactic predictions after \(prefix.joined(separator: " → "))"]
+    for pred in predictions {
+        lines.append("  \(pred.tactic.rawValue): \(String(format: "%.2f", pred.probability))")
+    }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handleScoreTextStyle(_ args: [String: Any]) async -> Any {
+    guard let text = args["text"] as? String, !text.isEmpty else {
+        return ["content": [["type": "text", "text": "Error: 'text' required"]]]
+    }
+    guard text.count <= 100_000 else {
+        return ["content": [["type": "text", "text": "Error: text too long (max 100KB)"]]]
+    }
+    let llmScore = await sharedStylometric.llmTextScore(text)
+    let urgency = await sharedStylometric.urgencyScore(text)
+    var lines: [String] = ["Stylometric scan"]
+    lines.append("LLM-text score: \(llmScore)/100")
+    lines.append("Urgency score: \(urgency.score)/100")
+    if !urgency.matchedTerms.isEmpty {
+        lines.append("Urgency terms matched: \(urgency.matchedTerms.joined(separator: ", "))")
+    }
+    if let author = args["author"] as? String, !author.isEmpty {
+        if let drift = await sharedStylometric.checkDrift(author: author, text: text) {
+            lines.append("Author '\(author)' drift cosine distance: \(String(format: "%.3f", drift.cosineDistance))")
+            lines.append("Flagged: \(drift.flagged ? "YES" : "no")")
+            for reason in drift.reasons { lines.append("  - \(reason)") }
+        } else {
+            lines.append("No baseline yet for author '\(author)' — call again to start the rolling baseline")
+        }
+    }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
+}
+
+func handleGetIntentPosterior(_ args: [String: Any]) async -> Any {
+    guard let treeKey = args["tree_key"] as? String, !treeKey.isEmpty else {
+        return ["content": [["type": "text", "text": "Error: 'tree_key' required"]]]
+    }
+    guard let posterior = await sharedIntentEngine.posterior(treeKey: treeKey) else {
+        return ["content": [["type": "text", "text": "No posterior found for tree '\(treeKey)' — no evidence has been observed yet"]]]
+    }
+    var lines: [String] = ["Intent posterior for tree \(treeKey)"]
+    lines.append("Top goal: \(posterior.topGoal.rawValue) (\(String(format: "%.3f", posterior.topProbability)))")
+    let sorted = posterior.probabilities.sorted { $0.value > $1.value }
+    lines.append("Full distribution:")
+    for (goal, prob) in sorted {
+        lines.append("  \(goal.rawValue): \(String(format: "%.3f", prob))")
+    }
+    lines.append("Evidence log (last \(min(posterior.evidenceLog.count, 8))):")
+    for ev in posterior.evidenceLog.suffix(8) {
+        lines.append("  - \(ev.rawValue)")
+    }
+    return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
 }
 
 // MARK: - cluster_alerts (v1.6.7)
@@ -562,8 +881,11 @@ func handleGetAlerts(_ args: [String: Any]) async -> Any {
             lines.append("  Time: \(time)")
             lines.append("  ID: \(alert.id)")
             if let proc = alert.processName { lines.append("  Process: \(proc)") }
-            if let path = alert.processPath { lines.append("  Path: \(path)") }
-            if let desc = alert.description { lines.append("  Detail: \(desc.prefix(300))") }
+            // v1.12.0 RC25 (privacy): redact /Users/<name>/ paths
+            // before handing the line to the LLM. LLMSanitizer covers
+            // username, private IPs, SSH/AWS/JWT credential shapes.
+            if let path = alert.processPath { lines.append("  Path: \(LLMSanitizer.sanitize(path))") }
+            if let desc = alert.description { lines.append("  Detail: \(LLMSanitizer.sanitize(String(desc.prefix(300))))") }
             if let techs = alert.mitreTechniques, !techs.isEmpty { lines.append("  MITRE: \(techs)") }
         }
         if let next = nextCursor {
@@ -816,7 +1138,8 @@ func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
         lines.append("Time:   \(isoFormatter.string(from: alert.timestamp))")
         lines.append("Status: \(alert.suppressed ? "Suppressed" : "Active")")
         if let proc = alert.processName { lines.append("Process: \(proc)") }
-        if let path = alert.processPath  { lines.append("Path:    \(path)") }
+        // v1.12.0 RC25 (privacy): redact paths before yielding to LLM.
+        if let path = alert.processPath  { lines.append("Path:    \(LLMSanitizer.sanitize(path))") }
         if let tactics = alert.mitreTactics    { lines.append("Tactics:    \(tactics)") }
         if let techs   = alert.mitreTechniques { lines.append("Techniques: \(techs)") }
         if let d3 = alert.d3fendTechniques, !d3.isEmpty {
@@ -944,7 +1267,11 @@ func handleScanText(_ args: [String: Any]) async -> Any {
         lines.append("⚠️  INJECTION DETECTED")
         if !result.reasons.isEmpty {
             lines.append("Reasons:")
-            for r in result.reasons { lines.append("  - \(r)") }
+            // v1.12.0 RC25 (privacy): Forensicate's reason strings can
+            // echo portions of the scanned text. Route through
+            // LLMSanitizer so paths / credential shapes / private IPs
+            // never round-trip back into the AI agent's context.
+            for r in result.reasons { lines.append("  - \(LLMSanitizer.sanitize(r))") }
         }
         if !result.matchedRules.isEmpty {
             lines.append("Matched Rules:")

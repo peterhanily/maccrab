@@ -189,6 +189,47 @@ final class DaemonState {
     /// SQLiteCausalGraphStore init failed.
     let causalStore: SQLiteCausalGraphStore?
 
+    /// Graph rule evaluator for v1.10.0 §23 multi-entity rules. Loaded
+    /// once at daemon startup from `Rules/graph/*.json`. EventLoop runs
+    /// every materialized Trace through `evaluate(entities:edges:)`
+    /// and routes matches into the standard alert sink. nil when the
+    /// causal store failed to initialize or no graph rules were found.
+    /// v1.12.0 RC3 (Int-HSig1): `var` so SIGHUP can swap in a fresh
+    /// evaluator with reloaded `Rules/graph/*.json` content. The
+    /// evaluator itself holds rules as `let`, so we rebuild rather
+    /// than mutate.
+    ///
+    /// TODO(v1.12.1) Sec-R5-N4: This `var` on a non-actor `final
+    /// class DaemonState` is technically a data race — SIGHUP writes
+    /// from `.main` queue (SignalHandlers.swift), EventLoop reads
+    /// from a detached Task. Benign on Darwin (pointer-aligned
+    /// reference swap is atomic) but Swift 6 strict-concurrency will
+    /// flag it. Fix: wrap in `OSAllocatedUnfairLock<GraphRuleEvaluator?>`
+    /// or make DaemonState an actor. Deferred from v1.12.0 because
+    /// the runtime behaviour is correct today.
+    var graphEvaluator: GraphRuleEvaluator?
+
+    // MARK: - Intent posterior (v1.12.0)
+    /// Bayesian belief network maintaining a posterior over attacker
+    /// goals per process tree. EventLoop translates each event into
+    /// zero or more `Evidence` values and feeds them in. When the top
+    /// non-benign goal probability crosses `intentAlertThreshold`
+    /// (default 0.85) with sufficient evidence, an alert is emitted.
+    let bayesianIntent: BayesianIntentEngine
+
+    /// LLM-backed classifier for package-install intent. Held on
+    /// DaemonState so MCP handlers + PackageScanner share a single
+    /// instance with the daemon's `LLMService`. Not invoked on every
+    /// event — only on explicit package-install signals.
+    let intentClassifier: IntentClassifier
+
+    /// v1.12.0 post-audit (M-Int1): correlates an AI agent's recent
+    /// context reads with package installs to label the install as
+    /// user-initiated / autonomous / slopsquat / injectionContext /
+    /// vagueDestructive. EventLoop fires it in a detached Task when a
+    /// package-install exec carries an AgentTool enrichment.
+    let promptIntentBridge: PromptIntentBridge
+
     // MARK: - Package Security
     let packageChecker: PackageFreshnessChecker
     let notarizationChecker: NotarizationChecker
@@ -230,6 +271,12 @@ final class DaemonState {
     /// shared across all three tiers. The split here lets event-firehose
     /// churn coexist with multi-year alert/campaign history.
     var storage: DaemonConfig.StorageConfig = DaemonConfig.StorageConfig()
+
+    // v1.12.0 post-audit (M-Cfg1): intent posterior thresholds from
+    // daemon_config.json. EventLoop reads these instead of hardcoded
+    // 0.85 / 3 so an operator can tune false-positive aggressiveness.
+    var intentPosteriorThreshold: Double = 0.85
+    var intentPosteriorMinDistinctEvidence: Int = 3
 
     // MARK: - v1.6.6 AI Suite
     //
@@ -357,6 +404,10 @@ final class DaemonState {
         ruleGenerator: RuleGenerator,
         causalGraphBridge: EventToRollingCausalGraphBridge? = nil,
         causalStore: SQLiteCausalGraphStore? = nil,
+        graphEvaluator: GraphRuleEvaluator? = nil,
+        bayesianIntent: BayesianIntentEngine,
+        intentClassifier: IntentClassifier,
+        promptIntentBridge: PromptIntentBridge,
         packageChecker: PackageFreshnessChecker,
         notarizationChecker: NotarizationChecker,
         gitSecurityMonitor: GitSecurityMonitor,
@@ -469,6 +520,10 @@ final class DaemonState {
         self.ruleGenerator = ruleGenerator
         self.causalGraphBridge = causalGraphBridge
         self.causalStore = causalStore
+        self.graphEvaluator = graphEvaluator
+        self.bayesianIntent = bayesianIntent
+        self.intentClassifier = intentClassifier
+        self.promptIntentBridge = promptIntentBridge
         self.packageChecker = packageChecker
         self.notarizationChecker = notarizationChecker
         self.gitSecurityMonitor = gitSecurityMonitor

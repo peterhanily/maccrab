@@ -42,6 +42,9 @@ let package = Package(
         .target(
             name: "MacCrabCore",
             dependencies: [],
+            resources: [
+                .process("Resources"),
+            ],
             linkerSettings: [
                 .linkedLibrary("EndpointSecurity"),
                 .linkedLibrary("bsm"),
@@ -95,6 +98,14 @@ let package = Package(
                 "MacCrabCore",
                 "MacCrabAgentKit",
                 .product(name: "Testing", package: "swift-testing"),
+            ],
+            // LLMEvalTests reads these fixtures via `#filePath` (source-tree
+            // path), but SPM still needs them declared so it stops emitting
+            // `found 3 file(s) which are unhandled` warnings on every build.
+            // `.copy` preserves the directory layout; the test code keeps
+            // working unchanged.
+            resources: [
+                .copy("LLMEvalFixtures"),
             ]
         ),
         .testTarget(

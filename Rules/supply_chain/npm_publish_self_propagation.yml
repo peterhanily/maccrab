@@ -1,0 +1,64 @@
+title: npm publish Spawned by Non-Interactive Parent (Worm Self-Propagation)
+id: d1a2b3c4-0302-4000-a000-000000000024
+status: experimental
+description: >
+    Detects `npm publish` (or npm OIDC token exchange) being invoked by
+    a parent that is not an interactive shell. Legitimate publish
+    workflows on a developer workstation are spawned interactively
+    (zsh/bash/sh) or by CI; the Shai-Hulud worm family invokes publish
+    from a postinstall context to republish itself into every package
+    the stolen token can write to. The November 2025 "Second Coming"
+    variant added the OIDC trusted-publisher path
+    (POST registry.npmjs.org/-/npm/v1/oidc/token/exchange/...) — the
+    same heuristic applies: not from an interactive shell, in a
+    package-manager descendant lineage, equals worm self-propagation.
+    Coexists intentionally with `npm_publish_from_ci.yml`: the latter
+    keys off a suspicious CWD or specific suspicious parents (node /
+    python / curl), this one keys off the *absence* of interactive /
+    known-CI parents. A live worm fires both rules; that redundancy
+    is the desired property for a critical-severity detection.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/
+    - https://www.reversinglabs.com/blog/shai-hulud-worm-npm
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1098/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.persistence
+    - attack.t1098
+    - attack.lateral_movement
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_publish:
+        Image|endswith:
+            - '/npm'
+            - '/pnpm'
+            - '/yarn'
+        CommandLine|contains:
+            - 'publish'
+            - 'oidc/token/exchange'
+    filter_interactive_parent:
+        ParentImage|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+            - '/fish'
+            - '/tmux'
+            - '/screen'
+    filter_known_ci:
+        ParentImage|endswith:
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+    condition: selection_publish and not filter_interactive_parent and not filter_known_ci
+falsepositives:
+    - Local release scripts wrapped in make/just/rake that spawn npm publish (parent will be /make /just /rake — investigate before suppressing)
+    - npm registry mirror sync tooling running as a daemon
+    - CI agents not in the filter list above — extend filter_known_ci with the local runner basename
+level: critical

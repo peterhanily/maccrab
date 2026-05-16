@@ -49,7 +49,14 @@ detection:
         TargetFilename|contains:
             - '/Library/Services/'
             - '/Workflows/'
-    condition: selection_automator or selection_shortcuts or selection_workflow_file
+    # Apple-signed Automator/Shortcuts is the expected vehicle for
+    # legitimate workflows authored by the user. Only flag when the
+    # parent is unsigned/ad-hoc or downloaded — the canonical malware
+    # delivery vector (e.g. payload arrives as a .workflow, double-
+    # clicked from ~/Downloads, lives under ~/Library/Services/).
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: (selection_automator or selection_shortcuts or selection_workflow_file) and not filter_apple_parent
 falsepositives:
     - Legitimate Automator workflows for productivity
     - Developer automation scripts

@@ -33,8 +33,77 @@ detection:
     filter_signed:
         SignerType:
             - 'apple'
-    condition: selection and not filter_debuggers and not filter_signed
+    # v1.12.0: rule pattern is CommandLine|contains on Mach API names;
+    # this fires on any process whose argv merely mentions the string —
+    # text search tools, pagers, editors, and shells running pipelines
+    # that grep for the literal name. None of these are doing injection.
+    # Until ES-event-based detection lands (v1.13.x), filter them.
+    filter_text_tools:
+        Image|endswith:
+            - '/grep'
+            - '/egrep'
+            - '/fgrep'
+            - '/awk'
+            - '/sed'
+            - '/head'
+            - '/tail'
+            - '/cat'
+            - '/less'
+            - '/more'
+            - '/man'
+            - '/find'
+            - '/xargs'
+            - '/cut'
+            - '/sort'
+            - '/uniq'
+            - '/tr'
+            - '/wc'
+            - '/file'
+            - '/strings'
+            - '/echo'
+            - '/printf'
+            - '/jq'
+            - '/yq'
+            - '/ed'
+            - '/vi'
+            - '/vim'
+            - '/nano'
+            - '/emacs'
+    filter_shells:
+        Image|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+            - '/dash'
+            - '/fish'
+            - '/csh'
+            - '/tcsh'
+    # v1.12.0 RC17: belt-and-suspenders. SignerType enrichment can be
+    # nil for the first process_creation event of a binary (CodeSigning
+    # cache miss), which made `filter_signed` miss /bin/ls, /bin/chmod,
+    # etc. on the first event after daemon start. Path-prefix filter is
+    # synchronous and doesn't depend on async enrichment.
+    filter_apple_paths:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/System/'
+            - '/usr/libexec/'
+    # v1.12.0 RC17: also filter Claude Code and other dev-AI agents whose
+    # commandlines legitimately contain Sigma rule names (grep, search,
+    # documentation lookups). The path is stable across versions; the
+    # version subdir varies, so a contains-match is right.
+    filter_dev_ai_tools:
+        Image|contains:
+            - '/.local/share/claude/'
+            - '/Applications/Cursor.app/'
+            - '/Applications/Visual Studio Code.app/'
+            - '/Applications/Xcode.app/'
+    condition: selection and not filter_debuggers and not filter_signed and not filter_text_tools and not filter_shells and not filter_apple_paths and not filter_dev_ai_tools
 falsepositives:
     - Legitimate debugging tools
     - Application crash reporters
+    - Documentation / source-code grep / man lookups (filtered)
 level: critical

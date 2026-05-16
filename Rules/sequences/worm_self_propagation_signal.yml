@@ -1,0 +1,112 @@
+title: Worm Self-Propagation Signal (Shai-Hulud / Lightning Pattern)
+id: e1f2a3b4-0040-4000-b000-000000000040
+status: experimental
+description: >
+    Detects the three-step kill chain unique to Shai-Hulud-class npm /
+    PyPI worms: a package-manager descendant reads a developer
+    credential file (~/.npmrc, ~/.pypirc, ~/.aws/credentials, ~/.ssh/
+    private keys), then within the same lineage makes an outbound
+    connection to a publish or maintainer-enumeration endpoint
+    (registry.npmjs.org PUT/POST, api.github.com /user/repos, PyPI
+    upload). This is the worm's *propagation loop* — once observed,
+    the host should be considered compromised and the affected token
+    rotated. Pairs with the graph rule
+    `maccrab_worm_self_propagation`.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://www.sysdig.com/blog/shai-hulud-the-novel-self-replicating-worm-infecting-hundreds-of-npm-packages
+    - https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/
+    - https://www.stepsecurity.io/blog/mini-shai-hulud-is-back-a-self-spreading-supply-chain-attack-hits-the-npm-ecosystem
+    - https://socket.dev/blog/lightning-pypi-package-compromised
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1555/
+    - https://attack.mitre.org/techniques/T1567/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.credential_access
+    - attack.t1555
+    - attack.exfiltration
+    - attack.t1567
+    - attack.persistence
+    - attack.t1098
+
+type: sequence
+window: 120s
+correlation: process.lineage
+ordered: true
+
+steps:
+    - id: pkg_mgr_descendant
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection:
+              ParentImage|endswith:
+                  - '/npm'
+                  - '/npx'
+                  - '/pnpm'
+                  - '/yarn'
+                  - '/node'
+                  - '/pip'
+                  - '/pip3'
+                  - '/uv'
+                  - '/poetry'
+                  - '/python'
+                  - '/python3'
+                  - '/bun'
+                  - '/gem'
+                  - '/cargo'
+          condition: selection
+
+    - id: cred_read
+      logsource:
+          category: file_event
+          product: macos
+      detection:
+          selection:
+              TargetFilename|contains:
+                  - '/.npmrc'
+                  - '/.pypirc'
+                  - '/.aws/credentials'
+                  - '/.aws/config'
+                  - '/.ssh/id_'
+                  - '/.ssh/identity'
+                  - '/.config/gh/hosts.yml'
+                  - '/.gem/credentials'
+                  - '/.cargo/credentials'
+                  - '/.netrc'
+              FileAction: 'close'
+          condition: selection
+      process: pkg_mgr_descendant.descendant
+
+    - id: registry_egress
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection_registry_publish:
+              DestinationHostname|contains:
+                  - 'registry.npmjs.org'
+                  - 'registry.yarnpkg.com'
+                  - 'upload.pypi.org'
+                  - 'pypi.org'
+          # v1.12.0 RC3 fix (Det-H5): drop the CommandLine clause —
+          # network events don't carry HTTP URIs in commandLine.
+          # The destination-host egress signal alone is enough when
+          # paired with the cred-read prerequisite (via `trigger:
+          # cred_read and registry_egress` below).
+          selection_repo_creation:
+              DestinationHostname|contains:
+                  - 'api.github.com'
+          condition: selection_registry_publish or selection_repo_creation
+      process: pkg_mgr_descendant.descendant
+
+trigger: cred_read and registry_egress
+falsepositives:
+    - An interactive developer publish flow (`npm publish` / `twine upload`) that legitimately reads ~/.npmrc or ~/.pypirc before pushing — the parent will be an interactive shell (zsh/bash) rather than a package-manager process and so will not match step 1
+    - Legitimate maintainer-enumeration tooling (npm-audit, npm whoami) used interactively from a shell
+    - AWS CLI / gcloud running inside a Python venv whose install was triggered moments ago; verify the operator instigated the credential read
+level: critical

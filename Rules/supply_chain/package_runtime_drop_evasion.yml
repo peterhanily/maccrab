@@ -1,0 +1,58 @@
+title: Package-Manager Descendant Drops Alt JS/Python Runtime (Evasion)
+id: d1a2b3c4-0302-4000-a000-000000000027
+status: experimental
+description: >
+    Detects a process descending from a package manager (npm/pnpm/yarn/
+    pip/uv/poetry) creating a Bun, Deno, or alternate Python interpreter
+    binary in a user-writable location (~/.bun, ~/.deno, /tmp,
+    /Library/Caches/). The May 2026 Mini Shai-Hulud Wave 4 used this
+    pattern to bring its own runtime, sidestepping Node-based
+    introspection and any node_modules-scoped policy. The legitimate
+    install paths for these runtimes are the user's choice (brew,
+    proto, asdf, mise) — never an npm/pip postinstall.
+author: MacCrab Community
+date: 2026/05/13
+references:
+    - https://www.stepsecurity.io/blog/mini-shai-hulud-is-back-a-self-spreading-supply-chain-attack-hits-the-npm-ecosystem
+    - https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised
+    - https://attack.mitre.org/techniques/T1105/
+    - https://attack.mitre.org/techniques/T1027/
+tags:
+    - attack.command_and_control
+    - attack.t1105
+    - attack.defense_evasion
+    - attack.t1027
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_runtime_drop:
+        TargetFilename|contains:
+            - '/.bun/bin/bun'
+            - '/.deno/bin/deno'
+            - '/.local/bin/bun'
+            - '/.local/bin/deno'
+            - '/tmp/bun'
+            - '/private/tmp/bun'
+            - '/Library/Caches/bun'
+        FileAction: 'close'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/node'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+    condition: selection_runtime_drop and selection_lineage
+falsepositives:
+    - A meta-installer like proto / asdf / mise that legitimately manages multiple runtimes; allowlist by Image basename
+    - Bun's own self-update path (`bun upgrade`) when triggered interactively
+level: high

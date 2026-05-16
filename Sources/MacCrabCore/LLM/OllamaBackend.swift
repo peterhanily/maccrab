@@ -24,9 +24,17 @@ public actor OllamaBackend: LLMBackend {
     /// host. `http://localhost`, `http://127.0.0.1`, and `http://[::1]`
     /// are safe; `http://10.0.0.5` is not. Used as a guard before
     /// attaching an API key.
+    /// v1.12.0 RC25 audit fix: nil-host URLs (`http:///path`, malformed
+    /// scheme://) are now treated as remote — the old nil-then-true
+    /// path also caught the case but inconsistently. Be explicit.
     static func isPlaintextRemote(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "http" else { return false }
-        guard let host = url.host?.lowercased() else { return true }
+        guard let host = url.host?.lowercased(), !host.isEmpty else {
+            // A nil/empty host means the URL parsed weirdly (e.g.,
+            // `http:////path`). Treat as remote so we never leak an
+            // API key over plaintext to an unknown destination.
+            return true
+        }
         if host == "localhost" { return false }
         if host == "127.0.0.1" || host.hasPrefix("127.") { return false }
         if host == "::1" || host == "[::1]" { return false }

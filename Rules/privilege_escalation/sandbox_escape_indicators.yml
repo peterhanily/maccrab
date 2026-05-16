@@ -1,16 +1,32 @@
-title: App Sandbox Escape Indicators
+title: App Sandbox Escape Indicators (DEPRECATED — unsalvageable)
 id: d1a2b3c4-0453-4000-a000-000000000453
-status: experimental
+status: deprecated
 description: >
-    Detects indicators of macOS App Sandbox escape attempts. Sandboxed
-    apps should not be able to access files outside their container or
-    communicate with arbitrary Mach services. This rule detects common
-    sandbox escape patterns including Mach port manipulation, XPC abuse,
-    and IOKit user client exploitation.
+    DEPRECATED — DO NOT RE-ENABLE.
+    This rule attempts to detect macOS App Sandbox escape attempts by
+    looking for API symbol names ('mach_port', 'IOServiceOpen',
+    'xpc_connection_create_mach_service', etc.) inside the process
+    CommandLine. That premise is fundamentally broken:
+      1. CommandLine carries program arguments, not source code.
+      2. The named functions are resolved at runtime via dlsym / dyld
+         inside the compiled binary — they are never present as literal
+         argv strings except in the pathological case of a developer
+         passing them as arguments to a debugger or codesign helper.
+      3. Every match observed in the field is FP — most often
+         `xcrun`, `dtrace`, `nm`, or `lldb` printing symbol tables.
+    The detection is preserved as `deprecated` (compiles but disabled
+    at runtime — see compile_rules.py:1131) so the rule id remains
+    valid for legacy suppressions, but the engine skips it in the hot
+    path. Real sandbox-escape detection requires Endpoint Security
+    sandbox-violation events (ES_EVENT_TYPE_NOTIFY_PROFILE_ADD,
+    sandbox profile denial deltas) and lineage correlation against
+    the app's expected sandbox container — planned for v1.13.
 author: MacCrab Community
 date: 2026/04/09
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1611/
+    - https://developer.apple.com/documentation/security/app_sandbox
 tags:
     - attack.privilege_escalation
     - attack.defense_evasion
@@ -19,6 +35,8 @@ logsource:
     category: process_creation
     product: macos
 detection:
+    # Kept verbatim so the compiled rule body survives — engine skips
+    # the rule entirely because status: deprecated → enabled: false.
     selection_mach:
         CommandLine|contains:
             - 'mach_port'
@@ -41,6 +59,5 @@ detection:
         SignerType: 'apple'
     condition: (selection_mach or selection_iokit or selection_xpc_abuse) and not filter_system
 falsepositives:
-    - Legitimate apps using IOKit for hardware access
-    - Virtual machine hypervisors
-level: high
+    - Every match (rule is broken — see description)
+level: informational

@@ -74,15 +74,17 @@ struct MacCrabApp: App {
                 .tint(MacCrabTheme.accent)
                 .onAppear {
                     appDelegate.setupStatusBar(appState: appState, updater: updaterController.updater)
-                    // v1.11.1: rule sync deferred from MacCrabApp.init()
-                    // to here. Runs detached so the dashboard window
-                    // paints first; sync's SIGHUP at completion notifies
-                    // the daemon. SwiftUI's .onAppear fires right after
-                    // first frame, so visual time-to-first-paint is the
-                    // window-render budget, not the sync budget.
-                    Task.detached(priority: .utility) {
-                        RuleBundleInstaller.syncIfNeeded()
-                    }
+                    // v1.12.0 fix (rule sync visibility on menubar apps):
+                    // RuleBundleInstaller.syncIfNeeded() moved from this
+                    // .onAppear to AppDelegate.applicationDidFinishLaunching.
+                    // V2RootView .onAppear only fires when the user opens
+                    // the dashboard window — for an LSUIElement=true
+                    // menubar app, a user who never clicks the menubar
+                    // icon will never see the rule sync run. The sysext
+                    // continues to read whatever the cask postflight (or
+                    // a previous version's sync) wrote. Moving to the
+                    // app-level launch hook makes the sync independent of
+                    // window state.
                     // Kick off system-extension activation on first
                     // launch. The manager dedups against an already-
                     // activated extension, so this is also safe on
@@ -283,6 +285,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         // Create the status bar item immediately — don't wait for window onAppear
         createStatusBarItem()
+        // v1.12.0 fix: rule sync runs here (was V2RootView.onAppear, which
+        // never fires for menubar-only users who don't click into the
+        // dashboard). Task.detached so the launch sequence isn't blocked;
+        // syncIfNeeded prompts for admin via osascript only when the
+        // installed rule version differs from the bundled version.
+        Task.detached(priority: .utility) {
+            RuleBundleInstaller.syncIfNeeded()
+        }
     }
 
     @MainActor func setupStatusBar(appState: AppState, updater: SPUUpdater? = nil) {

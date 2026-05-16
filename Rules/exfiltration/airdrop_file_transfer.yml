@@ -1,14 +1,20 @@
 title: AirDrop File Transfer by Non-Standard Process
 id: d1a2b3c4-0457-4000-a000-000000000457
-status: experimental
+status: deprecated
 description: >
-    Detects AirDrop file transfers initiated by processes other than
-    Finder or standard system sharing services. AirDrop can be used
-    for data exfiltration (sending files to a nearby attacker device)
-    or initial access (receiving malicious files). Unsigned or
-    non-Apple processes using the sharing framework are suspicious.
+    DEPRECATED — This rule is non-firing in practice. AirDrop transfers are
+    initiated through NSSharingService / SharingUI / sharingd XPC, not via a
+    command-line. The keyword `NSSharingService` / `SHKAirDrop` / `AirDrop`
+    only appears in CommandLine when a user explicitly invokes a CLI wrapper,
+    which is essentially never observed on real macOS endpoints. Coverage for
+    AirDrop-based exfiltration is now provided by
+    Rules/collection/airdrop_file_staging.yml which inspects the actual
+    AirDrop staging directory at the file_event layer and flags
+    credential/keystore filenames. This rule is kept as a never-firing stub
+    so its ID is preserved in case a future build adds AirDrop XPC telemetry.
 author: MacCrab Community
 date: 2026/04/09
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1011/001/
     - https://attack.mitre.org/techniques/T1566/001/
@@ -20,25 +26,14 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection_sharing:
-        CommandLine|contains:
-            - 'NSSharingService'
-            - 'SHKAirDrop'
-            - 'sharingd'
-            - 'AirDrop'
+    # Intentionally unreachable: requires a non-Apple-signed `sharing` CLI
+    # binary with an `airdrop` arg, which is not a real shipping pattern.
     selection_cli:
-        Image|endswith:
-            - '/sharing'
-        CommandLine|contains:
-            - 'airdrop'
+        Image|endswith: '/sharing'
+        CommandLine|contains: 'airdrop'
     filter_apple:
         SignerType: 'apple'
-    filter_finder:
-        ParentImage|endswith:
-            - '/Finder'
-            - '/sharingd'
-    condition: (selection_sharing or selection_cli) and not filter_apple and not filter_finder
+    condition: selection_cli and not filter_apple
 falsepositives:
-    - Third-party file sharing applications
-    - Automation tools using AirDrop
-level: high
+    - This rule does not fire on production macOS; see description.
+level: informational

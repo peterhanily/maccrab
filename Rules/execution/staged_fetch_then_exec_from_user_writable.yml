@@ -1,0 +1,81 @@
+title: Curl/Wget Fetch Followed By Execution From User-Writable Path
+id: d1a2b3c4-0500-4000-a000-000000000506
+status: experimental
+description: >
+    Detects the classic staged-payload primitive: a `curl` / `wget`
+    fetch (often from a package install lineage) followed within a
+    short window by an exec of a newly-written binary in a
+    user-writable temp directory (`/tmp`, `/private/tmp`,
+    `/var/folders/...`, `~/Library/Caches/`). Sequence semantics —
+    this is a high-confidence rule when paired with a parent in
+    the package-install set. BlueNoroff's `RustBucket` (2024) and
+    BlueNoroff's `KandyKorn` (2023) both use this two-step shape;
+    the axios npm March 2026 compromise dropped a Mach-O via the
+    same pattern.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.elastic.co/security-labs/the-runt-of-the-litter-bluenoroff-rustbucket
+    - https://snyk.io/blog/axios-npm-package-compromised-supply-chain-attack-delivers-cross-platform/
+    - https://attack.mitre.org/techniques/T1105/
+    - https://attack.mitre.org/techniques/T1204/002/
+tags:
+    - attack.execution
+    - attack.t1204.002
+    - attack.command_and_control
+    - attack.t1105
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_exec_user_writable:
+        Image|startswith:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/folders/'
+            - '/Users/'
+    selection_user_writable_caches:
+        Image|contains:
+            - '/Library/Caches/'
+            - '/.cache/'
+    # v1.12.0 post-audit (H-Det4): the prior selection_lineage included
+    # /sh, /bash, /zsh which made every node_modules/.bin/<binary>
+    # exec from any npm-descended shell fire this rule (typical dev
+    # workflow). Restrict parents to actual downloaders or runtime
+    # interpreters — those are the credible "fetched-then-executed"
+    # signature.
+    selection_lineage:
+        ParentImage|endswith:
+            - '/curl'
+            - '/wget'
+            - '/node'
+            - '/python'
+            - '/python3'
+        GrandparentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/node'
+            - '/bun'
+            - '/installer'
+            - '/package_script_service'
+    filter_known_tool_caches:
+        Image|contains:
+            - '/Cypress/Cache/'
+            - '/Cache/Playwright/'
+            - '/puppeteer/'
+            - '/electron/Cache/'
+            - '/.cache/ms-playwright/'
+            - '/.cache/Cypress/'
+    condition: (selection_exec_user_writable or selection_user_writable_caches) and selection_lineage and not filter_known_tool_caches
+falsepositives:
+    - Browser-automation toolkits (Playwright, Puppeteer, Cypress, Electron) that legitimately cache and execute headless-browser binaries from `~/Library/Caches/` — covered by `filter_known_tool_caches`
+    - Native-addon prebuilds (bcrypt, sharp, sqlite3, esbuild, swc) that cache compiled binaries under `~/Library/Caches/<pkg>/` and execute them — extend filter as packages are observed
+level: high

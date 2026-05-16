@@ -83,8 +83,22 @@ public actor LLMService {
             backend = GeminiBackend(apiKey: key, model: config.geminiModel)
         }
         let service = LLMService(backend: backend, config: config)
-        guard await service.isAvailable() else { return nil }
-        return service
+        // v1.12.0 RC27 (resiliency): bound the availability probe with
+        // a 3-second deadline. URLSession's default timeout is 60 s; on
+        // an unreachable Ollama or a captive-portal network the
+        // pre-fix await blocked the entire caller (dashboard launch,
+        // daemon boot path) for that full minute.
+        let available: Bool = await withTaskGroup(of: Bool?.self) { group in
+            group.addTask { await service.isAvailable() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                return nil  // timeout sentinel
+            }
+            let first = await group.next() ?? .some(false)
+            group.cancelAll()
+            return first ?? false  // nil means timeout — treat as unavailable
+        }
+        return available ? service : nil
     }
 
     /// Check if the LLM backend is available.

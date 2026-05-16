@@ -13,16 +13,18 @@ logsource:
     category: file_event
     product: macos
 detection:
+    # A .docktileplugin file is itself a strong indicator — every
+    # docktileplugin install drops a directory bundle ending in this
+    # extension. The previous `selection_paths` clause was an AND-of-
+    # contains over three locations, but `.app/` alone is so generic
+    # that the clause effectively passed every match through; it added
+    # no precision while obscuring the real signal. Anchor on the
+    # extension and let the apple-signing filter do the work.
     selection:
         TargetFilename|endswith: '.docktileplugin'
-    selection_paths:
-        TargetFilename|contains:
-            - '/Library/Application Support/'
-            - '/Contents/PlugIns/'
-            - '.app/'
     filter_apple:
         SignerType: 'apple'
-    condition: selection and selection_paths and not filter_apple
+    condition: selection and not filter_apple
 falsepositives:
     - Legitimate application installations that include Dock tile plugins
     - Xcode plugin development

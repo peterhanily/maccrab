@@ -1,17 +1,23 @@
-title: Dylib Written to Hijackable Search Path
+title: Dylib Written to Hijackable Path by Non-Platform Writer
 id: d1a2b3c4-0437-4000-a000-000000000437
 status: experimental
 description: >
-    Detects creation of a .dylib file in directories commonly used for
-    dylib search path hijacking. Attackers place malicious dylibs in
-    writable paths that precede legitimate library locations in the
-    dynamic linker search order, causing applications to load attacker
-    code on next launch.
+    Detects creation of a .dylib in a hijackable search path by a
+    writer process that is not Apple-signed, not parented by a
+    developer toolchain (Xcode, Homebrew, package managers), and
+    whose target path is outside the normal package install tree.
+    Attackers place malicious dylibs in writable paths that precede
+    legitimate library locations in the dynamic linker search order,
+    causing applications to load attacker code on next launch. Most
+    legitimate dylibs land under Homebrew's Cellar or Xcode's
+    DerivedData / build-output trees, which this rule filters out.
 author: MacCrab Community
 date: 2026/04/08
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1574/004/
     - https://attack.mitre.org/techniques/T1574/006/
+    - https://blog.malwarebytes.com/threat-analysis/2020/11/dylib-hijacking-on-osx/
 tags:
     - attack.persistence
     - attack.defense_evasion
@@ -25,28 +31,55 @@ detection:
         TargetFilename|endswith: '.dylib'
     selection_path:
         TargetFilename|contains:
-            - '/usr/local/lib/'
-            - '/opt/homebrew/lib/'
-            - '/Users/'
+            - '/Users/Shared/'
             - '/tmp/'
             - '/private/tmp/'
             - '/var/tmp/'
             - '/.Trash/'
             - '/Library/Application Support/'
-    filter_homebrew:
+    filter_homebrew_install_path:
+        # Anything actually written into Cellar / Homebrew opt is a
+        # formula install, not a hijack -- the search-path issue is
+        # for writes OUTSIDE these trees that shadow them.
+        TargetFilename|contains:
+            - '/Cellar/'
+            - '/opt/homebrew/'
+            - '/usr/local/Homebrew/'
+    filter_xcode_install_path:
+        TargetFilename|contains:
+            - '/Xcode.app/'
+            - '/DerivedData/'
+            - '/Library/Developer/'
+            - '/CocoaPods/'
+    filter_homebrew_writer:
         Image|endswith:
             - '/brew'
             - '/ruby'
             - '/gem'
-    filter_xcode:
+            - '/pip'
+            - '/pip3'
+            - '/npm'
+            - '/yarn'
+            - '/cargo'
+            - '/go'
+    filter_xcode_writer:
         Image|contains:
             - '/Xcode.app/'
             - '/Developer/'
-    filter_apple:
+            - '/xcodebuild'
+            - '/clang'
+            - '/ld'
+    filter_apple_writer:
         SignerType: 'apple'
-    condition: selection_dylib and selection_path and not filter_homebrew and not filter_xcode and not filter_apple
+    filter_pkg_installers:
+        # System installer / pkgd / shove pkg payloads -- benign installs
+        ParentImage|contains:
+            - '/installer'
+            - '/system_installd'
+            - '/PackageKit/'
+    condition: selection_dylib and selection_path and not filter_homebrew_install_path and not filter_xcode_install_path and not filter_homebrew_writer and not filter_xcode_writer and not filter_apple_writer and not filter_pkg_installers
 falsepositives:
-    - Homebrew formula installations
-    - Developer building shared libraries
-    - Legitimate application plugins
+    - Developers building shared libraries in /tmp during local iteration
+    - Third-party app installers writing helper dylibs to Application Support
+    - Plugin systems caching dylibs under Application Support
 level: medium

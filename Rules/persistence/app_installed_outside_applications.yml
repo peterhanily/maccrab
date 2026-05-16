@@ -1,9 +1,17 @@
-title: Application Bundle Created Outside /Applications
+title: Application Bundle Staged in Suspicious Path
 id: d1a2b3c4-0214-4000-a000-000000000214
 status: experimental
-description: Detects creation of .app bundles in non-standard locations such as /tmp, /Users/Shared, or hidden directories. Malware commonly stages application bundles outside /Applications to avoid detection.
+description: >
+    Detects creation of .app bundles in suspicious staging paths (/tmp,
+    /Volumes, ~/Downloads, ~/Library/Caches, hidden directories) by
+    processes that are NOT a recognised package manager, installer, or
+    developer tool. Malware commonly stages application bundles outside
+    /Applications to avoid detection. Legitimate Homebrew, Xcode,
+    MacPorts, CocoaPods, system installers, and codesign workflows are
+    filtered out via parent process exclusion.
 author: MacCrab Community
 date: 2026/03/30
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1036/005/
 tags:
@@ -14,23 +22,49 @@ logsource:
     category: file_event
     product: macos
 detection:
-    selection:
+    selection_app_executable:
         TargetFilename|contains: '.app/Contents/MacOS/'
-    filter_applications:
-        TargetFilename|startswith:
-            - '/Applications/'
-            - '/System/Applications/'
-    filter_xcode:
+    selection_suspicious_path:
+        TargetFilename|contains:
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/tmp/'
+            - '/Volumes/'
+            - '/Users/Shared/'
+            - '/Downloads/'
+            - '/Library/Caches/'
+            - '/.hidden/'
+    filter_known_installers:
+        Image|endswith:
+            - '/brew'
+            - '/installer'
+            - '/Installer'
+            - '/system_installd'
+            - '/installd'
+            - '/codesign'
+            - '/ditto'
+            - '/xcodebuild'
+            - '/port'
+            - '/pod'
+            - '/softwareupdated'
+            - '/PackageKit'
+    filter_xcode_paths:
         TargetFilename|contains:
             - '/DerivedData/'
-            - '/Build/'
+            - '/Build/Products/'
             - '/Xcode.app/'
-    filter_homebrew:
+            - '/Library/Developer/'
+    filter_homebrew_cellar:
         TargetFilename|startswith:
             - '/usr/local/Cellar/'
             - '/opt/homebrew/Cellar/'
-    condition: selection and not filter_applications and not filter_xcode and not filter_homebrew
+            - '/usr/local/Caskroom/'
+            - '/opt/homebrew/Caskroom/'
+    filter_apple_signed:
+        SignerType: 'apple'
+    condition: selection_app_executable and selection_suspicious_path and not filter_known_installers and not filter_xcode_paths and not filter_homebrew_cellar and not filter_apple_signed
 falsepositives:
-    - Development builds placed in non-standard paths
-    - Application translocation
+    - Development builds intentionally placed in non-standard paths
+    - Application translocation (Gatekeeper random path)
+    - Custom installer scripts not yet on the parent-process allowlist
 level: medium

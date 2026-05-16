@@ -29,7 +29,14 @@ public actor SelfDefense {
     private let monitoredPaths: [MonitoredPath]
 
     /// Hash of the maccrabd binary at startup.
-    private let binaryHash: String?
+    /// v1.12.0 RC24: computed lazily inside `start()` rather than in
+    /// the constructor. Daemon boot path can't afford a synchronous
+    /// SHA-256 on a 30 MB binary (3.5 s measured in RC22 timing).
+    private var binaryHash: String?
+
+    /// Resolved daemon-binary path. Retained for lazy hashing inside
+    /// `start()` and integrity-check re-hashes.
+    private let binaryPath: String
 
     /// Hash of compiled rules directory. Mutable because legitimate bundle
     /// syncs (fresh install, Sparkle-delivered rule updates, first-boot
@@ -112,7 +119,7 @@ public actor SelfDefense {
     public init(dataDir: String, rulesDir: String) {
         // Resolve the actual binary path using proc_pidpath (reliable even when
         // CommandLine.arguments[0] is just "maccrabd" without a full path).
-        let binaryPath: String = {
+        let resolvedBinary: String = {
             var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
             let result = proc_pidpath(getpid(), &buffer, UInt32(buffer.count))
             if result > 0 {
@@ -122,10 +129,17 @@ public actor SelfDefense {
             let raw = CommandLine.arguments[0]
             return (try? FileManager.default.destinationOfSymbolicLink(atPath: raw)) ?? raw
         }()
-        self.binaryHash = Self.sha256(fileAt: binaryPath)
+        self.binaryPath = resolvedBinary
+        // v1.12.0 RC24: hashes deferred to `start()`. Synchronous
+        // SHA-256 of the 30 MB daemon binary + 470-file rules dir
+        // took 3.5 s on the boot critical path (RC22 timing). Leaving
+        // them nil at construct time means the integrityCheck path
+        // sees "no baseline yet" until start() runs — equivalent to
+        // the pre-fix grace period.
+        self.binaryHash = nil
 
         self.rulesDir = rulesDir
-        self.rulesHash = Self.directoryHash(at: rulesDir)
+        self.rulesHash = nil
 
         // Build list of paths to monitor
         var paths: [MonitoredPath] = []
@@ -136,7 +150,7 @@ public actor SelfDefense {
         // cause false positives on dev rebuilds, Homebrew upgrades, and path
         // resolution edge cases (sudo, symlinks).
         paths.append(MonitoredPath(
-            path: binaryPath,
+            path: resolvedBinary,
             description: "MacCrab daemon binary",
             critical: false
         ))
@@ -183,7 +197,7 @@ public actor SelfDefense {
 
         self.monitoredPaths = paths
 
-        logger.info("Self-defense initialized: monitoring \(paths.count) paths, binary hash: \(self.binaryHash ?? "unknown")")
+        logger.info("Self-defense initialized (hashes deferred to start()): monitoring \(paths.count) paths")
     }
 
     // MARK: - Public API
@@ -193,6 +207,20 @@ public actor SelfDefense {
         self.tamperHandler = handler
         self.isActive = true
         self.startupTime = Date()
+
+        // v1.12.0 RC24: lazy hashing. Constructor used to compute
+        // SHA-256 of the daemon binary (~30 MB) + entire rules dir
+        // (470 files) synchronously, costing ~3.5 s on the boot path.
+        // Now both happen here — the SelfDefense actor is already on
+        // a background Task by the time start() runs, so the boot
+        // path doesn't wait.
+        if self.binaryHash == nil {
+            self.binaryHash = Self.sha256(fileAt: self.binaryPath)
+        }
+        if self.rulesHash == nil {
+            self.rulesHash = Self.directoryHash(at: self.rulesDir)
+        }
+        logger.info("Self-defense baseline hashes computed: binary=\(self.binaryHash ?? "unknown")")
 
         // 1. Anti-debug check
         if Self.isBeingDebugged() {

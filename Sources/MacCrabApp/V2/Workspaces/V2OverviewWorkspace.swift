@@ -67,9 +67,10 @@ struct V2OverviewWorkspace: View {
     /// Three-state banner driven by real signals: protection-active
     /// (live data + heartbeat fresh + score ≥ 75), degraded (live but
     /// score < 75 or stale heartbeat), or inactive (mock-mode = no
-    /// daemon writing data). Pre-fix the banner unconditionally said
-    /// "Protected — system is secure" regardless of state, which was
-    /// the single most-visible UX lie in the v2 dashboard.
+    /// daemon writing data). v1.12.0 RC16: dropped the .starting state
+    /// (briefly introduced in RC15) — turbo-fast daemon boot makes the
+    /// transient "starting" window invisible to the user, so the extra
+    /// state was just noise.
     private enum ProtectionState { case active, degraded, inactive }
 
     private var protectionState: ProtectionState {

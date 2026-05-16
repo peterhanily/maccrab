@@ -1,7 +1,12 @@
 title: Unsigned Binary Masquerading as System Utility
 id: d1a2b3c4-0027-4000-a000-000000000027
 status: experimental
-description: Detects unsigned binaries with names matching common system utilities, suggesting masquerading.
+description: >
+    Detects non-Apple-signed binaries whose filename matches a well-known macOS
+    system daemon (sshd, cron, launchd, mds, mdworker, trustd, securityd) but
+    which live outside the canonical system paths. Adversaries rename payloads
+    to mimic system processes (T1036.004) so that casual inspection of `ps`
+    output does not raise suspicion.
 author: MacCrab Community
 date: 2026/03/31
 references:
@@ -31,5 +36,7 @@ detection:
         SignerType: 'apple'
     condition: selection_name and not filter_system_path and not filter_apple
 falsepositives:
-    - Development builds of system utilities
+    - In-house developer builds of system utilities run from /tmp, ~/build, or DerivedData
+    - Custom OpenSSH server builds (e.g. Homebrew openssh, MacPorts) shipping their own /sshd
+    - QA/test harnesses that ship renamed stub binaries (mock sshd, mock launchd)
 level: high

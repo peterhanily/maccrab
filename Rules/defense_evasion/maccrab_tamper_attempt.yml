@@ -1,0 +1,84 @@
+title: Attempted Tamper of MacCrab Components (Self-Protection)
+id: d1a2b3c4-0500-4000-a000-000000000505
+status: experimental
+description: >
+    Detects any attempt by a non-MacCrab process to kill, unload,
+    delete, or rename MacCrab's own daemons, system extension,
+    application bundle, or rule corpus. Catches the
+    EDR-disable-then-fire-payload pattern used by macOS.SearchAwesome
+    against competing LaunchAgents (2024), Atomic Stealer's attempt
+    to disable Little Snitch, and the general worm prerequisite of
+    eliminating telemetry before the destructive payload runs. This
+    rule must clear with critical severity even when v1.12.0 is
+    detection-only — a tamper alert is the canary that the next
+    alert may never arrive.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://objective-see.org/blog/blog_0x47.html
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://attack.mitre.org/techniques/T1562/001/
+    - https://attack.mitre.org/techniques/T1070/004/
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+    - attack.t1070.004
+    - attack.impact
+    - maccrab.self_protection
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_kill_tool:
+        Image|endswith:
+            - '/pkill'
+            - '/killall'
+            - '/kill'
+            - '/launchctl'
+            - '/systemextensionsctl'
+        CommandLine|contains:
+            - 'maccrab'
+            - 'MacCrab'
+            - 'com.maccrab'
+    selection_unload_path:
+        Image|endswith:
+            - '/launchctl'
+        CommandLine|contains:
+            - 'bootout'
+            - 'unload'
+            - 'disable'
+        CommandLine|contains|all:
+            - 'maccrab'
+    selection_destruct_path:
+        Image|endswith:
+            - '/rm'
+            - '/mv'
+        CommandLine|contains:
+            - '/MacCrab.app'
+            - '/MacCrabAgent'
+            - '/maccrabd'
+            - '/com.maccrab.agent'
+            - 'compiled_rules/'
+            - '/Library/Application Support/MacCrab'
+    filter_maccrab_self:
+        Image|contains:
+            - 'MacCrab.app/Contents/'
+            - 'MacCrabAgent'
+            - 'maccrabd'
+            - 'maccrabctl'
+        ParentImage|contains:
+            - 'MacCrab.app/Contents/'
+            - 'maccrabd'
+            - 'sysextd'
+    filter_installer:
+        Image|endswith:
+            - '/installer'
+            - '/system_installd'
+            - '/Sparkle'
+            - '/sparkle'
+    condition: (selection_kill_tool or selection_unload_path or selection_destruct_path) and not filter_maccrab_self and not filter_installer
+falsepositives:
+    - The user running `brew uninstall maccrab` or `make uninstall` from an interactive shell — investigate parent shell + correlate with explicit dashboard "Uninstall" action
+    - Sparkle auto-update replacing the .app bundle as part of an in-place upgrade; filter_installer covers Sparkle's path
+    - Internal tests / dev rebuilds in the project directory; should be allowlisted by parent path matching the project tree
+level: critical

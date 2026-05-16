@@ -32,18 +32,85 @@ detection:
             - 'GroupMembers'
     selection_id_all:
         Image|endswith: '/id'
-        CommandLine|re: '-G|-nG|id\s+\w'
+        # `id -G` / `id -nG` enumerate group lists (the discovery signal).
+        # `id <user>` (third arg lookup) is the targeting signal. Plain `id`
+        # is filter_normal_id.
+        CommandLine|re: '-G|-nG|id\s+[a-zA-Z_][a-zA-Z0-9_-]+'
     filter_apple:
         SignerType:
             - 'apple'
+            - 'appStore'
+            - 'devId'
+    filter_platform:
+        PlatformBinary: 'true'
+    filter_system_path:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/usr/libexec/'
+            - '/System/'
     filter_normal_id:
         # Plain 'id' with no arguments or just the current user is noise
         CommandLine|endswith:
             - '/id'
             - ' id'
-    condition: (selection_dsmemberutil or selection_dscl_groups or selection_id_all) and not filter_apple and not filter_normal_id
+    # `id -G` / `groups` / `dsmemberutil checkmembership` are run by every
+    # shell init script, build system, and CI runner. Filter ancestry so
+    # only unusual lineage triggers.
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/brew'
+            - '/npm'
+            - '/yarn'
+            - '/pnpm'
+            - '/pip'
+            - '/pip3'
+            - '/make'
+            - '/cmake'
+            - '/cargo'
+            - '/go'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+            - '/chezmoi'
+            - '/stow'
+            - '/yadm'
+    filter_homebrew_parent:
+        ParentImage|startswith:
+            - '/opt/homebrew/'
+            - '/usr/local/Cellar/'
+            - '/usr/local/opt/'
+            - '/Applications/Xcode'
+            - '/Library/Developer/'
+    condition: (selection_dsmemberutil or selection_dscl_groups or selection_id_all) and not filter_apple and not filter_platform and not filter_system_path and not filter_normal_id and not filter_dev_tools and not filter_homebrew_parent
 falsepositives:
-    - System administration scripts auditing group membership
-    - MDM configuration profiles checking user roles
-    - Application installers checking for admin privileges
+    - System administration scripts auditing group membership (filter_dev_tools)
+    - MDM configuration profiles checking user roles (devId-signed)
+    - Application installers checking for admin privileges (devId-signed)
+    - Build systems running `id -G` in init scripts (filter_dev_tools)
 level: low
+# v1.11.2: tightened `id <user>` regex to require alpha-leading identifier
+# (was matching any word char incl. flags), added platform-binary / system-
+# path / dev-tool / Homebrew parent filters. `id -G` is daily build-system
+# use so unusual lineage is required.

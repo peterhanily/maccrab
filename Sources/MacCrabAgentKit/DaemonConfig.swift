@@ -30,6 +30,18 @@ struct DaemonConfig: Codable {
     // MARK: - Prompt Injection
     var promptInjectionConfidence: Int = 40
 
+    // MARK: - Intent Posterior (v1.12.0)
+    // Top non-benign goal probability that must be reached for the
+    // `maccrab.intent.bayesian-posterior` alert to fire. Strict by
+    // design — single-event Sigma rules already cover lower-confidence
+    // signals.
+    var intentPosteriorThreshold: Double = 0.85
+    // Distinct evidence types that must have accumulated before
+    // emitting the posterior alert. Prevents a single observation
+    // from flipping the alert despite the prior strongly favoring
+    // benign.
+    var intentPosteriorMinDistinctEvidence: Int = 3
+
     // MARK: - Storage (v1.8.0)
     //
     // Per-tier retention budgets. Pre-v1.8 used a single retentionDays +
@@ -228,6 +240,9 @@ struct DaemonConfig: Codable {
             "event_tap_poll_interval": "eventTapPollInterval",
             "system_policy_poll_interval": "systemPolicyPollInterval",
             "prompt_injection_confidence": "promptInjectionConfidence",
+            // v1.12.0 intent posterior thresholds
+            "intent_posterior_threshold": "intentPosteriorThreshold",
+            "intent_posterior_min_distinct_evidence": "intentPosteriorMinDistinctEvidence",
             // v1.8.0 legacy keys: rewritten in place by migrateLegacyStorageKeys
             // below. Keeping the snake_case → camelCase rewrite here so the
             // legacy migrator sees a consistent input dict.

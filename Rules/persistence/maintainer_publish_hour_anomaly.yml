@@ -1,0 +1,74 @@
+title: Package Publish From Non-Interactive Parent (Drift-Detection Input)
+id: d1a2b3c4-0500-4000-a000-000000000518
+status: experimental
+description: >
+    Detects an `npm publish` / `twine upload` / `gem push` / `cargo
+    publish` whose parent is launchd or a long-lived script runtime
+    rather than an interactive shell or known CI agent. This rule is
+    a single-event approximation; the real Welford-histogram per-
+    maintainer publish-time drift comparison lives in v1.13.x as a
+    daemon-side actor that the dashboard surfaces — this rule fires
+    as a contributing input to that downstream signal. Title clarified
+    in v1.12.0: the predicate does NOT do time-of-day matching (the
+    Sigma compiler has no temporal evaluation support); the "hour
+    anomaly" framing comes from the daemon-side baseline, not this
+    rule alone.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://identitymanagementinstitute.org/behavioral-drift-detection/
+    - https://www.exabeam.com/explainers/ueba/what-ueba-stands-for-and-a-5-minute-ueba-primer/
+    - https://attack.mitre.org/techniques/T1078/
+tags:
+    - attack.persistence
+    - attack.t1078
+    - maccrab.maintainer_drift
+    - maccrab.ueba
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_publish:
+        Image|endswith:
+            - '/npm'
+            - '/pnpm'
+            - '/yarn'
+            - '/twine'
+            - '/gem'
+            - '/cargo'
+        CommandLine|contains:
+            - 'publish'
+            - 'push'
+            - 'upload'
+    # v1.12.0 RC3 fix (Det-H7): `/node` removed. The `node` runtime
+    # hosts the `npm` script that does `npm publish`, so ParentImage
+    # endswith '/node' matches every legit npm publish workflow.
+    # The dead-man's-switch shape requires a non-interactive parent
+    # like launchd or a python wrapper; `/node` doesn't add coverage.
+    selection_no_tty:
+        ParentImage|endswith:
+            - '/launchd'
+            - '/python'
+            - '/python3'
+    filter_ci_runner:
+        ParentImage|endswith:
+            - '/runner'
+            - '/buildkite-agent'
+            - '/jenkins-agent'
+            - '/gitlab-runner'
+            - '/dagger'
+            - '/act'
+    filter_renovate_dependabot:
+        Image|contains:
+            - '/renovate'
+            - '/dependabot'
+    filter_homebrew_publish:
+        Image|contains:
+            - '/Cellar/'
+            - '/homebrew/'
+    condition: selection_publish and selection_no_tty and not filter_ci_runner and not filter_renovate_dependabot and not filter_homebrew_publish
+falsepositives:
+    - Legitimate maintainer working night shifts; user can suppress the rule per-tool basis
+    - CI agents running locally (act, dagger) — already filtered if parent matches /runner, /buildkite-agent etc.; extend filter if a local runner basename appears
+    - Auto-publish via Renovate / Dependabot triggered by a webhook from launchd; allowlist by parent Image when the workflow is established
+level: medium

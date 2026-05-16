@@ -1,0 +1,64 @@
+title: Ad-Hoc Signed Binary Executes From User-Writable Path
+id: d1a2b3c4-0500-4000-a000-000000000511
+status: experimental
+description: >
+    Detects an execve of a binary whose code-signing flags include
+    `CS_ADHOC` (ad-hoc signed, no Developer ID anchor) sitting under
+    `~/Downloads/`, `~/Desktop/`, `/tmp/`, `/var/folders/`, or
+    `/Volumes/`. Legitimate macOS distribution requires Developer ID
+    signing + notarization; ad-hoc + user-writable path is the
+    Atomic Stealer / Cthulhu / MacSync signature. Mac App Store
+    apps and `/Applications/`-installed apps are filtered out (they
+    are by definition outside the user-writable ad-hoc danger zone).
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://www.elastic.co/security-labs/inside-malicious-macos-apps
+    - https://attack.mitre.org/techniques/T1204/002/
+    - https://attack.mitre.org/techniques/T1553/004/
+tags:
+    - attack.execution
+    - attack.t1204.002
+    - attack.defense_evasion
+    - attack.t1553.004
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_user_writable_path:
+        Image|startswith:
+            - '/Users/'
+            - '/Volumes/'
+            - '/tmp/'
+            - '/private/tmp/'
+            - '/var/folders/'
+    selection_ad_hoc_signing:
+        # RuleEngine resolves IsAdhocSigned via the cs_blobs.h CS_ADHOC
+        # flag bit (RuleEngine.swift:868-869) — the prior selection on
+        # CodeSigningFlags|contains 'ADHOC' was wrong because the field
+        # returns the stringified integer (e.g. "2"), not the flag name.
+        IsAdhocSigned: 'true'
+    filter_legit_user_paths:
+        # v1.12.0 post-audit (H-Det2): the prior `Image|contains: '/Users/.+/Applications/'`
+        # used regex syntax with a substring modifier — `|contains` is
+        # literal-string matching, so the regex `.+` literal was never
+        # present in any real path and the filter never fired. Use a
+        # plain substring per-segment instead; matches both
+        # `/Users/<u>/Applications/` and the system `/Applications/`.
+        Image|contains:
+            - '/Applications/'
+            - '/Library/Developer/'
+            - '/Library/Caches/'
+    filter_known_dev_tools:
+        Image|endswith:
+            - '/swift-bundler'
+            - '/swift'
+            - '/swiftc'
+            - '/clang'
+            - '/ld'
+    condition: selection_user_writable_path and selection_ad_hoc_signing and not filter_legit_user_paths and not filter_known_dev_tools
+falsepositives:
+    - Developers running unsigned local builds during iteration (e.g., `.build/debug/foo`) — covered by `filter_known_dev_tools`; extend allowlist as appropriate
+    - Browser-automation harnesses launching unsigned helper binaries from `~/Library/Caches/` — filter on the cache path
+level: high

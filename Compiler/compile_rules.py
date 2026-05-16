@@ -140,6 +140,18 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     # `AgentTool` matches AIToolType.rawValue (claude_code, codex, ...).
     "AgentTraceId", "AgentSpanId", "AgentTool",
     "MachineAgentConfidence",
+    # --- v1.12.0: IntentClassifier verdict enrichments ---
+    # Populated by `EventEnricher` when a package-manager exec is
+    # observed and the daemon's `IntentClassifier` has produced a
+    # verdict for the brief. `IntentLabel` is one of the
+    # IntentClassifier.IntentLabel raw values; `IntentConfidence` is
+    # a stringified Double in [0.0, 1.0]. `IntentHighConfidence` is
+    # "true" iff confidence ≥ 0.5 (v1.12.0 RC7 — RC6 used 0.7 but
+    # the heuristic's max single-label score is 4–5 / 8 = 0.5–0.625,
+    # so the credentialHarvest worm path could not clear 0.7; lowered
+    # to 0.5 so Sigma rules can express the threshold via plain
+    # string equality).
+    "IntentLabel", "IntentConfidence", "IntentHighConfidence",
 }
 
 # Track fields we've already warned about to avoid spam.
@@ -1120,6 +1132,29 @@ def compile_rule(rule_data: dict, source_file: str):
     tags = rule_data.get("tags", [])
     falsepositives = rule_data.get("falsepositives", [])
     if falsepositives is None:
+        falsepositives = []
+    # v1.12.0 RC2 (B-N1): catch the YAML "unquoted colon in prose"
+    # bug that produced a list-of-dicts instead of a list-of-strings.
+    # If any entry isn't a string, coerce to its string representation
+    # AND warn so the rule author can quote the line properly.
+    if isinstance(falsepositives, list):
+        coerced: list[str] = []
+        for entry in falsepositives:
+            if isinstance(entry, str):
+                coerced.append(entry)
+            else:
+                print(
+                    f"  WARN  {rule_filename}: falsepositives entry is not a string "
+                    f"(got {type(entry).__name__} = {entry!r}). "
+                    f"Likely an unquoted YAML colon — wrap the bullet in single quotes."
+                )
+                coerced.append(str(entry))
+        falsepositives = coerced
+    else:
+        print(
+            f"  WARN  {rule_filename}: falsepositives field is not a list "
+            f"(got {type(falsepositives).__name__}). Coercing to empty list."
+        )
         falsepositives = []
 
     # Sigma `status` → runtime `enabled` flag. `deprecated` rules still

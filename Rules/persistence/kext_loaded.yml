@@ -11,15 +11,19 @@ tags:
     - attack.privilege_escalation
     - attack.t1547.006
 logsource:
+    # driver_load is the correct macOS logsource — ESCollector maps
+    # NOTIFY_KEXTLOAD and NOTIFY_IOKIT_OPEN here. The previous
+    # selection mixed driver_load (.kext bundles) with executables
+    # (kextload, kextutil, KernelExtensionManagement) that surface
+    # only under process_creation; under a `driver_load` logsource
+    # those Image suffixes never matched. Process-creation invocations
+    # of kextload/kextutil are covered by the broader `kext_unload`
+    # and `system_extension_load` rules.
     category: driver_load
     product: macos
 detection:
     selection:
-        Image|endswith:
-            - '.kext'
-            - 'kextload'
-            - 'kextutil'
-            - 'KernelExtensionManagement'
+        Image|endswith: '.kext'
     filter_apple:
         SignerType: 'apple'
     condition: selection and not filter_apple

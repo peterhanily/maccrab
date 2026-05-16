@@ -15,6 +15,9 @@ logsource:
 detection:
     selection:
         Image|endswith: '/airport'
+        # 'sniff' is the high-signal token (raw 802.11 capture); '-s' and
+        # '--scan' are daily IT/admin work. Keep the broad set but require
+        # ancestry to be non-interactive (see filters below).
         CommandLine|contains:
             - '-s'
             - '--scan'
@@ -22,11 +25,60 @@ detection:
             - '-I'
             - '--getinfo'
             - 'sniff'
+    filter_signed:
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    filter_platform:
+        PlatformBinary: 'true'
     filter_system:
-        ParentImage|startswith: '/System/'
-        SignerType: 'apple'
-    condition: selection and not filter_system
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+    # airport ships at /usr/libexec/airport (symlinked) and /System/Library/
+    # PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport.
+    filter_system_path:
+        Image|startswith:
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/usr/bin/'
+            - '/System/'
+    # `airport -s` is daily IT troubleshooting. Filter interactive shell,
+    # editor, CI, and dotfile-manager ancestry so the rule only fires on
+    # unusual lineage (e.g. a dropped /tmp binary spawning airport).
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+    condition: selection and not filter_signed and not filter_platform and not filter_system and not filter_system_path and not filter_dev_tools
 falsepositives:
-    - Network administrators troubleshooting Wi-Fi connectivity
-    - Wi-Fi diagnostics scripts
+    - Network administrators troubleshooting Wi-Fi connectivity (filtered via
+      shell ancestry)
+    - Wi-Fi diagnostics scripts (Apple-signed / platform binary)
 level: low
+# v1.11.2: separated parent-startswith from SignerType filter (previously
+# AND-combined as one selection so neither half worked alone), added platform-
+# binary / system-path / dev-tool ancestry filters. airport -s is daily IT
+# work so the rule must require unusual lineage.

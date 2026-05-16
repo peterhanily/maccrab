@@ -1,9 +1,18 @@
 title: Potential DNS Tunneling via Large TXT Queries
 id: d1a2b3c4-00a1-4000-a000-0000000000a1
 status: experimental
-description: Detects dig or nslookup performing TXT record queries with long domain names, which may indicate DNS tunneling for data exfiltration.
+description: >
+    Detects `dig`, `nslookup`, or `host` issuing TXT-record queries against
+    domains long enough to plausibly carry tunneled payload bytes. SPF, DKIM,
+    and DMARC verification is the dominant legitimate use of TXT queries and
+    target very short domains (e.g. `_dmarc.example.com`,
+    `example._domainkey.example.com`), so the rule additionally requires the
+    queried name to be at least 50 characters and to contain a long
+    contiguous run of base32/base64-style characters that is uncommon in
+    normal hostnames.
 author: MacCrab Community
 date: 2026/03/31
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1048/
 tags:
@@ -24,8 +33,22 @@ detection:
             - ' txt '
             - '-type=TXT'
             - '-type=txt'
-    condition: selection_tool and selection_txt
+            - '-t TXT'
+            - '-t txt'
+    selection_long_payload:
+        # Require a contiguous run of >=30 base32/base64-style characters
+        # inside the command line. Real SPF/DKIM/DMARC lookups never produce
+        # this — their queried name segments are short and dotted.
+        CommandLine|re: '[A-Za-z0-9+/=]{30,}'
+    filter_system:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection_tool and selection_txt and selection_long_payload and not filter_system and not filter_apple_parent
 falsepositives:
-    - Legitimate DNS debugging
-    - SPF/DKIM/DMARC verification
+    - Legitimate DNS debugging against long encoded subdomains
+    - DNSSEC trust-chain verification tooling
+    - DKIM rotation testing against unusually long selectors
 level: low

@@ -13,12 +13,23 @@ logsource:
     category: file_event
     product: macos
 detection:
+    # Two install paths cover real-world FinderSync extensions:
+    #   1. New file-provider extensions land under
+    #      /Library/Application Support/FileProvider/.
+    #   2. Traditional .appex bundles live inside a containing .app at
+    #      .app/Contents/PlugIns/*.appex/. The previous selection_alt
+    #      used `contains|all: ['.appex', 'FinderSync']` — the string
+    #      "FinderSync" only appears in the Info.plist's
+    #      NSExtensionPointIdentifier, never in the file path itself,
+    #      so the clause never fired.
     selection:
         TargetFilename|contains: '/Library/Application Support/FileProvider/'
     selection_alt:
-        TargetFilename|contains|all:
+        TargetFilename|contains: '.app/Contents/PlugIns/'
+        TargetFilename|endswith:
             - '.appex'
-            - 'FinderSync'
+            - '.appex/Info.plist'
+            - '.appex/PluginInfo.plist'
     filter_signed:
         SignerType:
             - 'apple'

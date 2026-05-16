@@ -1,0 +1,57 @@
+title: Fake Apple Bundle Identifier in User-Writable Location
+id: d1a2b3c4-0500-4000-a000-000000000508
+status: experimental
+description: >
+    Detects a `.app` bundle's `Info.plist` declaring a
+    `CFBundleIdentifier` starting with `com.apple.` while sitting
+    outside `/System/Applications/`, `/Applications/`,
+    `/System/Library/`, or `/System/iOSSupport/`. Legitimate Apple
+    apps never live under `~/Downloads/`, `/tmp/`, `~/Desktop/`, or
+    third-party `Applications/` subdirectories; a `com.apple.Safari`
+    bundle in `~/Downloads/Updater.app/` is the classic Atomic
+    Stealer / MacSync masquerade primitive. Pair with
+    `binary_resigned_post_installation.yml` for the codesign half
+    of the same kill chain.
+author: MacCrab Community
+date: 2026/05/14
+references:
+    - https://www.jamf.com/blog/macsync-stealer-evolution-code-signed-swift-malware-analysis/
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://attack.mitre.org/techniques/T1036/005/
+    - https://attack.mitre.org/techniques/T1036/004/
+tags:
+    - attack.defense_evasion
+    - attack.t1036.005
+    - attack.t1036.004
+    - attack.initial_access
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_info_plist:
+        TargetFilename|contains: '.app/Contents/Info.plist'
+        FileAction:
+            - 'create'
+            - 'close'
+    selection_apple_bundle_id:
+        FileContent|contains:
+            - '<string>com.apple.'
+    selection_non_system_path:
+        TargetFilename|contains:
+            - '/Users/'
+            - '/Volumes/'
+            - '/tmp/'
+            - '/private/tmp/'
+    filter_legit_apple_paths:
+        # v1.12.0 post-audit (H-Det1): `|contains: '/Applications/'`
+        # let an attacker bypass via `~/Applications/Updater.app/Contents/Info.plist`
+        # because the substring matches anywhere in the path. Use
+        # startswith so `/Applications/` only matches the system
+        # Applications dir; `/System/Library/Frameworks/` etc. likewise.
+        - TargetFilename|startswith: '/Applications/'
+        - TargetFilename|startswith: '/System/'
+    condition: selection_info_plist and selection_apple_bundle_id and selection_non_system_path and not filter_legit_apple_paths
+falsepositives:
+    - Developer building an Apple-style bundle in `~/Documents/projects/...` from Xcode; rare, allowlist by parent path
+    - Xcode `xcrun simctl` placing iOS simulator bundles under `~/Library/Developer/`; covered by the non-system-path restriction since /Library/Developer is inside the user home but the rule still fires — investigate and allowlist
+level: high

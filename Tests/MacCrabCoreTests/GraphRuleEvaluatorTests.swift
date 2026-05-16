@@ -90,7 +90,7 @@ struct GraphRuleEvaluatorTests {
 
     // MARK: - Starter rule loading
 
-    @Test("All 5 starter rules in Rules/graph/ decode cleanly")
+    @Test("All starter rules in Rules/graph/ decode cleanly")
     func starterRulesDecode() {
         let projectRoot = projectRootURL()
         let rules = GraphRuleLoader.loadFromProjectSource(projectRoot: projectRoot)
@@ -100,7 +100,77 @@ struct GraphRuleEvaluatorTests {
         #expect(ids.contains("maccrab_mcp_server_spawns_shell_then_credential"))
         #expect(ids.contains("maccrab_launchagent_after_credential_access"))
         #expect(ids.contains("maccrab_agent_associated_shell_writes_to_login_item"))
-        #expect(rules.count >= 5, "expected at least 5 starter rules, got \(rules.count)")
+        #expect(ids.contains("maccrab_worm_self_propagation"))
+        #expect(rules.count >= 6, "expected at least 6 starter rules, got \(rules.count)")
+    }
+
+    // MARK: - Worm self-propagation rule (v1.12.0)
+
+    @Test("Worm-self-propagation rule fires when npm reads .npmrc then connects out")
+    func wormSelfPropagationFiresOnNpmFixture() async throws {
+        let proc = try processEntity(key: "p", path: "/usr/local/bin/npm")
+        let cred = try fileEntity("/Users/me/.npmrc", kind: .credentialFile)
+        let net = try networkEntity("registry.npmjs.org")
+        let entities = [proc, cred, net]
+        let edges = [
+            edge(from: proc, to: cred, relation: .read,        confidence: 0.9),
+            edge(from: proc, to: net,  relation: .connectedTo, confidence: 0.9),
+        ]
+        let rules = GraphRuleLoader.loadFromProjectSource(projectRoot: projectRootURL())
+        let evaluator = GraphRuleEvaluator(rules: rules)
+        let matches = await evaluator.evaluate(entities: entities, edges: edges)
+        let worm = matches.first { $0.ruleId == "maccrab_worm_self_propagation" }
+        #expect(worm != nil)
+        #expect(worm?.severity == "critical")
+        #expect(worm?.attack.contains("T1195.001") == true)
+        #expect(worm?.attack.contains("T1567") == true)
+        #expect(worm?.bindings["proc"] == proc.id)
+    }
+
+    @Test("Worm rule also fires for Python lineage reading .pypirc")
+    func wormSelfPropagationFiresOnPythonFixture() async throws {
+        let proc = try processEntity(key: "p", path: "/usr/bin/python3")
+        let cred = try fileEntity("/Users/me/.pypirc", kind: .credentialFile)
+        let net = try networkEntity("upload.pypi.org")
+        let entities = [proc, cred, net]
+        let edges = [
+            edge(from: proc, to: cred, relation: .read,        confidence: 0.9),
+            edge(from: proc, to: net,  relation: .connectedTo, confidence: 0.9),
+        ]
+        let rules = GraphRuleLoader.loadFromProjectSource(projectRoot: projectRootURL())
+        let evaluator = GraphRuleEvaluator(rules: rules)
+        let matches = await evaluator.evaluate(entities: entities, edges: edges)
+        #expect(matches.contains(where: { $0.ruleId == "maccrab_worm_self_propagation" }))
+    }
+
+    @Test("Worm rule does NOT fire for a non-package-manager process (executable_name filter)")
+    func wormSelfPropagationSkipsNonPackageManager() async throws {
+        let proc = try processEntity(key: "p", path: "/usr/bin/cat")
+        let cred = try fileEntity("/Users/me/.npmrc", kind: .credentialFile)
+        let net = try networkEntity("registry.npmjs.org")
+        let edges = [
+            edge(from: proc, to: cred, relation: .read,        confidence: 0.9),
+            edge(from: proc, to: net,  relation: .connectedTo, confidence: 0.9),
+        ]
+        let rules = GraphRuleLoader.loadFromProjectSource(projectRoot: projectRootURL())
+        let evaluator = GraphRuleEvaluator(rules: rules)
+        let matches = await evaluator.evaluate(entities: [proc, cred, net], edges: edges)
+        #expect(matches.first(where: { $0.ruleId == "maccrab_worm_self_propagation" }) == nil)
+    }
+
+    @Test("Worm rule does NOT fire when destination network is in private_range")
+    func wormSelfPropagationSkipsPrivateNetwork() async throws {
+        let proc = try processEntity(key: "p", path: "/usr/local/bin/npm")
+        let cred = try fileEntity("/Users/me/.npmrc", kind: .credentialFile)
+        let net = try networkEntity("internal-mirror.lan", reputation: .privateRange)
+        let edges = [
+            edge(from: proc, to: cred, relation: .read,        confidence: 0.9),
+            edge(from: proc, to: net,  relation: .connectedTo, confidence: 0.9),
+        ]
+        let rules = GraphRuleLoader.loadFromProjectSource(projectRoot: projectRootURL())
+        let evaluator = GraphRuleEvaluator(rules: rules)
+        let matches = await evaluator.evaluate(entities: [proc, cred, net], edges: edges)
+        #expect(matches.first(where: { $0.ruleId == "maccrab_worm_self_propagation" }) == nil)
     }
 
     // MARK: - Headline rule fires on Fixture 1 shape

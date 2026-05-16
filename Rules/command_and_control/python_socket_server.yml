@@ -1,7 +1,14 @@
-title: Python Socket Server or HTTP Server Creation
+title: Python Socket Server or HTTP Server Bound to All Interfaces
 id: d1a2b3c4-0245-4000-a000-000000000245
 status: experimental
-description: Detects Python code creating socket servers or HTTP servers. Adversaries may use Python to quickly stand up command-and-control listeners or data exfiltration endpoints.
+description: >
+    Detects Python code creating socket servers or HTTP servers bound to all
+    interfaces (0.0.0.0 / "" / no bind argument) from a non-developer parent.
+    Adversaries use Python to stand up quick C2 listeners or data exfiltration
+    endpoints. To reduce false positives from local development, this rule
+    requires (a) a server-creation keyword, (b) an external bind indicator,
+    and (c) a parent that is not a terminal, IDE, or Apple-signed system
+    component.
 author: MacCrab Community
 date: 2026/03/30
 references:
@@ -13,11 +20,14 @@ logsource:
     category: process_creation
     product: macos
 detection:
-    selection:
+    selection_python:
         Image|endswith:
             - '/python'
             - '/python2'
             - '/python3'
+            - '/python3.11'
+            - '/python3.12'
+            - '/python3.13'
     selection_server:
         CommandLine|contains:
             - 'socket.bind'
@@ -28,8 +38,38 @@ detection:
             - 'socketserver'
             - 'TCPServer'
             - 'socket.listen'
-    condition: selection and selection_server
+    selection_external_bind:
+        CommandLine|contains:
+            - "'0.0.0.0'"
+            - '"0.0.0.0"'
+            - '--bind 0.0.0.0'
+            - "bind=('0.0.0.0'"
+            - "bind=(''"
+            - "bind=('',"
+            - 'INADDR_ANY'
+    filter_terminal:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/Code Helper'
+            - '/Xcode'
+            - '/PyCharm'
+    filter_apple_parent:
+        ParentSignerType: 'apple'
+    condition: selection_python and selection_server and selection_external_bind and not filter_terminal and not filter_apple_parent
 falsepositives:
-    - Local development servers
-    - Python-based testing frameworks
+    - Self-hosted internal services intentionally bound to all interfaces
+    - Container or CI runners using Python servers on 0.0.0.0
 level: medium

@@ -2,14 +2,18 @@ title: Mosh (Mobile Shell) Remote Session from Unsigned Process
 id: a1b2c3d4-1012-4000-b000-000000001012
 status: experimental
 description: |
-  Detects the mosh client being launched from an unsigned or ad-hoc signed process.
-  Mosh establishes encrypted remote sessions using UDP, which is often less
-  scrutinised than TCP/22 SSH traffic by network monitoring tools. Attackers may
-  prefer mosh over SSH to evade network-level SSH detection rules, and to maintain
-  persistent sessions that survive network interruptions during lateral movement
-  operations.
+  Telemetry-only signal: mosh client launched from an unsigned or ad-hoc
+  signed parent. Mosh establishes encrypted remote sessions using UDP, which
+  is often less scrutinised than TCP/22 SSH traffic by network monitoring
+  tools. Adversaries may prefer mosh over SSH to evade network-level SSH
+  detection rules and to maintain persistent sessions that survive network
+  interruptions during lateral movement. Mosh use by developers and
+  sysadmins is entirely legitimate, so this rule fires as a low-severity
+  correlation input — it is most useful as a contributor inside the
+  sequence/campaign engine, not as a standalone alert.
 author: MacCrab Community
 date: 2026/04/08
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1021/004/
 tags:
@@ -28,7 +32,13 @@ detection:
             - 'apple'
             - 'appStore'
             - 'devId'
-    condition: selection and not filter_apple
+    filter_apple_parent:
+        ParentSignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
+    condition: selection and not filter_apple and not filter_apple_parent
 falsepositives:
     - Legitimate developers using mosh for remote development sessions
+    - Sysadmins reaching servers over flaky links
 level: low

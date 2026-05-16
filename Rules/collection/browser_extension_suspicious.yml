@@ -1,14 +1,30 @@
-title: Suspicious Browser Extension with Dangerous Permissions
+title: Browser Extension Manifest or Package Modified Outside Browser Process
 id: d1a2b3c4-0365-4000-a000-000000000365
 status: experimental
 description: >
-    Detects browser extensions with dangerous permission combinations including
-    webRequest (traffic interception), nativeMessaging (process spawning),
-    cookies (session theft), or all_urls (full site access).
+    Detects modification of a browser extension manifest
+    (`manifest.json`) or an extension package (`.crx`, `.xpi`) by a
+    process that is NOT the browser itself. Legitimate extension
+    installs are written by the browser process during sync /
+    Chrome Web Store / Mozilla AMO install flows; writes from
+    `curl`, `bash`, `osascript`, or an unsigned helper indicate
+    sideloading — the canonical persistence path for browser
+    extension malware (ChromeLoader / ChromeBack / Genieo).
+    This rule intentionally does NOT claim to parse the manifest
+    permissions — `BrowserExtensionMonitor.swift` already performs
+    proper JSON parsing and emits a separate enriched event with
+    `permissions[]` populated. This rule is the cheap file-event
+    breadcrumb that complements that polling monitor by catching
+    the *write* in real time.
+    Severity MEDIUM: catches sideloading reliably, but the
+    permission analysis lives in the polling monitor's event, not
+    here.
 author: MacCrab Community
 date: 2026/04/05
+modified: 2026/05/14
 references:
     - https://attack.mitre.org/techniques/T1176/
+    - https://blog.checkpoint.com/research/chromeloader-malware/
 tags:
     - attack.persistence
     - attack.collection
@@ -17,20 +33,55 @@ logsource:
     category: file_event
     product: macos
 detection:
-    selection:
+    selection_extension_path:
         TargetFilename|contains:
-            - '/Extensions/'
-            - '/extensions/'
+            - '/Google/Chrome/Default/Extensions/'
+            - '/Chromium/Default/Extensions/'
+            - '/BraveSoftware/Brave-Browser/Default/Extensions/'
+            - '/Microsoft Edge/Default/Extensions/'
+            - '/Arc/User Data/Default/Extensions/'
+            - '/Firefox/Profiles/'
+            - '/Application Support/Vivaldi/Default/Extensions/'
+    selection_extension_file:
         TargetFilename|endswith:
-            - 'manifest.json'
+            - '/manifest.json'
             - '.xpi'
             - '.crx'
-    filter_system:
-        ParentImage|startswith:
+    # The browser writing its own extension files is the normal case
+    # — Chrome Web Store installs, Firefox AMO installs, Edge sync.
+    filter_browser_writer:
+        Image|endswith:
+            - '/Google Chrome'
+            - '/Google Chrome Helper'
+            - '/Chromium'
+            - '/Chromium Helper'
+            - '/Brave Browser'
+            - '/Brave Browser Helper'
+            - '/Microsoft Edge'
+            - '/Microsoft Edge Helper'
+            - '/Arc'
+            - '/Arc Helper'
+            - '/firefox'
+            - '/firefox-bin'
+            - '/plugin-container'
+            - '/Vivaldi'
+    # System-owned writers (OS installs, profile migration).
+    filter_system_writer:
+        Image|startswith:
             - '/System/'
             - '/usr/libexec/'
-    condition: selection and not filter_system
+        SignerType: 'apple'
+    # MDM-pushed extensions are a managed-deployment path, not abuse.
+    filter_mdm_writer:
+        ParentImage|contains:
+            - '/jamf'
+            - '/Jamf'
+            - '/kandji-daemon'
+            - '/MosyleDaemon'
+            - '/Addigy'
+    condition: selection_extension_path and selection_extension_file and not (filter_browser_writer or filter_system_writer or filter_mdm_writer)
 falsepositives:
-    - Legitimate extension installations
-    - Browser updates installing bundled extensions
+    - Developer loading an unpacked extension via the browser's Developer Mode (typically written by an IDE — investigate the writer's signing chain)
+    - Backup / sync tools (rsync, Backblaze) staging extension directories
+    - Profile migration tools (Migration Assistant covered by filter_system_writer)
 level: medium
