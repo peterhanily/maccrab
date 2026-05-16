@@ -261,12 +261,24 @@ public actor SelfDefense {
         // Check binary hash
         let currentBinaryHash = Self.sha256(fileAt: CommandLine.arguments[0])
         if let original = binaryHash, let current = currentBinaryHash, original != current {
-            events.append(TamperEvent(
-                type: .binaryModified,
-                description: "MacCrab binary has been modified since startup. Original hash: \(original), current: \(current)",
-                path: CommandLine.arguments[0],
-                severity: .critical
-            ))
+            // v1.12.1 FP fix: Sparkle / cask in-place upgrades legitimately
+            // replace the on-disk binary while the old version is still
+            // running in memory. Before alerting, verify the new binary
+            // is still validly signed under MacCrab's Developer ID team —
+            // if so, treat as a legitimate update and re-baseline
+            // silently. A real tamper can't forge a valid signature
+            // without the private key, so this gate is safe.
+            if Self.isSignedByMacCrabTeam(at: CommandLine.arguments[0]) {
+                logger.notice("Binary hash changed but signature is valid MacCrab Developer ID — treating as legitimate update, rebaselining")
+                self.binaryHash = current
+            } else {
+                events.append(TamperEvent(
+                    type: .binaryModified,
+                    description: "MacCrab binary has been modified since startup. Original hash: \(original), current: \(current)",
+                    path: CommandLine.arguments[0],
+                    severity: .critical
+                ))
+            }
         }
 
         // Check rules directory hash
@@ -284,6 +296,11 @@ public actor SelfDefense {
         // Check monitored files exist
         for path in monitoredPaths where path.critical {
             if !FileManager.default.fileExists(atPath: path.path) {
+                // v1.12.1 FP fix: same suppression as the DispatchSource
+                // delete branch. The periodic 15 s integrity check would
+                // otherwise re-fire the alert until the self-update
+                // completes and the new tree is in place.
+                if Self.isSelfUpdateInProgress() { continue }
                 events.append(TamperEvent(
                     type: .fileDeleted,
                     description: "\(path.description) has been deleted: \(path.path)",
@@ -388,10 +405,25 @@ public actor SelfDefense {
                     // Non-critical deletes are logged but don't fire tamper alerts
                     // (Homebrew upgrades routinely delete the old binary)
                     if !critical { return }
+                    // v1.12.1 FP fix: RuleBundleInstaller's elevated
+                    // `rm -rf <compiled_rules>` triggers this on every
+                    // Sparkle/cask update. The installer drops a
+                    // sentinel before the elevated session — when it's
+                    // fresh, treat the delete as a legitimate self-
+                    // update and schedule a re-baseline once the new
+                    // dir exists.
+                    if Self.isSelfUpdateInProgress() {
+                        Task { await self.handleSelfUpdateDelete(path: path, desc: desc) }
+                        return
+                    }
                     eventType = .fileDeleted
                     message = "\(desc) was DELETED: \(path)"
                 } else if data.contains(.rename) {
                     if !critical { return }
+                    if Self.isSelfUpdateInProgress() {
+                        Task { await self.handleSelfUpdateDelete(path: path, desc: desc) }
+                        return
+                    }
                     eventType = .fileDeleted
                     message = "\(desc) was RENAMED/MOVED: \(path)"
                 } else if data.contains(.write) {
@@ -729,6 +761,87 @@ public actor SelfDefense {
             return output.split(separator: " ").first.map(String.init)
         } catch {
             return nil
+        }
+    }
+
+    // MARK: - Self-update detection (v1.12.1 FP fix)
+
+    /// Path of the sentinel file RuleBundleInstaller drops at the start
+    /// of its elevated `rm -rf + cp -R` so SelfDefense can distinguish
+    /// "MacCrab updating itself" from "attacker deleting MacCrab".
+    private nonisolated static let selfUpdateSentinelPath =
+        "/Library/Application Support/MacCrab/.maccrab_self_update_in_progress"
+
+    /// Maximum age of the sentinel before we stop honoring it. The
+    /// elevated rule sync usually completes in 1-2 s on warm disk;
+    /// 90 s gives generous headroom for cold-cache + slow disks while
+    /// keeping the suppression window short enough that a real
+    /// post-update tamper still surfaces promptly.
+    private nonisolated static let selfUpdateSentinelTTL: TimeInterval = 90
+
+    /// Returns true if RuleBundleInstaller (dashboard side) is in the
+    /// middle of an elevated rule sync. Checked before firing delete /
+    /// rename / write alerts on paths inside the data dir.
+    nonisolated static func isSelfUpdateInProgress() -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(
+                atPath: selfUpdateSentinelPath),
+              let mtime = attrs[.modificationDate] as? Date else {
+            return false
+        }
+        return Date().timeIntervalSince(mtime) < selfUpdateSentinelTTL
+    }
+
+    /// Verify that the binary at `path` is code-signed under MacCrab's
+    /// Developer ID team (79S425CW99). Used to distinguish a legitimate
+    /// Sparkle / cask in-place upgrade — which replaces the .app's
+    /// binaries with a fresh validly-signed copy — from a real tamper
+    /// where the binary is rewritten by an attacker. Shells to
+    /// `/usr/bin/codesign -dvv --verify --` and matches against the
+    /// expected TeamIdentifier; rejects on any non-zero exit so an
+    /// unsigned or ad-hoc binary still trips the alert.
+    nonisolated static func isSignedByMacCrabTeam(at path: String) -> Bool {
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["-dvv", "--verify", "--", path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return false }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return output.contains("TeamIdentifier=79S425CW99")
+        } catch {
+            return false
+        }
+    }
+
+    /// Called from the file-event handler when a delete/rename fires
+    /// inside the self-update window. Logs at INFO (audit trail), tears
+    /// down the stale DispatchSource fd, and schedules a delayed
+    /// re-baseline once the new tree has been written.
+    private func handleSelfUpdateDelete(path: String, desc: String) async {
+        logger.notice("\(desc) DELETE during self-update window — suppressing alert + scheduling re-baseline (path: \(path, privacy: .public))")
+        // Give the elevated cp -R time to finish before recomputing the
+        // hash. Re-snapshotting before the new dir exists would baseline
+        // to empty, which the next real tamper wouldn't detect.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            await self?.rebaselineAfterSelfUpdate(path: path)
+        }
+    }
+
+    /// Recompute hashes after a self-update completes. Only re-baselines
+    /// if the sentinel has been cleared (success path) or the TTL has
+    /// expired (failure path); in either case, the new tree on disk is
+    /// what we want to baseline against.
+    private func rebaselineAfterSelfUpdate(path: String) async {
+        if path.contains("compiled_rules") || path.contains("rules") {
+            self.rulesHash = Self.directoryHash(at: self.rulesDir)
+            logger.info("Rules hash rebaselined after self-update (new hash: \(self.rulesHash ?? "unknown", privacy: .public))")
         }
     }
 

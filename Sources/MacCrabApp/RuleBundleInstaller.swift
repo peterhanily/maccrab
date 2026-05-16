@@ -294,7 +294,20 @@ enum RuleBundleInstaller {
         // suspenders — keeps the on-disk perms predictable even if a
         // future change to the .app's compiled_rules ships with
         // different bits.
-        let shell = "mkdir -p '\(parent)' && rm -rf '\(dst)' && cp -R '\(src)' '\(dst)' && chown -R root:admin '\(dst)' && chmod -R u=rwX,go=rX '\(dst)'"
+        // v1.12.1 (FP fix): drop a sentinel file under the data dir at the
+        // start of the elevated session and remove it at the end. The
+        // sysext's SelfDefense actor reads this sentinel before firing
+        // tamper alerts on deletes / renames / writes inside the data
+        // dir; a present sentinel with mtime within the last 90 s
+        // suppresses the alert and triggers a silent re-baseline.
+        // Without this, every Sparkle/cask upgrade fires a critical
+        // "compiled_rules deleted" alert because `rm -rf` on the watched
+        // dir is the very thing SelfDefense was built to flag.
+        // Trailing `; rm -f` (not `&&`) means we ALWAYS try to clear the
+        // sentinel — and if a step fails before the cleanup, the 90 s
+        // TTL still bounds the suppression window.
+        let sentinel = parent + "/.maccrab_self_update_in_progress"
+        let shell = "touch '\(sentinel)' && chown root:admin '\(sentinel)' && chmod 0644 '\(sentinel)' && mkdir -p '\(parent)' && rm -rf '\(dst)' && cp -R '\(src)' '\(dst)' && chown -R root:admin '\(dst)' && chmod -R u=rwX,go=rX '\(dst)'; rm -f '\(sentinel)'"
         let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
         let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to update its detection rules.\""
         let task = Process()

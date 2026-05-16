@@ -3,6 +3,60 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.1] — 2026-05-16
+
+Same-day self-defense FP hotfix for the two tamper alerts a v1.11.1 →
+v1.12.0 in-place Sparkle/cask upgrade fires against MacCrab itself:
+
+- **`MacCrab Tamper Detection: File Deleted` on
+  `/Library/Application Support/MacCrab/compiled_rules`.**
+  `RuleBundleInstaller.copyRulesWithElevation` (dashboard side) runs
+  `osascript … rm -rf <compiled_rules> && cp -R …` to refresh the
+  installed rule corpus when the bundled `.bundle_version` /
+  manifest.json content is newer. The sysext's `SelfDefense` actor
+  watches that dir via a `DispatchSource` file-system source and
+  fires a critical "File Deleted" tamper alert on every Sparkle/cask
+  upgrade. **Fix**: RuleBundleInstaller now drops a sentinel file at
+  `/Library/Application Support/MacCrab/.maccrab_self_update_in_progress`
+  at the start of the elevated session (created `root:admin 0644`,
+  removed at end). `SelfDefense` checks for this sentinel before
+  firing delete / rename / write alerts inside the data dir — if it's
+  fresh (mtime within 90 s), the alert is suppressed and a re-baseline
+  is scheduled 5 s later, once the new tree has been written.
+  90 s TTL bounds the suppression window if the sentinel ever gets
+  orphaned by a mid-flight failure.
+
+- **`MacCrab Tamper Detection: Binary Modified` on `maccrabd`.**
+  Sparkle's in-place .app replacement legitimately swaps the binary
+  on disk while the old version is still running in memory. The
+  sysext's periodic 15 s `integrityCheck()` then sees the on-disk
+  SHA-256 ≠ its startup baseline and fires a critical
+  "binary_modified" alert. **Fix**: before alerting on binary hash
+  mismatch, `SelfDefense.isSignedByMacCrabTeam(at:)` shells to
+  `codesign -dvv --verify --` and checks the output contains
+  `TeamIdentifier=79S425CW99`. Valid MacCrab Developer ID signature
+  → silent re-baseline. A real tamper can't forge the signature
+  without the private key, so the gate is safe. Applied in the
+  `integrityCheck()` mismatch branch; the DispatchSource `.delete`
+  on the binary path is already non-critical and silently dropped.
+
+Other safe-by-construction touches:
+
+- The periodic `integrityCheck()` `fileDeleted` branch also consults
+  the sentinel, so the 15 s re-fire loop doesn't re-emit the same
+  alert while the elevated `cp -R` is still mid-flight.
+- The elevated shell command in `copyRulesWithElevation` now uses
+  `; rm -f '<sentinel>'` (not `&&`) for the cleanup step, so the
+  sentinel clears even if an earlier step fails — defence-in-depth
+  against partial-success states.
+
+No new rules, no schema changes, no behavior changes outside the
+self-defense suppression path. Existing v1.12.0 installs will get
+v1.12.1 via Sparkle auto-update; the v1.12.0 install itself will
+fire one final tamper-on-self alert during the swap (the v1.12.0
+daemon is the one that's running while v1.12.1 replaces it) — that
+is the last time you should see this class of FP.
+
 ## [1.12.0] — 2026-05-16
 
 ### Release-week fix wave (RC25 → RC30)
