@@ -3,6 +3,59 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.4] — 2026-05-16
+
+Fifth release of the day. Focused fix for a macOS 26 Tahoe
+SwiftPM-resource-bundle crash that fired on the first click of
+the Intelligence workspace. v1.12.4 bundles every feature and
+hardening from v1.12.0 → v1.12.3 plus the macOS 26 fix.
+
+**The bug**: macOS 26 tightened `Bundle(url:)` validation.
+SwiftPM-generated resource bundles ship a stripped `Info.plist`
+containing only `CFBundleDevelopmentRegion`, which macOS ≤ 25
+accepted. macOS 26 rejects this minimal plist, `Bundle(url:)`
+returns nil, and SwiftPM's auto-generated `Bundle.module`
+accessor hits its own `fatalError("unable to find bundle named
+MacCrab_MacCrabCore")`. The crash fires on first reach to
+`Bundle.module` — in MacCrab, `PackageScanner` lazily instantiates
+`TyposquatDatabase` the first time `V2IntelligenceWorkspace`
+evaluates `state.provider.packages()`, which happens the first
+time a user clicks the Intelligence tab. Re-opening the app
+lands back on Intelligence (persisted last workspace) so the
+crash loops.
+
+**Two fixes**:
+
+1. `TyposquatDatabase.loadBundledCorpus(name:)` no longer reaches
+   `Bundle.module`. It probes the canonical SPM resource-bundle
+   search paths directly with `Data(contentsOf:)`. `Data` doesn't
+   care whether the directory validates as a CFBundle — it just
+   reads bytes off disk. Falls through to the in-source starter
+   corpus if all paths miss. Bulletproof to any future Bundle
+   validation changes.
+
+2. `build-release.sh` now overwrites the SPM-stub `Info.plist`
+   inside `MacCrab_MacCrabCore.bundle` with a complete CFBundle
+   plist (`CFBundleIdentifier`, `CFBundleInfoDictionaryVersion`,
+   `CFBundleName`, `CFBundlePackageType` = `BNDL`, version keys).
+   Defense in depth — any future SPM-resource consumer using
+   `Bundle.module` still works on macOS 26+.
+
+**The release-trail housekeeping**:
+
+- v1.12.0 → v1.12.3 GitHub releases all marked **Pre-release** and
+  yanked from the Sparkle appcast. Comprehensive warning banners
+  prepended to each.
+- Sparkle appcast advertises only v1.12.4.
+- `RELEASE_NOTES/v1.12.4.md` carries the full rollup upgrade matrix
+  (macOS 26 vs ≤ 25, source-version × dest-version) plus the
+  detailed v1.12.x change descriptions, copied from the v1.12.3
+  rollup with v1.12.4 fixes layered on top.
+
+No new Swift source vs v1.12.3 except the TyposquatDatabase fix.
+Same 469 rules, 1490 tests, 284 suites. Universal binary, min
+macOS 13.
+
 ## [1.12.3] — 2026-05-16
 
 Consolidated v1.12 rollup release. **No new code vs v1.12.2** —

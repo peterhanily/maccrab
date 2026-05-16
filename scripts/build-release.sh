@@ -229,6 +229,46 @@ if [ ! -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
     echo "      TyposquatDatabase will fall back to in-source starter corpus."
 fi
 
+# v1.12.4 fix (macOS 26 Tahoe crash): SwiftPM emits a stripped Info.plist
+# in the resource bundle that contains only CFBundleDevelopmentRegion.
+# macOS ≤ 25 accepts the minimal plist; macOS 26 rejects it — `Bundle(url:)`
+# returns nil — and SwiftPM's auto-generated `Bundle.module` accessor
+# then fatalError("unable to find bundle MacCrab_MacCrabCore"). Crash
+# fires on first Intelligence-tab click because PackageScanner lazily
+# instantiates TyposquatDatabase the first time .packages() is read.
+#
+# TyposquatDatabase itself no longer touches Bundle.module (it builds
+# resource URLs directly), but other future SPM-resource consumers
+# might — so write a complete CFBundle Info.plist over the SPM stub
+# so the bundle validates on every macOS version. Keys mirror what
+# Xcode emits for a typical resource bundle target.
+BUNDLE_PLIST="$APP/Contents/Resources/MacCrab_MacCrabCore.bundle/Info.plist"
+if [ -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
+    cat > "$BUNDLE_PLIST" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.maccrab.MacCrabCore.resources</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>MacCrabCore Resources</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+</dict>
+</plist>
+PLIST
+    echo "    ✓ Patched MacCrab_MacCrabCore.bundle/Info.plist (macOS 26 Bundle(url:) compatibility)"
+fi
+
 # v1.10.0: bundle maccrabctl + maccrab-mcp inside the .app at
 # Contents/Resources/bin/. Pre-fix the dashboard's runMaccrabctl
 # probed Bundle.main first, but the binary was only ever shipped to

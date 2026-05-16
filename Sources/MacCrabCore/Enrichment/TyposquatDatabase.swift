@@ -102,19 +102,90 @@ public actor TyposquatDatabase {
     /// back to the in-source starter set. Logging is deliberately
     /// terse: a missing corpus is a soft degrade, not an alertable
     /// daemon failure.
+    ///
+    /// v1.12.4 fix (macOS 26 Tahoe Intelligence-tab crash): we no
+    /// longer touch `Bundle.module`. SwiftPM-generated resource bundles
+    /// ship a stripped-down `Info.plist` containing only
+    /// `CFBundleDevelopmentRegion`, which macOS 26's `Bundle(url:)`
+    /// rejects — returning nil — and SwiftPM's auto-generated
+    /// `Bundle.module` accessor then `fatalError`s. The crash fires on
+    /// the first reach to `Bundle.module`, which (because PackageScanner
+    /// instantiates TyposquatDatabase lazily) happens the first time a
+    /// user clicks the Intelligence tab.
+    ///
+    /// Instead, build the resource URL ourselves by probing all of
+    /// SwiftPM's canonical search locations directly via `Data(contentsOf:)`.
+    /// `Data` doesn't care whether the .bundle dir validates as a
+    /// CFBundle — it just reads bytes off disk. We try the flat
+    /// SPM resource-bundle layout (`<resourceURL>/MacCrab_MacCrabCore.bundle/<name>.json`)
+    /// first since that's what build-release.sh ships, then fall
+    /// through to the per-target-bundle fallback for tests and
+    /// alternative consumers.
     private static func loadBundledCorpus(name: String) -> Set<String>? {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "json"),
-              let data = try? Data(contentsOf: url) else {
-            return nil
+        let filename = name + ".json"
+        let bundleName = "MacCrab_MacCrabCore.bundle"
+        var candidateURLs: [URL] = []
+
+        // 1. SPM-test override. Swift Package Manager sets
+        //    PACKAGE_RESOURCE_BUNDLE_PATH (or PACKAGE_RESOURCE_BUNDLE_URL)
+        //    during `swift test` so the auto-generated `Bundle.module`
+        //    can find the resource bundle adjacent to the xctest runner.
+        //    We honor the same env var so our tests pass without
+        //    touching Bundle.module.
+        let env = Foundation.ProcessInfo.processInfo.environment
+        for envKey in ["PACKAGE_RESOURCE_BUNDLE_PATH", "PACKAGE_RESOURCE_BUNDLE_URL"] {
+            if let override = env[envKey] {
+                candidateURLs.append(URL(fileURLWithPath: override).appendingPathComponent(filename))
+            }
         }
-        struct CorpusPayload: Decodable {
-            let packages: [String]
+
+        // 2. .app's Resources / Bundle.main.resourceURL — the SPM
+        //    bundle is copied here by build-release.sh.
+        if let resources = Bundle.main.resourceURL {
+            candidateURLs.append(
+                resources.appendingPathComponent(bundleName).appendingPathComponent(filename)
+            )
         }
-        guard let payload = try? JSONDecoder().decode(CorpusPayload.self, from: data) else {
-            return nil
+
+        // 3. Bundle owning this class — covers `swift test` and
+        //    framework-linked consumers. The resource bundle lives
+        //    adjacent to the loaded test/framework bundle, so probe
+        //    both its `resourceURL` (Resources/MacCrab_MacCrabCore.bundle)
+        //    and the sibling directory of its `bundleURL` (where SPM
+        //    places `.bundle` directories during `swift test`).
+        let owning = Bundle(for: BundleFinder.self)
+        if let resourceURL = owning.resourceURL {
+            candidateURLs.append(
+                resourceURL.appendingPathComponent(bundleName).appendingPathComponent(filename)
+            )
+            candidateURLs.append(resourceURL.appendingPathComponent(filename))
         }
-        return Set(payload.packages.map { $0.lowercased() })
+        candidateURLs.append(
+            owning.bundleURL.deletingLastPathComponent()
+                .appendingPathComponent(bundleName).appendingPathComponent(filename)
+        )
+
+        // 4. .app's own bundleURL (older SPM layouts).
+        candidateURLs.append(
+            Bundle.main.bundleURL.appendingPathComponent(bundleName).appendingPathComponent(filename)
+        )
+
+        struct CorpusPayload: Decodable { let packages: [String] }
+
+        for url in candidateURLs {
+            guard let data = try? Data(contentsOf: url),
+                  let payload = try? JSONDecoder().decode(CorpusPayload.self, from: data) else {
+                continue
+            }
+            return Set(payload.packages.map { $0.lowercased() })
+        }
+        return nil
     }
+
+    /// Private helper class so `Bundle(for:)` can locate the bundle
+    /// that holds this class. Identical to the pattern SwiftPM uses
+    /// inside its auto-generated resource_bundle_accessor.
+    private final class BundleFinder {}
 
     /// Constructor for tests / production with explicit top-1000 lists.
     public init(topNpm: Set<String>, topPyPI: Set<String>, maxDistance: Int = 2) {
