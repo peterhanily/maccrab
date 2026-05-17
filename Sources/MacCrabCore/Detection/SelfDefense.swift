@@ -258,32 +258,38 @@ public actor SelfDefense {
     public func integrityCheck() -> [TamperEvent] {
         var events: [TamperEvent] = []
 
-        // Check binary hash
-        let currentBinaryHash = Self.sha256(fileAt: CommandLine.arguments[0])
+        // Check binary hash. v1.12.5 fix: use `self.binaryPath` (the
+        // proc_pidpath-resolved absolute path set in `init`) instead of
+        // `CommandLine.arguments[0]` — under sysextd, argv[0] is the
+        // bundle-relative loader path which may not resolve to the
+        // on-disk file after Sparkle/cask replaces the .app, making
+        // sha256 + codesign verify silently miss or run against the
+        // wrong file. The user-visible v1.12.4 regression was a real
+        // signed binary swap firing `.binaryModified .critical`
+        // because the signer-validity gate was probing the wrong path.
+        let currentBinaryHash = Self.sha256(fileAt: self.binaryPath)
         if let original = binaryHash, let current = currentBinaryHash, original != current {
-            // v1.12.1 FP fix: Sparkle / cask in-place upgrades legitimately
-            // replace the on-disk binary while the old version is still
-            // running in memory. Before alerting, verify the new binary
-            // is still validly signed under MacCrab's Developer ID team —
-            // if so, treat as a legitimate update and re-baseline
-            // silently. A real tamper can't forge a valid signature
-            // without the private key, so this gate is safe.
-            if Self.isSignedByMacCrabTeam(at: CommandLine.arguments[0]) {
-                logger.notice("Binary hash changed but signature is valid MacCrab Developer ID — treating as legitimate update, rebaselining")
+            if Self.isSignedByMacCrabTeam(at: self.binaryPath) {
+                logger.notice("Binary hash changed but signature is valid MacCrab Developer ID — treating as legitimate update, rebaselining (path: \(self.binaryPath, privacy: .public))")
                 self.binaryHash = current
             } else {
                 events.append(TamperEvent(
                     type: .binaryModified,
                     description: "MacCrab binary has been modified since startup. Original hash: \(original), current: \(current)",
-                    path: CommandLine.arguments[0],
+                    path: self.binaryPath,
                     severity: .critical
                 ))
             }
         }
 
-        // Check rules directory hash
-        if let original = rulesHash {
-            let currentRulesHash = Self.directoryHash(at: monitoredPaths.first(where: { $0.description.contains("rules") })?.path ?? "")
+        // Check rules directory hash. v1.12.5 fix: apply the same
+        // self-update gate that the DispatchSource path has — without
+        // it, the periodic 15 s tick re-fires `.rulesModified .high`
+        // every cycle once a Sparkle rule push lands past the startup
+        // grace window. Hash-equal short-circuit at line below covers
+        // benign no-op writes; sentinel check covers active sync.
+        if let original = rulesHash, !Self.isSelfUpdateInProgress() {
+            let currentRulesHash = Self.directoryHash(at: self.rulesDir)
             if let current = currentRulesHash, original != current {
                 events.append(TamperEvent(
                     type: .rulesModified,
@@ -449,6 +455,21 @@ public actor SelfDefense {
                         // Only flag DB modifications as tampering for critical paths.
                         if !critical { return }
                         eventType = .databaseModified
+                    } else if path.contains("/MacOS/") || path.contains("maccrabd") || path.contains("com.maccrab.agent") {
+                        // v1.12.5 fix: a `.write` event on the daemon
+                        // binary path fires under Sparkle/cask in-place
+                        // upgrade. Apply both gates the integrityCheck
+                        // path applies: sentinel-window suppression for
+                        // explicit self-updates, signer-validity for
+                        // anything else. A real tamper that's also
+                        // validly signed by us is unreachable without
+                        // our private key.
+                        if Self.isSelfUpdateInProgress() {
+                            return
+                        }
+                        if Self.isSignedByMacCrabTeam(at: path) {
+                            return
+                        }
                     }
                     message = "\(desc) was modified: \(path)"
                 } else if data.contains(.attrib) {
@@ -650,9 +671,15 @@ public actor SelfDefense {
     private func checkForImpersonation() async {
         guard !duplicateAlerted else { return }
 
+        // v1.12.5 fix: the pre-fix probe used `pgrep -x maccrabd`
+        // which never finds the running sysext in release builds —
+        // the sysext executable name is `com.maccrab.agent`, not
+        // `maccrabd`. Match either name with `-f` so impersonation
+        // protection covers both the dev (`swift run maccrabd`) and
+        // release (sysextd-activated) flavors.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-x", "maccrabd"]
+        process.arguments = ["-f", "maccrabd|com\\.maccrab\\.agent"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice

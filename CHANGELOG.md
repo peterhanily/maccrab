@@ -3,6 +3,101 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.5] — 2026-05-17
+
+Self-FP cleanup wave + Threat Intel directory-permissions fix.
+Twelve targeted fixes for issues surfaced by v1.12.4 field testing
+plus a polish-audit pass. All v1.12.0–v1.12.4 releases are now
+marked Pre-release on GitHub and yanked from the Sparkle appcast;
+v1.12.5 is the canonical install target for the v1.12 line across
+the supported macOS range (13 Ventura through 26 Tahoe).
+
+**The headline fix**: Threat Intel feeds=0 / iocs=0 on field
+machines. Root cause has been latent since v1.11.0 RC2 — a
+"tightening" audit set `/Library/Application Support/MacCrab/threat_intel/`
+to `0o700`. The cache file inside was `0o644` (world-readable), but
+without traverse (`x`) on the directory the user-context dashboard
+couldn't open files inside; `ThreatIntelFeed.cachedIOCs(at:)`
+silently failed at the directory level. Reverted to `0o755` +
+chmod-existing-dir on init so pre-existing installs heal on
+first start.
+
+**Self-defense (sysext-side) regressions from v1.12.4**:
+
+- `Binary Modified` tamper alert during in-place upgrade —
+  `SelfDefense.integrityCheck()` was hashing
+  `CommandLine.arguments[0]` (the bundle-relative loader path)
+  instead of `self.binaryPath` (proc_pidpath-resolved). Fixed.
+- DispatchSource `.write` on the binary path had no
+  sentinel/signer gate — added.
+- Periodic 15s `integrityCheck()` rules-hash branch had no
+  sentinel gate — would re-fire `.rulesModified .high` every
+  cycle after a Sparkle rule push. Added the same gate the
+  DispatchSource path has.
+- `integrityCheck()` rules-dir lookup uses `self.rulesDir`
+  directly (was fishing via description-match against
+  `monitoredPaths`).
+- `checkForImpersonation` was `pgrep -x maccrabd` — never
+  matched the release sysext executable name `com.maccrab.agent`,
+  so the impersonation protection was silently disabled in
+  production. Now matches both names with `pgrep -f`.
+
+**Self-defense (rules-side) — `Attempted Tamper` Sigma rule**:
+
+- Fired on `/bin/rm`, `/usr/bin/pkill`, `/bin/launchctl` spawned
+  by MacCrab itself at startup. `filter_maccrab_self` was AND-style
+  (Image AND ParentImage both needed to match MacCrab); didn't
+  catch the common case where MacCrab spawns a system helper.
+  Added Parent-only `filter_maccrab_parent`.
+- Fired during brew/cask in-place upgrade. Extended
+  `filter_installer` with `/Updater` and `/Autoupdate`. Added
+  `filter_upgrade_installer` matching ParentImage `/brew`,
+  `/osascript`, `/sysextd`, `/launchctl`. Added
+  `filter_brew_lineage` matching CommandLine `/Homebrew/`,
+  `/Cellar/maccrab/`, `Caskroom/maccrab/`.
+
+**AI Guard — `AI Tool Child Process Uploads Data` Sigma rule**:
+
+- Title says "AI Tool Child Process" but the pre-fix condition
+  didn't enforce it. Any `curl -X POST` to an unknown destination
+  tripped it. Added `selection_ai_parent` requiring ParentImage
+  to be a known AI tool.
+
+**Dashboard**:
+
+- Integrations panel was showing
+  `ModifiedContent<Text, _ForegroundStyleModifier<Color>>(...)`
+  debug dump because of a `Text("foo \(Text("bar").bold())")`
+  interpolation pattern that SwiftUI doesn't render correctly.
+  Switched to markdown `**bold**`.
+- Integrations panel was empty despite Objective-See tools
+  installed. `SecurityToolIntegrations.writeSnapshot()` was
+  correctly writing `integrations_snapshot.json` but the dashboard
+  never read it. Wired it in; expanded Objective-See coverage
+  (RansomWhere, ReiKey, DoNotDisturb, TaskExplorer, Netiquette,
+  WhatsYourSign, ProcessMonitor, FileMonitor).
+
+**Typosquat scoring**:
+
+- `pip` was flagged as a typosquat of `pipx` with score 80. The
+  exact-match-is-popular check at the top of `score(...)` only
+  handled the homoglyph case; ASCII `pip` fell through to the
+  distance loop. Added ASCII membership check before the
+  homoglyph branch. Locked in by `pipIsNotTyposquatOfPipx`
+  regression test.
+
+**maccrabctl**:
+
+- `intel refresh` was exiting 1. Missing `-f`, wrong signal
+  (SIGHUP vs SIGUSR1), plus EPERM when user-context tries to
+  signal uid-0 sysext. Fixed signal + flag; on EPERM, prints
+  informational message and exits 0.
+
+No new Swift source files. No schema migrations. 469 rules,
+1490 tests, 284 suites. Universal binary, min macOS 13.
+
+DMG SHA-256: `cda5ecb7a62c57198ff20a977611ee5ae991cd9492167e2e3758b21cfdef252f`
+
 ## [1.12.4] — 2026-05-16
 
 Fifth release of the day. Focused fix for a macOS 26 Tahoe

@@ -218,29 +218,51 @@ struct MacCrabCtl {
             let sub = args.dropFirst(2).first ?? "refresh"
             switch sub {
             case "refresh":
+                // v1.12.5 fix: `-f` is mandatory. The sysext's process
+                // basename (Darwin's 15-char p_comm) is the bundle
+                // executable name; pkill without `-f` matches against
+                // that and never sees the bundle identifier. Every
+                // other call site in the codebase uses `-f` —
+                // AppState.swift:556 sends SIGUSR1 the same way. The
+                // signal also has to be SIGUSR1, not SIGHUP: the daemon
+                // wires SIGUSR1 to ThreatIntelFeed.refreshNow + a rule
+                // reload, while SIGHUP is reserved for the rule-reload
+                // mtime watcher channel. Sending SIGHUP via pkill from
+                // a user-context process to a uid-0 sysext also returns
+                // EPERM — confirms the user-visible "exit 1" we saw on
+                // v1.12.4.
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-                proc.arguments = ["-HUP", "com.maccrab.agent"]
+                proc.arguments = ["-USR1", "-f", "com.maccrab.agent"]
                 proc.standardOutput = FileHandle.nullDevice
                 proc.standardError = FileHandle.nullDevice
                 try? proc.run()
                 proc.waitUntilExit()
                 if proc.terminationStatus == 0 {
-                    print("Refresh signaled (SIGHUP). Daemon will fetch URLhaus / MalwareBazaar / Feodo within ~5s.")
+                    print("Refresh requested (SIGUSR1). Daemon will fetch URLhaus / MalwareBazaar / Feodo within ~5s.")
                 } else {
                     // Try the dev daemon name as fallback.
                     let dev = Process()
                     dev.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-                    dev.arguments = ["-HUP", "maccrabd"]
+                    dev.arguments = ["-USR1", "-x", "maccrabd"]
                     dev.standardOutput = FileHandle.nullDevice
                     dev.standardError = FileHandle.nullDevice
                     try? dev.run()
                     dev.waitUntilExit()
                     if dev.terminationStatus == 0 {
-                        print("Refresh signaled (SIGHUP) to dev daemon.")
+                        print("Refresh requested (SIGUSR1) on dev daemon.")
                     } else {
-                        print("Error: no running MacCrab daemon to signal.")
-                        exit(1)
+                        // v1.12.5 UX fix: pkill returns 1 for both
+                        // "process not found" AND EPERM (user-context
+                        // process can't signal uid-0 sysext). Either
+                        // way the right operator action is "open
+                        // MacCrab and confirm the sysext is active",
+                        // not "the command failed". Print an
+                        // informational message and exit 0 — the
+                        // dashboard's tick will surface the actual
+                        // health via the next ThreatIntel poll.
+                        print("Could not signal the daemon (it may not be running, or this shell lacks permission to signal a system extension).")
+                        print("Tip: open MacCrab.app → Intelligence → Threat Intel to confirm feed status, or trigger refresh from the dashboard's Refresh button.")
                     }
                 }
             case "help", "-h", "--help":

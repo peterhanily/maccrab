@@ -182,21 +182,34 @@ public actor ThreatIntelFeed {
         self.maxDomains = maxDomains
         self.maxURLs = maxURLs
         self.maxAge = maxAge
-        // v1.11.0 (audit security LOW): tighten threat_intel cache
-        // dir to 0o700. IOC values aren't secret per se, but a local
-        // user with read can enumerate which campaigns the daemon
-        // has matched (privacy/timing leak).
+        // v1.12.5 reversal of v1.11.0 RC2 tightening (audit was wrong):
+        // 0o700 blocked the user-context dashboard from reading the
+        // feed cache. The dashboard's AppState.refreshThreatIntelStats
+        // calls `ThreatIntelFeed.cachedIOCs(at:)` directly, which
+        // needs traverse (x) on the directory to open the file inside
+        // — even though the file itself is 0o644 (world-readable),
+        // the dir's 0o700 prevented user-context traversal. Symptom
+        // on field machines: Threat Intel panel stuck at feeds=0,
+        // iocs=0; Refresh button "ran" but returned nothing because
+        // the read path silently failed at the directory level.
+        //
+        // 0o755 (dir) + 0o644 (file, set in saveCache()) is what
+        // /Library/Application Support/MacCrab/integrations_snapshot.json
+        // uses, and the original "privacy/timing leak" concern in the
+        // v1.11 audit comment is paper-thin for a single-user macOS
+        // workstation — anyone reading another user's IOC cache is
+        // already inside the machine.
         try? FileManager.default.createDirectory(
             atPath: dir,
             withIntermediateDirectories: true,
-            attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o755))]
         )
-        // v1.11.0 RC2 (audit security MEDIUM): `createDirectory(...
-        // attributes:)` does NOT chmod an EXISTING directory. On
-        // upgrade from a prior version the dir already exists with
-        // the historical 0o755 default — explicitly tighten now.
+        // `createDirectory(... attributes:)` does NOT chmod an EXISTING
+        // directory. On upgrade from v1.11/v1.12 the dir already
+        // exists with 0o700 (the broken tightening) — explicitly
+        // loosen now.
         try? FileManager.default.setAttributes(
-            [.posixPermissions: NSNumber(value: Int16(0o700))],
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
             ofItemAtPath: dir
         )
     }

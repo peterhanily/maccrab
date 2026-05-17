@@ -202,10 +202,30 @@ public actor TyposquatDatabase {
         let top = registry == .npm ? topNpm : topPyPI
         let folded = Self.confusableFold(candidate)
         let normalizedCandidate = folded.lowercased()
+        let originalLowered = candidate.lowercased()
+
+        // v1.12.5 FP fix: ASCII candidate that IS a top-1000 package
+        // itself = NOT a typosquat — it's the real thing. Pre-fix, the
+        // function fell through to the distance loop and `pip` matched
+        // `pipx` at distance 1, surfacing "⚠️ Likely typosquat" on the
+        // single most-popular PyPI installer. Same shape would have
+        // affected `cli` → `clip`, `pkg` → `pkgx`, `dns` → `dnsx`,
+        // etc. Add the membership check at the top.
+        if top.contains(originalLowered) {
+            return TyposquatResult(
+                candidate: candidate,
+                similarTo: nil,
+                distance: 0,
+                registry: registry,
+                isHomoglyph: false,
+                score: 0,
+                reasons: ["candidate is itself a top-package entry on \(registry.rawValue); no typosquat signal"]
+            )
+        }
 
         // Exact match after fold = NOT a typosquat (it's the real package
         // with a confusable encoding).
-        if top.contains(normalizedCandidate) && normalizedCandidate != candidate.lowercased() {
+        if top.contains(normalizedCandidate) && normalizedCandidate != originalLowered {
             return TyposquatResult(
                 candidate: candidate,
                 similarTo: normalizedCandidate,

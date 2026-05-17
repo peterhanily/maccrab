@@ -63,7 +63,37 @@ detection:
             - 'localhost'
             - '127.0.0.1'
             - '::1'
-    condition: selection_upload_tool and selection_upload_method and not filter_known_destinations
+    # v1.12.5 fix: the rule title says "AI Tool Child Process" but
+    # the pre-fix condition didn't actually require the parent to
+    # be an AI tool — so any process on the machine running
+    # `curl -X POST` to an unknown destination tripped it, including
+    # MacCrab's own boot-time spawns and unrelated system tooling.
+    # Enforce the parent lineage so the rule means what the title
+    # says. List mirrors AIToolRegistry's canonical executable
+    # names plus the editor-app helpers those tools live inside.
+    selection_ai_parent:
+        ParentImage|contains:
+            - '/claude'
+            - '/claude-code'
+            - '/Cursor'
+            - '/cursor'
+            - '/copilot'
+            - '/gh-copilot'
+            - '/codex'
+            - '/aider'
+            - '/continue'
+            - '/cody'
+            - '/zed'
+            - '/windsurf'
+            - '/Goose'
+            - '/goose'
+            - 'Claude.app'
+            - 'Cursor.app'
+            - 'Zed.app'
+            - 'Windsurf.app'
+            - 'Visual Studio Code.app'
+            - '/Code Helper'
+    condition: selection_upload_tool and selection_upload_method and selection_ai_parent and not filter_known_destinations
 falsepositives:
     - Uploading to private artifact registries
     - CI/CD webhook notifications

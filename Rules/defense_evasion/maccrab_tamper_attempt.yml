@@ -70,13 +70,52 @@ detection:
             - 'MacCrab.app/Contents/'
             - 'maccrabd'
             - 'sysextd'
+    # v1.12.5 fix: filter_maccrab_self is AND-style (Image AND
+    # ParentImage), which doesn't suppress the common case where
+    # MacCrab spawns a system helper (/bin/rm, /usr/bin/pkill,
+    # /bin/launchctl) to do its own maintenance. The Image is the
+    # helper, not a MacCrab binary, so the AND never matches.
+    # Add a Parent-only filter for any process whose parent IS
+    # MacCrab itself — that covers RuleBundleInstaller's elevated
+    # cleanup, SystemExtensionManager's launchctl invocations,
+    # AppState's pkill SIGUSR1 calls, etc.
+    filter_maccrab_parent:
+        ParentImage|contains:
+            - 'MacCrab.app/Contents/'
+            - 'com.maccrab.agent'
+            - '/MacCrabAgent'
+            - '/maccrabd'
+            - '/maccrabctl'
     filter_installer:
         Image|endswith:
             - '/installer'
             - '/system_installd'
             - '/Sparkle'
             - '/sparkle'
-    condition: (selection_kill_tool or selection_unload_path or selection_destruct_path) and not filter_maccrab_self and not filter_installer
+            - '/Updater'
+            - '/Autoupdate'
+    # v1.12.5 fix: legitimate destructive operations spawned by
+    # brew/cask, osascript admin shell (RuleBundleInstaller's
+    # elevation channel), or the sysext (de)activation flow all
+    # have rm/mv lineage that trips selection_destruct_path. The
+    # filter_maccrab_self block above is AND-style (Image AND
+    # ParentImage), which doesn't match when MacCrab itself is the
+    # GRANDPARENT (osascript -> sh -> rm). Use ParentImage-only
+    # match here for the upgrade-installer lineage.
+    filter_upgrade_installer:
+        ParentImage|endswith:
+            - '/brew'
+            - '/osascript'
+            - '/sysextd'
+            - '/launchctl'
+            - '/Updater'
+            - '/Autoupdate'
+    filter_brew_lineage:
+        CommandLine|contains:
+            - '/Homebrew/'
+            - '/Cellar/maccrab/'
+            - 'Caskroom/maccrab/'
+    condition: (selection_kill_tool or selection_unload_path or selection_destruct_path) and not filter_maccrab_self and not filter_maccrab_parent and not filter_installer and not filter_upgrade_installer and not filter_brew_lineage
 falsepositives:
     - The user running `brew uninstall maccrab` or `make uninstall` from an interactive shell — investigate parent shell + correlate with explicit dashboard "Uninstall" action
     - Sparkle auto-update replacing the .app bundle as part of an in-place upgrade; filter_installer covers Sparkle's path

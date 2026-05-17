@@ -752,6 +752,39 @@ public final class V2LiveDataProvider: V2DataProvider {
             ))
         }
 
+        // v1.12.5 fix: surface DETECTED third-party security tools
+        // (Objective-See, Little Snitch, CrowdStrike, etc.) alongside
+        // configured OUTPUT SINKS. Pre-fix the panel only read the
+        // three config files above, so a user running BlockBlock /
+        // LuLu / KnockKnock / OverSight saw "No integrations
+        // configured" even when MacCrab's SecurityToolIntegrations
+        // actor had already detected them. The daemon writes
+        // `integrations_snapshot.json` periodically (DaemonTimers tick
+        // + at boot) with the enriched `isRunning`-checked tool list;
+        // we just read what it left behind.
+        let snapshotPath = dir + "/integrations_snapshot.json"
+        if let snap = SecurityToolIntegrations.readSnapshot(at: snapshotPath) {
+            for tool in snap.tools {
+                let status: V2StatusLevel = tool.isRunning ? .healthy : .info
+                let detail: String = {
+                    var parts: [String] = []
+                    if let v = tool.version, !v.isEmpty { parts.append("v\(v)") }
+                    parts.append(tool.isRunning ? "running" : "installed")
+                    if !tool.capabilities.isEmpty {
+                        parts.append(tool.capabilities.prefix(2).joined(separator: " · "))
+                    }
+                    return parts.joined(separator: " — ")
+                }()
+                out.append(V2MockIntegration(
+                    id: "tool:\(tool.name.replacingOccurrences(of: " ", with: "-").lowercased())",
+                    name: tool.name,
+                    kind: "detected-tool",
+                    status: status,
+                    detail: detail
+                ))
+            }
+        }
+
         return out
     }
 

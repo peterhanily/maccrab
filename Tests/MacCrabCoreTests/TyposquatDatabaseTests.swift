@@ -77,6 +77,30 @@ struct TyposquatDatabaseTests {
         #expect(result.score == 0)
     }
 
+    @Test("v1.12.5 regression: pip is a top package, not a typosquat of pipx")
+    func pipIsNotTyposquatOfPipx() async {
+        // Pre-v1.12.5 the exact-match-is-popular check ran AFTER the
+        // homoglyph branch, which only matched on confusable folds —
+        // so ASCII `pip` fell through to the distance loop and tripped
+        // `pipx` at distance 1, surfacing "⚠️ Likely typosquat — score
+        // 80 (similar to pipx)" on the most-popular PyPI installer.
+        // Same shape would have affected cli→clip / pkg→pkgx /
+        // dns→dnsx etc. Lock both in.
+        let db = TyposquatDatabase(maxDistance: 2)
+        let pipResult = await db.score(candidate: "pip", registry: .pypi)
+        #expect(pipResult.score == 0)
+        #expect(pipResult.similarTo == nil)
+
+        let pipxResult = await db.score(candidate: "pipx", registry: .pypi)
+        #expect(pipxResult.score == 0)
+        #expect(pipxResult.similarTo == nil)
+
+        // npm parallel — `next` is a top-100 package. Pre-fix it might
+        // have scored against `nest`, `nuxt`, `nx`.
+        let nextResult = await db.score(candidate: "next", registry: .npm)
+        #expect(nextResult.score == 0)
+    }
+
     @Test("Unrelated short name is not flagged")
     func unrelatedShortNameNotFlagged() async {
         let db = TyposquatDatabase(maxDistance: 2)

@@ -204,6 +204,111 @@ public actor SecurityToolIntegrations {
             ))
         }
 
+        // v1.12.5: extend Objective-See coverage. The pre-fix list
+        // had Little Snitch / BlockBlock / LuLu / KnockKnock / OverSight
+        // but missed RansomWhere, ReiKey, DoNotDisturb, TaskExplorer,
+        // NetiQuette, WhatsYourSign, and ProcessMonitor — common on
+        // any user-installed Objective-See bundle. Reported by a user
+        // who saw an empty Integrations panel despite running several
+        // of these.
+
+        // RansomWhere
+        if fm.fileExists(atPath: "/Library/Objective-See/RansomWhere") {
+            tools.append(InstalledTool(
+                name: "RansomWhere?",
+                path: "/Library/Objective-See/RansomWhere",
+                version: getBundleVersion("/Library/Objective-See/RansomWhere/RansomWhere.app"),
+                isRunning: isProcessRunning("RansomWhere"),
+                logPath: nil,
+                capabilities: ["ransomware-detection", "file-creation-monitoring"]
+            ))
+        }
+
+        // ReiKey
+        if fm.fileExists(atPath: "/Applications/ReiKey.app") {
+            tools.append(InstalledTool(
+                name: "ReiKey",
+                path: "/Applications/ReiKey.app",
+                version: getBundleVersion("/Applications/ReiKey.app"),
+                isRunning: isProcessRunning("ReiKey"),
+                logPath: nil,
+                capabilities: ["keyboard-tap-monitoring", "event-tap-detection"]
+            ))
+        }
+
+        // DoNotDisturb
+        if fm.fileExists(atPath: "/Applications/DoNotDisturb.app") ||
+           fm.fileExists(atPath: "/Library/Objective-See/DoNotDisturb") {
+            tools.append(InstalledTool(
+                name: "DoNotDisturb",
+                path: "/Applications/DoNotDisturb.app",
+                version: getBundleVersion("/Applications/DoNotDisturb.app"),
+                isRunning: isProcessRunning("DoNotDisturb"),
+                logPath: nil,
+                capabilities: ["lid-close-detection", "stolen-laptop-monitoring"]
+            ))
+        }
+
+        // TaskExplorer
+        if fm.fileExists(atPath: "/Applications/TaskExplorer.app") {
+            tools.append(InstalledTool(
+                name: "TaskExplorer",
+                path: "/Applications/TaskExplorer.app",
+                version: getBundleVersion("/Applications/TaskExplorer.app"),
+                isRunning: false,  // On-demand tool
+                logPath: nil,
+                capabilities: ["process-explorer", "loaded-dylibs", "open-files"]
+            ))
+        }
+
+        // NetiQuette
+        if fm.fileExists(atPath: "/Applications/Netiquette.app") {
+            tools.append(InstalledTool(
+                name: "Netiquette",
+                path: "/Applications/Netiquette.app",
+                version: getBundleVersion("/Applications/Netiquette.app"),
+                isRunning: false,
+                logPath: nil,
+                capabilities: ["network-monitor", "process-connections-explorer"]
+            ))
+        }
+
+        // WhatsYourSign (Finder extension)
+        if fm.fileExists(atPath: "/Applications/WhatsYourSign.app") {
+            tools.append(InstalledTool(
+                name: "WhatsYourSign",
+                path: "/Applications/WhatsYourSign.app",
+                version: getBundleVersion("/Applications/WhatsYourSign.app"),
+                isRunning: false,
+                logPath: nil,
+                capabilities: ["finder-codesign-extension"]
+            ))
+        }
+
+        // ProcessMonitor (CLI)
+        if fm.fileExists(atPath: "/usr/local/bin/ProcessMonitor") {
+            tools.append(InstalledTool(
+                name: "ProcessMonitor",
+                path: "/usr/local/bin/ProcessMonitor",
+                version: nil,
+                isRunning: isProcessRunning("ProcessMonitor"),
+                logPath: nil,
+                capabilities: ["es-process-events", "cli-json-stream"]
+            ))
+        }
+
+        // FileMonitor (CLI)
+        if fm.fileExists(atPath: "/usr/local/bin/FileMonitor") {
+            tools.append(InstalledTool(
+                name: "FileMonitor",
+                path: "/usr/local/bin/FileMonitor",
+                version: nil,
+                isRunning: isProcessRunning("FileMonitor"),
+                logPath: nil,
+                capabilities: ["es-file-events", "cli-json-stream"]
+            ))
+        }
+
         return tools
     }
 

@@ -816,7 +816,17 @@ public struct V2IntelligenceWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 8) {
                     Image(systemName: "info.circle").foregroundStyle(V2Theme.mutedText)
-                    Text("Configured external sinks. Edit in Settings → Integrations or `daemon_config.json`. v1.11.0 wires the live read; per-sink health reporting lands in v1.11.x — for now status reflects 'configured', not last-call success.")
+                    // v1.12.5 fix: Text-in-Text interpolation
+                    // (`Text("foo \(Text("bar").bold())")`) doesn't
+                    // render the inner view — SwiftUI calls
+                    // `description` on the modified Text struct and
+                    // splices that dump into the parent, producing
+                    // "Modified­Content<Text, _ForegroundStyleModifier
+                    // <Color>>(content: …" garbage on screen. Use
+                    // markdown-style `**bold**` instead — SwiftUI Text
+                    // initialized from LocalizedStringKey renders
+                    // `**…**` as bold natively.
+                    Text("Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Per-sink health checks land in v1.12.x; for now status reflects 'configured' / 'running' / 'installed'.")
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
@@ -826,7 +836,7 @@ public struct V2IntelligenceWorkspace: View {
                 if integrations.isEmpty {
                     HStack(spacing: 8) {
                         Image(systemName: "powerplug").foregroundStyle(V2Theme.mutedText)
-                        Text("No integrations configured. Drop a notifications.json or daemon_config.json with an outputs[] entry into the support directory.")
+                        Text("Nothing to surface yet. MacCrab hasn't detected any third-party security tools on this machine and no output sinks are configured. To wire alerts to Splunk / Slack / S3 / etc., drop a `daemon_config.json` (outputs[]) or `notifications.json` into `/Library/Application Support/MacCrab/`. Discovered tools (BlockBlock, LuLu, KnockKnock, OverSight, Santa, Little Snitch, etc.) appear here automatically after the daemon's next scan (~2 min).")
                             .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                     }
                     .padding(16)
@@ -834,7 +844,7 @@ public struct V2IntelligenceWorkspace: View {
                     .v2Panel()
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Configured integrations (\(integrations.count))")
+                        Text("Configured integrations & detected tools (\(integrations.count))")
                             .font(V2Theme.sectionTitle())
                             .foregroundStyle(V2Theme.primaryText)
                         VStack(spacing: 6) {
