@@ -19,6 +19,19 @@ struct V2AlertsWorkspace: View {
     @State private var campaigns: [V2MockCampaign] = []
     @State private var selectedCampaignIds: Set<String> = []
     @State private var loaded = false
+    // v1.12.7 Wave 9R: pending-mutation reconciliation. After Wave 9Q
+    // flipped @State optimistically on click, the auto-refresh-tick
+    // reload() — reading directly from alerts.db before the daemon
+    // had processed the inbox file — was clobbering the optimistic
+    // flip and "flickering" the alert back to its pre-mutation state.
+    // These sets track in-flight mutations so reload() can overlay
+    // the optimistic value on top of the DB read until the daemon
+    // catches up (at which point the set entry is pruned).
+    @State private var pendingSuppressedAlertIds: Set<String> = []
+    @State private var pendingUnsuppressedAlertIds: Set<String> = []
+    @State private var pendingDeletedAlertIds: Set<String> = []
+    @State private var pendingSuppressedCampaignIds: Set<String> = []
+    @State private var pendingLiftedSuppressionKeys: Set<String> = []
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
@@ -52,9 +65,19 @@ struct V2AlertsWorkspace: View {
     }
 
     private func reload() async {
-        let a = await state.provider.alerts(limit: 200)
-        let c = await state.provider.campaigns(limit: 50)
-        let s = await state.provider.suppressions()
+        // v1.12.6 Wave 9P: write each piece of @State as soon as it
+        // resolves, rather than batching all three into one trailing
+        // MainActor.run. Pre-9P, on a host with a big alerts.db /
+        // campaigns.db, the three sequential awaits could exceed the
+        // 5s auto-refresh-tick interval. When `state.refreshTick`
+        // incremented, SwiftUI's `.task(id:)` cancelled the running
+        // reload before the final MainActor.run ever fired —
+        // permanent staleness until the user closed and reopened the
+        // dashboard (which reset refreshTick to 0 and gave the body
+        // an uncontested first load). Same root cause as Wave 9G,
+        // just in three more workspaces. The cutoff calculation +
+        // filtering stays inside MainActor.run so the filtered
+        // arrays don't get computed against the wrong state.
         let cutoff: Date = {
             switch state.alertTimeRange {
             case "24h": return Date().addingTimeInterval(-86_400)
@@ -63,15 +86,75 @@ struct V2AlertsWorkspace: View {
             default:    return Date.distantPast
             }
         }()
-        let filteredAlerts = a.filter { $0.timestamp >= cutoff }
-        let filteredCampaigns = c.filter { $0.lastSeen >= cutoff }
+
+        let a = await state.provider.alerts(limit: 200)
         await MainActor.run {
-            self.suppressionEntries = s
-            // No silent mock-fallback on empty live results — show the
-            // real empty state. Mock provider already returns mock data.
-            self.alerts = filteredAlerts
-            self.campaigns = filteredCampaigns
+            // v1.12.7 Wave 9R: overlay pending optimistic mutations
+            // on top of the DB read. The daemon's inbox poller has
+            // a 5 s cadence so reload() runs at the next refresh tick
+            // can race the daemon's apply — without this overlay the
+            // pre-mutation DB value would clobber the user's just-
+            // clicked optimistic state for one tick (visible flicker).
+            // Prune entries whose DB value has caught up to the
+            // optimistic value (daemon has applied).
+            let merged: [V2MockAlert] = a.compactMap { dbAlert in
+                if pendingDeletedAlertIds.contains(dbAlert.id) {
+                    // Optimistic delete — hide row until DB drops it.
+                    return nil
+                }
+                var copy = dbAlert
+                if pendingSuppressedAlertIds.contains(dbAlert.id) {
+                    copy.suppressed = true
+                } else if pendingUnsuppressedAlertIds.contains(dbAlert.id) {
+                    copy.suppressed = false
+                }
+                return copy
+            }
+            // Prune `pendingSuppressedAlertIds` for IDs the DB now
+            // reflects as suppressed (daemon caught up).
+            pendingSuppressedAlertIds = pendingSuppressedAlertIds.filter { id in
+                guard let dbAlert = a.first(where: { $0.id == id }) else { return true }
+                return !dbAlert.suppressed
+            }
+            pendingUnsuppressedAlertIds = pendingUnsuppressedAlertIds.filter { id in
+                guard let dbAlert = a.first(where: { $0.id == id }) else { return true }
+                return dbAlert.suppressed
+            }
+            // Pending delete is pruned only when the DB no longer
+            // returns the row.
+            let dbIds = Set(a.map(\.id))
+            pendingDeletedAlertIds = pendingDeletedAlertIds.intersection(dbIds)
+
+            self.alerts = merged.filter { $0.timestamp >= cutoff }
             self.loaded = true
+        }
+
+        let c = await state.provider.campaigns(limit: 50)
+        await MainActor.run {
+            // Same overlay pattern for campaigns: hide optimistically-
+            // suppressed campaigns until the DB-side suppress lands.
+            let merged = c.filter { !pendingSuppressedCampaignIds.contains($0.id) }
+            // Prune: if a campaign no longer appears in c, the daemon
+            // has applied (suppressed campaigns drop from the active
+            // list returned by `campaigns(limit:)`).
+            let dbCampaignIds = Set(c.map(\.id))
+            pendingSuppressedCampaignIds = pendingSuppressedCampaignIds.intersection(dbCampaignIds)
+
+            self.campaigns = merged.filter { $0.lastSeen >= cutoff }
+        }
+
+        let s = await state.provider.suppressions()
+        await MainActor.run {
+            // Suppression lifts: hide entries we've optimistically
+            // lifted until the DB drops them. Key format matches
+            // pendingLiftedSuppressionKeys: "ruleId|scope".
+            let merged = s.filter { entry in
+                !pendingLiftedSuppressionKeys.contains("\(entry.ruleId)|\(entry.scope)")
+            }
+            // Prune: a lifted entry whose key no longer appears in s.
+            let dbKeys = Set(s.map { "\($0.ruleId)|\($0.scope)" })
+            pendingLiftedSuppressionKeys = pendingLiftedSuppressionKeys.intersection(dbKeys)
+            self.suppressionEntries = merged
             // If the navigation destination requested a specific alert
             // (notification "View" button or palette entity link), select
             // it now that we have the data. entityKey format matches
@@ -92,6 +175,21 @@ struct V2AlertsWorkspace: View {
     // MARK: - Mutations
 
     private func suppress(_ alert: V2MockAlert) async {
+        // v1.12.7 Wave 9Q+9R: flip the local suppressed flag and
+        // register the pending mutation so subsequent reload()s
+        // overlay the optimistic value on top of the DB read until
+        // the daemon catches up. Pre-9R the optimistic flip flickered
+        // back to un-suppressed on the next reload because the DB
+        // still had the old value (daemon hadn't processed inbox).
+        await MainActor.run {
+            pendingSuppressedAlertIds.insert(alert.id)
+            pendingUnsuppressedAlertIds.remove(alert.id)
+            if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
+                self.alerts[idx].suppressed = true
+            }
+            selected = nil
+        }
+
         let ok = await state.provider.suppressAlert(id: alert.id)
         await MainActor.run {
             if ok {
@@ -100,8 +198,12 @@ struct V2AlertsWorkspace: View {
                     title: "Alert suppressed",
                     detail: alert.ruleId
                 ))
-                selected = nil
             } else {
+                // Rollback the optimistic state.
+                pendingSuppressedAlertIds.remove(alert.id)
+                if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
+                    self.alerts[idx].suppressed = false
+                }
                 let detail = state.provider.lastErrorDescription ?? "unknown error"
                 let isReadOnly = detail.lowercased().contains("read-only")
                 state.showToast(V2Toast(
@@ -113,7 +215,9 @@ struct V2AlertsWorkspace: View {
                 ))
             }
         }
-        await reload()
+        // No trailing reload nor refreshTick bump — the natural
+        // 5 s auto-tick will reconcile, and our pending-mutation
+        // overlay shields us from the daemon-lag flicker.
     }
 
     private var campaignsToolbar: some View {
@@ -160,6 +264,14 @@ struct V2AlertsWorkspace: View {
     }
 
     private func bulkSuppressCampaigns(_ targets: [V2MockCampaign]) async {
+        // v1.12.7 Wave 9Q+9R: optimistic removal + pending registration.
+        let targetIds = Set(targets.map(\.id))
+        await MainActor.run {
+            pendingSuppressedCampaignIds.formUnion(targetIds)
+            self.campaigns.removeAll { targetIds.contains($0.id) }
+            self.selectedCampaignIds.removeAll()
+        }
+
         var totalSuppressed = 0
         var failedCount = 0
         for c in targets {
@@ -175,7 +287,6 @@ struct V2AlertsWorkspace: View {
             }
         }
         await MainActor.run {
-            selectedCampaignIds.removeAll()
             if failedCount == 0 {
                 state.showToast(V2Toast(
                     kind: .success,
@@ -190,6 +301,9 @@ struct V2AlertsWorkspace: View {
                     displayFor: 6
                 ))
             } else {
+                // Total failure — drop pending registrations so the
+                // next reload restores the campaigns.
+                pendingSuppressedCampaignIds.subtract(targetIds)
                 let detail = state.provider.lastErrorDescription ?? "unknown error"
                 let isReadOnly = detail.lowercased().contains("read-only")
                 state.showToast(V2Toast(
@@ -201,7 +315,6 @@ struct V2AlertsWorkspace: View {
                 ))
             }
         }
-        await reload()
     }
 
     /// Layout helper: render a list of strings as wrapped chips. Each
@@ -239,6 +352,14 @@ struct V2AlertsWorkspace: View {
     /// Uses scope when present so partial suppressions (per-process)
     /// don't accidentally lift the entire rule.
     private func liftSuppression(_ entry: V2SuppressionEntry) async {
+        // v1.12.7 Wave 9Q+9R: optimistic removal + pending registration.
+        let key = "\(entry.ruleId)|\(entry.scope)"
+        await MainActor.run {
+            pendingLiftedSuppressionKeys.insert(key)
+            self.suppressionEntries.removeAll {
+                $0.ruleId == entry.ruleId && $0.scope == entry.scope
+            }
+        }
         let ok = await state.provider.liftSuppression(ruleId: entry.ruleId, scope: entry.scope)
         await MainActor.run {
             if ok {
@@ -248,6 +369,8 @@ struct V2AlertsWorkspace: View {
                     detail: "\(entry.ruleId) (\(entry.scope))"
                 ))
             } else {
+                // Drop pending registration; next reload restores.
+                pendingLiftedSuppressionKeys.remove(key)
                 state.showToast(V2Toast(
                     kind: .error,
                     title: "Lift failed",
@@ -257,10 +380,16 @@ struct V2AlertsWorkspace: View {
                 ))
             }
         }
-        await reload()
     }
 
     private func suppressCampaign(_ c: V2MockCampaign) async {
+        // v1.12.7 Wave 9Q+9R: optimistically remove + register pending.
+        await MainActor.run {
+            pendingSuppressedCampaignIds.insert(c.id)
+            self.campaigns.removeAll { $0.id == c.id }
+            self.selectedCampaignIds.remove(c.id)
+        }
+
         let count = await state.provider.suppressCampaign(id: c.id)
         await MainActor.run {
             if count > 0 {
@@ -270,6 +399,11 @@ struct V2AlertsWorkspace: View {
                     detail: "\(count) item\(count == 1 ? "" : "s") (campaign + contributors)"
                 ))
             } else {
+                // Rollback the pending registration so the next reload
+                // brings the campaign back. The visible list will
+                // restore on the next reload — minor delay acceptable
+                // on an error path that's already showing a toast.
+                pendingSuppressedCampaignIds.remove(c.id)
                 let detail = state.provider.lastErrorDescription ?? "no rows updated"
                 let isReadOnly = detail.lowercased().contains("read-only")
                 state.showToast(V2Toast(
@@ -281,12 +415,22 @@ struct V2AlertsWorkspace: View {
                 ))
             }
         }
-        await reload()
     }
 
     private func bulkSuppress(_ targets: [V2MockAlert]) async {
         let ids = targets.filter { !$0.suppressed }.map(\.id)
         guard !ids.isEmpty else { return }
+
+        // v1.12.7 Wave 9Q+9R: optimistic flip + pending registration.
+        let idSet = Set(ids)
+        await MainActor.run {
+            pendingSuppressedAlertIds.formUnion(idSet)
+            pendingUnsuppressedAlertIds.subtract(idSet)
+            for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
+                self.alerts[idx].suppressed = true
+            }
+        }
+
         let count = await state.provider.suppressAlerts(ids: ids)
         await MainActor.run {
             if count > 0 && count == ids.count {
@@ -302,7 +446,17 @@ struct V2AlertsWorkspace: View {
                     detail: "\(count) of \(ids.count) suppressed; \(state.provider.lastErrorDescription ?? "see logs")",
                     displayFor: 6
                 ))
+                // Don't roll back partial successes — the reload's
+                // overlay will keep the optimistic state until the
+                // daemon catches up, and prune the registrations as
+                // the DB confirms each one individually.
             } else {
+                // Total failure — drop the pending registrations
+                // and flip the flags back.
+                pendingSuppressedAlertIds.subtract(idSet)
+                for idx in self.alerts.indices where idSet.contains(self.alerts[idx].id) {
+                    self.alerts[idx].suppressed = false
+                }
                 let detail = state.provider.lastErrorDescription ?? "no rows updated"
                 let isReadOnly = detail.lowercased().contains("read-only")
                 state.showToast(V2Toast(
@@ -314,7 +468,6 @@ struct V2AlertsWorkspace: View {
                 ))
             }
         }
-        await reload()
     }
 
     private func exportAlerts(_ targets: [V2MockAlert]) {
@@ -1192,6 +1345,14 @@ struct V2AlertsWorkspace: View {
     }
 
     private func unsuppressAlert(_ alert: V2MockAlert) async {
+        // v1.12.7 Wave 9Q+9R: flip + pending registration.
+        await MainActor.run {
+            pendingUnsuppressedAlertIds.insert(alert.id)
+            pendingSuppressedAlertIds.remove(alert.id)
+            if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
+                self.alerts[idx].suppressed = false
+            }
+        }
         let ok = await state.provider.unsuppressAlert(id: alert.id)
         if ok {
             state.showToast(V2Toast(
@@ -1199,8 +1360,14 @@ struct V2AlertsWorkspace: View {
                 title: "Unsuppressed",
                 detail: alert.title
             ))
-            await reload()
         } else {
+            // Rollback the pending registration and flag.
+            await MainActor.run {
+                pendingUnsuppressedAlertIds.remove(alert.id)
+                if let idx = self.alerts.firstIndex(where: { $0.id == alert.id }) {
+                    self.alerts[idx].suppressed = true
+                }
+            }
             state.showToast(V2Toast(
                 kind: .error,
                 title: "Couldn't unsuppress",
@@ -1210,6 +1377,12 @@ struct V2AlertsWorkspace: View {
     }
 
     private func deleteAlert(_ alert: V2MockAlert) async {
+        // v1.12.7 Wave 9Q+9R: remove + pending registration.
+        await MainActor.run {
+            pendingDeletedAlertIds.insert(alert.id)
+            self.alerts.removeAll { $0.id == alert.id }
+            if self.selected?.id == alert.id { self.selected = nil }
+        }
         let ok = await state.provider.deleteAlert(id: alert.id)
         if ok {
             state.showToast(V2Toast(
@@ -1217,8 +1390,9 @@ struct V2AlertsWorkspace: View {
                 title: "Deleted",
                 detail: alert.title
             ))
-            await reload()
         } else {
+            // Drop the pending delete; next reload restores the row.
+            await MainActor.run { pendingDeletedAlertIds.remove(alert.id) }
             state.showToast(V2Toast(
                 kind: .error,
                 title: "Couldn't delete",

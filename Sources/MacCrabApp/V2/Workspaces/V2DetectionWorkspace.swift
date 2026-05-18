@@ -88,33 +88,26 @@ public struct V2DetectionWorkspace: View {
             }
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick)") {
+            // v1.12.6 Wave 9P: write each piece of @State as soon as
+            // its await resolves. Pre-9P all four fields were gated
+            // behind one trailing MainActor.run after four awaits —
+            // and `rules()` alone reads ~430 compiled-rule JSON files
+            // + parses each, which can exceed the 5s refreshTick on
+            // cold cache. Same shape as Wave 9G in V2Intelligence.
+            //
+            // Filter handling: if there's no active filter query, the
+            // rule table renders the full list as soon as rules load —
+            // the haystack is only needed for filtered queries. If a
+            // filter IS active, filteredRules updates again once the
+            // detached haystack build completes.
             let r = await state.provider.rules()
-            let x = await state.provider.extensions()
-            let m = await state.provider.mcpServers()
-            // Precompute the lowercase haystack so the filter is a
-            // single string `contains` per row instead of 4 concats
-            // + lowercase per row per keystroke.
-            let haystack = await Task.detached(priority: .userInitiated) {
-                Dictionary(uniqueKeysWithValues: r.map { rule -> (String, String) in
-                    let h = (rule.id + " " + rule.title + " " + rule.category + " "
-                             + rule.mitre.joined(separator: " ")).lowercased()
-                    return (rule.id, h)
-                })
-            }.value
             await MainActor.run {
                 self.rules = r
-                self.extensions = x
-                self.mcpServers = m
-                self.rulesHaystack = haystack
-                // Re-apply current query with the new ruleset.
-                let q = self.debouncedRuleQuery
-                self.filteredRules = q.isEmpty
-                    ? r
-                    : r.filter { (haystack[$0.id] ?? "").contains(q) }
-                // Cross-workspace deep-link: alerts → rule. The Alert
-                // Open inspector's "Open rule" button sets entityId on
-                // the destination; we pick it up here and pre-select
-                // the matching rule in the inspector.
+                // Default (no filter): show all rules immediately.
+                if self.debouncedRuleQuery.isEmpty {
+                    self.filteredRules = r
+                }
+                // Cross-workspace deep-link: alerts → rule.
                 let candidateKeys = ["detection:detectionRules", "detection"]
                 for key in candidateKeys {
                     if let pendingId = state.selectedEntities[key],
@@ -123,6 +116,32 @@ public struct V2DetectionWorkspace: View {
                         state.selectedEntities[key] = nil
                         break
                     }
+                }
+            }
+
+            let x = await state.provider.extensions()
+            await MainActor.run { self.extensions = x }
+
+            let m = await state.provider.mcpServers()
+            await MainActor.run { self.mcpServers = m }
+
+            // Precompute the lowercase haystack so the filter is a
+            // single string `contains` per row instead of 4 concats
+            // + lowercase per row per keystroke. Detached so the
+            // string work doesn't block main.
+            let haystack = await Task.detached(priority: .userInitiated) {
+                Dictionary(uniqueKeysWithValues: r.map { rule -> (String, String) in
+                    let h = (rule.id + " " + rule.title + " " + rule.category + " "
+                             + rule.mitre.joined(separator: " ")).lowercased()
+                    return (rule.id, h)
+                })
+            }.value
+            await MainActor.run {
+                self.rulesHaystack = haystack
+                // Re-apply filter if one is active.
+                let q = self.debouncedRuleQuery
+                if !q.isEmpty {
+                    self.filteredRules = r.filter { (haystack[$0.id] ?? "").contains(q) }
                 }
             }
         }

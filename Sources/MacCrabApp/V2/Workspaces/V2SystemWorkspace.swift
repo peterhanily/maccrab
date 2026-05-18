@@ -31,19 +31,31 @@ public struct V2SystemWorkspace: View {
             tabBody
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick)") {
+            // v1.12.6 Wave 9P: write each piece of @State as soon as
+            // it resolves, so the System workspace's "metrics
+            // freshness" survives the 5s refreshTick cancellation
+            // race. heartbeat() reads heartbeat_rich.json (fast on
+            // any host); permissions() queries TCC + System Settings
+            // adjacencies (can take seconds on a host with a large
+            // TCC.db); trust-substrate read is already off-main.
+            // Pre-9P all three were gated behind one trailing
+            // MainActor.run — if permissions() took longer than the
+            // tick interval, the new refreshTick cancelled the body
+            // before heartbeat/permissions ever landed in @State.
+            // Same root cause as Wave 9G in V2IntelligenceWorkspace.
             let h = await state.provider.heartbeat()
-            let p = await state.provider.permissions()
+            await MainActor.run { self.heartbeat = h }
+
             // Read trust-substrate info on a detached task so the
             // disk I/O doesn't block main.
             let dir = state.provider.dataDir ?? "/Library/Application Support/MacCrab"
             let ts = await Task.detached(priority: .userInitiated) {
                 V2TrustSubstrateInfo.read(dataDir: dir)
             }.value
-            await MainActor.run {
-                self.heartbeat = h
-                self.permissions = p
-                self.trustInfo = ts
-            }
+            await MainActor.run { self.trustInfo = ts }
+
+            let p = await state.provider.permissions()
+            await MainActor.run { self.permissions = p }
         }
     }
 

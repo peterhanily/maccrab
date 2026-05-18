@@ -51,16 +51,31 @@ struct V2OverviewWorkspace: View {
             securityFactorsSheet
         }
         .task(id: "\(state.provider.mode):\(state.refreshTick):\(rangeKey)") {
+            // v1.12.6 Wave 9P: write each field to @State as soon as
+            // its async load resolves, rather than batching all four
+            // into one trailing MainActor.run. Pre-9P on a host with
+            // a big alerts.db, the sequential awaits (esp. kpis()
+            // which fans out to 5 SQL queries and alertHistogram()
+            // which scans up to 10K rows) could exceed the 5s
+            // auto-refresh tick. When state.refreshTick incremented,
+            // `.task(id:)` cancelled the body mid-await — the final
+            // MainActor.run never ran, the user saw permanently
+            // stale alerts/campaigns/KPIs/histogram until they
+            // closed and reopened the dashboard (which reset
+            // refreshTick to 0). Wave 9G fixed the same shape in
+            // V2IntelligenceWorkspace; 9P extends to Overview /
+            // Alerts / System.
             let a = await state.provider.alerts(limit: 50)
+            await MainActor.run { self.alerts = a }
+
             let c = await state.provider.campaigns(limit: 20)
+            await MainActor.run { self.campaigns = c }
+
             let k = await state.provider.kpis()
+            await MainActor.run { self.kpis = k }
+
             let buckets = await state.provider.alertHistogram(rangeKey: rangeKey)
-            await MainActor.run {
-                self.alerts = a
-                self.campaigns = c
-                self.kpis = k
-                self.histogramBuckets = buckets
-            }
+            await MainActor.run { self.histogramBuckets = buckets }
         }
     }
 

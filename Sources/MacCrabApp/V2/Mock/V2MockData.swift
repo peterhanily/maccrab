@@ -96,7 +96,13 @@ public struct V2MockAlert: Identifiable, Sendable, Hashable {
     public let category: String
     public let description: String
     public let actionsTaken: [String]
-    public let suppressed: Bool
+    // v1.12.7 Wave 9Q: optimistic UI on suppress/unsuppress flips this
+    // flag locally before the daemon round-trip completes, so it must
+    // be mutable. Previously `let` because the dashboard treated alerts
+    // as immutable snapshots — the same-tick reload was the only path
+    // by which `suppressed` could change. Now we flip locally first,
+    // reload reconciles later.
+    public var suppressed: Bool
     // v1.10.0 enrichments — surfaced in the alert inspector. Optional
     // because legacy alerts (pre-Phase-1 enrichment) won't have them
     // and the inspector hides each section when the field is nil/empty.

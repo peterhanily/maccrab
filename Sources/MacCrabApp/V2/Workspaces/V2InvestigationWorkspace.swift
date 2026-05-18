@@ -60,10 +60,14 @@ struct V2InvestigationWorkspace: View {
     }
 
     private func reload() async {
+        // v1.12.6 Wave 9P: write each piece of @State as soon as
+        // its await resolves so the trailing MainActor.run race
+        // (Wave 9G shape) can't drop both writes.
         let t = await state.provider.traces(limit: 50)
+        await MainActor.run { self.traces = t }
+
         let a = await state.provider.alerts(limit: 30)
         await MainActor.run {
-            self.traces = t
             self.recentAlerts = a
                 .filter { $0.severity == .critical || $0.severity == .high }
                 .prefix(8)

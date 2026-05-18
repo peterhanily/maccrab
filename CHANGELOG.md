@@ -3,6 +3,52 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.7] — 2026-05-18
+
+Single-purpose patch on top of v1.12.6. Fixes two field-reported
+dashboard responsiveness bugs on hosts with a large alerts.db /
+campaigns.db:
+
+**Wave 9P — auto-refresh staleness.** The Alerts, Campaigns, and
+Metrics panels stopped refreshing until the user closed and
+reopened the menubar window. Same `.task(id:)` cancellation race
+Wave 9G fixed in v1.12.6 RC2 for the Intelligence tab, but in five
+more workspaces (Overview / Alerts / System / Detection /
+Investigation). Each gated all `@State` writes behind one trailing
+`MainActor.run` after several sequential SQLite reads — on a busy
+host the combined load could exceed the 5-second refreshTick,
+which cancelled the body before any state landed. Fix: split into
+one `MainActor.run` per await so faster queries always land even
+if the slowest one is cancelled. V2EventsWorkspace and
+V2PreventionWorkspace audited as not vulnerable.
+
+**Wave 9Q + 9R — mutation lag.** Clicking Suppress / Unsuppress /
+Delete / etc. on an alert or campaign sat for ~5 s before the row
+visibly changed, because the mutation went through the file-IPC
+inbox (Wave 9A's read-only-dashboard model), the daemon's inbox
+poller runs at a 5s cadence, and the dashboard's reload was
+blocked behind that round-trip. 9Q added optimistic local @State
+flips on click; 9R adds a five-set pending-mutation overlay that
+`reload()` merges on top of the DB read so the optimistic flip
+survives until the daemon catches up. Mutations patched:
+`suppress`, `suppressCampaign`, `bulkSuppress`,
+`bulkSuppressCampaigns`, `unsuppressAlert`, `deleteAlert`,
+`liftSuppression`. User-visible mutation latency drops from ~5 s
+to one SwiftUI frame.
+
+Known limitations: pending overlay entries have no TTL (daemon-
+crash edge case bounded by dashboard close/reopen); bulk-suppress
+partial-failure can leak pending entries (rare); cross-workspace
+overlay not shared (Overview's Recent Activity may briefly show
+an alert that's been suppressed on the Alerts tab — bounded by
+the 5 s daemon poll). All documented in `RELEASE_NOTES/v1.12.7.md`.
+
+**Opsec status**: clean. No new schema migrations, no new bundled
+credentials, no new external network paths, no new entitlements,
+no new provisioning profile fields. SwiftUI refresh-binding code
+only. 8 files changed; 5 V2 workspace `.swift` + `V2MockData.swift`
++ 3 docs.
+
 ## [1.12.6] — 2026-05-18
 
 Refinement release. Seven internal waves on top of v1.12.5 hardening
