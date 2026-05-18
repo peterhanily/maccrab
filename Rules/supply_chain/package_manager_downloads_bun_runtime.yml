@@ -1,0 +1,74 @@
+title: Package-Install Lineage Downloads Bun Runtime via curl/wget (Mini Shai-Hulud)
+id: 35514523-7c92-4850-ad7c-c853394fd1e2
+status: experimental
+description: >
+    Detects a curl or wget invocation under a package-manager
+    descendant lineage (npm/npx/pnpm/yarn/pip/uv/poetry/bun/node/
+    python) whose target URL is the canonical Bun release archive on
+    github.com/oven-sh/bun/releases or bun.sh/install. Used as the
+    runtime-fetch half of the Mini Shai-Hulud Bun-pivot pattern (SAP
+    CAP Wave 1, PyTorch Lightning Wave 2, Intercom Wave 3, TanStack
+    CVE-2026-45321 Wave 4 — Feb-May 2026). The worm pulls Bun in
+    order to execute bun_environment.js / setup_bun.js / router_init.js
+    under a non-Node interpreter, escaping Node-based EDR hooks. Pairs
+    with `bun_executes_from_node_modules.yml` (the second half — Bun
+    actually running from /node_modules/) and
+    `package_postinstall_fetches_alt_runtime.yml` (the network-event
+    variant that catches the runtime download by destination host
+    even when no curl/wget intermediary is used).
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://www.stepsecurity.io/blog/mini-shai-hulud-is-back-a-self-spreading-supply-chain-attack-hits-the-npm-ecosystem
+    - https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://socket.dev/blog/pytorch-lightning-npm-supply-chain-2026
+    - https://attack.mitre.org/techniques/T1105/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.command_and_control
+    - attack.t1105
+    - attack.defense_evasion
+    - attack.t1027
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_download_tool:
+        Image|endswith:
+            - '/curl'
+            - '/wget'
+        CommandLine|contains:
+            - 'github.com/oven-sh/bun/releases'
+            - 'bun.sh/install'
+            - 'bun-darwin-x64'
+            - 'bun-darwin-aarch64'
+    selection_package_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/node'
+            - '/python'
+            - '/python3'
+            - '/sh'
+            - '/bash'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'postinstall'
+            - 'preinstall'
+            - 'lifecycle'
+            - 'add'
+    condition: selection_download_tool and selection_package_lineage
+falsepositives:
+    - A legitimate package whose declared build chain genuinely needs Bun and downloads it via curl during install — extremely rare; allowlist by package name once verified
+    - A monorepo bootstrap script run interactively but proxied through an npm-script wrapper whose parent appears to descend from npm
+    - Self-update flows for tools that bundle a Bun snapshot for portability (allowlist by tool path once observed)
+level: critical

@@ -1,0 +1,73 @@
+title: MCP Server Config Modified by Package-Manager Lineage (SANDWORM_MODE / Shai-Hulud)
+id: 11bcfe9e-1837-4c7d-9b67-45291af4638e
+status: experimental
+description: >
+    Detects writes to AI-tool MCP server configuration files (Cursor,
+    Windsurf, Claude Desktop, Claude Code, Continue) by a process whose
+    parent is a package manager (npm/npx/pnpm/yarn/pip/bun/node). The
+    Feb-May 2026 SANDWORM_MODE / Mini Shai-Hulud waves all weaponised
+    this pattern: a compromised postinstall script silently appends a
+    rogue MCP server entry pointing at attacker-controlled stdio so
+    every subsequent AI-tool invocation pipes the developer's prompts
+    and tool outputs to the attacker. Legitimate MCP installs go
+    through `claude mcp add` / `cursor mcp install`, not through a
+    package postinstall hook, so the lineage signal is high.
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://www.stepsecurity.io/blog/mini-shai-hulud-is-back-a-self-spreading-supply-chain-attack-hits-the-npm-ecosystem
+    - https://modelcontextprotocol.io/specification
+    - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+    - https://attack.mitre.org/techniques/T1546/016/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.persistence
+    - attack.t1546
+    - attack.t1546.016
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.defense_evasion
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target:
+        TargetFilename|endswith:
+            - '/.cursor/mcp.json'
+            - '/.windsurf/mcp.json'
+            - '/Library/Application Support/Claude/claude_desktop_config.json'
+            - '/.claude/mcp.json'
+            - '/.claude.json'
+            - '/.continue/config.json'
+            - '/.vscode/mcp.json'
+        FileAction:
+            - 'create'
+            - 'write'
+            - 'close'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/bun'
+            - '/node'
+            - '/python'
+            - '/python3'
+    filter_user_install_via_cli:
+        CommandLine|contains:
+            - 'claude mcp add'
+            - 'cursor mcp'
+            - 'windsurf mcp'
+            - 'continue mcp'
+    condition: selection_target and selection_lineage and not filter_user_install_via_cli
+falsepositives:
+    - A user explicitly running `claude mcp add` or `cursor mcp install` while a node-rooted shell is the descendant — handled by filter_user_install_via_cli, but if the CLI form differs in future releases extend the filter
+    - An AI-tool installer package whose published purpose is to register an MCP server during install — rare; allowlist by package name once observed
+    - Org-managed dotfile sync (chezmoi, yadm) replaying an MCP config snapshot during package-manager-rooted setup
+level: critical

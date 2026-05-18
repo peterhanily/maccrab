@@ -16,7 +16,9 @@ logsource:
 detection:
     selection:
         TargetFilename|contains: '/.ssh/id_'
-    condition: selection
+    filter_xcode_test:
+        ParentImage|endswith: '/swiftpm-testing-helper'
+    condition: selection and not filter_xcode_test
 falsepositives:
     - Git operations that use SSH authentication
     - scp/rsync file transfers

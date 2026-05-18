@@ -152,6 +152,17 @@ public actor EventEnricher {
             ?? SessionEnricher.enrich(pid: proc.pid, ancestors: ancestors.isEmpty ? proc.ancestors : ancestors)
 
         // --- 4. Build enriched ProcessInfo ---
+        // v1.12.6 Wave 9I: resolve uid → user_name when the collector
+        // left it empty. ESHelpers.processFromESProcess sets userName
+        // to "" because the ES framework only exposes audit-token UID;
+        // resolution requires getpwuid(). Pre-9I that resolution never
+        // happened, so 99.8% of events.db rows had user_id populated
+        // but user_name NULL. The dashboard's Wave 9H "User" inspector
+        // row showed empty as a result. Cached per-uid to avoid a
+        // getpwuid syscall per event on a single-user machine.
+        let resolvedUserName = proc.userName.isEmpty
+            ? Self.userNameForUid(proc.userId)
+            : proc.userName
         let enrichedProcess = ProcessInfo(
             pid: proc.pid,
             ppid: proc.ppid,
@@ -162,7 +173,7 @@ public actor EventEnricher {
             args: proc.args,
             workingDirectory: proc.workingDirectory,
             userId: proc.userId,
-            userName: proc.userName,
+            userName: resolvedUserName,
             groupId: proc.groupId,
             startTime: proc.startTime,
             exitCode: proc.exitCode,
@@ -361,5 +372,52 @@ public actor EventEnricher {
     /// Number of processes currently tracked in the lineage graph.
     public func lineageNodeCount() async -> Int {
         await lineage.nodeCount
+    }
+
+    // MARK: - User name resolution (Wave 9I)
+
+    /// Per-uid cache of resolved user names. On a single-user macOS
+    /// workstation almost every event has the same uid, so a tiny
+    /// dictionary collapses the per-event cost to one getpwuid call
+    /// total. Protected by a serial queue rather than the actor's
+    /// executor because callers from `enrich(_:)` are already on the
+    /// actor, but we want the cache to outlive the resolver call
+    /// without forcing more actor hops. Using a class with a lock
+    /// avoids the actor-isolation issue cleanly.
+    private static let userNameCache = UserNameCache()
+
+    fileprivate static func userNameForUid(_ uid: UInt32) -> String {
+        Self.userNameCache.name(for: uid)
+    }
+}
+
+/// Tiny thread-safe uid → name cache backing `EventEnricher`.
+/// Defined at file scope so it doesn't inherit `EventEnricher`'s
+/// actor isolation — calls into it are cheap, lock-protected reads.
+private final class UserNameCache: @unchecked Sendable {
+    private var entries: [UInt32: String] = [:]
+    private let lock = NSLock()
+
+    func name(for uid: UInt32) -> String {
+        lock.lock()
+        if let cached = entries[uid] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        // Resolve via libc. `getpwuid` may return nil for daemon /
+        // service uids that don't have a passwd entry; in that case
+        // store "" so we don't re-syscall on the next event.
+        let resolved: String
+        if let pw = getpwuid(uid_t(uid)) {
+            resolved = String(cString: pw.pointee.pw_name)
+        } else {
+            resolved = ""
+        }
+        lock.lock()
+        entries[uid] = resolved
+        lock.unlock()
+        return resolved
     }
 }

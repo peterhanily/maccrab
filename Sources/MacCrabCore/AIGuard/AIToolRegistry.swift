@@ -17,6 +17,7 @@ public enum AIToolType: String, Codable, Sendable, CaseIterable {
     case copilot = "copilot"
     case continuedev = "continue"
     case windsurf = "windsurf"
+    case kiro = "kiro"
     case unknown = "unknown_ai_tool"
 
     public var displayName: String {
@@ -29,6 +30,7 @@ public enum AIToolType: String, Codable, Sendable, CaseIterable {
         case .copilot: return "GitHub Copilot"
         case .continuedev: return "Continue.dev"
         case .windsurf: return "Windsurf"
+        case .kiro: return "Kiro IDE"
         case .unknown: return "Unknown AI Tool"
         }
     }
@@ -78,15 +80,37 @@ public struct AIToolRegistry: Sendable {
             "copilot-agent",
             "copilot-language-server",
         ]),
-        // Continue.dev
+        // Continue.dev — VS Code / JetBrains plugin; config at
+        // ~/.continue/. Wave 7A.5 added the explicit config-dir path
+        // because the SANDWORM_MODE supply-chain payload targets
+        // Continue's MCP config (~/.continue/config.json).
         (.continuedev, [
             "continue-binary",
             ".continue/",
+            "/.continue/config.json",
         ]),
-        // Windsurf
+        // Windsurf (Codeium) — IDE app + Codeium support dir + plugin
+        // MCP config path. Wave 7A.5 added ~/Library/Application
+        // Support/Codeium/Windsurf/ and ~/.windsurf/mcp.json — both
+        // surfaced as compromise targets by the same SANDWORM_MODE
+        // payload that targets Continue.
         (.windsurf, [
             "Windsurf.app/Contents/",
             "windsurf-helper",
+            "/Library/Application Support/Codeium/Windsurf/",
+            "/.windsurf/",
+            "/Codeium/Windsurf/",
+        ]),
+        // Kiro IDE (Amazon) — agent-based IDE. Wave 7A.5 added because
+        // the node-ipc supply-chain compromise (2025) listed Kiro
+        // settings dirs as a primary target. App lives at
+        // /Applications/Kiro.app and the per-user state lives in
+        // ~/Library/Application Support/Kiro/ + ~/.kiro/.
+        (.kiro, [
+            "Kiro.app/Contents/",
+            "/Library/Application Support/Kiro/",
+            "/.kiro/",
+            "kiro-helper",
         ]),
     ]
 
@@ -141,6 +165,9 @@ public struct AIToolRegistry: Sendable {
             (.openClaw, ["openclaw"]),
             (.cursor, ["cursor"]),
             (.aider, ["aider"]),
+            (.continuedev, ["continue"]),
+            (.windsurf, ["windsurf"]),
+            (.kiro, ["kiro"]),
         ]
         for (tool, patterns) in namePatterns {
             for p in patterns where name == p || name.hasPrefix(p + " ") {

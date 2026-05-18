@@ -177,12 +177,17 @@ public actor FileHasher {
         return !isLocal
     }
 
-    // MARK: - Private hashing
+    // MARK: - Hashing
 
     /// Compute SHA-256 of file contents via streaming 64 KB chunks.
     ///
-    /// Nonisolated: pure I/O + CryptoKit, no actor state touched.
-    nonisolated private static func computeSHA256(path: String) -> String? {
+    /// Nonisolated + public: pure I/O + CryptoKit, no actor state touched.
+    /// Exposed so callers that don't need actor-level LRU caching (e.g.
+    /// `SelfDefense`'s integrity checks, which compute hashes at startup
+    /// and on a 15 s periodic tick) can hash in-process without spawning
+    /// per-file `/usr/bin/shasum` subprocesses. The cached `hash(path:)`
+    /// instance method remains the preferred entry point for enrichment.
+    nonisolated public static func computeSHA256(path: String) -> String? {
         let url = URL(fileURLWithPath: path)
         let handle: FileHandle
         do {

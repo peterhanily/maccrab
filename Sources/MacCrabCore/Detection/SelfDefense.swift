@@ -5,6 +5,7 @@
 // Detects attempts to disable, modify, or interfere with MacCrab's operation.
 
 import Foundation
+import CryptoKit
 import os.log
 import Darwin
 
@@ -771,24 +772,21 @@ public actor SelfDefense {
 
     // MARK: - Hashing
 
-    /// Compute SHA-256 hash of a file using the system shasum tool.
+    /// Compute SHA-256 hash of a file in-process via CryptoKit streaming.
+    ///
+    /// v1.12.6 fix: prior to this version, this method shelled out to
+    /// `/usr/bin/shasum -a 256 <path>`. Because `/usr/bin/shasum` is a
+    /// `#!/usr/bin/perl` script, every call forked + exec'd the perl
+    /// interpreter. On a typical install with 425 compiled rule files,
+    /// `directoryHash()` produced 426 perl subprocesses per call —
+    /// roughly 28 perl spawns/second under the 15 s integrity-check
+    /// cadence (~2.5 M/day per host). Routing through
+    /// `FileHasher.computeSHA256(path:)` keeps the work entirely in
+    /// process, eliminating that subprocess flood while producing a
+    /// byte-identical hex digest.
     private nonisolated static func sha256(fileAt path: String) -> String? {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
-        process.arguments = ["-a", "256", path]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return output.split(separator: " ").first.map(String.init)
-        } catch {
-            return nil
-        }
+        return FileHasher.computeSHA256(path: path)
     }
 
     // MARK: - Self-update detection (v1.12.1 FP fix)
@@ -872,7 +870,27 @@ public actor SelfDefense {
         }
     }
 
-    /// Compute a combined hash of all files in a directory.
+    /// Compute a combined hash of all `.json` files in a directory.
+    ///
+    /// Sort order: alphabetical (`FileManager.contentsOfDirectory` +
+    /// `.sorted()`) — preserved from the pre-v1.12.6 implementation so
+    /// hash output remains stable across the migration.
+    ///
+    /// Combined-hash structure: concatenate per-file SHA-256 hex
+    /// digests (no separators), then SHA-256 the UTF-8 bytes of that
+    /// concatenation. This is byte-identical to the previous
+    /// `shasum -a 256 <tempfile-containing-concat>` path because UTF-8
+    /// of ASCII hex characters is the raw byte sequence — feeding the
+    /// same bytes to the same algorithm produces the same digest.
+    /// Critically important: a hash drift here would fire a one-time
+    /// false-positive `.rulesModified` alert on every existing install
+    /// the first time v1.12.6 runs.
+    ///
+    /// Error handling: fails closed on any unreadable file. Returns
+    /// `nil` rather than partial-coverage hashes that might silently
+    /// drop a file an attacker rendered unreadable. The caller treats
+    /// `nil` as "couldn't verify this tick" (no alert, no baseline
+    /// update); next tick will catch the real state.
     private nonisolated static func directoryHash(at path: String) -> String? {
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: path)
             .filter({ $0.hasSuffix(".json") })
@@ -880,16 +898,21 @@ public actor SelfDefense {
 
         var combined = ""
         for file in files {
-            if let hash = sha256(fileAt: path + "/" + file) {
-                combined += hash
+            guard let hash = sha256(fileAt: path + "/" + file) else {
+                // Fail closed: any unreadable rule file means we
+                // can't produce a trustworthy combined hash this
+                // tick. Return nil so the caller skips alerting +
+                // baseline-update this cycle instead of comparing
+                // against a partial-coverage hash.
+                return nil
             }
+            combined += hash
         }
-        guard !combined.isEmpty else { return nil }
-        // Hash the combined string
-        let tempFile = NSTemporaryDirectory() + "/maccrab_dirhash_\(getpid())"
-        try? combined.write(toFile: tempFile, atomically: true, encoding: .utf8)
-        let result = sha256(fileAt: tempFile)
-        try? FileManager.default.removeItem(atPath: tempFile)
-        return result
+        guard !combined.isEmpty,
+              let combinedBytes = combined.data(using: .utf8) else {
+            return nil
+        }
+        let digest = SHA256.hash(data: combinedBytes)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

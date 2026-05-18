@@ -1,0 +1,44 @@
+title: C2 Connection to sh.azurestaticprovider.net / 37.16.75.69 (Mini Shai-Hulud)
+id: 6b2a0325-1901-48ca-9bbf-c4b45cc0d7ab
+status: experimental
+description: >
+    Detects a DNS resolution or outbound network connection to the
+    literal C2 host `sh.azurestaticprovider.net` (or its parent
+    `azurestaticprovider.net`) or the associated IP `37.16.75.69`.
+    These are the documented C2 indicators for the Mini Shai-Hulud
+    SAP CAP / PyTorch Lightning / Intercom / TanStack waves
+    (Feb-May 2026). The domain typosquats Microsoft Azure Static
+    Web Apps to evade casual review; the IP is the resolution
+    pinned in the Feb-Mar 2026 waves. Any traffic to either is
+    essentially diagnostic — legitimate macOS hosts have no reason
+    to talk to this typosquat domain.
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://www.stepsecurity.io/blog/mini-shai-hulud-is-back-a-self-spreading-supply-chain-attack-hits-the-npm-ecosystem
+    - https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://socket.dev/blog/pytorch-lightning-npm-supply-chain-2026
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://attack.mitre.org/techniques/T1102/
+tags:
+    - attack.command_and_control
+    - attack.t1071.001
+    - attack.t1102
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection_host:
+        DestinationHostname|contains:
+            - 'azurestaticprovider.net'
+    selection_ip:
+        DestinationIp:
+            - '37.16.75.69'
+    condition: selection_host or selection_ip
+falsepositives:
+    - A defender or red-team operator running a controlled replay of the IOC on the monitored host — investigate parent lineage; the alert is the correct outcome
+    - A defender pinning the IP into a local DNS sinkhole for analysis (rare; the network-connection event still fires once the resolution is attempted)
+level: critical

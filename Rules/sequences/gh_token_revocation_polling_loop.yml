@@ -1,0 +1,95 @@
+title: Package-Install Lineage Followed by Sustained api.github.com Polling (TanStack Dead-Man's-Switch)
+id: 14b34c1b-0487-4cdf-b11d-f37a3591c791
+status: experimental
+description: >
+    Detects the dead-man's-switch watchdog signature used by the
+    Mini Shai-Hulud Wave 4 TanStack worm (CVE-2026-45321, May 2026):
+    a Node / Python / bun process spawned under a package-install
+    lineage (npm/npx/pnpm/yarn/pip/uv/poetry parent with an
+    install-shaped commandline), followed by a network connection
+    to api.github.com from the same lineage. The single-event rule
+    `token_revocation_polling_loop.yml` already catches the
+    watchdog by hostname + node-class image, but the cadence half
+    — same process repeatedly hitting api.github.com over >120s —
+    is a sequence-engine job. This rule expresses the
+    install-then-poll *handoff*: any api.github.com hit observed
+    within 180s of a package-install spawn signals a freshly
+    planted watchdog. Pair with `gh_token_monitor_plist_dropped.yml`
+    (the LaunchAgent half) and `dead_mans_switch_literal_scanner.yml`
+    (the PAT literal). Cadence enforcement (the literal "every 60s"
+    polling) remains a v1.13 sequence-engine enhancement once a
+    `count|gte` modifier lands.
+
+type: sequence
+window: 180s
+correlation: process.lineage
+ordered: true
+
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised
+    - https://attack.mitre.org/techniques/T1485/
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://attack.mitre.org/techniques/T1195/001/
+
+tags:
+    - attack.command_and_control
+    - attack.t1071.001
+    - attack.impact
+    - attack.t1485
+    - attack.persistence
+    - attack.initial_access
+    - attack.t1195.001
+
+steps:
+    - id: install_spawn
+      logsource:
+          category: process_creation
+          product: macos
+      detection:
+          selection_runtime:
+              Image|endswith:
+                  - '/node'
+                  - '/bun'
+                  - '/python'
+                  - '/python3'
+                  - '/deno'
+          selection_install_parent:
+              ParentImage|endswith:
+                  - '/npm'
+                  - '/npx'
+                  - '/pnpm'
+                  - '/yarn'
+                  - '/pip'
+                  - '/pip3'
+                  - '/uv'
+                  - '/poetry'
+                  - '/launchd'
+              ParentCommandLine|contains:
+                  - 'install'
+                  - 'add'
+                  - 'postinstall'
+                  - 'preinstall'
+                  - 'gh-token-monitor'
+          condition: selection_runtime and selection_install_parent
+
+    - id: github_api_poll
+      logsource:
+          category: network_connection
+          product: macos
+      detection:
+          selection:
+              DestinationHostname|contains:
+                  - 'api.github.com'
+          condition: selection
+      process: install_spawn.descendant
+
+trigger: all
+falsepositives:
+    - Renovate / dependabot / a GitHub-aware bot that legitimately polls api.github.com under a launchd-spawned schedule and was last spawned during a recent install (rare; the single-event rule's filter for /Renovate / /dependabot already exempts the bot binary, but the sequence rule may still fire on the first poll inside the 180s window)
+    - GitHub Desktop or Tower triggering an authenticated `/user` lookup shortly after the user manually ran `npm install` in a different shell — review the process ancestry to confirm the spawn-then-poll lineage is real
+    - CI runners polling for trigger events that overlap a fresh install — usually descend from /runner / /Runner.Listener; allowlist by lineage
+level: critical

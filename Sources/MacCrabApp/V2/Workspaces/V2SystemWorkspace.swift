@@ -173,6 +173,36 @@ public struct V2SystemWorkspace: View {
                 icon: "memorychip.fill",
                 iconColor: V2Theme.healthy
             )
+            // v1.12.6 Wave 9O: surface Wave-9K operator counters,
+            // but only when non-zero so a normal-running host's
+            // health row isn't cluttered with two extra "0" cards.
+            // payload_truncated_total fires when the EventStore
+            // 64KB raw_json cap clips an oversized event; non-zero
+            // means chatty exec args or large network payloads are
+            // landing on the hot path. eslogger_dropped_total is
+            // ES-buffer sequence gaps — non-zero means the ring
+            // buffer overflowed, which usually requires a daemon
+            // restart or tuning.
+            if let truncated = h?.payloadTruncatedTotal, truncated > 0 {
+                metricCard(
+                    title: "Truncations",
+                    value: fmtCount(truncated),
+                    trend: "64KB cap hits",
+                    trendKind: .warning,
+                    icon: "scissors",
+                    iconColor: V2Theme.warning
+                )
+            }
+            if let dropped = h?.esloggerDroppedTotal, dropped > 0 {
+                metricCard(
+                    title: "ES drops",
+                    value: fmtCount(dropped),
+                    trend: "buffer gaps",
+                    trendKind: .warning,
+                    icon: "exclamationmark.triangle.fill",
+                    iconColor: V2Theme.warning
+                )
+            }
         }
     }
 

@@ -35,6 +35,63 @@ public actor CampaignDetector {
         public let tactics: Set<String>
         public let timeSpanSeconds: Double
         public let detectedAt: Date
+
+        // MARK: - v1.12.6 Wave 2C aggregate attribution
+
+        /// Distinct user IDs across contributing alerts.
+        public let affectedUsers: Set<String>
+
+        /// Distinct process executable paths across contributing alerts.
+        public let affectedExecutables: Set<String>
+
+        /// Earliest contributing alert timestamp.
+        public let firstSeen: Date
+
+        /// Latest contributing alert timestamp.
+        public let lastSeen: Date
+
+        /// Max process-ancestor depth observed across contributing alerts.
+        public let processTreeDepth: Int
+
+        /// Distinct MITRE ATT&CK technique IDs across contributing alerts.
+        public let techniques: Set<String>
+
+        /// Distinct `ai_tool` values (claude_code, cursor, …) involved.
+        /// Empty for non-AI campaigns.
+        public let aiTools: Set<String>
+
+        public init(
+            id: String,
+            type: CampaignType,
+            severity: Severity,
+            title: String,
+            description: String,
+            alerts: [AlertSummary],
+            tactics: Set<String>,
+            timeSpanSeconds: Double,
+            detectedAt: Date
+        ) {
+            self.id = id
+            self.type = type
+            self.severity = severity
+            self.title = title
+            self.description = description
+            self.alerts = alerts
+            self.tactics = tactics
+            self.timeSpanSeconds = timeSpanSeconds
+            self.detectedAt = detectedAt
+
+            // v1.12.6 Wave 2C: compute aggregates from the contributing
+            // alerts at construction time. The detector has them in-memory
+            // here — no cross-DB join needed at persist time.
+            self.affectedUsers = Set(alerts.compactMap { $0.userId })
+            self.affectedExecutables = Set(alerts.compactMap { $0.processPath })
+            self.firstSeen = alerts.map(\.timestamp).min() ?? detectedAt
+            self.lastSeen = alerts.map(\.timestamp).max() ?? detectedAt
+            self.processTreeDepth = alerts.compactMap(\.processTreeDepth).max() ?? 0
+            self.techniques = Set(alerts.flatMap(\.mitreTechniques))
+            self.aiTools = Set(alerts.compactMap(\.aiTool))
+        }
     }
 
     /// The kind of campaign pattern that was detected.
@@ -57,6 +114,26 @@ public actor CampaignDetector {
         public let timestamp: Date
         public let tactics: Set<String>
 
+        // MARK: - v1.12.6 Wave 2C aggregation inputs
+        //
+        // Optional fields populated by the EventLoop when constructing the
+        // summary. Default to empty/nil so existing call sites that don't
+        // supply them keep compiling unchanged. The `Campaign` initializer
+        // aggregates these across the contributing-alert list at persist
+        // time.
+
+        /// MITRE ATT&CK technique IDs from the firing rule (e.g. `["T1059.004"]`).
+        public let mitreTechniques: Set<String>
+
+        /// Originating AI tool (claude_code, cursor, …) if the event was
+        /// attributed to one. `nil` for non-AI alerts.
+        public let aiTool: String?
+
+        /// Depth of the contributing event's process ancestor chain
+        /// (`ancestors.count`). Used to surface the deepest lineage observed
+        /// during a campaign.
+        public let processTreeDepth: Int?
+
         public init(
             ruleId: String,
             ruleTitle: String,
@@ -65,7 +142,10 @@ public actor CampaignDetector {
             pid: Int? = nil,
             userId: String? = nil,
             timestamp: Date = Date(),
-            tactics: Set<String> = []
+            tactics: Set<String> = [],
+            mitreTechniques: Set<String> = [],
+            aiTool: String? = nil,
+            processTreeDepth: Int? = nil
         ) {
             self.ruleId = ruleId
             self.ruleTitle = ruleTitle
@@ -75,6 +155,9 @@ public actor CampaignDetector {
             self.userId = userId
             self.timestamp = timestamp
             self.tactics = tactics
+            self.mitreTechniques = mitreTechniques
+            self.aiTool = aiTool
+            self.processTreeDepth = processTreeDepth
         }
     }
 

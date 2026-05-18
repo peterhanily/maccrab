@@ -16,6 +16,12 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     public let schemaVersion: Int
     public let eventTypeCounts1h: [String: Int]
     public let collectors: [Collector]
+    // v1.12.6 Wave 9O: Wave-9K added these counters to
+    // heartbeat_rich.json but pre-9O the dashboard snapshot didn't
+    // decode them. Wired now so the System workspace can surface
+    // payload-cap-firing rate and ES-collector drop rate.
+    public let payloadTruncatedTotal: Int
+    public let esloggerDroppedTotal: Int
 
     public struct Collector: Sendable, Equatable, Hashable {
         public let name: String
@@ -83,7 +89,14 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             sysextHasFDA: raw["sysext_has_fda"] as? Bool ?? false,
             schemaVersion: raw["schema_version"] as? Int ?? 0,
             eventTypeCounts1h: counts,
-            collectors: collectors
+            collectors: collectors,
+            // Wave 9O: pre-9O these keys were emitted by DaemonTimers
+            // (Wave 9K) but silently dropped here. Default to 0 when
+            // missing so legacy heartbeats from older daemons that
+            // pre-date Wave 9K render as "no truncation, no drops"
+            // rather than crash.
+            payloadTruncatedTotal: raw["payload_truncated_total"] as? Int ?? 0,
+            esloggerDroppedTotal: raw["eslogger_dropped_total"] as? Int ?? 0
         )
     }
 }

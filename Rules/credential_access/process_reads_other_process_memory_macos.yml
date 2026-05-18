@@ -1,0 +1,113 @@
+title: Process Reads Another Process Memory via task_for_pid / mach_vm_read (TanStack OIDC Theft)
+id: 4b889f55-5cca-402d-a717-ae257b5d9ef8
+status: experimental
+description: >
+    Detects a process whose invocation references the Mach memory-read
+    primitives (`task_for_pid`, `mach_vm_read`, `mach_vm_read_overwrite`,
+    `mach_vm_region`, `proc_pidinfo`) used to read another process's
+    address space — the macOS analog of Linux /proc/pid/mem. The
+    Mini Shai-Hulud Wave 4 TanStack worm (CVE-2026-45321, May 2026)
+    used these primitives to read a developer's OIDC token directly
+    from the running gh / aws / git-credential-helper process memory
+    after the user authenticated, sidestepping read-the-cred-file
+    detections. Coexists with `task_for_pid_injection.yml` (the
+    Mach-port-tampering variant) and `securityd_memory_access.yml`
+    (the keychain-daemon variant).
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://developer.apple.com/documentation/kernel/1502472-task_for_pid
+    - https://attack.mitre.org/techniques/T1057/
+    - https://attack.mitre.org/techniques/T1555/005/
+    - https://attack.mitre.org/techniques/T1003/
+tags:
+    - attack.credential_access
+    - attack.t1003
+    - attack.t1555
+    - attack.t1555.005
+    - attack.discovery
+    - attack.t1057
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_mach_memory_api:
+        CommandLine|contains:
+            - 'task_for_pid'
+            - 'mach_vm_read'
+            - 'mach_vm_read_overwrite'
+            - 'mach_vm_region'
+            - 'proc_pidinfo'
+            - 'pid_for_task'
+    filter_debuggers:
+        Image|endswith:
+            - '/lldb'
+            - '/lldb-rpc-server'
+            - '/debugserver'
+            - '/DTServiceHub'
+            - '/Xcode'
+            - '/leaks'
+            - '/heap'
+            - '/sample'
+            - '/vmmap'
+            - '/footprint'
+    filter_apple_signed:
+        SignerType: 'apple'
+    filter_apple_paths:
+        Image|startswith:
+            - '/bin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/usr/sbin/'
+            - '/System/'
+            - '/usr/libexec/'
+    filter_text_tools:
+        Image|endswith:
+            - '/grep'
+            - '/egrep'
+            - '/fgrep'
+            - '/awk'
+            - '/sed'
+            - '/head'
+            - '/tail'
+            - '/cat'
+            - '/less'
+            - '/more'
+            - '/man'
+            - '/find'
+            - '/xargs'
+            - '/cut'
+            - '/sort'
+            - '/uniq'
+            - '/tr'
+            - '/wc'
+            - '/file'
+            - '/strings'
+            - '/echo'
+            - '/printf'
+            - '/jq'
+            - '/yq'
+    filter_shells:
+        Image|endswith:
+            - '/zsh'
+            - '/bash'
+            - '/sh'
+            - '/dash'
+            - '/fish'
+            - '/csh'
+            - '/tcsh'
+    filter_dev_ai_tools:
+        Image|contains:
+            - '/.local/share/claude/'
+            - '/Applications/Cursor.app/'
+            - '/Applications/Visual Studio Code.app/'
+            - '/Applications/Xcode.app/'
+            - '/Applications/Zed.app/'
+    condition: selection_mach_memory_api and not filter_debuggers and not filter_apple_signed and not filter_apple_paths and not filter_text_tools and not filter_shells and not filter_dev_ai_tools
+falsepositives:
+    - Rule depends on ES event subscription for `task_for_pid` / `mach_vm_read` / `proc_pidinfo` which is NOT active in the current build (ESCollector.swift v1.12.6 subscribes only to EXEC/FORK/EXIT/CREATE/WRITE/CLOSE/RENAME/UNLINK/SIGNAL/KEXTLOAD/MMAP/MPROTECT/SETOWNER/SETMODE — verify before tagging stable). Until those events are wired, this rule fires only on processes whose argv mentions the API names as literals (text tools and dev IDEs already filtered), which is a weak signal. Track ES subscription expansion as a v1.13 dependency.
+    - A security researcher reverse-engineering Mach APIs from an interactive shell — investigator parents are usually shell-rooted; investigate process lineage
+    - Apple's own diagnostic tooling (leaks/heap/vmmap/sample) — covered by filter_debuggers, but Apple-signed builds also clear via filter_apple_signed
+level: critical

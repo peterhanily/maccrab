@@ -1,0 +1,56 @@
+title: Compromised node-ipc Version Observed in node_modules (peacenotwar 9.1.6/9.2.3/12.0.1)
+id: 21a8021e-abb7-4791-8d68-eab80a49edb4
+status: experimental
+description: >
+    Detects creation or modification of `/node_modules/node-ipc/package.json`
+    whose FileContent reports one of the three known-compromised
+    version strings: 9.1.6, 9.2.3, or 12.0.1. These versions of the
+    node-ipc package were published as part of the March 2022
+    "peacenotwar" supply-chain protest by maintainer RIAEvangelist
+    and ship a require()-time payload that overwrites filesystem
+    contents on hosts geolocated in Russia or Belarus. The package
+    has never been formally retracted from npm; any developer
+    pinning to an unbounded range that resolves to one of these
+    versions remains vulnerable. The FileContentEnricher already
+    scans .json files under /node_modules/, so the version-pin check
+    fires reliably at install / refresh.
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://snyk.io/blog/peacenotwar-node-ipc-supply-chain-2022
+    - https://www.bleepingcomputer.com/news/security/sabotaged-open-source-node-ipc-package-takes-aim-at-russian-belarusian-devs/
+    - https://github.com/advisories/GHSA-97m3-w2cp-4xx6
+    - https://attack.mitre.org/techniques/T1195/001/
+    - https://attack.mitre.org/techniques/T1485/
+tags:
+    - attack.initial_access
+    - attack.t1195.001
+    - attack.impact
+    - attack.t1485
+    - attack.execution
+    - attack.t1059.007
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_node_ipc_path:
+        TargetFilename|endswith:
+            - '/node_modules/node-ipc/package.json'
+        FileAction:
+            - 'create'
+            - 'close'
+            - 'write'
+    selection_compromised_version:
+        FileContent|contains:
+            - '"version": "9.1.6"'
+            - '"version": "9.2.3"'
+            - '"version": "12.0.1"'
+            - '"version":"9.1.6"'
+            - '"version":"9.2.3"'
+            - '"version":"12.0.1"'
+    condition: selection_node_ipc_path and selection_compromised_version
+falsepositives:
+    - A security researcher intentionally pinning to a compromised version for analysis on the same host (the alert is the correct outcome)
+    - Backup / restore of historical project archives whose committed lockfile referenced one of these versions — review the project's lockfile and pin away from the bad version
+    - Documentation snippets / IOC corpora bundled as a package — extremely rare given the FileContent allowlist gating; investigate the package identity
+level: critical

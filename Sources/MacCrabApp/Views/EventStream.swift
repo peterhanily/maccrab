@@ -705,8 +705,40 @@ private struct EventDetailPanel: View {
                     VStack(alignment: .leading, spacing: 6) {
                         EventDetailRow(label: "Name", value: event.processName)
                         EventDetailRow(label: "PID", value: String(event.pid))
+                        // v1.12.6 Wave 9H: surface Wave-2 schema columns
+                        // (executable, user, working_directory,
+                        // architecture, is_notarized, ai_tool, parent,
+                        // process_sha256). Pre-9H these were populated
+                        // in events.db but never rendered.
+                        if !event.executablePath.isEmpty {
+                            EventDetailRow(label: "Path", value: event.executablePath)
+                        }
                         if !event.signerType.isEmpty {
                             EventDetailRow(label: "Signer", value: event.signerType)
+                        }
+                        if let notarized = event.isNotarized {
+                            EventDetailRow(label: "Notarized", value: notarized ? "Yes" : "No")
+                        }
+                        if !event.architecture.isEmpty {
+                            EventDetailRow(label: "Arch", value: event.architecture)
+                        }
+                        if !event.userName.isEmpty {
+                            EventDetailRow(label: "User", value: event.userName)
+                        }
+                        if !event.workingDirectory.isEmpty {
+                            EventDetailRow(label: "CWD", value: event.workingDirectory)
+                        }
+                        if !event.aiTool.isEmpty {
+                            EventDetailRow(label: "AI tool", value: event.aiTool)
+                        }
+                        if !event.parentName.isEmpty {
+                            EventDetailRow(label: "Parent", value: event.parentName)
+                        }
+                        if !event.parentExecutable.isEmpty {
+                            EventDetailRow(label: "Parent path", value: event.parentExecutable)
+                        }
+                        if !event.processSHA256.isEmpty {
+                            EventDetailRow(label: "SHA-256", value: event.processSHA256)
                         }
                     }.padding(4)
                 }
@@ -755,7 +787,10 @@ private struct EventDetailRow: View {
     let value: String
     var body: some View {
         HStack(alignment: .top) {
-            Text(label).font(.caption).foregroundColor(.secondary).frame(width: 60, alignment: .trailing)
+            // v1.12.6 Wave 9H: widened from 60 → 90 to accommodate
+            // new labels added in this wave: "Notarized", "Parent path",
+            // "SHA-256". 60 truncated those with an ellipsis.
+            Text(label).font(.caption).foregroundColor(.secondary).frame(width: 90, alignment: .trailing)
             Text(value).font(.system(.subheadline, design: .monospaced)).textSelection(.enabled)
         }
     }

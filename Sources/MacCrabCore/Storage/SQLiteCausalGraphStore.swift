@@ -202,11 +202,35 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     // MARK: Lifecycle
 
-    public init(databasePath: String, encryption: DatabaseEncryption? = nil) async throws {
+    /// - Parameters:
+    ///   - databasePath: Filesystem path to `tracegraph.db`.
+    ///   - encryption: Optional encryption layer for `attributes_json` /
+    ///     `evidence_json` payloads.
+    ///   - forceReadOnly: When `true`, open the database with
+    ///     `SQLITE_OPEN_READONLY` and skip migrations / chmod. The
+    ///     dashboard (MacCrabApp/V2LiveDataProvider) sets this to
+    ///     guarantee its long-lived handle never holds shared/upgrade
+    ///     locks that block the daemon's `VACUUM` /
+    ///     `wal_checkpoint(TRUNCATE)`. Field background (v1.12.6 RC1,
+    ///     Wave 9A): `tracegraph.db` grew to 11 GB while the size cap
+    ///     was 300 MB because the daemon's VACUUM was blocked by the
+    ///     dashboard's RW connection. See `EventStore.openDatabase` for
+    ///     the full incident notes.
+    public init(
+        databasePath: String,
+        encryption: DatabaseEncryption? = nil,
+        forceReadOnly: Bool = false
+    ) async throws {
         self.databasePath = databasePath
         self.encryption = encryption
-        try openDatabase()
-        try applyMigrations()
+        try openDatabase(forceReadOnly: forceReadOnly)
+        // Migrations write to the schema (CREATE INDEX, ALTER TABLE). A
+        // RO connection cannot run them — and shouldn't need to: the
+        // daemon's RW connection has already applied the migrations
+        // before the dashboard's RO open ever happens.
+        if !forceReadOnly {
+            try applyMigrations()
+        }
     }
 
     deinit {
@@ -229,7 +253,7 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         }
     }
 
-    private func openDatabase() throws {
+    private func openDatabase(forceReadOnly: Bool = false) throws {
         try Self.rejectIfSymlink(databasePath)
         try Self.rejectIfSymlink(databasePath + "-wal")
         try Self.rejectIfSymlink(databasePath + "-shm")
@@ -240,11 +264,23 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         // dashboard runs as the admin-group user and needs write
         // access to mutate. 0o640 (the historical default) breaks any
         // future trace mutation flow with "database is read only".
-        let oldUmask = umask(0o007)
+        //
+        // When forceReadOnly == true the dashboard is the caller: it
+        // never creates new files (no CREATE flag) and never chmods —
+        // the daemon owns the file and the dashboard has no business
+        // touching its mode bits.
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        let rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
-        umask(oldUmask)
+        let flags: Int32
+        let rc: Int32
+        if forceReadOnly {
+            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
+        } else {
+            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+            let oldUmask = umask(0o007)
+            rc = sqlite3_open_v2(databasePath, &handle, flags, nil)
+            umask(oldUmask)
+        }
         guard rc == SQLITE_OK, let openedHandle = handle else {
             let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             if let handle { sqlite3_close(handle) }
@@ -252,20 +288,38 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         }
         self.db = openedHandle
         // Re-clamp existing files from prior installs that were created
-        // under the older 0o640 default.
-        chmod(databasePath, 0o660)
-        chmod(databasePath + "-wal", 0o660)
-        chmod(databasePath + "-shm", 0o660)
+        // under the older 0o640 default. Skip when forceReadOnly — see
+        // umask block above.
+        if !forceReadOnly {
+            chmod(databasePath, 0o660)
+            chmod(databasePath + "-wal", 0o660)
+            chmod(databasePath + "-shm", 0o660)
+        }
 
         // Per-connection pragmas: smaller than EventStore (graph data is
         // moderate volume), larger than alerts (recursive walks are
         // common). Roughly midway: 16 MB cache, 64 MB mmap.
-        sqlite3_exec(openedHandle, "PRAGMA journal_mode = WAL", nil, nil, nil)
-        sqlite3_exec(openedHandle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
+        //
+        // journal_mode = WAL is the only pragma that touches the file
+        // (it changes the journaling format) — skip it on a RO handle
+        // since the daemon already set the file's mode. The remaining
+        // pragmas are per-connection state and are safe to apply
+        // either way.
+        // Wave 9B.1 (v1.12.6 RC2): auto_vacuum MUST come BEFORE journal_mode
+        // — SQLite silently refuses to flip auto_vacuum after the WAL setup
+        // dirties the DB header. Pre-9B.1 tracegraph.db never set
+        // auto_vacuum, so it stayed in mode 0 (NONE) and incrementalVacuum
+        // was a no-op. Field-confirmed bug: tracegraph.db at 11 GB in
+        // mode 0 on a v1.12.6 RC1 user machine.
+        if !forceReadOnly {
+            sqlite3_exec(openedHandle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
+            sqlite3_exec(openedHandle, "PRAGMA journal_mode = WAL", nil, nil, nil)
+            sqlite3_exec(openedHandle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
+            sqlite3_exec(openedHandle, "PRAGMA wal_autocheckpoint = 1000", nil, nil, nil)
+        }
         sqlite3_exec(openedHandle, "PRAGMA cache_size = -16000", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA mmap_size = 67108864", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA temp_store = MEMORY", nil, nil, nil)
-        sqlite3_exec(openedHandle, "PRAGMA wal_autocheckpoint = 1000", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA busy_timeout = 5000", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA foreign_keys = ON", nil, nil, nil)
     }
@@ -1116,6 +1170,75 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     public func databaseSizeBytes() -> Int64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: databasePath)
         return (attrs?[.size] as? Int64) ?? 0
+    }
+
+    // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
+    //
+    // KNOWN GAP: tracegraph.db does NOT set `auto_vacuum = INCREMENTAL`
+    // on fresh DBs (see openDatabase — only journal_mode, cache, mmap,
+    // wal_autocheckpoint, busy_timeout, foreign_keys are set). Field-
+    // observed: tracegraph.db is the WORST offender of the four
+    // stores, hitting 11 GB on a daily-Claude-Code dev box before any
+    // Wave 9B mitigation. The runtime helper detects mode 0 and
+    // short-circuits to a no-op so this method is harmless on
+    // existing files but does nothing useful either.
+    //
+    // For new INCREMENTAL-mode DBs (post-v1.13 conversion) this will
+    // reclaim freelist pages in place exactly like EventStore. Until
+    // then operators must run `maccrabctl maintenance vacuum
+    // tracegraph` to convert.
+    @discardableResult
+    public func incrementalVacuum(maxPages: Int) async throws -> Int {
+        guard let db = db else { return 0 }
+        let result = try StoragePragmas.runIncrementalVacuum(on: db, maxPages: maxPages)
+        return result.pagesReclaimed
+    }
+
+    /// Best-effort VACUUM. On a 11 GB tracegraph.db this is the only
+    /// path that actually shrinks the file today (mode-0 auto_vacuum
+    /// means incremental_vacuum is a no-op) — and VACUUM needs
+    /// ~= DB-size of scratch space, which is exactly the low-disk
+    /// problem Wave 9B exists to work around. The size-cap caller
+    /// pre-flights free space and skips this when too tight.
+    public func vacuum() async throws {
+        guard let db = db else { return }
+        let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw CausalGraphStoreError.stepFailed("VACUUM failed: \(msg)")
+        }
+    }
+
+    /// PASSIVE→RESTART checkpoint chain. Drains the WAL so on-disk
+    /// footprint measurements include WAL content.
+    @discardableResult
+    public func walCheckpoint() async -> Bool {
+        guard let db = db else { return false }
+        var passiveLog: Int32 = 0
+        var passiveCkpt: Int32 = 0
+        let rcPassive = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_PASSIVE),
+            &passiveLog, &passiveCkpt
+        )
+        if rcPassive == SQLITE_OK, passiveLog == passiveCkpt { return true }
+
+        var restartLog: Int32 = 0
+        var restartCkpt: Int32 = 0
+        let rcRestart = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_RESTART),
+            &restartLog, &restartCkpt
+        )
+        return rcRestart == SQLITE_OK && restartLog == restartCkpt
+    }
+
+    /// Read the file's current `auto_vacuum` mode. Used by callers
+    /// (DaemonTimers) to log the gap when this DB is not in
+    /// INCREMENTAL mode (mode 2).
+    public func autoVacuumMode() async -> Int {
+        guard let db = db else { return 0 }
+        return Int(StoragePragmas.readAutoVacuumMode(db))
     }
 
     /// Total trace row count.

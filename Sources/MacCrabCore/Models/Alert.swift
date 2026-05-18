@@ -74,6 +74,47 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
     /// Structured LLM investigation output (populated in Phase 4).
     public var llmInvestigation: LLMInvestigation?
 
+    // MARK: Attribution promotion (schema v5, v1.12.6 Wave 2B)
+    //
+    // Pre-v5 these lived in raw_json on the *event* (or in `hostContext`
+    // for hostName). Promoting them to indexed Alert columns lets the
+    // dashboard pivot views ("show me alerts for ai_tool=claude_code on
+    // user=alice over the last 7d") run without scanning every alert's
+    // JSON blob or joining to events.db. All Optional so:
+    //  - existing Codable JSON rows keep deserializing
+    //  - pre-v5 alert rows decode with nil
+    //  - call sites that don't have the data leave the field nil and
+    //    AlertStore writes NULL
+    //
+    // Populated centrally by AlertSink from the triggering Event so the
+    // chokepoint invariant (Pass 2 of pre-release-audit) is preserved.
+
+    /// Numeric user ID of the process that triggered the alert.
+    public let userId: UInt32?
+
+    /// User name of the process owner (e.g. `"alice"`).
+    public let userName: String?
+
+    /// Working directory of the triggering process at event time.
+    public let workingDirectory: String?
+
+    /// AI coding tool attribution (e.g. `"claude_code"`, `"cursor"`).
+    /// Pulled from `Event.enrichments["ai_tool"]` or `["agent_tool"]`.
+    public let aiTool: String?
+
+    /// Full executable path of the direct parent process.
+    /// Pulled from `event.process.ancestors.first?.executable`.
+    public let parentExecutable: String?
+
+    /// SHA-256 of the triggering process executable on disk.
+    /// Pulled from `event.process.hashes?.sha256`.
+    public let processSha256: String?
+
+    /// Host name where the alert was generated. Internal storage uses
+    /// the real hostname (`Foundation.ProcessInfo.processInfo.hostName`);
+    /// outbound webhook/syslog redact this separately for privacy.
+    public let hostName: String?
+
     // MARK: Initializer
 
     public init(
@@ -94,7 +135,14 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         analyst: AnalystMetadata? = nil,
         d3fendTechniques: [String]? = nil,
         remediationHint: String? = nil,
-        llmInvestigation: LLMInvestigation? = nil
+        llmInvestigation: LLMInvestigation? = nil,
+        userId: UInt32? = nil,
+        userName: String? = nil,
+        workingDirectory: String? = nil,
+        aiTool: String? = nil,
+        parentExecutable: String? = nil,
+        processSha256: String? = nil,
+        hostName: String? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -114,6 +162,13 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         self.d3fendTechniques = d3fendTechniques
         self.remediationHint = remediationHint
         self.llmInvestigation = llmInvestigation
+        self.userId = userId
+        self.userName = userName
+        self.workingDirectory = workingDirectory
+        self.aiTool = aiTool
+        self.parentExecutable = parentExecutable
+        self.processSha256 = processSha256
+        self.hostName = hostName
     }
 }
 

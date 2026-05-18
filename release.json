@@ -1,16 +1,16 @@
 {
-  "version": "1.12.5",
-  "release_date": "2026-05-17T08:25:06Z",
-  "rules": 469,
-  "tests": 1491,
-  "test_suites": 284,
+  "version": "1.12.6",
+  "release_date": "2026-05-18T14:55:21Z",
+  "rules": 481,
+  "tests": 1637,
+  "test_suites": 303,
   "dmg": {
-    "filename": "MacCrab-v1.12.5.dmg",
-    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.12.5/MacCrab-v1.12.5.dmg",
-    "sha256": "cda5ecb7a62c57198ff20a977611ee5ae991cd9492167e2e3758b21cfdef252f",
-    "size_bytes": 69088499
+    "filename": "MacCrab-v1.12.6.dmg",
+    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.12.6/MacCrab-v1.12.6.dmg",
+    "sha256": "db99df513642a077bd34dbfa476affbd1dcfcca1a3f202e4ecf0b64eab741673",
+    "size_bytes": 69583192
   },
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.12.5",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.12.6",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0"
 }

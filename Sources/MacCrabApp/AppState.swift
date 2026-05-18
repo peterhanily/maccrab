@@ -1102,11 +1102,21 @@ final class AppState: ObservableObject {
             fileName: "events.db",
             defaultDir: dataDir
         )
+        // Wave 9A.1 (v1.12.6 RC2): dashboard opens both stores read-only.
+        // Mutation paths (suppress / unsuppress / delete) route through
+        // the inbox file-IPC channel per v1.10.1; the direct
+        // store.suppress/unsuppress/prune calls below have always been
+        // marked "Best-effort DB write (fails silently on read-only DB)"
+        // in their existing comments. Pre-9A.1 the RW open held shared+
+        // upgrade locks on events.db/alerts.db that blocked the sysext's
+        // VACUUM (field-confirmed via lsof showing two RW fds on the
+        // dashboard process). Same fix shape as the v1.6.22 perf-audit-
+        // pattern lesson, re-applied here.
         async let alertResult: AlertStore? = Task.detached(priority: .userInitiated) {
-            try? AlertStore(directory: alertDir)
+            try? AlertStore(directory: alertDir, forceReadOnly: true)
         }.value
         async let eventResult: EventStore? = Task.detached(priority: .userInitiated) {
-            try? EventStore(directory: eventDir)
+            try? EventStore(directory: eventDir, forceReadOnly: true)
         }.value
         let (alert, event) = await (alertResult, eventResult)
         if let store = alert {
@@ -1189,7 +1199,8 @@ final class AppState: ObservableObject {
         if let store = cachedAlertStore, cachedAlertStorePath == chosen {
             return store
         }
-        let store = try AlertStore(directory: chosen)
+        // Wave 9A.1 (v1.12.6 RC2): dashboard alert store is read-only.
+        let store = try AlertStore(directory: chosen, forceReadOnly: true)
         cachedAlertStore = store
         cachedAlertStorePath = chosen
         return store
@@ -1229,7 +1240,8 @@ final class AppState: ObservableObject {
         if let store = cachedEventStore, cachedEventStorePath == chosen {
             return store
         }
-        let store = try EventStore(directory: chosen)
+        // Wave 9A.1 (v1.12.6 RC2): dashboard event store is read-only.
+        let store = try EventStore(directory: chosen, forceReadOnly: true)
         cachedEventStore = store
         cachedEventStorePath = chosen
         return store
@@ -2524,6 +2536,15 @@ final class AppState: ObservableObject {
             detail = e.process.executable
         }
 
+        // v1.12.6 Wave 9H: surface Wave-2 schema additions in the
+        // detail pane. ai_tool reads `ai_tool` first then `agent_tool`
+        // (Wave 9C's enrichment-key writer fallback) so we display
+        // whichever key the producing path chose. is_notarized is
+        // optional — codeSignature may be nil (e.g. ad-hoc / unsigned
+        // bin); only show it when we have signature info.
+        let parent = e.process.ancestors.first
+        let aiToolValue = e.enrichments["ai_tool"]
+            ?? e.enrichments["agent_tool"] ?? ""
         return EventViewModel(
             id: e.id,
             timestamp: e.timestamp,
@@ -2532,7 +2553,16 @@ final class AppState: ObservableObject {
             processName: e.process.name,
             pid: e.process.pid,
             detail: detail,
-            signerType: e.process.codeSignature?.signerType.rawValue ?? ""
+            signerType: e.process.codeSignature?.signerType.rawValue ?? "",
+            executablePath: e.process.executable,
+            userName: e.process.userName,
+            workingDirectory: e.process.workingDirectory,
+            architecture: e.process.architecture ?? "",
+            isNotarized: e.process.codeSignature.map { $0.isNotarized },
+            aiTool: aiToolValue,
+            parentName: parent?.name ?? "",
+            parentExecutable: parent?.executable ?? "",
+            processSHA256: e.process.hashes?.sha256 ?? ""
         )
     }
 

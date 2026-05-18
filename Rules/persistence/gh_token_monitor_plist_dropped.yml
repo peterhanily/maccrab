@@ -1,0 +1,48 @@
+title: TanStack gh-token-monitor LaunchAgent Plist Dropped (Dead-Man's-Switch Watchdog)
+id: aafe2840-0def-48b4-a9d4-36e61023ea87
+status: experimental
+description: >
+    Detects creation of the specific LaunchAgent plist
+    `com.user.gh-token-monitor.plist` under `~/Library/LaunchAgents/`
+    or `/Library/LaunchAgents/`. This filename is the literal IOC
+    documented in the Mini Shai-Hulud Wave 4 TanStack compromise
+    (CVE-2026-45321, May 2026): the worm registers a node-rooted
+    background watcher that polls `api.github.com/user` carrying a
+    stolen PAT, and `rm -rf $HOME` fires if the token is revoked
+    (the dead-man's-switch). The plist filename is so specific that
+    its appearance under LaunchAgents is essentially diagnostic. Pair
+    with `token_revocation_polling_loop.yml` (the network half) and
+    `dead_mans_switch_literal_scanner.yml` (the PAT-description
+    literal).
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://attack.mitre.org/techniques/T1543/001/
+    - https://attack.mitre.org/techniques/T1485/
+tags:
+    - attack.persistence
+    - attack.t1543.001
+    - attack.impact
+    - attack.t1485
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_plist:
+        TargetFilename|endswith:
+            - '/Library/LaunchAgents/com.user.gh-token-monitor.plist'
+            - '/Library/LaunchDaemons/com.user.gh-token-monitor.plist'
+        FileAction:
+            - 'create'
+            - 'close'
+            - 'write'
+    condition: selection_plist
+falsepositives:
+    - A defender or red-team operator deploying a same-named honeyfile to study attacker reuse of the literal — extremely rare; the alert is the correct outcome
+    - A user manually copying the IOC plist for forensic analysis on the monitored host (review process lineage; investigator handlers should be allowlisted by parent image)
+level: critical

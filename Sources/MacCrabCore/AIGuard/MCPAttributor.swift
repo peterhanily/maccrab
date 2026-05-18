@@ -323,6 +323,7 @@ public actor MCPAttributor {
         case .continuedev:           return "continue"
         case .windsurf:              return "windsurf"
         case .copilot:               return "vscode"
+        case .kiro:                  return "kiro"
         case .codex, .aider, .unknown: return tool.rawValue
         }
     }

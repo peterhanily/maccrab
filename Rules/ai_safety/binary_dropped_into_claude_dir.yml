@@ -1,0 +1,93 @@
+title: Executable Dropped Into .claude/ Subdirectory (SessionStart Hijack)
+id: 690711f9-8a8d-49e4-9124-0710e7d26398
+status: experimental
+description: >
+    Detects creation of an executable-looking file (basename has no
+    extension, or has a script / Mach-O extension) under a Claude Code
+    workspace directory (`.claude/scripts/`, `.claude/hooks/`,
+    `.claude/agents/`, `.claude/skills/`, `.claude/commands/`) by a
+    non-Anthropic process. The SafeDep SessionStart-hijack pattern
+    (May 2026) plants a hook script that the Claude Code CLI silently
+    runs on every session start; once dropped, the attacker has
+    persistent code execution inside the developer's agent context.
+    The FileContentEnricher does not currently scan `.claude/` paths
+    so file-magic verification is not available — this rule keys off
+    path + extension + writer lineage. Pairs with
+    `claude_settings_hook_injection_by_non_claude.yml` (which catches
+    the settings.json half) and `skill_md_poisoning_install.yml`
+    (which catches the SKILL.md half).
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://safedep.io/blog/claude-code-session-start-hijack-2026
+    - https://thehackernews.com/2026/05/mini-shai-hulud-worm-compromises.html
+    - https://attack.mitre.org/techniques/T1564/001/
+    - https://attack.mitre.org/techniques/T1546/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1564.001
+    - attack.persistence
+    - attack.t1546
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_target_path:
+        TargetFilename|contains:
+            - '/.claude/scripts/'
+            - '/.claude/hooks/'
+            - '/.claude/agents/'
+            - '/.claude/commands/'
+            - '/.claude/skills/'
+            - '/.claude/bin/'
+        FileAction:
+            - 'create'
+            - 'close'
+    selection_executable_shape:
+        TargetFilename|endswith:
+            - '.sh'
+            - '.bash'
+            - '.zsh'
+            - '.command'
+            - '.py'
+            - '.js'
+            - '.mjs'
+            - '.cjs'
+            - '.ts'
+            - '.rb'
+            - '.pl'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/bun'
+            - '/node'
+            - '/python'
+            - '/python3'
+    filter_claude_writers:
+        Image|endswith:
+            - '/claude'
+            - '/claude-code'
+    filter_known_editors:
+        Image|endswith:
+            - '/vim'
+            - '/nvim'
+            - '/code'
+            - '/cursor'
+            - '/zed'
+            - '/emacs'
+    condition: selection_target_path and selection_executable_shape and selection_lineage and not filter_claude_writers and not filter_known_editors
+falsepositives:
+    - Anthropic's CLI legitimately installing built-in skills / commands during a `claude mcp add` flow; filter_claude_writers covers the `/claude` writer
+    - A trusted dotfile manager (chezmoi, yadm, stow) syncing project-tracked `.claude/commands/*.sh` into place — these descend from the dotfile-manager binary, not from a package manager, so they won't satisfy selection_lineage
+    - A user running `npx some-claude-skill-installer` intentionally to install community skills — review the package provenance; allowlist via project boundary if trusted
+level: critical

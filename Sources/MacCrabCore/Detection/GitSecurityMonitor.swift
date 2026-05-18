@@ -92,6 +92,16 @@ public actor GitSecurityMonitor {
         // 4. .gitconfig modification by non-git process
         if let filePath = filePath,
            filePath.hasSuffix("/.gitconfig") || filePath.hasSuffix("/.git/config") {
+            // v1.12.6: filter SwiftPM / Xcode / DerivedData checkouts. SwiftPM's
+            // dependency resolver writes .git/config into vendored package dirs
+            // (.build/checkouts/, .swiftpm/, DerivedData/) during builds. Those
+            // are not user gitconfigs and not tamper signals.
+            let isVendoredCheckout = filePath.contains("/.build/checkouts/")
+                || filePath.contains("/.swiftpm/")
+                || filePath.contains("/DerivedData/")
+            if isVendoredCheckout {
+                return nil
+            }
             if !path.hasSuffix("/git") && !path.hasSuffix("/git-config") {
                 return GitSecurityEvent(
                     type: .gitConfigModified,

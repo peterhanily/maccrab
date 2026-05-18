@@ -36,6 +36,44 @@ struct AIToolRegistryTests {
         #expect(registry.isAITool(executablePath: "/Applications/Cursor.app/Contents/MacOS/Cursor") == .cursor)
     }
 
+    @Test("Detects Continue.dev via config dir + name (Wave 7A.5)")
+    func detectContinue() {
+        let registry = AIToolRegistry()
+        // App / binary-style paths
+        #expect(registry.isAITool(executablePath: "/Users/user/.continue/continue-binary") == .continuedev)
+        // Explicit MCP config path (SANDWORM_MODE compromise target)
+        #expect(registry.isAITool(executablePath: "/Users/user/.continue/config.json") == .continuedev)
+        // Process-name lookup
+        #expect(registry.isAIToolByName("continue") == .continuedev)
+    }
+
+    @Test("Detects Windsurf via Codeium support dir + MCP config (Wave 7A.5)")
+    func detectWindsurf() {
+        let registry = AIToolRegistry()
+        // The Codeium-branded support dir is the SANDWORM_MODE target
+        #expect(registry.isAITool(
+            executablePath: "/Users/user/Library/Application Support/Codeium/Windsurf/extensions"
+        ) == .windsurf)
+        // The dotfile-style MCP config path
+        #expect(registry.isAITool(executablePath: "/Users/user/.windsurf/mcp.json") == .windsurf)
+        // The .app path is preserved from the pre-existing pattern
+        #expect(registry.isAITool(executablePath: "/Applications/Windsurf.app/Contents/MacOS/Windsurf") == .windsurf)
+        #expect(registry.isAIToolByName("windsurf") == .windsurf)
+    }
+
+    @Test("Detects Kiro IDE via app + ~/.kiro + ~/Library/Application Support/Kiro (Wave 7A.5)")
+    func detectKiro() {
+        let registry = AIToolRegistry()
+        // Amazon Kiro .app bundle
+        #expect(registry.isAITool(executablePath: "/Applications/Kiro.app/Contents/MacOS/Kiro") == .kiro)
+        // node-ipc compromise target dirs
+        #expect(registry.isAITool(
+            executablePath: "/Users/user/Library/Application Support/Kiro/settings"
+        ) == .kiro)
+        #expect(registry.isAITool(executablePath: "/Users/user/.kiro/cache") == .kiro)
+        #expect(registry.isAIToolByName("kiro") == .kiro)
+    }
+
     @Test("Does NOT flag regular binaries as AI tools")
     func noFalsePositives() {
         let registry = AIToolRegistry()
@@ -187,6 +225,56 @@ struct ProjectBoundaryTests {
             aiToolName: "Claude Code"
         )
         #expect(violation == nil, "No boundary registered = no violation")
+    }
+
+    @Test("registerBoundary rejects filesystem root")
+    func rejectsFilesystemRoot() async {
+        let boundary = ProjectBoundary()
+        let accepted = await boundary.registerBoundary(aiPid: 100, projectDir: "/")
+        #expect(accepted == false, "A boundary at / would flag every write as outside")
+
+        // And no violation should be emitted for subsequent writes — the
+        // boundary was never recorded, so checkWrite returns nil for the
+        // "no boundary registered" branch.
+        let violation = await boundary.checkWrite(
+            filePath: "/Users/u/anywhere",
+            aiSessionPid: 100,
+            aiToolName: "Claude Code"
+        )
+        #expect(violation == nil, "Rejected boundary must not produce violations")
+    }
+
+    @Test("registerBoundary rejects empty projectDir")
+    func rejectsEmpty() async {
+        let boundary = ProjectBoundary()
+        #expect(await boundary.registerBoundary(aiPid: 100, projectDir: "") == false)
+        #expect(await boundary.registerBoundary(aiPid: 101, projectDir: "   ") == false)
+        #expect(await boundary.registerBoundary(aiPid: 102, projectDir: "\t\n") == false)
+    }
+
+    @Test("registerBoundary accepts a normal project path")
+    func acceptsValidPath() async {
+        let boundary = ProjectBoundary()
+        let accepted = await boundary.registerBoundary(
+            aiPid: 100,
+            projectDir: "/Users/user/Projects/myapp"
+        )
+        #expect(accepted == true, "A normal user project path must be accepted")
+    }
+
+    @Test("Writes to /dev/null are not flagged as boundary violations")
+    func devNullAllowed() async {
+        let boundary = ProjectBoundary()
+        await boundary.registerBoundary(aiPid: 100, projectDir: "/Users/user/Projects/myapp")
+
+        for path in ["/dev/null", "/dev/urandom", "/dev/random", "/dev/zero"] {
+            let violation = await boundary.checkWrite(
+                filePath: path,
+                aiSessionPid: 100,
+                aiToolName: "Claude Code"
+            )
+            #expect(violation == nil, "\(path) is a legitimate device sink, not a boundary violation")
+        }
     }
 }
 

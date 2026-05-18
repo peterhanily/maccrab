@@ -17,12 +17,18 @@ public enum AlertStoreError: Error, LocalizedError {
     case databaseOpenFailed(String)
     case prepareFailed(String)
     case stepFailed(String)
+    /// v1.12.6 Wave 9N: distinguish SQLITE_FULL from generic step
+    /// failures so callers can stop retrying immediately on a
+    /// disk-pressured host instead of hammering the busted insert.
+    /// Mirrors EventStore.diskFull (added in v1.12.0 RC28).
+    case diskFull(String)
 
     public var errorDescription: String? {
         switch self {
         case .databaseOpenFailed(let msg):  return "Database open failed: \(msg)"
         case .prepareFailed(let msg):       return "Prepare failed: \(msg)"
         case .stepFailed(let msg):          return "Step failed: \(msg)"
+        case .diskFull(let msg):            return "Disk full: \(msg)"
         }
     }
 }
@@ -54,9 +60,21 @@ public enum AlertStoreError: Error, LocalizedError {
 /// | `mitre_techniques`        | TEXT?   | Comma-separated ATT&CK technique IDs               |
 /// | `suppressed`              | INTEGER | 0 = visible, 1 = hidden by user (default 0)        |
 /// | `llm_investigation_json`  | TEXT?   | Phase-4 agentic triage (v2 migration)              |
+/// | `d3fend_techniques`       | TEXT?   | CSV of D3FEND defensive technique IDs (v3)         |
+/// | `remediation_hint`        | TEXT?   | First-line remediation guidance (v3)               |
+/// | `analyst_metadata_json`   | TEXT?   | SOC analyst workflow blob (v3)                     |
+/// | `campaign_id`             | TEXT?   | Owning CampaignDetector grouping (v4)              |
+/// | `user_id`                 | INTEGER?| UID of triggering process (v5, v1.12.6 Wave 2B)    |
+/// | `user_name`               | TEXT?   | Username of triggering process owner (v5)          |
+/// | `working_directory`       | TEXT?   | Triggering process CWD at event time (v5)          |
+/// | `ai_tool`                 | TEXT?   | AI tool attribution (claude_code/cursor/...) (v5)  |
+/// | `parent_executable`       | TEXT?   | First ancestor executable path (v5)                |
+/// | `process_sha256`          | TEXT?   | SHA-256 of triggering process executable (v5)      |
+/// | `host_name`               | TEXT?   | Host where alert was generated (v5)                |
 ///
 /// Indexes cover the common query patterns: time-range, rule, severity,
-/// and the composite triage path `(timestamp, severity, suppressed)`.
+/// the composite triage path `(timestamp, severity, suppressed)`, plus
+/// v5 attribution pivots `user_id` and `(ai_tool, timestamp)`.
 ///
 /// ## Concurrency
 ///
@@ -146,6 +164,38 @@ public actor AlertStore {
                 "CREATE INDEX IF NOT EXISTS idx_alerts_campaign_id ON alerts(campaign_id)",
             ]
         ),
+        // v5 (v1.12.6 Wave 2B): promote attribution fields from raw_json
+        // / cross-DB join to indexed columns on the alert row itself.
+        // Pre-v5 the dashboard "who/where/which AI?" pivots either had
+        // to JOIN alerts.db → events.db on event_id (cross-DB join, no
+        // FK enforcement, breaks when events drop out of the 24h hot
+        // tier) or json_extract the LLM investigation blob. Both are
+        // O(table-scan) and fail post-eviction.
+        //
+        // Source of truth: AlertSink populates these directly from the
+        // triggering Event before insertion — single chokepoint, no
+        // second insertion path introduced (preserves Pass 2 of
+        // pre-release-audit.sh).
+        //
+        // Indexes:
+        //   - idx_alerts_user_id: per-user alert lookups in fleet view.
+        //   - idx_alerts_ai_tool_ts: AI-Guard timeline pivots
+        //     ("show me alerts for ai_tool=claude_code last 7d").
+        Migration(
+            version: 5,
+            name: "add_attribution_columns",
+            sql: [
+                "ALTER TABLE alerts ADD COLUMN user_id INTEGER",
+                "ALTER TABLE alerts ADD COLUMN user_name TEXT",
+                "ALTER TABLE alerts ADD COLUMN working_directory TEXT",
+                "ALTER TABLE alerts ADD COLUMN ai_tool TEXT",
+                "ALTER TABLE alerts ADD COLUMN parent_executable TEXT",
+                "ALTER TABLE alerts ADD COLUMN process_sha256 TEXT",
+                "ALTER TABLE alerts ADD COLUMN host_name TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_alerts_ai_tool_ts ON alerts(ai_tool, timestamp)",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -163,7 +213,14 @@ public actor AlertStore {
 
     /// Opens a SQLite database, creates schema, and prepares statements before
     /// actor isolation begins. Returns all handles so init can assign directly.
-    private static func openDatabase(at path: String) throws -> (OpaquePointer, Bool, OpaquePointer?) {
+    ///
+    /// - Parameter forceReadOnly: When `true`, open with
+    ///   `SQLITE_OPEN_READONLY` and skip the RW attempt. The dashboard
+    ///   (MacCrabApp/V2LiveDataProvider) uses this to keep its long-lived
+    ///   handle from holding shared/upgrade locks that would block the
+    ///   daemon's `VACUUM` / `wal_checkpoint(TRUNCATE)`. See
+    ///   `EventStore.openDatabase` for the v1.12.6 Wave 9A field background.
+    private static func openDatabase(at path: String, forceReadOnly: Bool = false) throws -> (OpaquePointer, Bool, OpaquePointer?) {
         // Reject symlinks on the DB path and its WAL/SHM/journal sidecars.
         // `sqlite3_open_v2` follows symlinks, so a privileged attacker who can
         // swap the DB file for a symlink could redirect writes to an arbitrary
@@ -175,14 +232,22 @@ public actor AlertStore {
 
         var db: OpaquePointer?
         var isReadOnly = false
-        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        var rc = sqlite3_open_v2(path, &db, flags, nil)
-        if rc != SQLITE_OK {
-            if let handle = db { sqlite3_close(handle) }
-            db = nil
+        var flags: Int32
+        var rc: Int32
+        if forceReadOnly {
             flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
             rc = sqlite3_open_v2(path, &db, flags, nil)
             isReadOnly = true
+        } else {
+            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+            rc = sqlite3_open_v2(path, &db, flags, nil)
+            if rc != SQLITE_OK {
+                if let handle = db { sqlite3_close(handle) }
+                db = nil
+                flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+                rc = sqlite3_open_v2(path, &db, flags, nil)
+                isReadOnly = true
+            }
         }
         guard rc == SQLITE_OK, let handle = db else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
@@ -200,7 +265,11 @@ public actor AlertStore {
         Self.exec(handle, "PRAGMA busy_timeout = 5000")
         Self.exec(handle, "PRAGMA foreign_keys = ON")
 
-        // Create schema
+        // Create schema. The CREATE TABLE statement reflects the *latest*
+        // schema (v5 attribution columns inline) so a fresh install lands
+        // with the full column set without needing the ALTER TABLE
+        // migration path to run. Existing v1..v4 DBs get the new columns
+        // via the v5 Migration entry below (idempotent ADD COLUMN).
         let schemaSQLs = [
             """
             CREATE TABLE IF NOT EXISTS alerts (
@@ -209,7 +278,19 @@ public actor AlertStore {
                 severity TEXT NOT NULL, event_id TEXT NOT NULL,
                 process_path TEXT, process_name TEXT, description TEXT,
                 mitre_tactics TEXT, mitre_techniques TEXT,
-                suppressed INTEGER DEFAULT 0
+                suppressed INTEGER DEFAULT 0,
+                llm_investigation_json TEXT,
+                d3fend_techniques TEXT,
+                remediation_hint TEXT,
+                analyst_metadata_json TEXT,
+                campaign_id TEXT,
+                user_id INTEGER,
+                user_name TEXT,
+                working_directory TEXT,
+                ai_tool TEXT,
+                parent_executable TEXT,
+                process_sha256 TEXT,
+                host_name TEXT
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)",
@@ -219,6 +300,9 @@ public actor AlertStore {
             "CREATE INDEX IF NOT EXISTS idx_alerts_ts_severity ON alerts(timestamp, severity)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_rule_ts ON alerts(rule_id, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_ts_sev_sup ON alerts(timestamp, severity, suppressed)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_campaign_id ON alerts(campaign_id)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_ai_tool_ts ON alerts(ai_tool, timestamp)",
         ]
         for sql in schemaSQLs { Self.exec(handle, sql) }
 
@@ -244,8 +328,10 @@ public actor AlertStore {
                 mitre_tactics, mitre_techniques, suppressed,
                 llm_investigation_json,
                 d3fend_techniques, remediation_hint, analyst_metadata_json,
-                campaign_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                campaign_id,
+                user_id, user_name, working_directory,
+                ai_tool, parent_executable, process_sha256, host_name
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -276,8 +362,17 @@ public actor AlertStore {
     /// as collateral damage on storage prune. Existing v1.7-shape DBs are
     /// migrated by `AlertsTableRelocator` at daemon startup.
     ///
+    /// - Parameters:
+    ///   - directory: Filesystem directory the store should live in.
+    ///   - forceReadOnly: When `true`, open with `SQLITE_OPEN_READONLY` and
+    ///     skip chmod / umask management. The dashboard sets this to
+    ///     guarantee its connection never holds locks that block the
+    ///     daemon's `VACUUM`. Suppress / unsuppress / delete from the
+    ///     dashboard route through the inbox file-IPC channel
+    ///     (v1.10.1's fix) when SQLITE_READONLY surfaces — that fallback
+    ///     was already in place; Wave 9A simply guarantees we take it.
     /// - Throws: `AlertStoreError` if the database cannot be opened or initialized.
-    public init(directory: String = "/Library/Application Support/MacCrab") throws {
+    public init(directory: String = "/Library/Application Support/MacCrab", forceReadOnly: Bool = false) throws {
         let maccrabDir = URL(fileURLWithPath: directory)
 
         try FileManager.default.createDirectory(
@@ -298,23 +393,29 @@ public actor AlertStore {
         // 0o660 gives the admin-group dashboard the rw it needs without
         // making DBs world-readable.
         let oldUmask = umask(0o007)
-        let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
+        let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: forceReadOnly)
         umask(oldUmask)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
-        chmod(databasePath, 0o660)
-        chmod(databasePath + "-wal", 0o660)
-        chmod(databasePath + "-shm", 0o660)
+        // Skip chmod when forceReadOnly: the dashboard is not the owner
+        // and has no business touching the daemon-owned file's mode bits.
+        if !forceReadOnly {
+            chmod(databasePath, 0o660)
+            chmod(databasePath + "-wal", 0o660)
+            chmod(databasePath + "-shm", 0o660)
+        }
     }
 
     /// Creates an `AlertStore` at a custom path (useful for testing).
     ///
-    /// - Parameter path: Full file system path for the SQLite database.
+    /// - Parameters:
+    ///   - path: Full file system path for the SQLite database.
+    ///   - forceReadOnly: See `init(directory:forceReadOnly:)`.
     /// - Throws: `AlertStoreError` if the database cannot be opened or initialized.
-    public init(path: String) throws {
+    public init(path: String, forceReadOnly: Bool = false) throws {
         self.databasePath = path
-        let (handle, ro, stmt) = try Self.openDatabase(at: path)
+        let (handle, ro, stmt) = try Self.openDatabase(at: path, forceReadOnly: forceReadOnly)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
@@ -414,10 +515,35 @@ public actor AlertStore {
         // (schema v4, v1.11.0 RC2). Pre-fix this field was Codable on
         // Alert but never reached SQL.
         bindTextOrNull(stmt, index: 17, value: alert.campaignId)
+        // 18-24: attribution columns (schema v5, v1.12.6 Wave 2B).
+        // NULL when the alert was constructed without an Event (self-
+        // defense, ES health, scheduled-report stubs) — AlertSink
+        // populates these from `event.process.*` for event-bound paths.
+        // bindTextNonEmptyOrNull normalises "" → NULL so query-time
+        // `WHERE ai_tool IS NOT NULL` doesn't pick up sentinel empties.
+        if let uid = alert.userId {
+            sqlite3_bind_int64(stmt, 18, Int64(uid))
+        } else {
+            sqlite3_bind_null(stmt, 18)
+        }
+        bindTextNonEmptyOrNull(stmt, index: 19, value: alert.userName)
+        bindTextNonEmptyOrNull(stmt, index: 20, value: alert.workingDirectory)
+        bindTextNonEmptyOrNull(stmt, index: 21, value: alert.aiTool)
+        bindTextNonEmptyOrNull(stmt, index: 22, value: alert.parentExecutable)
+        bindTextNonEmptyOrNull(stmt, index: 23, value: alert.processSha256)
+        bindTextNonEmptyOrNull(stmt, index: 24, value: alert.hostName)
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            // v1.12.6 Wave 9N: surface SQLITE_FULL / SQLITE_IOERR_NOSPC
+            // distinctly, matching EventStore's Resil-B1 pattern. The
+            // alert path doesn't have a hot-loop retry, but callers
+            // (AlertSink, suppression sync, etc.) should still see the
+            // disk-pressure signal rather than a generic step failure.
+            if rc == SQLITE_FULL || (rc & 0xFF) == SQLITE_FULL || rc == 0x0D0A {
+                throw AlertStoreError.diskFull(msg)
+            }
             throw AlertStoreError.stepFailed(msg)
         }
     }
@@ -886,6 +1012,74 @@ public actor AlertStore {
         return totalDeleted
     }
 
+    // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
+    //
+    // Mirrors EventStore.incrementalVacuum. AlertStore is configured
+    // with `auto_vacuum = INCREMENTAL` on fresh DBs (see
+    // StoragePragmas.applyAlertStorePragmas), so this is the safe
+    // path on low-disk hosts where a full VACUUM can't get the
+    // 1.3× scratch space it needs.
+    //
+    // Returns pages physically removed from the file. Zero on
+    // pre-v1.10 alerts.db files that never had the one-shot
+    // VACUUM-to-INCREMENTAL conversion run; in that case the caller
+    // logs the gap but the file simply won't shrink between full
+    // VACUUMs (read-only DBs return 0 with no error).
+    @discardableResult
+    public func incrementalVacuum(maxPages: Int) async throws -> Int {
+        guard let db = db else { return 0 }
+        let result = try StoragePragmas.runIncrementalVacuum(on: db, maxPages: maxPages)
+        return result.pagesReclaimed
+    }
+
+    /// Best-effort VACUUM. Mirrors EventStore.vacuum — only the
+    /// size-cap enforcer calls this, after pre-flighting free disk
+    /// space. Required as the second leg of the Wave 9B low-disk
+    /// fallback (incremental_vacuum is preferred but the AlertStore
+    /// caller still wants the option to fall through to full VACUUM
+    /// once disk frees up).
+    public func vacuum() async throws {
+        guard let db = db else { return }
+        let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw AlertStoreError.stepFailed("VACUUM failed: \(msg)")
+        }
+    }
+
+    /// PASSIVE→RESTART checkpoint chain. Same shape as
+    /// EventStore.walCheckpoint; alerts.db has a smaller cache and
+    /// rarely accumulates a large WAL but the size-cap path still
+    /// needs a drained WAL before measuring on-disk size.
+    @discardableResult
+    public func walCheckpoint() async -> Bool {
+        guard let db = db else { return false }
+        var passiveLog: Int32 = 0
+        var passiveCkpt: Int32 = 0
+        let rcPassive = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_PASSIVE),
+            &passiveLog, &passiveCkpt
+        )
+        if rcPassive == SQLITE_OK, passiveLog == passiveCkpt { return true }
+
+        var restartLog: Int32 = 0
+        var restartCkpt: Int32 = 0
+        let rcRestart = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_RESTART),
+            &restartLog, &restartCkpt
+        )
+        return rcRestart == SQLITE_OK && restartLog == restartCkpt
+    }
+
+    /// Read the file's `PRAGMA auto_vacuum` mode. Returns 0/1/2
+    /// (NONE / FULL / INCREMENTAL); 0 on closed/error.
+    public func autoVacuumMode() async -> Int {
+        guard let db = db else { return 0 }
+        return Int(StoragePragmas.readAutoVacuumMode(db))
+    }
+
     // MARK: - Private Helpers
 
     /// A sum type for binding values to prepared statements.
@@ -934,6 +1128,19 @@ public actor AlertStore {
         }
     }
 
+    /// Binds a text value or NULL, treating empty strings as NULL.
+    /// Used by attribution columns (schema v5) so query-time
+    /// `WHERE ai_tool IS NOT NULL` predicates don't pick up empty
+    /// sentinel strings emitted by upstream callers that haven't
+    /// gated on `!isEmpty` themselves.
+    private func bindTextNonEmptyOrNull(_ stmt: OpaquePointer, index: Int32, value: String?) {
+        if let value, !value.isEmpty {
+            bindText(stmt, index: index, value: value)
+        } else {
+            sqlite3_bind_null(stmt, index)
+        }
+    }
+
     /// Reads a text column or returns `nil` if the column is NULL.
     private func columnTextOrNil(_ stmt: OpaquePointer, index: Int32) -> String? {
         guard let cstr = sqlite3_column_text(stmt, index) else { return nil }
@@ -966,7 +1173,13 @@ public actor AlertStore {
             // Columns by index match the CREATE TABLE order:
             // 0: id, 1: timestamp, 2: rule_id, 3: rule_title, 4: severity,
             // 5: event_id, 6: process_path, 7: process_name, 8: description,
-            // 9: mitre_tactics, 10: mitre_techniques, 11: suppressed
+            // 9: mitre_tactics, 10: mitre_techniques, 11: suppressed,
+            // 12: llm_investigation_json (v2), 13: d3fend_techniques (v3),
+            // 14: remediation_hint (v3), 15: analyst_metadata_json (v3),
+            // 16: campaign_id (v4), 17: user_id (v5), 18: user_name (v5),
+            // 19: working_directory (v5), 20: ai_tool (v5),
+            // 21: parent_executable (v5), 22: process_sha256 (v5),
+            // 23: host_name (v5).
 
             guard let id = columnTextOrNil(stmt, index: 0),
                   let ruleId = columnTextOrNil(stmt, index: 2),
@@ -1017,6 +1230,22 @@ public actor AlertStore {
             // actually identify contributing rows.
             let campaignId = columnTextOrNil(stmt, index: 16)
 
+            // Columns 17-23: attribution promotion (schema v5,
+            // v1.12.6 Wave 2B). Each is independently nullable —
+            // pre-v5 rows have all seven NULL. user_id is INTEGER;
+            // SQLite reports SQLITE_NULL via sqlite3_column_type,
+            // distinguishing nil from a legitimate uid==0 (root).
+            let userId: UInt32? = {
+                guard sqlite3_column_type(stmt, 17) != SQLITE_NULL else { return nil }
+                return UInt32(sqlite3_column_int64(stmt, 17))
+            }()
+            let userName = columnTextOrNil(stmt, index: 18)
+            let workingDirectory = columnTextOrNil(stmt, index: 19)
+            let aiTool = columnTextOrNil(stmt, index: 20)
+            let parentExecutable = columnTextOrNil(stmt, index: 21)
+            let processSha256 = columnTextOrNil(stmt, index: 22)
+            let hostName = columnTextOrNil(stmt, index: 23)
+
             let alert = Alert(
                 id: id,
                 timestamp: Date(timeIntervalSince1970: timestamp),
@@ -1034,7 +1263,14 @@ public actor AlertStore {
                 analyst: analyst,
                 d3fendTechniques: d3fend,
                 remediationHint: remediation,
-                llmInvestigation: investigation
+                llmInvestigation: investigation,
+                userId: userId,
+                userName: userName,
+                workingDirectory: workingDirectory,
+                aiTool: aiTool,
+                parentExecutable: parentExecutable,
+                processSha256: processSha256,
+                hostName: hostName
             )
             results.append(alert)
         }

@@ -77,24 +77,31 @@ public final class V2LiveDataProvider: V2DataProvider {
         // let, then assign the results back on @MainActor (the actor
         // types are Sendable so this is safe). Net: cold open drops
         // from serial sum to ~max(individual open) + actor hop.
+        // Wave 9A (v1.12.6 RC2): all four dashboard-side stores open
+        // read-only. The dashboard never writes — alert suppress /
+        // unsuppress / delete route through the inbox file-IPC channel
+        // per v1.10.1. Pre-9A the RW open held shared/upgrade locks
+        // that blocked the sysext's VACUUM (field-confirmed via lsof
+        // showing two RW fds on the dashboard process) — the v1.6.22
+        // perf-audit-pattern recurring in a new actor.
         async let alertStoreT: AlertStore? = Task.detached { () -> AlertStore? in
             guard let dir = alertsDir else { return nil }
-            return try? AlertStore(directory: dir)
+            return try? AlertStore(directory: dir, forceReadOnly: true)
         }.value
         async let eventStoreT: EventStore? = Task.detached { () -> EventStore? in
             guard let dir = eventsDir else { return nil }
-            return try? EventStore(directory: dir)
+            return try? EventStore(directory: dir, forceReadOnly: true)
         }.value
         async let campaignStoreT: CampaignStore? = Task.detached { () -> CampaignStore? in
             guard let dir = campaignDir else { return nil }
-            return try? CampaignStore(directory: dir)
+            return try? CampaignStore(directory: dir, forceReadOnly: true)
         }.value
         // SQLiteCausalGraphStore's init is already async (its own actor
         // hop), so it doesn't need a Task.detached wrapper — but we
         // still want it to run in parallel with the other three.
         async let causalStoreT: SQLiteCausalGraphStore? = {
             guard let dir = traceDir else { return nil }
-            return try? await SQLiteCausalGraphStore(databasePath: dir + "/tracegraph.db")
+            return try? await SQLiteCausalGraphStore(databasePath: dir + "/tracegraph.db", forceReadOnly: true)
         }()
 
         self.alertStore = await alertStoreT
@@ -362,38 +369,84 @@ public final class V2LiveDataProvider: V2DataProvider {
         // sort + per-feed-row build all ran on @MainActor — typically
         // 10-50 ms, sometimes 100+ ms on cold cache. Detach the
         // entire body off-main; only `dataDir` capture is needed.
-        guard let dir = dataDir else { return [] }
-        let cacheDir = dir + "/threat_intel"
+        //
+        // v1.12.6 Wave 9E: route through `loadFeedsFromCache(preferring:)`
+        // so a `dataDir` that resolved to one directory still finds the
+        // cache when the sysext wrote it to the other (system vs user-
+        // home). Pre-fix this only read `dataDir + "/threat_intel"` and
+        // silently returned [] on path mismatch until the user clicked
+        // Refresh and the daemon re-wrote the cache. The helper falls
+        // back to the canonical system + user-home paths so the threat-
+        // intel surface populates on first appear.
+        let resolvedDir = dataDir
         return await Task.detached(priority: .userInitiated) {
-            guard let iocs = ThreatIntelFeed.cachedIOCs(at: cacheDir) else { return [] }
-            let totalHashes = iocs.hashes.count
-            let totalIPs = iocs.ips.count
-            let totalDomains = iocs.domains.count
-            let totalURLs = iocs.urls.count
-            let now = Date()
-            var rows: [V2MockFeed] = []
-            for (name, lastUpdate) in iocs.perFeedLastUpdate.sorted(by: { $0.key < $1.key }) {
-                let staleness = now.timeIntervalSince(lastUpdate)
-                let kind = V2LiveDataProvider.feedKindHint(name: name)
-                let entries: Int = {
-                    switch kind {
-                    case "Hashes":   return totalHashes
-                    case "IPs":      return totalIPs
-                    case "Domains":  return totalDomains
-                    case "URLs":     return totalURLs
-                    default:         return totalHashes + totalIPs + totalDomains + totalURLs
-                    }
-                }()
-                let status: V2StatusLevel = staleness > 6 * 60 * 60 ? .warning : .info
-                rows.append(V2MockFeed(
-                    id: "feed-\(name)",
-                    name: name, kind: kind,
-                    entries: entries, lastFetch: lastUpdate,
-                    status: status, staleness: staleness
-                ))
-            }
-            return rows
+            return V2LiveDataProvider.loadFeedsFromCache(preferring: resolvedDir)
         }.value
+    }
+
+    /// Read the threat-intel feed cache from disk, trying the optional
+    /// `preferred` directory first and then each canonical path returned
+    /// by `candidateThreatIntelCacheDirs(preferring:)`. Returns the
+    /// first cache that decodes cleanly, mapped into the V2 row shape.
+    /// Empty when no cache exists anywhere.
+    ///
+    /// Marked `nonisolated` so callers can invoke it off the MainActor
+    /// (e.g. inside `Task.detached` in `feeds()`), and `static` so the
+    /// V2IntelligenceWorkspace can read the cache directly on first
+    /// appear without waiting for `connectLiveData()` to flip the
+    /// provider to live mode.
+    nonisolated public static func loadFeedsFromCache(preferring preferred: String? = nil) -> [V2MockFeed] {
+        let dirs = candidateThreatIntelCacheDirs(preferring: preferred)
+        guard let iocs = dirs.lazy.compactMap({ ThreatIntelFeed.cachedIOCs(at: $0) }).first else {
+            return []
+        }
+        let totalHashes = iocs.hashes.count
+        let totalIPs = iocs.ips.count
+        let totalDomains = iocs.domains.count
+        let totalURLs = iocs.urls.count
+        let now = Date()
+        var rows: [V2MockFeed] = []
+        for (name, lastUpdate) in iocs.perFeedLastUpdate.sorted(by: { $0.key < $1.key }) {
+            let staleness = now.timeIntervalSince(lastUpdate)
+            let kind = V2LiveDataProvider.feedKindHint(name: name)
+            let entries: Int = {
+                switch kind {
+                case "Hashes":   return totalHashes
+                case "IPs":      return totalIPs
+                case "Domains":  return totalDomains
+                case "URLs":     return totalURLs
+                default:         return totalHashes + totalIPs + totalDomains + totalURLs
+                }
+            }()
+            let status: V2StatusLevel = staleness > 6 * 60 * 60 ? .warning : .info
+            rows.append(V2MockFeed(
+                id: "feed-\(name)",
+                name: name, kind: kind,
+                entries: entries, lastFetch: lastUpdate,
+                status: status, staleness: staleness
+            ))
+        }
+        return rows
+    }
+
+    /// Canonical threat-intel cache directory candidates, in priority
+    /// order. The optional `preferred` directory wins first; the system
+    /// path (sysext-written) is tried next; the user-home path
+    /// (`swift run maccrabd` dev workflow) is tried last. Duplicates
+    /// are de-duplicated so the same dir isn't probed twice.
+    nonisolated public static func candidateThreatIntelCacheDirs(preferring preferred: String? = nil) -> [String] {
+        var dirs: [String] = []
+        if let preferred {
+            dirs.append(preferred + "/threat_intel")
+        }
+        let systemDir = "/Library/Application Support/MacCrab/threat_intel"
+        let userDir = (FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("MacCrab/threat_intel").path)
+            ?? NSHomeDirectory() + "/Library/Application Support/MacCrab/threat_intel"
+        if !dirs.contains(systemDir) { dirs.append(systemDir) }
+        if !dirs.contains(userDir) { dirs.append(userDir) }
+        return dirs
     }
 
     nonisolated private static func feedKindHint(name: String) -> String {
@@ -1256,12 +1309,13 @@ public final class V2LiveDataProvider: V2DataProvider {
 
     nonisolated internal static func toV2Alert(_ a: Alert) -> V2MockAlert {
         let mitre = a.mitreTechniquesList
-        // Process-side metadata (pid/parent/user) isn't stored on Alert
-        // — only on the originating Event. Surface defaults here and
-        // the inspector hides those rows when empty rather than
-        // showing fake "PID: 0" data. actionsTaken is left empty for
-        // the same reason: alerts that DID trigger a response action
-        // get tagged later when prevention is wired through.
+        // v1.12.6 Wave 9H: parent / user / ai_tool / working_directory /
+        // process_sha256 / host_name now ARE stored on Alert (Wave 2's
+        // alerts.db v4 → v5 ALTER TABLE). Pre-9H the comment claimed
+        // these were only on the originating Event — true before Wave 2,
+        // not after. Inspector still hides empty fields so legacy
+        // pre-v1.12.6 alerts that have NULL in these columns render
+        // identically to the pre-9H path.
         return V2MockAlert(
             id: a.id,
             title: a.ruleTitle,
@@ -1270,8 +1324,12 @@ public final class V2LiveDataProvider: V2DataProvider {
             process: a.processName ?? "—",
             processPath: a.processPath ?? "",
             pid: 0,
-            parent: "",
-            user: "",
+            parent: a.parentExecutable ?? "",
+            user: a.userName ?? "",
+            aiTool: a.aiTool ?? "",
+            workingDirectory: a.workingDirectory ?? "",
+            processSHA256: a.processSha256 ?? "",
+            hostName: a.hostName ?? "",
             timestamp: a.timestamp,
             mitre: mitre,
             category: (a.mitreTactics ?? "uncategorised").components(separatedBy: ",").first ?? "—",
@@ -1310,17 +1368,32 @@ public final class V2LiveDataProvider: V2DataProvider {
     }
 
     nonisolated internal static func toV2Campaign(_ r: CampaignStore.Record) -> V2MockCampaign {
+        // v1.12.6 Wave 9J: surface Wave-2 campaigns.db schema columns
+        // (affectedUsers, affectedExecutables, processTreeDepth,
+        // techniques, aiTools) plus prefer the persisted firstSeen /
+        // lastSeen over the pre-Wave-2 synthetic
+        // `detectedAt - timeSpanSeconds`. `entities` was previously
+        // hardcoded to 0 — now derives from
+        // `affectedUsers + affectedExecutables` count.
+        let users = r.affectedUsers ?? []
+        let execs = r.affectedExecutables ?? []
+        let entitiesCount = users.count + execs.count
         return V2MockCampaign(
             id: r.id,
             name: r.title,
             severity: toV2Severity(r.severity),
-            firstSeen: r.detectedAt.addingTimeInterval(-r.timeSpanSeconds),
-            lastSeen: r.detectedAt,
+            firstSeen: r.firstSeen ?? r.detectedAt.addingTimeInterval(-r.timeSpanSeconds),
+            lastSeen: r.lastSeen ?? r.detectedAt,
             alertCount: r.alerts.count,
             tactics: r.tactics,
-            entities: 0,
+            entities: entitiesCount,
             killChainStages: r.tactics,
-            summary: r.description
+            summary: r.description,
+            affectedUsers: users,
+            affectedExecutables: execs,
+            techniques: r.techniques ?? [],
+            aiTools: r.aiTools ?? [],
+            processTreeDepth: r.processTreeDepth ?? 0
         )
     }
 

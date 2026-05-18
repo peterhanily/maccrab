@@ -83,6 +83,31 @@ struct DaemonConfig: Codable {
         /// cutoff can't fit.
         var eventsMaxSizeMB: Int = 200
 
+        /// Cadence (in minutes) for the events.db size-cap enforcer.
+        ///
+        /// v1.12.6: pre-fix the size-cap timer was hardcoded to 6 hours.
+        /// On a busy machine (`~47 MB/min` event firehose observed on
+        /// field hosts) the DB could overrun a 300 MB cap by ~17 GB
+        /// between sweeps. Exposing the cadence here lets operators
+        /// match the cadence to their workload: workhorse hosts may
+        /// want 5 min; idle hosts can stay at 60 min to save CPU.
+        ///
+        /// Default: 60 min (1 h). A 0/negative override is clamped to
+        /// the default at scheduling time with a warning logged.
+        ///
+        /// JSON key mapping: both `events_size_cap_interval_minutes`
+        /// (snake_case) and `eventsSizeCapIntervalMinutes` (camelCase)
+        /// decode to this field via the storage block's snake-rewrite.
+        /// See `migrateLegacyStorageKeys` for the rewrite table.
+        ///
+        /// An out-of-band early-fire watchdog (60 s cadence) catches
+        /// sudden growth bursts between scheduled sweeps when the DB
+        /// exceeds 1.5× the configured cap. The watchdog is not
+        /// configurable — it is a defense-in-depth guarantee that the
+        /// disk budget is never radically violated regardless of the
+        /// scheduled cadence the operator picked.
+        var eventsSizeCapIntervalMinutes: Int = 60
+
         /// Days of `event_aggregates` rows to keep. Aggregates are tiny
         /// (one row per day per category per signer per path); 90d is
         /// cheap and useful for "what did this machine do last Tuesday?".
@@ -357,6 +382,8 @@ struct DaemonConfig: Codable {
                 config.storage.eventsHotTierMinutes = v * 60
             }
             if let v = storage["eventsMaxSizeMB"]    as? Int { config.storage.eventsMaxSizeMB = v }
+            // v1.12.6 per-host tunable sweep cadence
+            if let v = storage["eventsSizeCapIntervalMinutes"] as? Int { config.storage.eventsSizeCapIntervalMinutes = v }
             if let v = storage["aggregateDays"]      as? Int { config.storage.aggregateDays = v }
             if let v = storage["alertsRetentionDays"]    as? Int { config.storage.alertsRetentionDays = v }
             if let v = storage["alertsMaxSizeMB"]    as? Int { config.storage.alertsMaxSizeMB = v }
@@ -393,14 +420,21 @@ struct DaemonConfig: Codable {
 
         // Snake-case rewrite for the storage block's own keys.
         let storageSnakeToCamel: [String: String] = [
-            "events_hot_tier_hours":   "eventsHotTierHours",   // legacy alias (handled below)
-            "events_hot_tier_minutes": "eventsHotTierMinutes",
-            "events_max_size_mb":      "eventsMaxSizeMB",
-            "aggregate_days":          "aggregateDays",
-            "alerts_retention_days":   "alertsRetentionDays",
-            "alerts_max_size_mb":      "alertsMaxSizeMB",
-            "campaigns_retention_days":"campaignsRetentionDays",
-            "campaigns_max_size_mb":   "campaignsMaxSizeMB",
+            "events_hot_tier_hours":            "eventsHotTierHours",   // legacy alias (handled below)
+            "events_hot_tier_minutes":          "eventsHotTierMinutes",
+            "events_max_size_mb":               "eventsMaxSizeMB",
+            // v1.12.6: per-host tunable sweep cadence. `*Minutes` is
+            // safe under JSONDecoder's `.convertFromSnakeCase` (no
+            // trailing-uppercase abbreviation), but we still rewrite
+            // here for parity with sibling keys and so partial-decode
+            // JSON dicts use the exact property name the synthesized
+            // decoder expects after the overlay-onto-defaults step.
+            "events_size_cap_interval_minutes": "eventsSizeCapIntervalMinutes",
+            "aggregate_days":                   "aggregateDays",
+            "alerts_retention_days":            "alertsRetentionDays",
+            "alerts_max_size_mb":               "alertsMaxSizeMB",
+            "campaigns_retention_days":         "campaignsRetentionDays",
+            "campaigns_max_size_mb":            "campaignsMaxSizeMB",
         ]
         for (snake, camel) in storageSnakeToCamel where storage[snake] != nil && storage[camel] == nil {
             storage[camel] = storage.removeValue(forKey: snake)

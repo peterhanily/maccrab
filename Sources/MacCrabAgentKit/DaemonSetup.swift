@@ -569,6 +569,17 @@ enum DaemonSetup {
         Task.detached(priority: .utility) {
             await threatIntel.start()
             await BundledThreatIntel.loadInto(threatIntel)
+            // v1.12.6 Wave 9F: write the cache file to disk RIGHT NOW
+            // so a dashboard launched before the initial network fetch
+            // completes (~14 min on a fresh install across all three
+            // abuse.ch feeds) sees bundled IOCs immediately on first
+            // Intelligence-tab mount. Pre-9F the cache file didn't
+            // exist until updateAllFeeds() finished, so cold-start
+            // dashboards saw an empty Threat Intel panel until the
+            // user hit refresh. start() now awaits loadCachedFeeds()
+            // inline, so on warm boot persistCacheNow() saves the
+            // union (network IOCs from prior boots + bundled).
+            await threatIntel.persistCacheNow()
             let bundledStats = BundledThreatIntel.stats
             print("Bundled threat intel loaded (deferred): \(bundledStats.hashes) hashes, \(bundledStats.ips) IPs, \(bundledStats.domains) domains")
             print("Threat intel feed active (abuse.ch Feodo, URLhaus, MalwareBazaar)")

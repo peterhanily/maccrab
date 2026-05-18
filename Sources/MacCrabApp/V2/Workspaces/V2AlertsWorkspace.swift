@@ -717,10 +717,26 @@ struct V2AlertsWorkspace: View {
                     V2InspectorKeyValue("PID",    "\(alert.pid)", mono: true)
                 }
                 if !alert.parent.isEmpty {
-                    V2InspectorKeyValue("Parent", alert.parent)
+                    V2InspectorKeyValue("Parent", alert.parent, mono: true)
                 }
                 if !alert.user.isEmpty {
                     V2InspectorKeyValue("User",   alert.user)
+                }
+                // v1.12.6 Wave 9H: Wave-2 alerts.db schema additions —
+                // ai_tool, working_directory, process_sha256, host_name.
+                // Hide each row when its column is empty (pre-9H alerts
+                // have NULL in these columns and render identically).
+                if !alert.workingDirectory.isEmpty {
+                    V2InspectorKeyValue("CWD",    alert.workingDirectory, mono: true)
+                }
+                if !alert.aiTool.isEmpty {
+                    V2InspectorKeyValue("AI tool", alert.aiTool)
+                }
+                if !alert.processSHA256.isEmpty {
+                    V2InspectorKeyValue("SHA-256", alert.processSHA256, mono: true)
+                }
+                if !alert.hostName.isEmpty {
+                    V2InspectorKeyValue("Host",   alert.hostName, mono: true)
                 }
             }
             V2InspectorSection("When") {
@@ -967,12 +983,28 @@ struct V2AlertsWorkspace: View {
                     Text(c.name)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(V2Theme.primaryText)
-                    // v1.11.0 (audit functionality MEDIUM): drop the
-                    // "X entities" suffix — `toV2Campaign` hardcodes
-                    // entities to 0 because no entity-count is computed
-                    // at materialization time. Showed "0 entities" on
-                    // every card pre-fix.
-                    Text("\(c.alertCount) alerts · \(V2TimeFormat.relative(c.firstSeen))")
+                    // v1.12.6 Wave 9J: revive entity count now that
+                    // toV2Campaign populates `entities` from the
+                    // Wave-2 affectedUsers + affectedExecutables
+                    // arrays (pre-9J it was hardcoded 0, and the v1.11
+                    // audit had hidden the suffix as a result). Also
+                    // appends process-tree depth + AI-tool count when
+                    // non-zero so the operator can size the blast
+                    // radius from the card without opening the
+                    // inspector.
+                    var metaSuffix: String {
+                        var parts: [String] = ["\(c.alertCount) alerts",
+                                                V2TimeFormat.relative(c.firstSeen)]
+                        if c.entities > 0 { parts.append("\(c.entities) entities") }
+                        if c.processTreeDepth > 0 {
+                            parts.append("depth \(c.processTreeDepth)")
+                        }
+                        if !c.aiTools.isEmpty {
+                            parts.append("\(c.aiTools.count) AI tool\(c.aiTools.count == 1 ? "" : "s")")
+                        }
+                        return parts.joined(separator: " · ")
+                    }
+                    Text(metaSuffix)
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
                 }
@@ -1023,8 +1055,60 @@ struct V2AlertsWorkspace: View {
                     }
                 }
             }
+            // v1.12.6 Wave 9J: Wave-2 schema additions surfaced as
+            // collapsed rows under the kill chain. Each row hidden
+            // when its underlying array is empty so pre-Wave-2
+            // campaigns render identically (data was always NULL).
+            if !c.affectedUsers.isEmpty {
+                campaignChipRow(label: "Users", values: c.affectedUsers)
+            }
+            if !c.affectedExecutables.isEmpty {
+                campaignChipRow(label: "Executables", values: c.affectedExecutables, mono: true)
+            }
+            if !c.aiTools.isEmpty {
+                campaignChipRow(label: "AI tools", values: c.aiTools)
+            }
+            if !c.techniques.isEmpty {
+                campaignChipRow(label: "Techniques", values: c.techniques, mono: true)
+            }
         }
         .v2Panel()
+    }
+
+    /// v1.12.6 Wave 9J: shared chip-row layout for the new campaign
+    /// fields. Caps display at 8 chips so a wide affected-executables
+    /// set doesn't blow the card layout — surfaces the rest as a
+    /// trailing "+N more" chip. Uses a horizontal ScrollView so the
+    /// row stays single-line even when chips overflow the card.
+    @ViewBuilder
+    private func campaignChipRow(label: String, values: [String], mono: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("\(label):")
+                .font(V2Theme.cardTitle())
+                .foregroundStyle(V2Theme.tertiaryText)
+                .frame(width: 88, alignment: .leading)
+            let cap = 8
+            let head = Array(values.prefix(cap))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(head, id: \.self) { v in
+                        Text(v)
+                            .font(mono ? V2Theme.mono() : V2Theme.meta())
+                            .foregroundStyle(V2Theme.mutedText)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(V2Theme.panelBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .lineLimit(1)
+                    }
+                    if values.count > cap {
+                        Text("+\(values.count - cap) more")
+                            .font(V2Theme.meta())
+                            .foregroundStyle(V2Theme.tertiaryText)
+                    }
+                }
+            }
+        }
     }
 
     private var historyTab: some View {

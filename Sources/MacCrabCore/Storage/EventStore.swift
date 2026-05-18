@@ -54,6 +54,32 @@ public actor EventStore {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
+    // MARK: Payload size cap (v1.12.6)
+
+    /// Hard cap on per-event raw_json bytes after encoding. Events exceeding
+    /// this are truncated at the per-arg level before re-encoding; the
+    /// `payload.truncated` enrichment is set to record the truncation.
+    ///
+    /// Field-measured background: median exec raw_json is ~700B; P99 is under
+    /// 16KB. The cap sits well above the long tail but well below the
+    /// 1 MB outliers we've seen (e.g. base64-encoded appcast.xml passed via
+    /// `python3 -c '...'`). Keeps the DB / FTS5 index / dashboard from
+    /// being blinded by a single misbehaving caller.
+    internal static let maxRawJsonBytes: Int = 65_536
+
+    /// Threshold above which a single `process.args` entry gets replaced with
+    /// a `<truncated:N bytes>` marker. Chosen to match the
+    /// UnifiedLogCollector message cap convention so per-arg behaviour is
+    /// predictable across collectors.
+    internal static let argTruncationThreshold: Int = 4_096
+
+    /// Number of events whose raw_json was truncated to fit `maxRawJsonBytes`.
+    /// Snapshot via `payloadTruncatedTotal()`. Surfaced into
+    /// `heartbeat_rich.json` as `payload_truncated_total` (Wave 9K,
+    /// v1.12.6) so operators see the cap firing rate without
+    /// scraping the daemon log.
+    private var payloadTruncatedCount: Int = 0
+
     // MARK: Prepared statement cache
 
     private var insertStmt: OpaquePointer?
@@ -206,6 +232,44 @@ public actor EventStore {
                 "CREATE INDEX IF NOT EXISTS idx_overrides_updated ON attribution_overrides(updated_at)",
             ]
         ),
+        // v1.12.6 Wave 2A: promote user / architecture / notarization /
+        // ai_tool / parent / session fields from raw_json into indexed
+        // columns. Pre-fix, rules predicating on `User`, `Architecture`,
+        // `NotarizationStatus`, etc. silently fell through to
+        // `event.enrichments[fieldName]` (never populated for these keys
+        // -- e.g. NotarizationChecker writes `notarization.status`, not
+        // `NotarizationStatus`). Result: rosetta_binary_from_downloads,
+        // notarization_absent_non_system, and the rosetta / notarized-
+        // dropper sequence rules never fired in production.
+        //
+        // Migration is ADDITIVE: pre-v6 rows keep NULL for the new
+        // columns, and RuleEngine falls back to raw_json extraction
+        // for those rows so historical events remain matchable.
+        Migration(
+            version: 6,
+            name: "promote_raw_json_to_indexed_columns",
+            sql: [
+                "ALTER TABLE events ADD COLUMN user_id INTEGER",
+                "ALTER TABLE events ADD COLUMN user_name TEXT",
+                "ALTER TABLE events ADD COLUMN group_id INTEGER",
+                "ALTER TABLE events ADD COLUMN working_directory TEXT",
+                "ALTER TABLE events ADD COLUMN responsible_pid INTEGER",
+                "ALTER TABLE events ADD COLUMN architecture TEXT",
+                "ALTER TABLE events ADD COLUMN is_platform_binary INTEGER",
+                "ALTER TABLE events ADD COLUMN is_notarized INTEGER",
+                "ALTER TABLE events ADD COLUMN process_sha256 TEXT",
+                "ALTER TABLE events ADD COLUMN parent_name TEXT",
+                "ALTER TABLE events ADD COLUMN parent_executable TEXT",
+                "ALTER TABLE events ADD COLUMN parent_signer_type TEXT",
+                "ALTER TABLE events ADD COLUMN ai_tool TEXT",
+                "ALTER TABLE events ADD COLUMN ai_tool_child INTEGER",
+                "ALTER TABLE events ADD COLUMN session_launch_source TEXT",
+                "ALTER TABLE events ADD COLUMN tcc_decision TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_events_ai_tool_ts ON events(ai_tool, timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_events_parent_exe_ts ON events(parent_executable, timestamp)",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -223,7 +287,15 @@ public actor EventStore {
 
     /// Opens a SQLite database before actor isolation begins.
     /// Returns (db handle, isReadOnly) so init can assign to stored properties.
-    private static func openDatabase(at path: String) throws -> (OpaquePointer, Bool, OpaquePointer?) {
+    ///
+    /// - Parameter forceReadOnly: When `true`, skip the RW open attempt and
+    ///   open with `SQLITE_OPEN_READONLY` directly. Used by the dashboard
+    ///   (MacCrabApp/V2LiveDataProvider) to ensure its long-lived connection
+    ///   never holds the shared/upgrade lock that blocks the daemon's
+    ///   `VACUUM` and `wal_checkpoint(TRUNCATE)` operations.
+    ///   (v1.12.6 RC2, Wave 9A — see lsof field background in v1.12.6 RC1
+    ///   recovery notes.)
+    private static func openDatabase(at path: String, forceReadOnly: Bool = false) throws -> (OpaquePointer, Bool, OpaquePointer?) {
         // Reject symlinks on the DB path and its WAL/SHM/journal sidecars.
         // `sqlite3_open_v2` follows symlinks, so a privileged attacker who can
         // swap the DB file for a symlink could redirect writes to an arbitrary
@@ -235,14 +307,26 @@ public actor EventStore {
 
         var db: OpaquePointer?
         var isReadOnly = false
-        var flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        var rc = sqlite3_open_v2(path, &db, flags, nil)
-        if rc != SQLITE_OK {
-            if let handle = db { sqlite3_close(handle) }
-            db = nil
+        var flags: Int32
+        var rc: Int32
+        if forceReadOnly {
+            // Explicit RO open — no RW attempt. The dashboard never writes
+            // to this store (mutations route through the inbox file-IPC
+            // channel per v1.10.1), so we skip the RW open and the lock
+            // it would imply.
             flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
             rc = sqlite3_open_v2(path, &db, flags, nil)
             isReadOnly = true
+        } else {
+            flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+            rc = sqlite3_open_v2(path, &db, flags, nil)
+            if rc != SQLITE_OK {
+                if let handle = db { sqlite3_close(handle) }
+                db = nil
+                flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+                rc = sqlite3_open_v2(path, &db, flags, nil)
+                isReadOnly = true
+            }
         }
         guard rc == SQLITE_OK, let handle = db else {
             let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
@@ -351,6 +435,11 @@ public actor EventStore {
         // keys into `event.enrichments`; we project them into columns
         // here so SQL-side queries (`WHERE agent_trace_id = ?`,
         // `WHERE agent_tool = 'claude_code'`) actually work.
+        // v1.12.6 Wave 2A: 16 new columns promoted from raw_json (params
+        // 30..=45). Order kept stable so re-prepares across schema bumps
+        // are append-only. NULL/0 for fields that aren't present on a
+        // given event category (e.g. tcc_decision is only set for TCC
+        // events; ai_tool only when a TraceCorrelator binding exists).
         let insertSQL = """
             INSERT OR REPLACE INTO events (
                 id, timestamp, event_category, event_type, event_action, severity,
@@ -360,8 +449,13 @@ public actor EventStore {
                 tcc_service, tcc_client, raw_json,
                 mcp_server_name, mcp_server_category, ai_tool_session_id,
                 agent_trace_id, agent_span_id, agent_tool,
-                machine_agent_confidence, agent_evidence_json
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+                machine_agent_confidence, agent_evidence_json,
+                user_id, user_name, group_id, working_directory,
+                responsible_pid, architecture, is_platform_binary,
+                is_notarized, process_sha256, parent_name, parent_executable,
+                parent_signer_type, ai_tool, ai_tool_child,
+                session_launch_source, tcc_decision
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -395,19 +489,22 @@ public actor EventStore {
     /// The directory is created if it does not already exist.
     ///
     /// - Throws: `EventStoreError` if the database cannot be opened or initialized.
-    public init(directory: String = "/Library/Application Support/MacCrab") throws {
+    public init(directory: String = "/Library/Application Support/MacCrab", forceReadOnly: Bool = false) throws {
         let maccrabDir = URL(fileURLWithPath: directory)
 
-        try FileManager.default.createDirectory(
-            at: maccrabDir,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
-        // rwxr-xr-x: non-root MacCrab.app needs to traverse and read the DB
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: maccrabDir.path
-        )
+        // Skip dir-create + chmod when forceReadOnly — dashboard is not the
+        // owner of these paths and shouldn't mutate them.
+        if !forceReadOnly {
+            try FileManager.default.createDirectory(
+                at: maccrabDir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: maccrabDir.path
+            )
+        }
 
         self.databasePath = maccrabDir.appendingPathComponent("events.db").path
 
@@ -417,26 +514,34 @@ public actor EventStore {
         // group-read only, which made bulk-suppress fail with
         // "database is read only". 0o660 keeps non-admin users locked
         // out while letting the dashboard mutate without an XPC broker.
-        let oldUmask = umask(0o007)
-        let (handle, ro, stmt) = try Self.openDatabase(at: databasePath)
-        umask(oldUmask)
-        self.db = handle
-        self.isReadOnly = ro
-        self.insertStmt = stmt
-        // Re-clamp existing files from prior installs that were created
-        // under the older 0o640 default.
-        chmod(databasePath, 0o660)
-        chmod(databasePath + "-wal", 0o660)
-        chmod(databasePath + "-shm", 0o660)
+        // (Skip umask + chmod entirely when forceReadOnly — see Wave 9A.)
+        if forceReadOnly {
+            let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: true)
+            self.db = handle
+            self.isReadOnly = ro
+            self.insertStmt = stmt
+        } else {
+            let oldUmask = umask(0o007)
+            let (handle, ro, stmt) = try Self.openDatabase(at: databasePath, forceReadOnly: false)
+            umask(oldUmask)
+            self.db = handle
+            self.isReadOnly = ro
+            self.insertStmt = stmt
+            // Re-clamp existing files from prior installs that were created
+            // under the older 0o640 default.
+            chmod(databasePath, 0o660)
+            chmod(databasePath + "-wal", 0o660)
+            chmod(databasePath + "-shm", 0o660)
+        }
     }
 
     /// Creates an `EventStore` at a custom path (useful for testing).
     ///
     /// - Parameter path: Full file system path for the SQLite database.
     /// - Throws: `EventStoreError` if the database cannot be opened or initialized.
-    public init(path: String) throws {
+    public init(path: String, forceReadOnly: Bool = false) throws {
         self.databasePath = path
-        let (handle, ro, stmt) = try Self.openDatabase(at: path)
+        let (handle, ro, stmt) = try Self.openDatabase(at: path, forceReadOnly: forceReadOnly)
         self.db = handle
         self.isReadOnly = ro
         self.insertStmt = stmt
@@ -489,6 +594,14 @@ public actor EventStore {
     /// — operators tuning their filter list need to see the impact.
     public func insertFilterCounters() -> (dropped: Int, passed: Int)? {
         return insertFilter?.counters.snapshot()
+    }
+
+    /// Snapshot the running total of events whose raw_json was truncated
+    /// to fit `maxRawJsonBytes`. Exposed so the daemon heartbeat can surface
+    /// `maccrab_eventstore_payload_truncated_total` to scrapers and the
+    /// dashboard. Monotonic for the lifetime of the actor.
+    public func payloadTruncatedTotal() -> Int {
+        return payloadTruncatedCount
     }
 
     public func insert(event: Event) throws {
@@ -567,14 +680,32 @@ public actor EventStore {
             sanitizedEvent = event
         }
 
-        let jsonData: Data
+        // v1.12.6: bound raw_json at insert. A single misbehaving caller
+        // (e.g. `python3 -c '...' <base64-payload>`) can otherwise drop a
+        // ~1MB row into events.db and crowd out detection signal. Encode
+        // once; if oversized, apply structured per-arg truncation +
+        // enrichment markers; only as a final fail-open fallback do we
+        // truncate the raw string itself.
+        let jsonString: String
         do {
-            jsonData = try encoder.encode(sanitizedEvent)
+            let initialData = try encoder.encode(sanitizedEvent)
+            if initialData.count <= Self.maxRawJsonBytes {
+                guard let s = String(data: initialData, encoding: .utf8) else {
+                    throw EventStoreError.encodingFailed("Failed to convert JSON data to string")
+                }
+                jsonString = s
+            } else {
+                let truncated = truncatePayload(
+                    sanitizedEvent: sanitizedEvent,
+                    originalBytes: initialData.count
+                )
+                jsonString = truncated.string
+                payloadTruncatedCount &+= 1
+            }
+        } catch let error as EventStoreError {
+            throw error
         } catch {
             throw EventStoreError.encodingFailed(error.localizedDescription)
-        }
-        guard let jsonString = String(data: jsonData, encoding: .utf8) else {
-            throw EventStoreError.encodingFailed("Failed to convert JSON data to string")
         }
 
         sqlite3_reset(stmt)
@@ -649,6 +780,75 @@ public actor EventStore {
         bindTextOrNull(stmt, index: 28, value: event.enrichments[TraceCorrelator.EnrichmentKey.confidence])
         // 29: agent_evidence_json
         bindTextOrNull(stmt, index: 29, value: event.enrichments[TraceCorrelator.EnrichmentKey.evidenceJson])
+        // v1.12.6 Wave 2A schema v6: promoted process / signature /
+        // session / ai-tool fields. Empty Strings are bound as NULL so
+        // `IS NULL` filters work in SQL; "" would otherwise non-match
+        // for `field IS NOT NULL`. Bool fields use SQLite 0/1 INTEGER.
+        // 30: user_id (UInt32 -> Int64 to avoid Int32 overflow)
+        sqlite3_bind_int64(stmt, 30, Int64(event.process.userId))
+        // 31: user_name -- empty -> NULL (often empty in capture stream)
+        bindTextOrNull(stmt, index: 31, value: event.process.userName.isEmpty ? nil : event.process.userName)
+        // 32: group_id
+        sqlite3_bind_int64(stmt, 32, Int64(event.process.groupId))
+        // 33: working_directory -- empty -> NULL
+        bindTextOrNull(stmt, index: 33, value: event.process.workingDirectory.isEmpty ? nil : event.process.workingDirectory)
+        // 34: responsible_pid (Int32, never negative in practice but
+        // bind raw value — historical events have rpid==pid placeholder)
+        sqlite3_bind_int(stmt, 34, event.process.rpid)
+        // 35: architecture (Optional<String>) -- nil already maps to NULL
+        bindTextOrNull(stmt, index: 35, value: event.process.architecture)
+        // 36: is_platform_binary -- 0/1 not "true"/"false"
+        sqlite3_bind_int(stmt, 36, event.process.isPlatformBinary ? 1 : 0)
+        // 37: is_notarized -- only when codeSignature is present.
+        // NULL means "unknown" (no signature info), 0 means "explicitly
+        // not notarized", 1 means "notarized". Sigma rules predicate
+        // on the 3-state via the NotarizationStatus resolver alias.
+        if let sig = event.process.codeSignature {
+            sqlite3_bind_int(stmt, 37, sig.isNotarized ? 1 : 0)
+        } else {
+            sqlite3_bind_null(stmt, 37)
+        }
+        // 38: process_sha256 -- only when ProcessHasher attached hashes
+        bindTextOrNull(stmt, index: 38, value: event.process.hashes?.sha256)
+        // 39: parent_name -- first ancestor or NULL when ancestors empty
+        bindTextOrNull(stmt, index: 39, value: event.process.ancestors.first?.name)
+        // 40: parent_executable -- ditto
+        bindTextOrNull(stmt, index: 40, value: event.process.ancestors.first?.executable)
+        // 41: parent_signer_type -- set by EventEnricher when parent
+        // process signature lookup succeeds; nil otherwise.
+        bindTextOrNull(stmt, index: 41, value: event.enrichments["ParentSignerType"])
+        // 42: ai_tool -- reads either canonical key. AIProcessTracker
+        // (EventLoop.swift:89,97) writes "ai_tool"; TraceCorrelator
+        // (the legacy EnrichmentKey.agentTool constant) writes
+        // "agent_tool". Either should populate the indexed column.
+        // v1.12.6 RC2 fix: pre-RC1 only read EnrichmentKey.agentTool
+        // so the column was 100% NULL in production despite
+        // "claude_code"/"cursor"/etc. being live in raw_json under
+        // the "ai_tool" key. Rules can match either Sigma alias
+        // against this column (AITool, AiTool both resolve here).
+        let aiTool = event.enrichments["ai_tool"]
+            ?? event.enrichments[TraceCorrelator.EnrichmentKey.agentTool]
+        bindTextOrNull(stmt, index: 42, value: aiTool)
+        // 43: ai_tool_child -- 1 when MCPAttributor / AgentLineage
+        // marks this process as a descendant of an AI tool; otherwise
+        // NULL (not "0", so historical rows still register as unknown).
+        if let aiChild = event.enrichments["ai_tool_child"] {
+            sqlite3_bind_int(stmt, 43, aiChild == "true" ? 1 : 0)
+        } else {
+            sqlite3_bind_null(stmt, 43)
+        }
+        // 44: session_launch_source -- LaunchSource raw value ("ssh",
+        // "terminal", "launchd", ...) from SessionEnricher; nil when
+        // the enricher hasn't classified the parent chain yet.
+        bindTextOrNull(stmt, index: 44, value: event.process.session?.launchSource?.rawValue)
+        // 45: tcc_decision -- "granted" / "denied". TCCInfo.allowed
+        // (Bool) flattened to a string so the Sigma rule can compare
+        // against rule literals without engine-side Bool plumbing.
+        if let allowed = event.tcc?.allowed {
+            bindText(stmt, index: 45, value: allowed ? "granted" : "denied")
+        } else {
+            sqlite3_bind_null(stmt, 45)
+        }
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
@@ -664,6 +864,177 @@ public actor EventStore {
             }
             throw EventStoreError.stepFailed(msg)
         }
+    }
+
+    // MARK: - Payload truncation (v1.12.6)
+
+    /// Result of the payload truncation pipeline.
+    private struct TruncatedPayload {
+        let event: Event
+        let string: String
+    }
+
+    /// Apply structured truncation to an oversized event payload so the
+    /// SQLite write fits inside `maxRawJsonBytes`. Returns a re-encoded
+    /// JSON string plus the mutated `Event` so callers can observe the
+    /// truncation markers (used in tests).
+    ///
+    /// Pipeline (cheapest → most aggressive):
+    ///   1. Replace each `process.args` entry over `argTruncationThreshold`
+    ///      bytes with `"<truncated:N bytes>"`. Drops the dominant 1MB
+    ///      base64-arg case to a marker.
+    ///   2. If still oversized, also collapse `process.commandLine` to a
+    ///      marker (recovers events whose mass lives in the joined string
+    ///      rather than per-arg).
+    ///   3. As a last-resort fail-open, truncate the raw JSON string
+    ///      itself to `maxRawJsonBytes - margin` and append a tail
+    ///      marker. The row will no longer JSON-parse cleanly — downstream
+    ///      decoders are expected to read the truncation enrichments
+    ///      first and skip raw_json reconstruction.
+    ///
+    /// Always sets `payload.truncated = "true"` and
+    /// `payload.original_bytes = "<N>"` on the resulting event so the FTS
+    /// index, dashboard, and analytics consumers see the cap was hit.
+    private func truncatePayload(
+        sanitizedEvent: Event,
+        originalBytes: Int
+    ) -> TruncatedPayload {
+        let log = Logger(subsystem: "com.maccrab.storage", category: "event-store")
+        var mutated = sanitizedEvent
+        mutated.enrichments["payload.truncated"] = "true"
+        mutated.enrichments["payload.original_bytes"] = String(originalBytes)
+
+        // Pass 1: per-arg truncation.
+        let originalArgs = sanitizedEvent.process.args
+        let truncatedArgs: [String] = originalArgs.map { arg in
+            let argBytes = arg.utf8.count
+            if argBytes > Self.argTruncationThreshold {
+                return "<truncated:\(argBytes) bytes>"
+            }
+            return arg
+        }
+
+        let argsChanged = zip(originalArgs, truncatedArgs).contains { $0 != $1 }
+        if argsChanged {
+            mutated = withProcess(
+                event: mutated,
+                rebuiltProcess: rebuildProcess(
+                    sanitizedEvent.process,
+                    commandLine: sanitizedEvent.process.commandLine,
+                    args: truncatedArgs
+                )
+            )
+        }
+
+        if let encoded = try? encoder.encode(mutated),
+           encoded.count <= Self.maxRawJsonBytes,
+           let s = String(data: encoded, encoding: .utf8) {
+            return TruncatedPayload(event: mutated, string: s)
+        }
+
+        // Pass 2: also collapse the joined commandLine.
+        let originalCmd = sanitizedEvent.process.commandLine
+        let cmdBytes = originalCmd.utf8.count
+        let collapsedCmd = "<truncated:\(cmdBytes) bytes>"
+        mutated = withProcess(
+            event: mutated,
+            rebuiltProcess: rebuildProcess(
+                sanitizedEvent.process,
+                commandLine: collapsedCmd,
+                args: truncatedArgs
+            )
+        )
+
+        if let encoded = try? encoder.encode(mutated),
+           encoded.count <= Self.maxRawJsonBytes,
+           let s = String(data: encoded, encoding: .utf8) {
+            return TruncatedPayload(event: mutated, string: s)
+        }
+
+        // Pass 3 (fail-open): brute-force truncate the JSON string. We
+        // never block insert — better to land a partially-readable row
+        // than to lose the event and the truncation signal entirely.
+        let tail = "<...truncated>"
+        let margin = tail.utf8.count + 16
+        let target = max(0, Self.maxRawJsonBytes - margin)
+        let rawString: String
+        if let data = try? encoder.encode(mutated),
+           let s = String(data: data, encoding: .utf8) {
+            rawString = s
+        } else {
+            // Should be unreachable — mutated is built from sanitizedEvent
+            // which encoded successfully above. Fall back to a stub.
+            rawString = "{\"payload\":\"unencodable\"}"
+        }
+        // Slice on UTF-8 byte boundary — may land mid-codepoint, so walk
+        // back a few bytes until we hit valid UTF-8. Bounded by `margin`.
+        let utf8Bytes = Array(rawString.utf8)
+        var sliceEnd = min(target, utf8Bytes.count)
+        var truncated = ""
+        while sliceEnd > 0 {
+            if let s = String(data: Data(utf8Bytes.prefix(sliceEnd)), encoding: .utf8) {
+                truncated = s
+                break
+            }
+            sliceEnd -= 1
+        }
+        truncated.append(tail)
+
+        log.warning("Payload truncation fell through to fail-open path for event \(sanitizedEvent.id.uuidString, privacy: .public) (\(originalBytes) bytes)")
+        return TruncatedPayload(event: mutated, string: truncated)
+    }
+
+    /// Rebuild a `ProcessInfo` with new `commandLine` and `args` fields,
+    /// preserving every other field. Used by the truncation pipeline so
+    /// downstream enrichments (codeSignature, ancestors, hashes, etc.)
+    /// survive the per-arg rewrite.
+    private func rebuildProcess(
+        _ source: ProcessInfo,
+        commandLine: String,
+        args: [String]
+    ) -> ProcessInfo {
+        return ProcessInfo(
+            pid: source.pid,
+            ppid: source.ppid,
+            rpid: source.rpid,
+            name: source.name,
+            executable: source.executable,
+            commandLine: commandLine,
+            args: args,
+            workingDirectory: source.workingDirectory,
+            userId: source.userId,
+            userName: source.userName,
+            groupId: source.groupId,
+            startTime: source.startTime,
+            exitCode: source.exitCode,
+            codeSignature: source.codeSignature,
+            ancestors: source.ancestors,
+            architecture: source.architecture,
+            isPlatformBinary: source.isPlatformBinary,
+            hashes: source.hashes,
+            session: source.session,
+            envVars: source.envVars
+        )
+    }
+
+    /// Rebuild an `Event` swapping in a different `ProcessInfo`. Preserves
+    /// id/timestamp/category/type/action and copies enrichments + severity
+    /// + ruleMatches through.
+    private func withProcess(event: Event, rebuiltProcess: ProcessInfo) -> Event {
+        return Event(
+            id: event.id,
+            timestamp: event.timestamp,
+            eventCategory: event.eventCategory,
+            eventType: event.eventType,
+            eventAction: event.eventAction,
+            process: rebuiltProcess,
+            file: event.file,
+            network: event.network,
+            tcc: event.tcc,
+            enrichments: event.enrichments,
+            severity: event.severity,
+            ruleMatches: event.ruleMatches
+        )
     }
 
     /// Persists a batch of events inside a single transaction.
@@ -1505,6 +1876,42 @@ public actor EventStore {
             &restartLog, &restartCkpt
         )
         return rcRestart == SQLITE_OK && restartLog == restartCkpt
+    }
+
+    // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
+    //
+    // Reclaim freelist pages from the end of the file in place — no
+    // scratch disk required. Drives the low-disk fallback in
+    // `enforceDatabaseSizeCap` when a full VACUUM would need more
+    // headroom than the volume has.
+    //
+    // Returns the number of pages physically removed from the file
+    // (delta in `PRAGMA freelist_count`). Zero means either:
+    //   - The DB isn't in `auto_vacuum = INCREMENTAL` mode (pre-v1.10
+    //     EventStore DBs that never had the one-shot conversion run),
+    //   - The freelist was already empty,
+    //   - Or `maxPages == 0`.
+    //
+    // The caller can divide by `Int64(maxPages) * Int64(pageSize)` to
+    // estimate the file-size reduction, but the size-cap enforcer
+    // reads the on-disk footprint directly via `statvfs` so it gets
+    // exact numbers including the WAL/SHM sidecars.
+    @discardableResult
+    public func incrementalVacuum(maxPages: Int) async throws -> Int {
+        guard let db = db else { return 0 }
+        let result = try StoragePragmas.runIncrementalVacuum(on: db, maxPages: maxPages)
+        return result.pagesReclaimed
+    }
+
+    /// Read the file's `PRAGMA auto_vacuum` mode at runtime. Returns
+    /// 0/1/2 (NONE / FULL / INCREMENTAL); 0 on closed/error. The
+    /// size-cap enforcer reads this so it can log when the DB is not
+    /// in INCREMENTAL mode — incrementalVacuum is a no-op in that
+    /// case, and the operator may want to schedule a one-shot
+    /// `maccrabctl maintenance vacuum` to convert.
+    public func autoVacuumMode() async -> Int {
+        guard let db = db else { return 0 }
+        return Int(StoragePragmas.readAutoVacuumMode(db))
     }
 
     // MARK: - Reentrancy guard for size-cap enforcement

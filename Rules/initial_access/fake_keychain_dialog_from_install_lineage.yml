@@ -1,0 +1,75 @@
+title: osascript Fake Keychain / iCloud Password Dialog From Package-Install Lineage (OpenClaw)
+id: 632b63f6-0674-49bd-bb4d-3f9070f8b0ba
+status: experimental
+description: >
+    Detects `osascript -e 'display dialog ...'` whose dialog text
+    impersonates the Keychain, iCloud, or system-password prompt, when
+    spawned by a process descending from a package manager
+    (npm / npx / pnpm / yarn / pip / pip3 / uv / poetry / bun / node /
+    python). This is the OpenClaw / GhostLoader credential-phishing IOC
+    (April-May 2026): a compromised postinstall throws an authentic-
+    looking AppleScript dialog asking the user to "re-enter your
+    Keychain password" — the captured plaintext is then exfiltrated.
+    Legitimate package installs never need to display Keychain
+    dialogs.
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://www.aikido.dev/blog/openclaw-ghostloader-macos-postinstall-credential-phish-2026
+    - https://socket.dev/blog/openclaw-malicious-npm-and-pypi-packages-2026
+    - https://attack.mitre.org/techniques/T1056/002/
+    - https://attack.mitre.org/techniques/T1059/002/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.collection
+    - attack.t1056.002
+    - attack.execution
+    - attack.t1059.002
+    - attack.credential_access
+    - attack.t1555
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection_osascript:
+        Image|endswith:
+            - '/osascript'
+        CommandLine|contains:
+            - 'display dialog'
+    selection_keychain_phrasing:
+        CommandLine|contains:
+            - 'Keychain'
+            - 'keychain'
+            - 'iCloud'
+            - 'Apple ID'
+            - 'AppleID'
+            - 'system password'
+            - 'Your password'
+            - 'sign in to continue'
+            - 'unlock to continue'
+            - 'Software Update'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/bun'
+            - '/node'
+            - '/python'
+            - '/python3'
+            - '/gem'
+            - '/ruby'
+            - '/cargo'
+    condition: selection_osascript and selection_keychain_phrasing and selection_lineage
+falsepositives:
+    - A legitimate package whose declared purpose is credential UX (e.g., a developer-facing `keytar`-like dialog helper) — extremely rare; review the package provenance and allowlist by package name
+    - A red-team / training package intentionally simulating this attack — investigate the parent CommandLine for `install` to confirm
+    - An installer package displaying a generic permissions dialog that happens to mention `keychain` only as a docs reference — extend filter list once observed
+level: critical

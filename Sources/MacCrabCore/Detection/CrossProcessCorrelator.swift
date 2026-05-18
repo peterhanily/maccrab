@@ -249,6 +249,22 @@ public actor CrossProcessCorrelator {
         // to the correlator. If the file path contains `/.build/`, it's
         // an SPM build artifact — the cross-process signal is noise.
         "/.build/",
+        // v1.12.6: Claude Code shell-snapshot scratch files. Each tool
+        // invocation captures the shell environment to
+        // ~/.claude/shell-snapshots/snapshot-<shell>-<ts>-<rand>.sh,
+        // written by zsh/bash and re-read by the next tool. Many tools
+        // per session × snapshot-per-tool produces a steady stream of
+        // multi-process file convergence with zero attack signal.
+        "/.claude/shell-snapshots/",
+        // v1.12.6: MacCrab's own release-build scratch dir. scripts/
+        // build-release.sh writes /private/tmp/maccrab-release-<ts>/
+        // and codesign/productbuild/cp fan out across it. Self-FP.
+        "/private/tmp/maccrab-release-",
+        // v1.12.6: MacCrab's own compiled-rules directory. The install
+        // pipeline (sysextd, the daemon's own writer, and maccrabctl)
+        // touch this path during rule reload, producing a 3-process
+        // chain against our own JSON files. Self-FP.
+        "/Library/Application Support/MacCrab/compiled_rules/",
     ]
 
     /// Network destinations that are never interesting.

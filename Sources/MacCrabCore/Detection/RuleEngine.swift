@@ -920,11 +920,84 @@ public actor RuleEngine {
                 .map { "\($0.key)=\($0.value)" }
                 .joined(separator: " ")
 
-        case "process.is_platform_binary":
+        case "process.is_platform_binary", "IsPlatformBinary", "PlatformBinary":
             return String(event.process.isPlatformBinary)
 
-        case "process.architecture":
+        case "process.architecture", "Architecture":
+            // v1.12.6 Wave 2A: previously Sigma's `Architecture:` fell
+            // through to event.enrichments["Architecture"] which is never
+            // populated (the ES collector writes the raw "arm64"/"x86_64"
+            // string directly onto ProcessInfo.architecture). Rules in
+            // Rules/defense_evasion/rosetta_*.yml predicate on this Sigma
+            // field name — without the alias they silently never fired.
             return event.process.architecture
+
+        // v1.12.6 Wave 2A: explicit Sigma aliases for fields the rule
+        // corpus uses but the pre-v6 resolver mapped to wrong / unset
+        // enrichment keys. Each case here corresponds to a column added
+        // in EventStore schema v6 and unblocks at least one production
+        // rule from the dead-letter list.
+
+        case "process.is_notarized", "IsNotarized":
+            // Three-state: nil when no codeSignature attached (unknown),
+            // otherwise the Bool flattened to "true"/"false" so Sigma's
+            // string equality compares against rule literals cleanly.
+            return event.process.codeSignature.map { String($0.isNotarized) }
+
+        case "NotarizationStatus":
+            // Mirrors NotarizationChecker.NotarizationStatus rawValues
+            // exactly so Rules/defense_evasion/notarization_absent_*.yml,
+            // mas_receipt_access_by_non_sandbox.yml, and
+            // sequences/notarized_dropper_pattern.yml can predicate on
+            // 'notarized' / 'not_notarized' literally. nil when the
+            // codeSignature enricher hasn't attached info yet — Sigma's
+            // `equals` against nil returns false, which matches the
+            // rule author's intent (don't fire on unknown).
+            guard let sig = event.process.codeSignature else { return nil }
+            return sig.isNotarized ? "notarized" : "not_notarized"
+
+        case "process.user_id", "UserId":
+            return String(event.process.userId)
+
+        case "process.group_id", "GroupId":
+            return String(event.process.groupId)
+
+        case "WorkingDirectory":
+            // Sigma alias for `process.working_directory` (already mapped
+            // above). Keeps rule authors from having to know the dotted
+            // form.
+            return event.process.workingDirectory
+
+        case "ResponsiblePid":
+            return String(event.process.rpid)
+
+        case "ParentName":
+            return event.process.ancestors.first?.name
+
+        case "AiTool", "AITool":
+            // v1.12.6 Wave 9M: read `ai_tool` first then fall back to
+            // `agent_tool`. EventStore v6 writer (Wave 9C) populates
+            // the column via `ai_tool ?? agent_tool` because the
+            // production AIProcessTracker emits `ai_tool` while the
+            // legacy TraceCorrelator emits `agent_tool`. Pre-9M this
+            // case read ONLY agent_tool, so rules matching on
+            // `AiTool: claude_code` failed to fire against events
+            // produced by the modern writer path. Two aliases match
+            // either casing a rule author might write.
+            return event.enrichments["ai_tool"]
+                ?? event.enrichments[TraceCorrelator.EnrichmentKey.agentTool]
+
+        case "AiToolChild", "AIToolChild":
+            return event.enrichments["ai_tool_child"]
+
+        case "SessionLaunchSource":
+            // Synonym for `LaunchSource` already mapped above, kept
+            // for grep'ability against the v6 column name.
+            return event.process.session?.launchSource?.rawValue
+
+        case "TCCDecision":
+            // Match the SQL column convention: "granted" / "denied".
+            return event.tcc.map { $0.allowed ? "granted" : "denied" }
 
         // --- File fields ---
         case "file.path", "TargetFilename":
@@ -942,7 +1015,12 @@ public actor RuleEngine {
         case "file.size":
             return event.file?.size.map { String($0) }
 
-        case "file.action":
+        case "file.action", "FileAction":
+            // "FileAction" is in `_KNOWN_PASSTHROUGH_FIELDS` in the rule
+            // compiler — without this alias 15+ ai_safety/supply_chain
+            // rules that predicate on `FileAction: 'create'` etc. would
+            // silently never fire because resolveField() would hit the
+            // `default:` enrichments-dict branch and return nil.
             return event.file?.action.rawValue
 
         case "file.source_path", "SourceFilename":

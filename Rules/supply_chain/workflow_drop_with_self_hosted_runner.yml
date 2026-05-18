@@ -1,0 +1,81 @@
+title: GitHub Actions Workflow With self-hosted Runner Dropped by Package Install (TanStack)
+id: 79e34a9e-bef4-42b0-bb06-7afc3bc29f82
+status: experimental
+description: >
+    Detects creation of a `.github/workflows/*.yml` (or `.yaml`) file
+    by a package-install lineage where the filename matches one of the
+    known IOC variants (discussion.yaml, shai-hulud-workflow.yml,
+    runner.yml, self-hosted.yml). The Mini Shai-Hulud Wave 4 TanStack
+    compromise (CVE-2026-45321, May 2026) dropped a workflow whose
+    `runs-on: self-hosted` line redirects subsequent CI to an attacker-
+    controlled runner, granting persistent push and secret access to
+    the project. This is a narrower variant of
+    `package_install_drops_github_workflow.yml` — the parent rule
+    keys off any workflow drop with scaffolder filtering, this rule
+    keys off the specific filenames documented in the May 2026 wave
+    so it fires at `critical` without scaffolder exemption.
+    Limitation: ideal detection would inspect FileContent for the
+    literal `runs-on: self-hosted` token, but FileContentEnricher
+    does not currently scan files under `.github/workflows/`. When
+    the enricher allowlist is extended in a future release, this rule
+    should grow a `FileContent|contains: 'runs-on: self-hosted'`
+    selection to broaden coverage beyond filename-IOC.
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://snyk.io/blog/tanstack-npm-packages-compromised/
+    - https://www.wiz.io/blog/mini-shai-hulud-strikes-again-tanstack-more-npm-packages-compromised
+    - https://www.sysdig.com/blog/shai-hulud-the-novel-self-replicating-worm-infecting-hundreds-of-npm-packages
+    - https://attack.mitre.org/techniques/T1546/
+    - https://attack.mitre.org/techniques/T1078/004/
+    - https://attack.mitre.org/techniques/T1195/001/
+tags:
+    - attack.persistence
+    - attack.t1546
+    - attack.defense_evasion
+    - attack.t1078.004
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: file_event
+    product: macos
+detection:
+    selection_workflow_ioc_filename:
+        TargetFilename|contains:
+            - '/.github/workflows/'
+        TargetFilename|endswith:
+            - '/discussion.yaml'
+            - '/discussion.yml'
+            - '/shai-hulud-workflow.yml'
+            - '/shai-hulud-workflow.yaml'
+            - '/runner.yml'
+            - '/self-hosted.yml'
+            - '/self-hosted.yaml'
+            - '/runs-on.yml'
+        FileAction:
+            - 'create'
+            - 'close'
+    selection_lineage:
+        ParentImage|endswith:
+            - '/npm'
+            - '/npx'
+            - '/pnpm'
+            - '/yarn'
+            - '/pip'
+            - '/pip3'
+            - '/uv'
+            - '/poetry'
+            - '/python'
+            - '/python3'
+            - '/node'
+        ParentCommandLine|contains:
+            - 'install'
+            - 'add'
+            - 'postinstall'
+            - 'preinstall'
+    condition: selection_workflow_ioc_filename and selection_lineage
+falsepositives:
+    - A maintained corpus of community-contributed workflow templates whose filename overlaps with an IOC (e.g., a legitimate `discussion.yaml` template for GitHub Discussions automation) — review the workflow body and allowlist via project boundary
+    - A workflow-generator npm package whose published purpose is to scaffold `.github/workflows/discussion.yaml` — extend filter list by package basename once observed
+    - Rule depends on filename-IOC detection only; live worms that rotate to new filenames will not fire. Promote this rule once FileContentEnricher.shouldScan extends to `.github/workflows/`.
+level: critical

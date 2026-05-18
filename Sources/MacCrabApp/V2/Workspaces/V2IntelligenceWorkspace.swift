@@ -43,12 +43,46 @@ public struct V2IntelligenceWorkspace: View {
             // PackageFreshnessChecker, NOT the new PackageScanner),
             // and the integrations tab was a static placeholder. Pull
             // both on every tick; the cache absorbs the cost.
-            async let f = state.provider.feeds()
+            //
+            // v1.12.6 Wave 9E: feeds are read directly via
+            // `V2LiveDataProvider.loadFeedsFromCache(preferring:)`
+            // rather than through `state.provider.feeds()`. The
+            // threat-intel cache file on disk is the source of truth
+            // regardless of provider mode — V2MockDataProvider's
+            // `feeds()` returned synthetic fixtures (Spamhaus DROP /
+            // MITRE ATT&CK / etc.) that weren't wired to anything, and
+            // on first appear the workspace would render those mock
+            // rows until the mock→live provider flip plus a .task(id:)
+            // re-fire overwrote them. User-visible symptom: "feeds
+            // don't seem to work right away until you hit refresh".
+            // The static helper probes both canonical paths (system +
+            // user-home) so the cache is found regardless of which
+            // directory `dataDir` resolved to.
+            //
+            // v1.12.6 Wave 9G: feeds are assigned to @State BEFORE the
+            // slower `packages()` / `integrations()` readers resolve.
+            // Pre-9G the three reads were combined in one `await (f, p, i)`
+            // tuple, blocking `self.feeds = feedsResult` until packages()
+            // returned. PackageScanner.scan() shells out to brew + npm +
+            // pip3 on cold open and can take 5+ seconds — longer than the
+            // dashboard's default 5s auto-refresh tick. `.task(id:)`
+            // cancels the running body when the id changes, so on every
+            // tick the feeds assignment was canceled before it ran. The
+            // user's symptom: "feeds still require a refresh to appear"
+            // even with `feed_cache.json` present and populated on disk.
+            // Manual refresh worked only because it injects a 6s sleep
+            // that lets PackageScanner's 5-min cache warm before the
+            // refreshTick bump fires the next task body.
+            let dataDirHint = (state.provider as? V2LiveDataProvider)?.dataDir
+            let feedsResult = await Task.detached(priority: .userInitiated) {
+                V2LiveDataProvider.loadFeedsFromCache(preferring: dataDirHint)
+            }.value
+            await MainActor.run { self.feeds = feedsResult }
+
             async let p = state.provider.packages()
             async let i = state.provider.integrations()
-            let (feedsResult, pkgsResult, integResult) = await (f, p, i)
+            let (pkgsResult, integResult) = await (p, i)
             await MainActor.run {
-                self.feeds = feedsResult
                 // Only seed packages from the live provider when the
                 // user hasn't run an explicit scan (which uses the
                 // older PackageFreshnessChecker for richer data).

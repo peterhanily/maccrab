@@ -108,7 +108,9 @@ struct V2HeartbeatSnapshotTests {
             sysextHasFDA: false,
             schemaVersion: 2,
             eventTypeCounts1h: eventTypeCounts1h,
-            collectors: []
+            collectors: [],
+            payloadTruncatedTotal: 0,
+            esloggerDroppedTotal: 0
         )
     }
 }

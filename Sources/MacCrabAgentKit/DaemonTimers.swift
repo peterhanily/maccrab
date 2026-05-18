@@ -34,6 +34,13 @@ enum DaemonTimers {
         let campaignsPruneTimer: DispatchSourceTimer?
         let campaignsSizeCapTimer: DispatchSourceTimer?
         let sizeCapTimer: DispatchSourceTimer
+        /// v1.12.6: early-fire watchdog (60 s cadence) for the events.db
+        /// size cap. Defense-in-depth for the configurable scheduled
+        /// `sizeCapTimer` — catches sudden growth bursts (DB > 1.5× cap)
+        /// between scheduled sweeps. Retained here so the DispatchSourceTimer
+        /// isn't ARC-deallocated on return from `start()` (mirrors the
+        /// v1.10.0 fix for the trace/tracegraph prune timers).
+        let sizeCapWatchdogTimer: DispatchSourceTimer
         let maintenanceTimer: DispatchSourceTimer
         let feedbackTimer: DispatchSourceTimer
         let heartbeatTimer: DispatchSourceTimer
@@ -409,6 +416,42 @@ enum DaemonTimers {
                             let nowSize = await causalStore.databaseSizeBytes()
                             if nowSize < capBytes { break }
                         }
+
+                        // Wave 9B (v1.12.6): tracegraph.db is the
+                        // worst offender — field-observed 11 GB on a
+                        // long-running install. Try incremental_vacuum
+                        // first (no scratch disk needed), then full
+                        // VACUUM only if disk has 1.3× headroom.
+                        //
+                        // KNOWN GAP: this DB doesn't currently set
+                        // auto_vacuum=INCREMENTAL on creation, so
+                        // incrementalVacuum is a no-op until a
+                        // future migration. The runtime mode probe
+                        // logs the gap when triggered.
+                        let cgPath = state.supportDir + "/tracegraph.db"
+                        let postPruneMB = measureDatabaseFootprintMB(dbPath: cgPath)
+                        let mode = await causalStore.autoVacuumMode()
+                        let reclaimed = (try? await causalStore.incrementalVacuum(maxPages: 200_000)) ?? 0
+                        let postIncrementalMB = measureDatabaseFootprintMB(dbPath: cgPath)
+                        if reclaimed > 0 {
+                            logger.notice("TraceGraph size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
+                        } else if mode != 2 {
+                            logger.warning("TraceGraph size cap: incremental_vacuum unavailable (auto_vacuum mode=\(mode), need 2/INCREMENTAL). Run `maccrabctl maintenance vacuum tracegraph` once to convert.")
+                        }
+
+                        let freeMB = freeDiskMB(forPath: cgPath)
+                        let needMB = Int(Double(postIncrementalMB) * 1.3)
+                        if freeMB >= needMB {
+                            do {
+                                try await causalStore.vacuum()
+                                let finalMB = measureDatabaseFootprintMB(dbPath: cgPath)
+                                logger.notice("TraceGraph size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
+                            } catch {
+                                logger.warning("TraceGraph size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
+                            }
+                        } else {
+                            logger.warning("TraceGraph size cap: full VACUUM skipped — need \(needMB) MB free, have \(freeMB) MB. incremental_vacuum reclaimed \(reclaimed) pages.")
+                        }
                     }
                 }
             }
@@ -441,6 +484,40 @@ enum DaemonTimers {
                             if dropped == 0 { break }
                             let nowSize = await traceStore.databaseSizeBytes()
                             if nowSize < capBytes { break }
+                        }
+
+                        // Wave 9B (v1.12.6): incremental_vacuum +
+                        // low-disk-safe full VACUUM. Same pattern as
+                        // the tracegraph.db enforcer above.
+                        //
+                        // KNOWN GAP: traces.db doesn't currently set
+                        // auto_vacuum=INCREMENTAL on creation, so
+                        // incrementalVacuum is a no-op until a
+                        // future migration. The mode probe logs the
+                        // gap on the first triggered sweep.
+                        let tsPath = state.supportDir + "/traces.db"
+                        let postPruneMB = measureDatabaseFootprintMB(dbPath: tsPath)
+                        let mode = await traceStore.autoVacuumMode()
+                        let reclaimed = (try? await traceStore.incrementalVacuum(maxPages: 200_000)) ?? 0
+                        let postIncrementalMB = measureDatabaseFootprintMB(dbPath: tsPath)
+                        if reclaimed > 0 {
+                            logger.notice("OTLP traces size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
+                        } else if mode != 2 {
+                            logger.warning("OTLP traces size cap: incremental_vacuum unavailable (auto_vacuum mode=\(mode), need 2/INCREMENTAL). Run `maccrabctl maintenance vacuum traces` once to convert.")
+                        }
+
+                        let freeMB = freeDiskMB(forPath: tsPath)
+                        let needMB = Int(Double(postIncrementalMB) * 1.3)
+                        if freeMB >= needMB {
+                            do {
+                                try await traceStore.vacuum()
+                                let finalMB = measureDatabaseFootprintMB(dbPath: tsPath)
+                                logger.notice("OTLP traces size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
+                            } catch {
+                                logger.warning("OTLP traces size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
+                            }
+                        } else {
+                            logger.warning("OTLP traces size cap: full VACUUM skipped — need \(needMB) MB free, have \(freeMB) MB. incremental_vacuum reclaimed \(reclaimed) pages.")
                         }
                     }
                 }
@@ -475,7 +552,21 @@ enum DaemonTimers {
         let startupSizeMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
         let startupCapMB = max(100, state.storage.eventsMaxSizeMB)
         let startupHotMinutes = max(15, state.storage.eventsHotTierMinutes)
-        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, cap=\(startupCapMB) MB, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 15 min, every 6h thereafter.")
+        // v1.12.6: cadence is now user-configurable via
+        // storage.eventsSizeCapIntervalMinutes. The default (60 min)
+        // replaces the v1.10.0 hardcoded 6h interval that left field
+        // hosts wedged with up to ~17 GB of unswept growth on busy
+        // workloads. Operators on heavier workloads can drop the
+        // interval (e.g. 5 min); idle hosts can lift it to save CPU.
+        let configuredSweepMinutes = state.storage.eventsSizeCapIntervalMinutes
+        let sweepIntervalMinutes: Int
+        if configuredSweepMinutes > 0 {
+            sweepIntervalMinutes = configuredSweepMinutes
+        } else {
+            sweepIntervalMinutes = 60
+            logger.warning("eventsSizeCapIntervalMinutes=\(configuredSweepMinutes) is non-positive — falling back to default 60 min cadence.")
+        }
+        logger.notice("Tier-rollup timer armed: hot-tier=\(startupHotMinutes)m adaptive, cap=\(startupCapMB) MB, sweep cadence=\(sweepIntervalMinutes)m, currently \(startupSizeMB) MB (db+wal+shm). First sweep in 60 s.")
 
         // v1.10.0 audit fix: first sweep at .now() + 60 s instead of
         // + 900 s. If the user is booting into a sysext that
@@ -485,8 +576,17 @@ enum DaemonTimers {
         // of startup time to settle while still firing fast enough
         // for the user to see "DB shrunk from X to Y" within 1-2
         // minutes of launching the dashboard.
+        //
+        // v1.12.6: repeat interval pulled from
+        // `state.storage.eventsSizeCapIntervalMinutes` (default 60 min,
+        // configurable via daemon_config.json or user_overrides.json).
+        // The hardcoded 6h interval that this replaces let a busy host's
+        // events.db overrun a 300 MB cap by ~17 GB between sweeps.
         let sizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
-        sizeCapTimer.schedule(deadline: .now() + 60, repeating: 6 * 3600)
+        sizeCapTimer.schedule(
+            deadline: .now() + 60,
+            repeating: .seconds(sweepIntervalMinutes * 60)
+        )
         sizeCapTimer.setEventHandler {
             Task {
                 let capMB = max(100, state.storage.eventsMaxSizeMB)
@@ -494,6 +594,17 @@ enum DaemonTimers {
                 let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
                 let aggregateDays = max(1, state.storage.aggregateDays)
                 let alertsRetention = max(1, state.storage.alertsRetentionDays)
+                // v1.12.6: serialize scheduled sweeps with the early-fire
+                // watchdog (and any inbox flush-request) via the shared
+                // beginSizeCapPrune guard on EventStore. Without this,
+                // a watchdog burst on a wedged host could stack on top
+                // of an in-flight scheduled sweep, doubling the I/O
+                // load just when the disk is most pressured.
+                guard await state.eventStore.beginSizeCapPrune() else {
+                    logger.info("Tier-rollup scheduled sweep: another sweep already in flight, skipping.")
+                    return
+                }
+                defer { Task { await state.eventStore.endSizeCapPrune() } }
                 await runAdaptiveRollupSweep(
                     eventStore: state.eventStore,
                     dbPath: dbFilePath,
@@ -507,10 +618,67 @@ enum DaemonTimers {
         }
         sizeCapTimer.resume()
 
+        // v1.12.6: early-fire size-cap watchdog. Defense-in-depth for the
+        // configurable scheduled cadence above — if the DB blows past
+        // 1.5× the cap between scheduled sweeps (sustained event-firehose
+        // burst, runaway rule write-amplification, etc.), fire a sweep
+        // immediately rather than letting growth continue unchecked.
+        //
+        // Cadence: 60 s. Cheap — three stat() calls (db + wal + shm)
+        // and a numeric compare; only schedules a sweep on the cold
+        // path (over-threshold).
+        //
+        // Reentrancy: shares the EventStore `beginSizeCapPrune` guard
+        // with the scheduled sweep + inbox flush-request handler, so
+        // the watchdog cannot stack on top of an in-flight sweep.
+        let sizeCapWatchdogTimer = DispatchSource.makeTimerSource(queue: .global())
+        sizeCapWatchdogTimer.schedule(deadline: .now() + 120, repeating: 60)
+        sizeCapWatchdogTimer.setEventHandler {
+            Task {
+                let capMB = max(100, state.storage.eventsMaxSizeMB)
+                let nowMB = measureDatabaseFootprintMB(dbPath: dbFilePath)
+                // 1.5× cap is the "this should never happen on a healthy
+                // host" line. Picked so normal jitter around the cap
+                // (the scheduled sweep prunes to 80% of cap, then the
+                // hot tier refills) doesn't trip the watchdog every
+                // minute. The 0.5× margin gives the scheduled sweep
+                // headroom to do its job.
+                let watchdogThresholdMB = Int(Double(capMB) * 1.5)
+                guard nowMB > watchdogThresholdMB else { return }
+                guard await state.eventStore.beginSizeCapPrune() else {
+                    // A scheduled sweep is already running. The
+                    // scheduled sweep will bring us back under the cap
+                    // — no need to queue another.
+                    return
+                }
+                defer { Task { await state.eventStore.endSizeCapPrune() } }
+                let targetMB = Int(Double(capMB) * 0.8)
+                let hotMinutes = max(15, state.storage.eventsHotTierMinutes)
+                let aggregateDays = max(1, state.storage.aggregateDays)
+                let alertsRetention = max(1, state.storage.alertsRetentionDays)
+                logger.warning("Tier-rollup early-fire watchdog: DB \(nowMB) MB exceeds 1.5× cap (\(watchdogThresholdMB) MB) — running sweep now.")
+                await runAdaptiveRollupSweep(
+                    eventStore: state.eventStore,
+                    dbPath: dbFilePath,
+                    targetSizeMB: targetMB,
+                    capSizeMB: capMB,
+                    hotTierMinutes: hotMinutes,
+                    aggregateDays: aggregateDays,
+                    alertsRetentionDays: alertsRetention
+                )
+            }
+        }
+        sizeCapWatchdogTimer.resume()
+
         // Hourly size-cap defense for alerts.db. Alert volume is orders of
         // magnitude lower than events, so this rarely fires — but if a
         // pathological rule-author commits an alert-spamming rule, the cap
         // bounds the blast radius.
+        //
+        // Wave 9B (v1.12.6): on a low-disk host the post-prune VACUUM
+        // would skip silently. We now run incremental_vacuum first
+        // (free, in-place truncate) and only fall through to full
+        // VACUUM if the volume has 1.3× headroom.
         let alertsSizeCapTimer = DispatchSource.makeTimerSource(queue: .global())
         alertsSizeCapTimer.schedule(deadline: .now() + 1800, repeating: 3600)
         alertsSizeCapTimer.setEventHandler {
@@ -524,11 +692,44 @@ enum DaemonTimers {
                 let dropTarget = max(1_000, Int(Double(total) * (overFraction + 0.1)))
                 let dropped = (try? await state.alertStore.pruneOldest(count: dropTarget)) ?? 0
                 logger.warning("Alerts size cap: pruned \(dropped) oldest alerts (\(nowMB) MB > \(capMB) MB cap, target drop \(dropTarget))")
+
+                // Phase 2a: incremental_vacuum first — free, in-place
+                // truncate of end-of-file freelist pages. No-op if the
+                // DB isn't in INCREMENTAL mode.
+                let postPruneMB = measureDatabaseFootprintMB(dbPath: alertsPath)
+                let reclaimed = (try? await state.alertStore.incrementalVacuum(maxPages: 200_000)) ?? 0
+                let postIncrementalMB = measureDatabaseFootprintMB(dbPath: alertsPath)
+                if reclaimed > 0 {
+                    logger.notice("Alerts size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
+                }
+
+                // Phase 2b: full VACUUM only if 1.3× headroom available.
+                let freeMB = freeDiskMB(forPath: alertsPath)
+                let needMB = Int(Double(postIncrementalMB) * 1.3)
+                if freeMB >= needMB {
+                    do {
+                        try await state.alertStore.vacuum()
+                        let finalMB = measureDatabaseFootprintMB(dbPath: alertsPath)
+                        logger.notice("Alerts size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
+                    } catch {
+                        logger.warning("Alerts size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
+                    }
+                } else if reclaimed == 0 {
+                    logger.warning("Alerts size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB) AND incremental_vacuum was no-op. File size unchanged.")
+                } else {
+                    logger.warning("Alerts size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB). incremental_vacuum still reclaimed \(reclaimed) pages.")
+                }
             }
         }
         alertsSizeCapTimer.resume()
 
         // Same hourly defense for campaigns.db when present.
+        //
+        // Wave 9B (v1.12.6): incremental_vacuum + low-disk-safe full
+        // VACUUM mirror the alerts.db enforcer above. Campaigns table
+        // is tiny in practice, but the consistent shape keeps the
+        // structured-log output uniform across stores so operators
+        // grep one predicate to see all four.
         let campaignsSizeCapTimer: DispatchSourceTimer?
         if let campaignStore = state.campaignStore {
             let t = DispatchSource.makeTimerSource(queue: .global())
@@ -544,6 +745,29 @@ enum DaemonTimers {
                     let dropTarget = max(100, Int(Double(total) * (overFraction + 0.1)))
                     let dropped = (try? await campaignStore.pruneOldest(count: dropTarget)) ?? 0
                     logger.warning("Campaigns size cap: pruned \(dropped) oldest campaigns (\(nowMB) MB > \(capMB) MB cap, target drop \(dropTarget))")
+
+                    let postPruneMB = measureDatabaseFootprintMB(dbPath: cPath)
+                    let reclaimed = (try? await campaignStore.incrementalVacuum(maxPages: 200_000)) ?? 0
+                    let postIncrementalMB = measureDatabaseFootprintMB(dbPath: cPath)
+                    if reclaimed > 0 {
+                        logger.notice("Campaigns size cap: incremental_vacuum reclaimed \(reclaimed) pages, \(postPruneMB) MB → \(postIncrementalMB) MB")
+                    }
+
+                    let freeMB = freeDiskMB(forPath: cPath)
+                    let needMB = Int(Double(postIncrementalMB) * 1.3)
+                    if freeMB >= needMB {
+                        do {
+                            try await campaignStore.vacuum()
+                            let finalMB = measureDatabaseFootprintMB(dbPath: cPath)
+                            logger.notice("Campaigns size cap: full VACUUM complete — \(postIncrementalMB) MB → \(finalMB) MB")
+                        } catch {
+                            logger.warning("Campaigns size cap: full VACUUM failed (\(error.localizedDescription)). incremental_vacuum reclaimed \(reclaimed) pages.")
+                        }
+                    } else if reclaimed == 0 {
+                        logger.warning("Campaigns size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB) AND incremental_vacuum was no-op.")
+                    } else {
+                        logger.warning("Campaigns size cap: full VACUUM skipped (need \(needMB) MB free, have \(freeMB) MB). incremental_vacuum still reclaimed \(reclaimed) pages.")
+                    }
                 }
             }
             t.resume()
@@ -760,6 +984,28 @@ enum DaemonTimers {
                 return d
             }
 
+            // v1.12.6 Wave 9D: surface event-insert error counts + rate +
+            // last-kind into the rich heartbeat so the dashboard can
+            // render a "storage degraded" banner without having to
+            // poll storage_errors.json as a second source. Reads
+            // through the StorageErrorTracker actor — strictly off the
+            // hot insert path (30 s cadence).
+            let insertErrorSnapshot = await StorageErrorTracker.shared.eventInsertErrorSnapshot()
+
+            // v1.12.6 Wave 9K: previously-orphaned operator counters
+            // wired into the rich heartbeat:
+            //  - `payload_truncated_total`: how many events have hit
+            //    EventStore's 64 KB raw_json cap since boot. Pre-9K
+            //    the counter incremented on every truncation but was
+            //    never surfaced — Wave 1's cap could fire 10⁴× per
+            //    minute without operator visibility.
+            //  - `eslogger_dropped_total`: ES-collector sequence-gap
+            //    drops. Pre-9K only logged as a warning every 30 s;
+            //    now exposed as a counter so the dashboard can plot
+            //    ES buffer pressure.
+            let payloadTruncatedTotal = await state.eventStore.payloadTruncatedTotal()
+            let esloggerDroppedTotal = await state.esloggerCollector?.getDroppedEventCount() ?? 0
+
             let payload: [String: Any] = [
                 "written_at_unix": nowUnix,
                 "uptime_seconds": uptime,
@@ -770,6 +1016,18 @@ enum DaemonTimers {
                 "event_type_counts_1h": eventTypeCounts,
                 "collector_health": collectorDicts,
                 "events_dropped": droppedTotal,
+                // Wave 9D additions. `last_event_insert_error_kind` is
+                // an empty string when no event-insert error has been
+                // recorded since boot — JSONSerialization can't carry
+                // Swift `nil` so we elide-by-empty-string. Dashboard
+                // consumers should treat `""` and missing key
+                // identically.
+                "event_insert_errors_total": insertErrorSnapshot.total,
+                "event_insert_error_rate_per_min": insertErrorSnapshot.ratePerMin,
+                "last_event_insert_error_kind": insertErrorSnapshot.lastKind ?? "",
+                // Wave 9K additions.
+                "payload_truncated_total": payloadTruncatedTotal,
+                "eslogger_dropped_total": esloggerDroppedTotal,
                 "schema_version": 4,
             ]
 
@@ -954,6 +1212,7 @@ enum DaemonTimers {
             campaignsPruneTimer: campaignsPruneTimer,
             campaignsSizeCapTimer: campaignsSizeCapTimer,
             sizeCapTimer: sizeCapTimer,
+            sizeCapWatchdogTimer: sizeCapWatchdogTimer,
             maintenanceTimer: maintenanceTimer,
             feedbackTimer: feedbackTimer,
             heartbeatTimer: heartbeatTimer,
@@ -1325,10 +1584,38 @@ func runAdaptiveRollupSweep(
     }
 
     // Build a progressively-tightening cutoff ladder from the configured
-    // hot-tier window. Floors at 15 min (sequence-rebuild safety).
-    let raw = [hotTierMinutes, hotTierMinutes / 2, hotTierMinutes / 4]
-    let cutoffsMinutes: [Double] = Array(NSOrderedSet(array: raw.map { max(15, $0) }))
-        .compactMap { ($0 as? Int).map(Double.init) }
+    // hot-tier window. Floors at 15 min (sequence-rebuild safety: the
+    // longest single sequence rule has a 10-minute window; below 15 we'd
+    // risk dropping events mid-sequence on rule reload).
+    //
+    // v1.12.6 fix: the prior implementation built `[hot, hot/2, hot/4]`,
+    // applied `max(15, …)` to each, then `NSOrderedSet` dedup'd. When
+    // `hotTierMinutes ≤ 15`, all three rungs collapsed to 15 and the
+    // dedup left a single-entry ladder — meaning the Layer-2 adaptive
+    // pass had no progressively-tighter cutoffs to try, and Layer 3
+    // (the row-count fallback) had to do all the work alone. On a host
+    // already running with a 15 min hot tier (a deliberate "minimum
+    // safe" setting), this defeated the adaptive design entirely.
+    //
+    // New ladder construction: explicit fractional cutoffs with strict
+    // monotonic decrease enforced via `min(prev - 1, candidate)` before
+    // the 15-minute floor is applied. At `hotTierMinutes == 15` this
+    // yields `[15, 14, 13]` (still adaptive, still above the 10-minute
+    // sequence-window). At `hotTierMinutes == 30` it yields
+    // `[30, 15, 13]`. The minimum floor of 13 (15 − 2) was picked so
+    // even the pathological-floor case retains *some* tightening room;
+    // the Layer-3 row-count fallback below still handles any overflow.
+    let hotMinutes = hotTierMinutes
+    let rung1 = hotMinutes
+    let rung2 = min(rung1 - 1, max(15, hotMinutes / 2))
+    let rung3 = min(rung2 - 1, max(15, hotMinutes / 4))
+    let rawLadder = [rung1, rung2, rung3]
+    // Filter to strictly-positive cutoffs (rung2/rung3 can dip if the
+    // operator sets a 1-minute hot tier — defense against bogus config
+    // rather than expected operation).
+    let cutoffsMinutes: [Double] = rawLadder
+        .filter { $0 > 0 }
+        .map(Double.init)
     let startSizeMB = measureDatabaseFootprintMB(dbPath: dbPath)
     var totalPruned = 0
 
@@ -1399,22 +1686,33 @@ func runAdaptiveRollupSweep(
     // pointlessly. Matches the v1.6.13 legacy design ("prune everything
     // first, then VACUUM once at the end").
     //
-    // Skipped if no rows were pruned (no freed pages to reclaim) or if
-    // free disk is too tight (VACUUM rebuilds into a parallel temp
-    // file ≈ DB size; needs at least 1.3× headroom). On skip we also
-    // run a wal_checkpoint(TRUNCATE) so any drained pages migrate from
-    // the WAL into the main file — a cheap partial cleanup.
+    // Wave 9B (v1.12.6): incremental_vacuum first so we (a) shrink
+    // the file even when disk is too tight for full VACUUM, and (b)
+    // reduce the headroom requirement for the full VACUUM below by
+    // pre-truncating end-of-file freelist pages.
+    //
+    // Full VACUUM skipped if no rows were pruned, if free disk is too
+    // tight (VACUUM rebuilds into a parallel temp file ≈ DB size;
+    // needs at least 1.3× headroom), or both. On skip we still run a
+    // wal_checkpoint(TRUNCATE) so any drained pages migrate from the
+    // WAL into the main file — a cheap partial cleanup.
     if totalPruned > 0 {
-        let dbSizeBeforeVacuum = measureDatabaseFootprintMB(dbPath: dbPath)
+        let dbSizeBeforePrune = measureDatabaseFootprintMB(dbPath: dbPath)
+        let reclaimed = (try? await eventStore.incrementalVacuum(maxPages: 200_000)) ?? 0
+        let dbSizeAfterIncremental = measureDatabaseFootprintMB(dbPath: dbPath)
+        if reclaimed > 0 {
+            logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages, \(dbSizeBeforePrune) MB → \(dbSizeAfterIncremental) MB")
+        }
+
         let freeMB = freeDiskMB(forPath: dbPath)
-        if freeMB >= Int(Double(dbSizeBeforeVacuum) * 1.3) {
+        if freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) {
             do {
                 try await eventStore.vacuum()
             } catch {
                 logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
             }
         } else {
-            logger.warning("Tier-rollup: skipping VACUUM (free disk \(freeMB) MB < 1.3× DB size \(dbSizeBeforeVacuum) MB) — running checkpoint(TRUNCATE) instead")
+            logger.warning("Tier-rollup: skipping full VACUUM (free disk \(freeMB) MB < 1.3× DB size \(dbSizeAfterIncremental) MB). incremental_vacuum reclaimed \(reclaimed) pages; running checkpoint(TRUNCATE) for WAL cleanup.")
             await eventStore.walCheckpoint()
         }
     }
@@ -1550,23 +1848,60 @@ private func enforceDatabaseSizeCap(
     let sizeAfterPruneMB = currentSizeMB()
     logger.notice("Size-cap phase 1: pruned \(pruned) rows (estimated \(estimatedPrune), cap \(maxPerSweep)); logical size now \(sizeAfterPruneMB) MB")
 
-    // --- Phase 2: VACUUM if we have the disk headroom ---
+    // --- Phase 2a: incremental_vacuum pre-flight (Wave 9B, v1.12.6) ---
+    //
+    // BEFORE attempting a full VACUUM, run incremental_vacuum to
+    // trim end-of-file freelist pages in place. This is free
+    // (no scratch disk) and:
+    //   1. On a 7 GB events.db with 1.7M freelist pages, this can
+    //      drop the file to ~500 MB BEFORE the full VACUUM runs,
+    //      making the subsequent full-rewrite cheap.
+    //   2. If disk is too tight for full VACUUM, this is our only
+    //      path to actually shrinking the file. Without it, the
+    //      `.db` file grew unbounded between sweeps because every
+    //      VACUUM attempt failed the headroom check.
+    //
+    // 200K-page cap (set in StoragePragmas.incrementalVacuumHardCap)
+    // bounds the wall-clock so a runaway freelist on a huge file
+    // doesn't stall the actor for minutes. At ~4 KB/page that's up
+    // to ~800 MB of file truncation per call, which on commodity SSDs
+    // takes ~5-30 s. The next scheduled sweep continues if more
+    // pages remain.
+    let preVacuumMB = sizeAfterPruneMB
+    let preReclaimed: Int
+    do {
+        preReclaimed = try await eventStore.incrementalVacuum(maxPages: 200_000)
+    } catch {
+        logger.warning("Size-cap phase 2a: incremental_vacuum threw \(error.localizedDescription) — continuing")
+        preReclaimed = 0
+    }
+    let sizeAfterIncrementalMB = currentSizeMB()
+    if preReclaimed > 0 {
+        logger.notice("Size-cap phase 2a: incremental_vacuum reclaimed \(preReclaimed) pages, \(preVacuumMB) MB → \(sizeAfterIncrementalMB) MB")
+    } else {
+        let mode = await eventStore.autoVacuumMode()
+        if mode != 2 {
+            logger.warning("Size-cap phase 2a: incremental_vacuum unavailable (auto_vacuum mode=\(mode), need 2/INCREMENTAL). Run `maccrabctl maintenance vacuum events` once to convert.")
+        }
+    }
+
+    // --- Phase 2b: full VACUUM if we have the disk headroom ---
     //
     // VACUUM needs ~= current DB size of scratch space. We require
-    // 1.3× as buffer. If the volume is tight, we skip VACUUM
-    // entirely — the `.db` file won't shrink this pass, but pages
-    // are freed internally so the DB won't grow again until the
-    // freed pages are reused. On the next hourly tick (or once
-    // disk frees), we'll revisit.
+    // 1.3× as buffer, recomputed AFTER phase 2a so the incremental
+    // truncate shrinks our headroom requirement. If the volume is
+    // still tight, we skip VACUUM entirely — the file has been
+    // partially shrunk by phase 2a (or by no-op if INCREMENTAL is
+    // off), and the next hourly tick (or once disk frees) revisits.
 
-    let needMB = Int(Double(sizeAfterPruneMB) * 1.3)
+    let needMB = Int(Double(sizeAfterIncrementalMB) * 1.3)
     let freeMB = freeDiskMB()
     let canVacuum = freeMB >= needMB
 
     if !canVacuum {
-        logger.warning("Size-cap phase 2: skipping VACUUM — need \(needMB) MB free, have \(freeMB) MB. File size unchanged; will retry next tick.")
+        logger.warning("Size-cap phase 2b: skipping full VACUUM — need \(needMB) MB free, have \(freeMB) MB. Phase 2a reclaimed \(preReclaimed) pages; will retry next tick.")
         let endMB = currentSizeMB()
-        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), vacuum: skipped)")
+        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: skipped)")
         return true
     }
 
@@ -1576,9 +1911,9 @@ private func enforceDatabaseSizeCap(
     do {
         try await eventStore.vacuum()
     } catch {
-        logger.error("Size-cap phase 2: VACUUM failed (\(error.localizedDescription)). File size likely unchanged; will retry next tick.")
+        logger.error("Size-cap phase 2b: VACUUM failed (\(error.localizedDescription)). Phase 2a reclaimed \(preReclaimed) pages; will retry next tick.")
         let endMB = currentSizeMB()
-        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), vacuum: failed)")
+        logger.notice("Size-cap sweep complete: \(initialMB) MB → \(endMB) MB (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: failed)")
         return true
     }
 
@@ -1586,7 +1921,7 @@ private func enforceDatabaseSizeCap(
     _ = await eventStore.walCheckpoint()
 
     let finalMB = currentSizeMB()
-    logger.notice("Size-cap sweep complete: \(initialMB) MB → \(finalMB) MB (rows pruned: \(pruned), vacuum: success, checkpoint_before_drained: \(checkpointBefore))")
+    logger.notice("Size-cap sweep complete: \(initialMB) MB → \(finalMB) MB (rows pruned: \(pruned), incremental_vacuum: \(preReclaimed) pages, full vacuum: success, checkpoint_before_drained: \(checkpointBefore))")
     return true
 }
 

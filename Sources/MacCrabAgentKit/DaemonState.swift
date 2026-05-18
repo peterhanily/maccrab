@@ -223,6 +223,14 @@ final class DaemonState {
     /// event — only on explicit package-install signals.
     let intentClassifier: IntentClassifier
 
+    /// v1.12.6 — budget cap + result cache for `intentClassifier` when
+    /// EventLoop fires it as a tie-breaker on AI-attributed installs
+    /// with low heuristic confidence. Bounds LLM dispatches at one per
+    /// process tree per 10 minutes and stores the verdict so subsequent
+    /// events in the same tree see the refined label without paying
+    /// another LLM call. LRU-bounded at 256 entries.
+    let intentRefinementCache: IntentRefinementCache = IntentRefinementCache()
+
     /// v1.12.0 post-audit (M-Int1): correlates an AI agent's recent
     /// context reads with package installs to label the install as
     /// user-initiated / autonomous / slopsquat / injectionContext /

@@ -140,6 +140,21 @@ struct EventViewModel: Identifiable {
     let pid: Int32
     let detail: String
     let signerType: String
+    // v1.12.6 Wave 9H: surface Wave-2 schema additions in the event
+    // detail panel. Pre-9H these were populated in events.db but the
+    // dashboard's EventViewModel didn't carry them, so the detail
+    // pane never rendered user/ai_tool/parent/arch/notarization. Each
+    // field defaults to "" so the 12+ existing mock-construction
+    // sites in this file stay valid without an audit pass.
+    var executablePath: String = ""
+    var userName: String = ""
+    var workingDirectory: String = ""
+    var architecture: String = ""
+    var isNotarized: Bool? = nil
+    var aiTool: String = ""
+    var parentName: String = ""
+    var parentExecutable: String = ""
+    var processSHA256: String = ""
 
     var timeString: String {
         Self.timeFormatter.string(from: timestamp)

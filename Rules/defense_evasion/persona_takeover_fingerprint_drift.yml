@@ -52,7 +52,12 @@ detection:
     filter_git_credential_osxkeychain:
         Image|endswith:
             - '/git-credential-osxkeychain'
-    condition: selection_target and selection_fingerprint_keys and not filter_xcode_first_init and not filter_git_credential_osxkeychain
+    filter_swiftpm_checkout:
+        TargetFilename|contains:
+            - '/.build/checkouts/'
+            - '/.swiftpm/'
+            - '/DerivedData/'
+    condition: selection_target and selection_fingerprint_keys and not filter_xcode_first_init and not filter_git_credential_osxkeychain and not filter_swiftpm_checkout
 falsepositives:
     - User legitimately changes their signing key after rotating a GPG key — this fires once and is correctly suppressible by the analyst
     - First-laptop-setup wizards (chezmoi, yadm, dotbot) writing a fresh `~/.gitconfig`; allowlist these by Image

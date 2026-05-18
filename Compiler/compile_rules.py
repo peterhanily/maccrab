@@ -152,6 +152,15 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     # to 0.5 so Sigma rules can express the threshold via plain
     # string equality).
     "IntentLabel", "IntentConfidence", "IntentHighConfidence",
+    # --- v1.12.6 Wave 2A: promoted Sigma aliases ---
+    # Resolver cases live in RuleEngine.swift; columns live in the v6
+    # EventStore schema migration. Kept as passthroughs (not in
+    # SIGMA_FIELD_MAP) so YAML authors can keep using these Sigma-
+    # style field names verbatim without the compiler renaming them.
+    "IsNotarized", "IsPlatformBinary", "UserId", "GroupId",
+    "WorkingDirectory", "ResponsiblePid", "ParentName",
+    "AiTool", "AITool", "AiToolChild", "AIToolChild",
+    "SessionLaunchSource", "TCCDecision",
 }
 
 # Track fields we've already warned about to avoid spam.

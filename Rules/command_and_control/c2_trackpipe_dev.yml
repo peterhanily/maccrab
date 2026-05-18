@@ -1,0 +1,38 @@
+title: C2 Connection to trackpipe.dev (OpenClaw / GhostLoader)
+id: 04ec2e3b-5a8e-4363-a8dd-1cfe0d6d270a
+status: experimental
+description: >
+    Detects a DNS resolution or outbound network connection to
+    `trackpipe.dev` or any subdomain thereof — the documented C2
+    domain used by the OpenClaw / GhostLoader macOS-targeted
+    postinstall credential-phish campaign (April-May 2026). The
+    domain has no legitimate non-attacker registrant and any
+    traffic from a macOS host is essentially diagnostic. Pairs with
+    `fake_keychain_dialog_from_install_lineage.yml` (the on-host
+    phish dialog) and the broader package-manager-install lineage
+    rules.
+author: MacCrab Team
+date: 2026/05/17
+references:
+    - https://www.aikido.dev/blog/openclaw-ghostloader-macos-postinstall-credential-phish-2026
+    - https://socket.dev/blog/openclaw-malicious-npm-and-pypi-packages-2026
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://attack.mitre.org/techniques/T1102/
+tags:
+    - attack.command_and_control
+    - attack.t1071.001
+    - attack.t1102
+    - attack.initial_access
+    - attack.t1195.001
+logsource:
+    category: network_connection
+    product: macos
+detection:
+    selection:
+        DestinationHostname|contains:
+            - 'trackpipe.dev'
+    condition: selection
+falsepositives:
+    - A defender or red-team operator deliberately replaying the IOC on the monitored host — investigate parent lineage; the alert is the correct outcome
+    - The domain being repurposed for a benign legitimate service in the future (review WHOIS and registrant before triaging away)
+level: critical

@@ -217,31 +217,53 @@ public actor ThreatIntelFeed {
     // MARK: - Public API
 
     /// Start auto-updating feeds in the background.
-    public func start() {
+    public func start() async {
         isRunning = true
 
-        // Then update from network
+        // v1.12.6 Wave 9F: load cache + operator drop-ins BEFORE
+        // returning so DaemonSetup's subsequent `BundledThreatIntel.
+        // loadInto(...)` + `persistCacheNow()` see the hydrated state.
+        // Pre-9F start() kicked off a fire-and-forget Task — the
+        // hydration race meant a `persistCacheNow()` called from
+        // DaemonSetup could overwrite the on-disk cache with
+        // bundled-only IOCs (losing network feed data from prior
+        // boots). Awaiting these two steps inline is cheap (single
+        // file read + dir scan); the network fetch stays async.
+        await loadCachedFeeds()
+
+        // v1.9 Phase-5.7 (TI-M7): wire the operator's drop-in
+        // *.hashes.txt / *.ips.txt / *.domains.txt files at boot.
+        // Pre-fix loadCustomIOCFiles() existed but was never
+        // called, so any operator who placed files in the cache
+        // dir got no behaviour. Custom IOCs are pinned through
+        // the age-eviction (source == "Custom" survives).
+        loadCustomIOCFiles()
+
+        // Periodic network refresh in a background Task — does not
+        // block the daemon's setup chain.
         Task {
-            // Load cached data first (instant, no network)
-            await loadCachedFeeds()
-
-            // v1.9 Phase-5.7 (TI-M7): wire the operator's drop-in
-            // *.hashes.txt / *.ips.txt / *.domains.txt files at boot.
-            // Pre-fix loadCustomIOCFiles() existed but was never
-            // called, so any operator who placed files in the cache
-            // dir got no behaviour. Custom IOCs are pinned through
-            // the age-eviction (source == "Custom" survives).
-            loadCustomIOCFiles()
-
             await updateAllFeeds()
 
-            // Schedule periodic updates
             while isRunning {
                 try? await Task.sleep(nanoseconds: UInt64(updateInterval * 1_000_000_000))
                 guard isRunning else { break }
                 await updateAllFeeds()
             }
         }
+    }
+
+    /// v1.12.6 Wave 9F: persist the current in-memory IOC set to
+    /// disk RIGHT NOW. Used by DaemonSetup after
+    /// `BundledThreatIntel.loadInto(...)` so the dashboard's first
+    /// Intelligence-tab mount sees bundled IOCs even before the
+    /// initial network fetch (~14 min latency on first cold boot
+    /// across all three abuse.ch feeds) has finished. Safe to call
+    /// after `start()` because start now awaits `loadCachedFeeds()`
+    /// inline — so the in-memory state on warm boot already
+    /// contains the previous cache file's network IOCs before we
+    /// rewrite the file.
+    public func persistCacheNow() {
+        saveCache()
     }
 
     /// Stop auto-updating.

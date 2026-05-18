@@ -1104,9 +1104,31 @@ enum EventLoop {
                 posteriorForBrief = await state.bayesianIntent.posterior(treeKey: treeKey)
             }
             if let brief = IntentBriefBuilder.brief(for: enrichedEvent, posterior: posteriorForBrief) {
-                let result = IntentClassifier.heuristicClassifyPublic(brief)
-                enrichedEvent.enrichments["IntentLabel"] = result.label.rawValue
-                enrichedEvent.enrichments["IntentConfidence"] = String(format: "%.2f", result.confidence)
+                let heuristicResult = IntentClassifier.heuristicClassifyPublic(brief)
+
+                // v1.12.6 (wire-the-orphans Wave 3A): if a prior event
+                // in the same process tree already triggered a
+                // successful LLM classification, that refined verdict
+                // wins for the current event — the LLM saw the brief
+                // with full context and overrides the per-event
+                // heuristic. The TTL on the cache keeps this in line
+                // with the synchronous hot path: a stale refinement
+                // (older than 10 min) is treated as missing.
+                var stampedLabel = heuristicResult.label.rawValue
+                var stampedConfidence = heuristicResult.confidence
+                var stampedProvider = heuristicResult.provider
+                if let refinement = await state.intentRefinementCache.refinement(for: treeKey) {
+                    stampedLabel = refinement.label
+                    stampedConfidence = refinement.confidence
+                    stampedProvider = refinement.provider
+                    enrichedEvent.enrichments["IntentRefinedBy"] = refinement.provider
+                    if !refinement.reasons.isEmpty {
+                        enrichedEvent.enrichments["IntentReasons"] = refinement.reasons.prefix(3).joined(separator: " | ")
+                    }
+                }
+                enrichedEvent.enrichments["IntentLabel"] = stampedLabel
+                enrichedEvent.enrichments["IntentConfidence"] = String(format: "%.2f", stampedConfidence)
+                enrichedEvent.enrichments["IntentProvider"] = stampedProvider
                 // v1.12.0 RC6 (Int-R6-N1) + RC7 fix (Int-R7-N1):
                 // stamp a boolean high-confidence flag so the Sigma
                 // rule can predicate on a numeric-equivalent threshold
@@ -1124,8 +1146,68 @@ enum EventLoop {
                 // 0.5 as the "moderate confidence" tier — same value
                 // as `unknown` fallback's confidence, distinct from
                 // `benign` (0.8). CHANGELOG updated to match.
-                if result.confidence >= 0.5 {
+                if stampedConfidence >= 0.5 {
                     enrichedEvent.enrichments["IntentHighConfidence"] = "true"
+                }
+
+                // v1.12.6 (wire-the-orphans Wave 3A): LLM-aware
+                // tie-breaker. The synchronous heuristic above stays
+                // the source of truth for the current event — we never
+                // block the hot path waiting on the LLM. But for
+                // AI-attributed installs where the heuristic was
+                // ambiguous, we dispatch a detached classification so
+                // the next event in the same tree sees a refined
+                // verdict. Cost is bounded by:
+                //
+                //   1. AI attribution required — non-AI installs run
+                //      heuristic only, matching prior behaviour.
+                //   2. Heuristic must be < 0.7 confident — confident
+                //      heuristic verdicts skip the LLM entirely. This
+                //      is the standard "LLM is a tie-breaker, not a
+                //      default classifier" pattern.
+                //   3. IntentRefinementCache acts as a per-tree
+                //      cooldown (10-min TTL) so a single tree can
+                //      trigger at most one LLM call per window,
+                //      regardless of how many events it generates.
+                //   4. LLMService already enforces the global 5s min
+                //      interval, 3-failure circuit breaker, and 50KB
+                //      response cap.
+                //
+                // On LLM failure (circuit open / parse fail / nil)
+                // we silently leave the heuristic verdict in place —
+                // the synchronous stamp above already covered the
+                // current event, and the next event will retry once
+                // the TTL expires.
+                let isAITriggered = enrichedEvent.enrichments["ai_tool"] != nil
+                    || enrichedEvent.enrichments["agent_tool"] != nil
+                    || enrichedEvent.enrichments["ai_tool_child"] == "true"
+                if isAITriggered && heuristicResult.confidence < 0.7 {
+                    let shouldDispatch = await state.intentRefinementCache.shouldClassify(treeKey: treeKey)
+                    if shouldDispatch {
+                        await state.intentRefinementCache.recordDispatch(treeKey: treeKey)
+                        let classifier = state.intentClassifier
+                        let cache = state.intentRefinementCache
+                        let capturedBrief = brief
+                        let capturedTreeKey = treeKey
+                        Task.detached(priority: .utility) { @Sendable in
+                            let llmResult = await classifier.classify(capturedBrief)
+                            // Treat .unknown / heuristic-fallback as
+                            // "no useful refinement" — they wouldn't
+                            // improve the next event's verdict and
+                            // would burn the TTL window.
+                            guard llmResult.label != .unknown,
+                                  llmResult.provider != "heuristic" else {
+                                return
+                            }
+                            let refinement = IntentRefinementCache.Refinement(
+                                label: llmResult.label.rawValue,
+                                confidence: llmResult.confidence,
+                                provider: llmResult.provider,
+                                reasons: llmResult.reasons
+                            )
+                            await cache.recordResult(treeKey: capturedTreeKey, refinement: refinement)
+                        }
+                    }
                 }
 
                 // v1.12.0 post-audit (M-Int1): when the install was
@@ -1522,13 +1604,23 @@ enum EventLoop {
                     )
 
                     // Campaign detection: chain alerts into higher-level patterns
+                    // v1.12.6 Wave 2C: surface MITRE technique tags, AI-tool
+                    // attribution, and the process-tree depth so the campaign
+                    // aggregates can be computed at persist time without a
+                    // cross-DB join.
+                    let techniqueTags = match.tags.filter { $0.contains("t1") }
                     let alertSummary = CampaignDetector.AlertSummary(
                         ruleId: alert.ruleId,
                         ruleTitle: alert.ruleTitle,
                         severity: match.severity,
                         processPath: alert.processPath,
+                        pid: Int(enrichedEvent.process.pid),
+                        userId: String(enrichedEvent.process.userId),
                         timestamp: alert.timestamp,
-                        tactics: Set(tactics)
+                        tactics: Set(tactics),
+                        mitreTechniques: Set(techniqueTags),
+                        aiTool: enrichedEvent.enrichments["ai_tool"],
+                        processTreeDepth: enrichedEvent.process.ancestors.count
                     )
                     let campaigns = await state.campaignDetector.processAlert(alertSummary)
                     for campaign in campaigns {
@@ -1553,6 +1645,19 @@ enum EventLoop {
                         // analyst workflow survive daemon restarts. Failures
                         // are non-fatal — log and continue.
                         if let store = state.campaignStore {
+                            // v1.12.6 Wave 2C: pass through the aggregate
+                            // attribution computed by `CampaignDetector` over
+                            // the contributing alerts. Empty sets surface as
+                            // nil so the DB column stays NULL (idiomatic for
+                            // "absent" rather than "[]").
+                            let aggregatedUsers = campaign.affectedUsers.isEmpty
+                                ? nil : Array(campaign.affectedUsers).sorted()
+                            let aggregatedExecs = campaign.affectedExecutables.isEmpty
+                                ? nil : Array(campaign.affectedExecutables).sorted()
+                            let aggregatedTechniques = campaign.techniques.isEmpty
+                                ? nil : Array(campaign.techniques).sorted()
+                            let aggregatedAITools = campaign.aiTools.isEmpty
+                                ? nil : Array(campaign.aiTools).sorted()
                             let record = CampaignStore.Record(
                                 id: campaign.id,
                                 type: campaign.type.rawValue,
@@ -1573,7 +1678,14 @@ enum EventLoop {
                                         timestamp: $0.timestamp,
                                         tactics: Array($0.tactics).sorted()
                                     )
-                                }
+                                },
+                                affectedUsers: aggregatedUsers,
+                                affectedExecutables: aggregatedExecs,
+                                firstSeen: campaign.firstSeen,
+                                lastSeen: campaign.lastSeen,
+                                processTreeDepth: campaign.processTreeDepth,
+                                techniques: aggregatedTechniques,
+                                aiTools: aggregatedAITools
                             )
                             do {
                                 try await store.insert(record)
@@ -1761,8 +1873,13 @@ enum EventLoop {
                 // AlertSink chokepoint even though NoiseFilter + dedup were
                 // already applied above — keeps the architectural invariant
                 // (no direct AlertStore.insert outside AlertSink) intact.
+                // v1.12.6 Wave 2B: pass enrichedEvent so AlertSink can
+                // populate the schema-v5 attribution columns (user, CWD,
+                // ai_tool, parent_exec, sha256, host_name) for every
+                // alert in the batch — they all share the same triggering
+                // event by construction.
                 if !batchAlerts.isEmpty {
-                    do { try await state.alertSink.insertEngineBatch(alerts: batchAlerts) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                    do { try await state.alertSink.insertEngineBatch(alerts: batchAlerts, event: enrichedEvent) } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
 
                 // LLM analysis for individual HIGH/CRITICAL alerts (non-blocking).

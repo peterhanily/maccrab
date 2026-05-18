@@ -689,6 +689,87 @@ struct CrossProcessCorrelatorTests {
         )
         #expect(chain != nil, "Real /tmp write→execute chain should still fire")
     }
+
+    // MARK: - Self-FP regressions (v1.12.6 Wave 4B)
+
+    @Test("Claude Code shell-snapshot files do not form a chain")
+    func claudeShellSnapshotDoesNotChain() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let snapshot = "/Users/u/.claude/shell-snapshots/snapshot-zsh-1715000000-abc.sh"
+
+        await correlator.recordFileEvent(
+            path: snapshot, action: "write",
+            pid: 1100, processName: "zsh", processPath: "/bin/zsh",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: snapshot, action: "read",
+            pid: 1101, processName: "bash", processPath: "/bin/bash",
+            timestamp: now.addingTimeInterval(1)
+        )
+        #expect(chain == nil, "Claude Code shell-snapshot scratch files are tool-internal, not attacker convergence")
+    }
+
+    @Test("MacCrab release-build scratch dir does not form a chain")
+    func maccrabReleaseTmpDoesNotChain() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let artifact = "/private/tmp/maccrab-release-20260517/MacCrab.app/Contents/MacOS/MacCrab"
+
+        await correlator.recordFileEvent(
+            path: artifact, action: "write",
+            pid: 1200, processName: "cp", processPath: "/bin/cp",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: artifact, action: "write",
+            pid: 1201, processName: "codesign", processPath: "/usr/bin/codesign",
+            timestamp: now.addingTimeInterval(2)
+        )
+        #expect(chain == nil, "MacCrab's own release-build scratch dir is self-activity, not a chain")
+    }
+
+    @Test("MacCrab compiled_rules dir does not form a chain")
+    func maccrabCompiledRulesDoesNotChain() async {
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let rule = "/Library/Application Support/MacCrab/compiled_rules/persistence.json"
+
+        await correlator.recordFileEvent(
+            path: rule, action: "write",
+            pid: 1300, processName: "maccrabctl", processPath: "/usr/local/bin/maccrabctl",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: rule, action: "read",
+            pid: 1301, processName: "com.maccrab.agent", processPath: "/Library/SystemExtensions/.../com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent",
+            timestamp: now.addingTimeInterval(1)
+        )
+        #expect(chain == nil, "MacCrab's own compiled_rules dir is install-pipeline activity, not a chain")
+    }
+
+    @Test("User work-dir paths still form chains (sanity)")
+    func userWorkDirStillChains() async {
+        // Regression guard for the v1.12.6 Wave 4B additions: a normal
+        // path under /Users/.../work/ must still produce a chain when
+        // two distinct PIDs touch it with different actions.
+        let correlator = CrossProcessCorrelator(correlationWindow: 300, minChainLength: 2)
+        let now = Date()
+        let path = "/Users/me/work/dropped-payload"
+
+        await correlator.recordFileEvent(
+            path: path, action: "write",
+            pid: 1400, processName: "curl", processPath: "/usr/bin/curl",
+            timestamp: now
+        )
+        let chain = await correlator.recordFileEvent(
+            path: path, action: "execute",
+            pid: 1401, processName: "evil", processPath: "/Users/me/work/evil",
+            timestamp: now.addingTimeInterval(2)
+        )
+        #expect(chain != nil, "User work-dir convergence must still fire")
+    }
 }
 
 // Database encryption tests moved to DatabaseEncryptionTests.swift in

@@ -84,7 +84,14 @@ public actor AttributionOverrideStore {
         }
 
         // Tiny store; conservative pragmas.
+        // v1.12.6 Wave 9L: auto_vacuum = INCREMENTAL MUST be set
+        // BEFORE journal_mode = WAL. SQLite silently refuses to flip
+        // auto_vacuum once WAL setup has dirtied the DB header. Wave
+        // 9B.1 fixed this across the five primary stores but missed
+        // AttributionOverrideStore. Tiny-store impact is small but
+        // the invariant is uniform — see StoragePragmas.swift comment.
         if !isReadOnly {
+            sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA cache_size = -2000", nil, nil, nil)   // 2 MB

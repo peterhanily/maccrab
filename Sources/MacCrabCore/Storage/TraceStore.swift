@@ -160,7 +160,15 @@ public actor TraceStore {
 
         // Tighter pragmas than EventStore — traces are bursty + small;
         // 8 MB cache + 32 MB mmap is comfortable.
+        //
+        // Wave 9B.1 (v1.12.6 RC2): auto_vacuum MUST come BEFORE journal_mode
+        // — SQLite silently refuses to flip auto_vacuum once the DB header
+        // has been dirtied by WAL setup. Pre-9B.1 TraceStore never set
+        // auto_vacuum, so traces.db stayed in mode 0 (NONE) and
+        // incrementalVacuum's reclaim path was a no-op. See the matching
+        // ordering note in StoragePragmas.applyEventStorePragmas.
         if !isReadOnly {
+            sqlite3_exec(handle, "PRAGMA auto_vacuum = INCREMENTAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
             sqlite3_exec(handle, "PRAGMA cache_size = -8000", nil, nil, nil)   // 8 MB
@@ -508,5 +516,70 @@ public actor TraceStore {
     public func databaseSizeBytes() -> Int64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: databasePath)
         return (attrs?[.size] as? Int64) ?? 0
+    }
+
+    // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
+    //
+    // KNOWN GAP: TraceStore does NOT set `auto_vacuum = INCREMENTAL`
+    // on fresh DBs (see openDatabase above — only journal_mode, cache,
+    // mmap, and busy_timeout are set). The Wave 9B helper detects
+    // this at runtime via `PRAGMA auto_vacuum` and short-circuits to
+    // a no-op (returns 0) when the file is in mode 0, which is the
+    // current behaviour for all existing traces.db files.
+    //
+    // Switching this would require a v1.13 ALTER PRAGMA + one-shot
+    // full VACUUM on existing DBs, which we explicitly avoid in
+    // v1.12.6. The gap is logged by the caller (DaemonTimers) so
+    // operators can see "incremental_vacuum: skipped — DB not in
+    // INCREMENTAL mode" in the structured log.
+    @discardableResult
+    public func incrementalVacuum(maxPages: Int) async throws -> Int {
+        guard let db = db else { return 0 }
+        let result = try StoragePragmas.runIncrementalVacuum(on: db, maxPages: maxPages)
+        return result.pagesReclaimed
+    }
+
+    /// Best-effort VACUUM. Required as the second leg of the Wave 9B
+    /// low-disk fallback (full VACUUM also rewrites the file with
+    /// the new auto_vacuum mode if PRAGMA was changed beforehand).
+    public func vacuum() async throws {
+        guard let db = db else { return }
+        let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
+        if rc != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            throw TraceStoreError.queryFailed("VACUUM failed: \(msg)")
+        }
+    }
+
+    /// PASSIVE→RESTART checkpoint chain — used by the size-cap path
+    /// to drain the WAL before measuring on-disk footprint.
+    @discardableResult
+    public func walCheckpoint() async -> Bool {
+        guard let db = db else { return false }
+        var passiveLog: Int32 = 0
+        var passiveCkpt: Int32 = 0
+        let rcPassive = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_PASSIVE),
+            &passiveLog, &passiveCkpt
+        )
+        if rcPassive == SQLITE_OK, passiveLog == passiveCkpt { return true }
+
+        var restartLog: Int32 = 0
+        var restartCkpt: Int32 = 0
+        let rcRestart = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_RESTART),
+            &restartLog, &restartCkpt
+        )
+        return rcRestart == SQLITE_OK && restartLog == restartCkpt
+    }
+
+    /// Read the file's current `auto_vacuum` mode. Used by callers
+    /// that want to log the gap when this DB is not in INCREMENTAL
+    /// mode (mode 2). Mode 0 = NONE, 1 = FULL, 2 = INCREMENTAL.
+    public func autoVacuumMode() async -> Int {
+        guard let db = db else { return 0 }
+        return Int(StoragePragmas.readAutoVacuumMode(db))
     }
 }

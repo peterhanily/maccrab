@@ -205,6 +205,8 @@ tmp/
 # -----------------------------------------------------------------------------
 dist/
 .claude/scheduled_tasks.lock
+# AI-assisted agent worktrees (sub-repos created by the harness)
+.claude/worktrees/
 
 # -----------------------------------------------------------------------------
 # Outdated / internal docs (kept locally, not part of public repo)

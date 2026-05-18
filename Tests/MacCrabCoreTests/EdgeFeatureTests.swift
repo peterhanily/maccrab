@@ -62,6 +62,34 @@ struct GitSecurityMonitorTests {
         // git itself is allowed
         #expect(result == nil)
     }
+
+    @Test("v1.12.6: SwiftPM checkout .git/config writes are filtered (not flagged)")
+    func swiftpmCheckoutNotFlagged() async {
+        let monitor = GitSecurityMonitor()
+        let paths = [
+            "/Users/x/proj/.build/checkouts/swift-syntax/.git/config",
+            "/Users/x/proj/.swiftpm/configuration/.git/config",
+            "/Users/x/Library/Developer/Xcode/DerivedData/foo/.git/config"
+        ]
+        for path in paths {
+            let result = await monitor.checkProcess(
+                name: "swift-package", path: "/usr/bin/swift-package",
+                pid: 999, commandLine: "resolve", filePath: path, envVars: nil
+            )
+            #expect(result == nil, "SwiftPM checkout path \(path) should not trigger gitConfigModified")
+        }
+    }
+
+    @Test("v1.12.6: real ~/.gitconfig modification by non-git still flagged")
+    func realGitconfigStillFlagged() async {
+        let monitor = GitSecurityMonitor()
+        let result = await monitor.checkProcess(
+            name: "python3", path: "/usr/bin/python3",
+            pid: 999, commandLine: "modify gitconfig",
+            filePath: "/Users/x/.gitconfig", envVars: nil
+        )
+        #expect(result?.type == .gitConfigModified)
+    }
 }
 
 @Suite("File Injection Scanner")

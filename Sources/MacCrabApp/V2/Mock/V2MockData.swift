@@ -83,6 +83,14 @@ public struct V2MockAlert: Identifiable, Sendable, Hashable {
     public let pid: Int32
     public let parent: String
     public let user: String
+    // v1.12.6 Wave 9H: surface Wave-2 alerts.db schema additions
+    // in the alert inspector. Defaults to `""` so the existing
+    // V2MockAlert fixture constructors elsewhere in this file don't
+    // need to pass them (the inspector rendering hides empty rows).
+    public var aiTool: String = ""
+    public var workingDirectory: String = ""
+    public var processSHA256: String = ""
+    public var hostName: String = ""
     public let timestamp: Date
     public let mitre: [String]
     public let category: String
@@ -106,7 +114,14 @@ public struct V2MockAlert: Identifiable, Sendable, Hashable {
 
     public init(id: String, title: String, severity: V2Severity, ruleId: String,
                 process: String, processPath: String, pid: Int32,
-                parent: String, user: String, timestamp: Date,
+                parent: String, user: String,
+                // v1.12.6 Wave 9H additions (default to "" so existing
+                // mock fixture call sites stay valid).
+                aiTool: String = "",
+                workingDirectory: String = "",
+                processSHA256: String = "",
+                hostName: String = "",
+                timestamp: Date,
                 mitre: [String], category: String, description: String,
                 actionsTaken: [String], suppressed: Bool,
                 remediationHint: String? = nil,
@@ -129,6 +144,10 @@ public struct V2MockAlert: Identifiable, Sendable, Hashable {
         self.pid = pid
         self.parent = parent
         self.user = user
+        self.aiTool = aiTool
+        self.workingDirectory = workingDirectory
+        self.processSHA256 = processSHA256
+        self.hostName = hostName
         self.timestamp = timestamp
         self.mitre = mitre
         self.category = category
@@ -162,6 +181,15 @@ public struct V2MockCampaign: Identifiable, Sendable, Hashable {
     public let entities: Int
     public let killChainStages: [String]
     public let summary: String
+    // v1.12.6 Wave 9J: surface Wave-2 campaigns.db schema additions
+    // (v1 → v2 added 7 indexed columns). Defaults to empty so the
+    // existing V2MockCampaign fixture constructors stay valid and
+    // the inspector hides rows when empty.
+    public var affectedUsers: [String] = []
+    public var affectedExecutables: [String] = []
+    public var techniques: [String] = []
+    public var aiTools: [String] = []
+    public var processTreeDepth: Int = 0
 }
 
 // MARK: - Event

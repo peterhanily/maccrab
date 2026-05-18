@@ -3,6 +3,264 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.6] — 2026-05-18
+
+Refinement release. Seven internal waves on top of v1.12.5 hardening
+storage discipline, attribution schema, AI-tool guard coverage, and
+audit-script enforcement, plus 12 new detection rules for the
+2026 supply-chain incident wave (SANDWORM_MODE / OpenClaw /
+Mini Shai-Hulud / TanStack / node-ipc / Brew Hijack). No public
+behavior changes from v1.12.5; this is an internal-quality release
+that also lights up 21 previously-silent Sigma rules (Architecture,
+NotarizationStatus, FileAction resolver cases).
+
+**Storage + perf foundations (Wave 1)**:
+
+- `events.db` size-cap timer cadence is now **user-configurable** via
+  the new `eventsSizeCapIntervalMinutes` field (default 60 min, can
+  be set via `daemon_config.json` or `user_overrides.json`).
+  Pre-v1.12.6 the timer was hardcoded at 6 hours, so on a heavy host
+  ingesting ~170K events/hour the file gained ~17 GB between sweeps.
+  A non-configurable 60-second early-fire watchdog also fires the
+  sweep when the DB exceeds 1.5× the cap. Closes a Wave 6 finding
+  that traced back to v1.6.x size-cap pattern.
+- Adaptive cutoff ladder no longer collapses to a single rung at
+  `hotTierMinutes ≤ 15` (was the v1.8.0 design's edge case).
+- `SelfDefense.directoryHash()` migrated from `/usr/bin/shasum`
+  subprocess spawns to in-process CryptoKit `FileHasher`. Removes
+  **~1,704 perl subprocesses/minute** (~2.5M/day) on every host
+  because shasum is a perl script. Backward-compatible: the combined-
+  hash output is byte-equal to the previous shasum-based path
+  (verified by a dedicated test that runs both paths and asserts
+  equality), so no false `.rulesModified .high` alert fires on
+  first upgrade.
+- `EventStore.insert(event:)` enforces a **64 KB cap on per-event
+  raw_json**. Sets `payload.truncated="true"` and
+  `payload.original_bytes=N` enrichments on truncated events. Stops
+  ~1 MB outlier events (appcast-publish base64 payloads, etc.) from
+  poisoning the database and inflating the FTS index.
+
+**Schema enrichment (Wave 2)** — 30 indexed columns added across
+the three stores. Additive only; pre-v1.12.6 rows have NULL in new
+columns. Backward-compat for rule matching is automatic — the rule
+engine works against the in-memory Event struct (rehydrated from
+raw_json on SQL read).
+
+- `events.db` v5 → v6: user_id, user_name, group_id,
+  working_directory, responsible_pid, architecture,
+  is_platform_binary, is_notarized, process_sha256, parent_name,
+  parent_executable, parent_signer_type, ai_tool, ai_tool_child,
+  session_launch_source, tcc_decision. RuleEngine gains 16 Sigma
+  aliases (Architecture, IsNotarized, NotarizationStatus, User,
+  UserId, AiTool, ParentName, ...). **6 dead Sigma rules unblocked**
+  (rosetta detection × 3, notarization detection × 3).
+- `alerts.db` v4 → v5: user_id, user_name, working_directory,
+  ai_tool, parent_executable, process_sha256, host_name. AlertSink
+  populates from the triggering Event at construction time.
+- `campaigns.db` v1 → v2: affected_users, affected_executables,
+  first_seen, last_seen, process_tree_depth, techniques, ai_tools.
+  CampaignDetector computes aggregates over contributing alerts at
+  persist time.
+
+**Wire-the-orphans cleanup (Wave 3)**:
+
+- `state.intentClassifier` (LLM-aware IntentClassifier) was
+  constructed in DaemonState but never called. Now wired as a
+  tie-breaker for AI-triggered installs when heuristic confidence
+  is below 0.7. Runs in `Task.detached(priority: .utility)` so the
+  hot path never blocks on LLM latency. Per-tree-key cooldown via
+  new `IntentRefinementCache` (LRU 256 / TTL 10 min) prevents burst
+  fan-out.
+- PASS 1 of `scripts/pre-release-audit.sh` DAEMON_BINDINGS list
+  refreshed for the 8 new @AppStorage keys added since v1.6.18.
+  Two keys (`alertNotifications`, `minAlertSeverity`) were
+  misclassified as UI-only since v1.11.0 — corrected.
+
+**Detection (Wave 4 + Wave 7B)**:
+
+- New `FileAction` Sigma alias in RuleEngine (one-line change
+  activates 15+ AI-safety / supply-chain rules that referenced the
+  field but had no resolver case).
+- `ProjectBoundary.swift` rejects `"/"` as a project root (was
+  silently making every AI-tool write a "boundary violation" —
+  312 alerts on the dev sample). Adds `/dev/null`, `/dev/urandom`,
+  `/dev/random`, `/dev/zero` to globalExceptions.
+- `CrossProcessCorrelator.swift` adds three paths to
+  `ignoredPathSubstrings`: Claude Code shell snapshots, MacCrab's
+  own release-build tmp dir, MacCrab's own compiled_rules dir.
+  Closes ~280 self-FP alerts on the dev sample.
+- `GitSecurityMonitor.swift` filters writes to `.git/config` under
+  SwiftPM / Xcode / DerivedData checkout dirs.
+- Three rule edits: `ai_tool_reads_ssh_keys.yml` adds
+  swiftpm-testing-helper filter; `developer_credential_bulk_harvest.yml`
+  deprecated until count-aggregation lands in the rule engine;
+  `persona_takeover_fingerprint_drift.yml` adds SwiftPM-checkout
+  filter.
+- **12 new Sigma rules** covering the Feb-May 2026 supply-chain
+  incident wave (Wave 6.6 research + Wave 7B):
+  - `mcp_server_config_injection_by_non_ai_tool` —
+    SANDWORM_MODE / Shai-Hulud rogue MCP server pattern
+  - `binary_dropped_into_claude_dir` — SafeDep SessionStart hijack
+  - `fake_keychain_dialog_from_install_lineage` —
+    OpenClaw / GhostLoader iCloud-Keychain phishing
+  - `package_manager_downloads_bun_runtime` — Mini Shai-Hulud
+    Node-EDR-bypass pattern
+  - `gh_token_monitor_plist_dropped` — TanStack CVE-2026-45321 IOC
+  - `workflow_drop_with_self_hosted_runner` — TanStack
+    discussion.yaml registration pattern
+  - `process_reads_other_process_memory_macos` — TanStack OIDC
+    theft macOS analog (task_for_pid / mach_vm_read)
+  - `npm_module_require_then_bulk_credential_read` (sequence) —
+    node-ipc require()-time credential burst
+  - `gh_token_revocation_polling_loop` (sequence) — TanStack
+    dead-man's-switch handoff
+  - `node_ipc_compromised_versions` — node-ipc 9.1.6/9.2.3/12.0.1
+    pinned IOC
+  - `c2_azurestaticprovider_net` — Mini Shai-Hulud C2 IOC
+  - `c2_trackpipe_dev` — OpenClaw / GhostLoader C2 IOC
+
+**Audit infrastructure (Wave 5 + Wave 7A)**:
+
+- 4 new audit passes from the v1.12.x release-marathon lessons:
+  Pass A (codesign entitlement isolation), Pass B (SwiftPM resource
+  bundle Info.plist), Pass C (permission-paired integration test),
+  Pass D (self-defense Sigma filter symmetry).
+- 4 new passes from Wave 6 wire-the-orphans audit recommendations:
+  Pass E (KNOWN_PASSTHROUGH_FIELDS resolver coverage — caught
+  XPCServiceName + FileAction as real latent orphans), Pass F
+  (DaemonState field consumer audit), Pass G (Detection actor reader
+  audit), Pass H (MCP-tool handler / daemon-state coverage).
+- Pass 1 unclassified @AppStorage warn → err. Pass 3 support-dir
+  extractor made path-agnostic. Pass 7 (dead since dashboard moved
+  to V2 workspaces) revived with V2 workspace globbing. Pass 8
+  eviction-evidence regex tightened.
+- `AIToolRegistry` extended for **Kiro / Continue.dev / Windsurf**
+  config paths — closes the Wave 6.6 gap where node-ipc + SANDWORM_MODE
+  targeted AI-tool surfaces MacCrab didn't recognize.
+
+**Numbers**:
+
+- 475 compiled rules (424 single-event + 39 sequence + 6 graph +
+  6 new sigma rule additions baked in; 12 net new rules total
+  across Wave 7B).
+- 1589 tests in 291 suites (+99 from v1.12.5's 1490).
+- Audit script: PASSED with 6 warnings (down from 8); all
+  warnings are tracked latent findings for v1.13 with allowlist
+  entries documenting why.
+- Schema migrations: events.db v5 → v6, alerts.db v4 → v5,
+  campaigns.db v1 → v2. All additive, no destructive changes.
+- Universal binary. Min macOS 13 Ventura through macOS 26 Tahoe.
+
+**Performance regression check** (Wave 6.8): events.db insert
+throughput drops ~10% (1025 → 919 ev/s) and per-event storage
+grows ~43% (1791 → 2563 B) — the expected price of promoting 16
+fields from raw_json into indexed columns. Live load (47 ev/s on a
+dev host) is ~5% of measured insert capacity; no headroom risk.
+SelfDefense hash latency drops ~220× (6 s → 27 ms per call) —
+substantial net steady-state CPU saving that more than offsets the
+schema cost.
+
+**Deferred to v1.13** (the strategic-wiring release):
+
+- Production-side wiring of v1.12.0 supply-chain immune-system actors
+  (`PackageContentAnalyzer`, `AttestationEnricher`,
+  `PackageMetadataAnalyzer`, `TyposquatDatabase`,
+  `BayesianIntentEngine`). These exist as on-demand MCP tools but
+  the daemon's `EventEnricher` never invokes them on live `npm install`
+  events — Wave 6.6's strategic finding. v1.13 will turn the v1.12
+  conceptual wedge into an active immune-system layer.
+- Sigma date format normalization (YYYY/MM/DD → YYYY-MM-DD
+  corpus-wide) for strict Sigma 2.x spec compliance.
+- `CDHashExtractor` migration from private SPI (`csops` syscall
+  + `proc_pidinfo` flavor 17) to public `SecCodeCopySigningInformation`.
+- `notarize.sh` migration to `xcrun notarytool store-credentials`
+  for Tahoe 26.x compatibility.
+
+**Opsec status**: clean. No credentials, internal hosts, or signing
+material in the diff. Schema migrations are non-destructive and
+forward-only.
+
+### RC1 → RC2 fix wave (Wave 9)
+
+RC1 (`463272560b4c…`) was field-tested by the maintainer and surfaced
+three compounding bugs that together broke the entire Wave 1
+storage-discipline story. RC2 fixes the root causes — not cosmetic.
+
+- **9A — Dashboard-side stores held the DB open RW, blocking the
+  daemon's VACUUM.** `V2LiveDataProvider` was opening EventStore,
+  AlertStore, CampaignStore, and SQLiteCausalGraphStore in
+  read/write mode. The daemon's "Reduce events.db now" handler ran
+  `VACUUM` against the same file — SQLite needs an exclusive lock,
+  the dashboard's RW connection refused to drop, the vacuum
+  silently no-op'd and the file kept growing. Field-confirmed via
+  `lsof`. Added `forceReadOnly: true` plumbing through all four
+  stores; `V2LiveDataProvider` and `AppState` (which also opens
+  stores from the dashboard side) both pass it now.
+- **9B — Size-cap enforcer had no fallback when full VACUUM
+  couldn't run.** A full `VACUUM` needs ~1.3× DB-size free disk.
+  On a host where events.db has grown past the cap, the user is
+  almost by definition disk-pressured. The size-cap timer now
+  tries `PRAGMA incremental_vacuum` first (releases freelist
+  pages, needs ~0× extra disk) and falls back to full VACUUM
+  only if mode allows.
+- **9B.1 — PRAGMA order bug meant `incremental_vacuum` was a no-op
+  on every DB ever shipped.** `PRAGMA auto_vacuum = INCREMENTAL`
+  must be applied BEFORE `PRAGMA journal_mode = WAL`. SQLite
+  silently refuses to flip auto_vacuum once WAL setup has dirtied
+  the DB header — no error, just stays in mode 0. Every store
+  across every release has been running in mode 0, making 9B's
+  incremental_vacuum a no-op. Field-confirmed via runtime PRAGMA
+  inspection on the RC1 user machine: tracegraph.db at 11 GB in
+  mode 0. RC2 reorders the PRAGMA sequence across
+  `StoragePragmas.swift`, `CampaignStore.swift`, `TraceStore.swift`,
+  and `SQLiteCausalGraphStore.swift`. **Critical comment block
+  added at top of `applyEventStorePragmas` so the constraint can't
+  be regressed.** New DBs ship in mode 2 (INCREMENTAL); pre-existing
+  mode-0 DBs need a one-shot manual `VACUUM` (or rm + recreate) to
+  convert.
+- **9C — `ai_tool` column landed NULL despite raw_json populated.**
+  Wave 2A's EventStore writer read the `agent_tool` enrichment
+  key, but the production writer uses `ai_tool`. RC2 reads
+  `ai_tool` first and falls back to `agent_tool` so both code
+  paths populate.
+- **9D — Silent insert failures.** During the disk-full incident
+  the dashboard showed "0 ev/s" because every events.db insert
+  failed — but the failure path logged nothing. RC2 adds a 3-tier
+  escalation ladder (`StorageErrorTracker`) — first failure logs,
+  logarithmic ladder follows (10, 100, 1000, …), plus heartbeat
+  fields `event_insert_errors_total / _rate / _last_kind` exposed
+  in `maccrabctl status`.
+- **9E — Threat intel feeds didn't auto-load on dashboard mount.**
+  `V2IntelligenceWorkspace`'s `.task(id:)` deferred to the data
+  provider; on first fire `V2MockDataProvider` won the race and
+  returned fixture data. RC2's new
+  `V2LiveDataProvider.loadFeedsFromCache(preferring:)` static
+  helper probes a prioritized cache-dir list directly.
+- **9F — Bundled IOCs weren't persisted on cold start.** Field-
+  confirmed gap on top of 9E: the dashboard correctly read
+  `feed_cache.json` via 9E's helper, but on a fresh install the
+  file didn't exist until the daemon's first `updateAllFeeds()`
+  finished (~14 min across abuse.ch feeds on the RC2 user
+  machine). `BundledThreatIntel.loadInto` added IOCs to in-memory
+  actor state via `addCustomIOCs` but never wrote the cache file.
+  RC2: `ThreatIntelFeed.start()` is now async-await so it awaits
+  `loadCachedFeeds()` + `loadCustomIOCFiles()` inline (periodic
+  network loop split into background Task). New
+  `persistCacheNow()` public method; `DaemonSetup` calls it
+  immediately after `BundledThreatIntel.loadInto(...)` so the
+  dashboard sees bundled IOCs on first Intelligence-tab mount.
+  Warm-boot safety preserved: prior cached IOCs hydrate first, so
+  the post-bundled persist writes the union — never a
+  bundled-only overwrite.
+
+New test files: `StoreReadOnlyTests`, `IncrementalVacuumTests`,
+`EventStoreAiToolFallbackTests`, `InsertFailureEscalationTests`,
+`V2IntelligenceFeedsLoaderTests`, `ThreatIntelColdStartPersistTests`. 55/55 Wave 9 tests pass. Full
+suite has 4 pre-existing timing-related failures in
+`SchemaMigrationIntegrationTests.reopenIsIdempotent` (passes in
+isolation 0.27s, fails under parallel test-runner contention) —
+tracked for v1.13 tolerance adjustment, not an RC2 regression.
+
 ## [1.12.5] — 2026-05-17
 
 Self-FP cleanup wave + Threat Intel directory-permissions fix.
