@@ -38,7 +38,7 @@ machine. None are committed; none are ever copied off the build Mac.
 | Secret | Used by | Loss impact |
 |---|---|---|
 | Developer ID Application certificate (Peter Hanily, team `79S425CW99`) | `codesign` during build, `notarytool` for Apple submission | Until revoked: attacker can sign any Mach-O as MacCrab. Apple revocation is the only mitigation. |
-| App-specific password for Apple ID `[redacted]` | `notarytool submit --password ...` | Attacker can submit other binaries for notarization under this team. Limited blast radius — revoke at appleid.apple.com. |
+| App-specific password for the Apple ID associated with team `79S425CW99` | `notarytool submit --password ...` | Attacker can submit other binaries for notarization under this team. Limited blast radius — revoke at appleid.apple.com. |
 | Sparkle EdDSA private key (matching `SUPublicEDKey` baked into shipped Info.plist) | `sign_update` during appcast entry generation | **Catastrophic.** Existing v1.x Sparkle clients verify against the embedded public key. If the private key leaks, an attacker can sign a malicious appcast XML and `MacCrab.app` will auto-update to a malicious DMG. **No rotation path** without shipping a new bundle (and convincing every existing user to install it manually). |
 | GitHub fine-grained PAT (`SITE_REPO_TOKEN`), scoped to `contents:write` on `peterhanily/maccrab-site` | `publish-appcast-entry.sh` to commit the appcast entry | Attacker with this token can modify `appcast.xml` to advertise a malicious DMG. Mitigated because the DMG itself still needs a valid EdDSA signature (above), but combined with that key it's a complete supply-chain compromise. |
 
