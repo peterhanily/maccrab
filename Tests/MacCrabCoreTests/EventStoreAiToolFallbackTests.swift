@@ -21,7 +21,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("EventStore: ai_tool column reads both canonical keys (v1.12.6 RC2 Wave 9C)")

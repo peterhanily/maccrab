@@ -152,4 +152,4 @@ struct AlertInvestigationPersistenceTests {
 
 // Swift Testing needs the SQLite types pulled into the test file for
 // the schema-inspection test above.
-import SQLite3
+import CSQLCipher

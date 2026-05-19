@@ -10,7 +10,7 @@
 // changes, and reads the databases via the sqlite3 C API.
 
 import Foundation
-import SQLite3
+import CSQLCipher
 import os.log
 
 // MARK: - TCCMonitorError

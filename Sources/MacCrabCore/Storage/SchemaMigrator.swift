@@ -5,7 +5,7 @@
 // Used by EventStore and AlertStore after base table creation.
 
 import Foundation
-import SQLite3
+import CSQLCipher
 
 // MARK: - Migration
 

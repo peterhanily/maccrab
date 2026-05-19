@@ -18,7 +18,7 @@
 // must already have secrets/PII redacted.
 
 import Foundation
-import SQLite3
+import CSQLCipher
 import os.log
 
 // MARK: - TraceStoreError

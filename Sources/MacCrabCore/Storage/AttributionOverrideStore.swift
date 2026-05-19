@@ -19,7 +19,7 @@
 // removing it would require a migration v6 with no functional gain.
 
 import Foundation
-import SQLite3
+import CSQLCipher
 import os.log
 
 public enum AttributionOverrideStoreError: Error, LocalizedError {

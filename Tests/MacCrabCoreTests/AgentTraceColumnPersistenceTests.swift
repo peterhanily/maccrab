@@ -7,7 +7,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("EventStore: agent_* column projection (v1.9 audit B1 regression)")

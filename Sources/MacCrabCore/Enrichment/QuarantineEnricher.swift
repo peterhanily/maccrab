@@ -7,7 +7,7 @@
 
 import Foundation
 import os.log
-import SQLite3
+import CSQLCipher
 
 /// Looks up file download origin from the QuarantineEventsV2 database.
 ///

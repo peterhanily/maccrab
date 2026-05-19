@@ -6,7 +6,7 @@
 
 import Foundation
 import Combine
-import SQLite3
+import CSQLCipher
 import MacCrabCore
 import os.log
 

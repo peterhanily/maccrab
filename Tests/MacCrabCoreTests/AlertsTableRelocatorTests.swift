@@ -15,7 +15,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("AlertsTableRelocator (v1.8.0)")

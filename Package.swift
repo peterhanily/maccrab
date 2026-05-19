@@ -39,9 +39,70 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.1"),
     ],
     targets: [
+        // SQLCipher amalgamation, vendored from sqlcipher/sqlcipher v4.16.0
+        // (SQLite 3.53.1). The only SQLite implementation in the codebase —
+        // no target links the macOS-bundled libsqlite3 anymore. SQLCipher in
+        // non-codec mode (no PRAGMA key issued) behaves identically to
+        // upstream SQLite, so existing un-encrypted stores (events.db,
+        // alerts.db, etc.) continue to work transparently. Encryption is
+        // available on demand via PRAGMA key at the per-store level.
+        //
+        // See Sources/CSQLCipher/REBUILD.md for amalgamation regen steps
+        // when bumping SQLCipher versions.
+        .target(
+            name: "CSQLCipher",
+            path: "Sources/CSQLCipher",
+            sources: ["sqlite3.c"],
+            publicHeadersPath: "include",
+            cSettings: [
+                .define("SQLITE_HAS_CODEC"),
+                .define("SQLCIPHER_CRYPTO_CC"),
+                // SQLCipher's codec wires itself into SQLite's startup /
+                // shutdown via these hooks. The amalgamation #error's at
+                // compile time if they're missing.
+                .define("SQLITE_EXTRA_INIT", to: "sqlcipher_extra_init"),
+                .define("SQLITE_EXTRA_SHUTDOWN", to: "sqlcipher_extra_shutdown"),
+                .define("SQLITE_TEMP_STORE", to: "2"),
+                .define("SQLITE_THREADSAFE", to: "1"),
+                .define("SQLITE_ENABLE_FTS5"),
+                .define("SQLITE_ENABLE_RTREE"),
+                .define("SQLITE_DEFAULT_FOREIGN_KEYS", to: "1"),
+                .define("SQLITE_ENABLE_BYTECODE_VTAB"),
+                .define("SQLITE_ENABLE_DBSTAT_VTAB"),
+                .define("SQLITE_DQS", to: "0"),
+                .define("SQLITE_STRICT_SUBTYPE", to: "1"),
+                .define("HAVE_USLEEP", to: "1"),
+                // Required even in SPM debug builds: SQLite's amalgamation
+                // gates its internal debug helpers (sqlite3BtreeHoldsAllMutexes,
+                // sqlite3SchemaMutexHeld, sqlite3NoTempsInRange, etc.) behind
+                // SQLITE_DEBUG, but its assert() calls expect those helpers
+                // to be declared. Defining NDEBUG turns the assert() calls
+                // into no-ops, matching the standard "release-mode" SQLite
+                // build documented at sqlite.org/howtocompile.html. We do
+                // not enable SQLITE_DEBUG; we're not SQLite contributors and
+                // its asserts are not security checks.
+                .define("NDEBUG", to: "1"),
+                // Suppress non-actionable warnings from the SQLite/SQLCipher
+                // amalgamation. These come from upstream source we don't
+                // edit; surfacing them in our build output just buries
+                // legitimate diagnostics in MacCrabCore code.
+                .unsafeFlags([
+                    "-Wno-unused-function",
+                    "-Wno-unused-but-set-variable",
+                    "-Wno-shorten-64-to-32",
+                    "-Wno-comma",
+                    "-Wno-implicit-fallthrough",
+                    "-Wno-ambiguous-macro",
+                ]),
+            ],
+            linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("Foundation"),
+            ]
+        ),
         .target(
             name: "MacCrabCore",
-            dependencies: [],
+            dependencies: ["CSQLCipher"],
             resources: [
                 .process("Resources"),
             ],
@@ -50,7 +111,6 @@ let package = Package(
                 .linkedLibrary("bsm"),
                 .linkedFramework("Security"),
                 .linkedFramework("OSLog"),
-                .linkedLibrary("sqlite3"),
             ]
         ),
         .executableTarget(

@@ -7,7 +7,7 @@
 
 import Foundation
 import Darwin
-import SQLite3
+import CSQLCipher
 import os.log
 
 // MARK: - EventStoreError
@@ -1826,13 +1826,28 @@ public actor EventStore {
     /// so only called after a size-driven prune when
     /// `checkpointAndVacuum()` has confirmed there's enough free
     /// disk to do it safely.
+    ///
+    /// **WAL discipline**: the function checkpoints the WAL before
+    /// and after VACUUM. Older SQLite (≤3.43, the macOS-bundled
+    /// libsqlite3 we used pre-CSQLCipher migration) auto-checkpointed
+    /// inside VACUUM, making the pattern caller-checkpoint-free.
+    /// SQLite ≥3.53 (vendored via SQLCipher 4.16.0) no longer
+    /// guarantees this — VACUUM can return SQLITE_OK without
+    /// touching the WAL, leaving post-VACUUM file sizes identical
+    /// to pre-VACUUM and silently breaking the size-cap shrink
+    /// contract. Pre-checkpoint guarantees VACUUM operates on a
+    /// drained main DB; post-checkpoint truncates the WAL that
+    /// VACUUM itself produced so the on-disk footprint reflects the
+    /// rebuilt DB.
     public func vacuum() async throws {
         guard let db = db else { return }
+        _ = await walCheckpoint()
         let rc = sqlite3_exec(db, "VACUUM", nil, nil, nil)
         if rc != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
             throw EventStoreError.stepFailed("VACUUM failed: \(msg)")
         }
+        _ = await walCheckpoint()
     }
 
     /// Checkpoint the WAL into the main DB file. Uses the non-

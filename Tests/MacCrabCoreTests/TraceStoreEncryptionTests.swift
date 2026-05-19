@@ -6,7 +6,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("TraceStore: column-level AES-GCM for attributes_json")

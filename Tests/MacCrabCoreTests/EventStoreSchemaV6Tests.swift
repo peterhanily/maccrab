@@ -15,7 +15,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("EventStore: schema v6 column projection + Sigma aliases (v1.12.6 Wave 2A)")

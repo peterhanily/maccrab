@@ -1,0 +1,4 @@
+SQLCipher 4.16.0 (sources from https://github.com/sqlcipher/sqlcipher v4.16.0)
+  - Bundled SQLite version: 3.53.1
+  - Crypto backend: CommonCrypto (Apple)
+  - Amalgamation built 2026-05-19

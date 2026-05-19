@@ -24,7 +24,7 @@
 // confirmed.
 
 import Foundation
-import SQLite3
+import CSQLCipher
 import os.log
 
 public enum AlertsTableRelocator {

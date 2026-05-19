@@ -1,6 +1,6 @@
 import Foundation
 import MacCrabCore
-import SQLite3
+import CSQLCipher
 import os.log
 import SystemConfiguration
 

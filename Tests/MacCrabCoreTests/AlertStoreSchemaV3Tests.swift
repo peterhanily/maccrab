@@ -12,7 +12,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("AlertStore schema v5 — attribution promotion")

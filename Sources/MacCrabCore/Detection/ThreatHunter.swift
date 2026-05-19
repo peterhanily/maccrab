@@ -6,7 +6,7 @@
 // Uses pattern matching (not LLM) for v1 — maps common phrases to SQL queries.
 
 import Foundation
-import SQLite3
+import CSQLCipher
 import os.log
 
 /// Translates natural language threat hunting queries into database searches.

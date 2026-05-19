@@ -9,7 +9,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("Campaign Store Schema v2 — Wave 2C aggregates")

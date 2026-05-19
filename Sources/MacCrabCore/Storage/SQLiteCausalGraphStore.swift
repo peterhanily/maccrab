@@ -26,7 +26,7 @@
 
 import Foundation
 import Darwin
-import SQLite3
+import CSQLCipher
 import os.log
 
 // MARK: - Error

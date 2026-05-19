@@ -13,7 +13,7 @@
 // 2 connections × 256 MB mmap + 64 MB cache reserved per connection.
 
 import Foundation
-import SQLite3
+import CSQLCipher
 
 enum StoragePragmas {
     /// EventStore page cache. Negative values are KB.

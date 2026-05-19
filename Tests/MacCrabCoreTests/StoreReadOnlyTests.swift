@@ -26,7 +26,7 @@
 
 import Testing
 import Foundation
-import SQLite3
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("Store read-only mode (v1.12.6 Wave 9A)")
