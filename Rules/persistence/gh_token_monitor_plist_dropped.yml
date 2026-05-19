@@ -1,3 +1,11 @@
+# rule-lint-exempt: literal-ioc
+# This rule fires on a specific known-malicious filename
+# (`com.user.gh-token-monitor.plist`) documented as the dead-man's-
+# switch persistence artefact of the Mini Shai-Hulud Wave 4 TanStack
+# compromise (CVE-2026-45321). The filename itself is the IOC; adding
+# a system-process filter would defeat detection (legitimate Apple-
+# signed installers can write arbitrary filenames). See `rule-lint.sh`
+# header for the exemption convention.
 title: TanStack gh-token-monitor LaunchAgent Plist Dropped (Dead-Man's-Switch Watchdog)
 id: aafe2840-0def-48b4-a9d4-36e61023ea87
 status: experimental

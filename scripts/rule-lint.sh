@@ -10,6 +10,20 @@
 #   3. No rule has a condition that is ONLY a selection with no filter
 #   4. Sequence rules have filters in at least one step
 #
+# Exempting individual rules:
+#   Some rules — typically literal-IOC rules that fire on a specific
+#   filename, hash, or domain documented in a public IOC list — should
+#   NOT be filtered. Adding a "filter_apple_signed" gate to a known-bad-
+#   filename detector would defeat the rule (Apple-signed processes can
+#   write any filename). To opt such a rule out of the filter check,
+#   add a comment near the top of the YAML file:
+#
+#       # rule-lint-exempt: literal-ioc
+#
+#   The marker takes any short reason after the colon. Use it sparingly;
+#   the lint check exists for a reason. Each exempt rule should pair the
+#   marker with a justifying comment.
+#
 # Usage:
 #   ./scripts/rule-lint.sh              # Lint all rules
 #   ./scripts/rule-lint.sh --strict     # Fail on warnings too
@@ -111,6 +125,15 @@ check_rule() {
             return
         fi
     done
+
+    # Per-rule opt-out marker. Literal-IOC rules (specific filename,
+    # hash, or domain) shouldn't carry a filter block — the IOC is the
+    # detection. Match anywhere in the file; the reason after the colon
+    # is documentation for the maintainer, not parsed here.
+    if grep -qE "^#\s*rule-lint-exempt:" "$file"; then
+        pass
+        return
+    fi
 
     # Extract the detection section
     local detection
