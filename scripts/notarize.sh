@@ -109,29 +109,51 @@ fi
 APPLE_ID="${APPLE_ID:-}"
 APPLE_TEAM_ID="${APPLE_TEAM_ID:-}"
 NOTARIZE_PASSWORD="${NOTARIZE_PASSWORD:-}"
+NOTARIZE_KEYCHAIN_PROFILE="${NOTARIZE_KEYCHAIN_PROFILE:-}"
 
-if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$NOTARIZE_PASSWORD" ]; then
+# Auth argv selection. If NOTARIZE_KEYCHAIN_PROFILE is set the script
+# uses `xcrun notarytool --keychain-profile <name>` which reads the
+# stored credential from the macOS keychain — nothing sensitive ends
+# up on the command line and `ps` can't observe it. To set up the
+# profile once:
+#   xcrun notarytool store-credentials maccrab-notary \
+#       --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARIZE_PASSWORD"
+#   export NOTARIZE_KEYCHAIN_PROFILE=maccrab-notary
+# The legacy `--apple-id / --team-id / --password` path remains the
+# fallback so existing release configs keep working without any
+# operator action.
+NOTARIZE_AUTH=()
+NOTARIZE_AUTH_OK=0
+NOTARIZE_DISPLAY=""
+if [ -n "$NOTARIZE_KEYCHAIN_PROFILE" ]; then
+    NOTARIZE_AUTH=(--keychain-profile "$NOTARIZE_KEYCHAIN_PROFILE")
+    NOTARIZE_AUTH_OK=1
+    NOTARIZE_DISPLAY="keychain profile: $NOTARIZE_KEYCHAIN_PROFILE"
+elif [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$NOTARIZE_PASSWORD" ]; then
+    NOTARIZE_AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARIZE_PASSWORD")
+    NOTARIZE_AUTH_OK=1
+    NOTARIZE_DISPLAY="Apple ID: $APPLE_ID  Team ID: $APPLE_TEAM_ID"
+fi
+
+if [ "$NOTARIZE_AUTH_OK" = "1" ]; then
     if [ -z "$DEVELOPER_ID" ]; then
         warn "Notarization requires Developer ID signing — skipping notarization"
         warn "Set DEVELOPER_ID to enable notarization"
     else
         info "Submitting for notarization..."
-        echo "  Apple ID:  $APPLE_ID"
-        echo "  Team ID:   $APPLE_TEAM_ID"
+        echo "  $NOTARIZE_DISPLAY"
 
         # Submit and wait for result (|| true prevents set -e from
         # killing the script before we can inspect the output)
         NOTARIZE_OUTPUT=$(xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$NOTARIZE_PASSWORD" \
+            "${NOTARIZE_AUTH[@]}" \
             --wait 2>&1) || true
 
         echo "$NOTARIZE_OUTPUT"
 
         # Check for auth failure
         if echo "$NOTARIZE_OUTPUT" | grep -qi "unable to authenticate\|401"; then
-            fail "Authentication failed — check APPLE_ID, APPLE_TEAM_ID, and NOTARIZE_PASSWORD"
+            fail "Authentication failed — check NOTARIZE_KEYCHAIN_PROFILE (or APPLE_ID / APPLE_TEAM_ID / NOTARIZE_PASSWORD)"
         fi
 
         if echo "$NOTARIZE_OUTPUT" | grep -q "status: Accepted"; then
@@ -150,9 +172,7 @@ if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$NOTARIZE_PASSWORD" ];
             if [ -n "$SUBMISSION_ID" ]; then
                 warn "Notarization rejected. Fetching log..."
                 xcrun notarytool log "$SUBMISSION_ID" \
-                    --apple-id "$APPLE_ID" \
-                    --team-id "$APPLE_TEAM_ID" \
-                    --password "$NOTARIZE_PASSWORD" 2>&1 || true
+                    "${NOTARIZE_AUTH[@]}" 2>&1 || true
             fi
             fail "Notarization was rejected — see log above"
         else
@@ -161,12 +181,13 @@ if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$NOTARIZE_PASSWORD" ];
     fi
 else
     if [ -n "$APPLE_ID" ] || [ -n "$APPLE_TEAM_ID" ] || [ -n "$NOTARIZE_PASSWORD" ]; then
-        warn "Incomplete notarization credentials — all three required:"
+        warn "Incomplete notarization credentials — set NOTARIZE_KEYCHAIN_PROFILE,"
+        warn "or set all three of: APPLE_ID / APPLE_TEAM_ID / NOTARIZE_PASSWORD:"
         [ -z "$APPLE_ID" ]          && warn "  Missing: APPLE_ID (Apple ID email)"
         [ -z "$APPLE_TEAM_ID" ]     && warn "  Missing: APPLE_TEAM_ID (Developer Team ID)"
         [ -z "$NOTARIZE_PASSWORD" ] && warn "  Missing: NOTARIZE_PASSWORD (app-specific password)"
     else
-        warn "Notarization skipped — APPLE_ID, APPLE_TEAM_ID, and NOTARIZE_PASSWORD not set"
+        warn "Notarization skipped — set NOTARIZE_KEYCHAIN_PROFILE or APPLE_ID + APPLE_TEAM_ID + NOTARIZE_PASSWORD"
     fi
 fi
 

@@ -33,7 +33,12 @@ packages:
     # The sysext updates transparently via OSSystemExtensionRequest(.replace)
     # whenever the host app updates, so it doesn't need Sparkle linked in.
     url: https://github.com/sparkle-project/Sparkle
-    from: 2.6.4
+    # Pinned exact to match Package.swift's `.exact("2.9.1")`. xcodegen
+    # is only used to generate the Xcode project for IDE work; the
+    # actual release build uses SPM directly, so today the two paths
+    # would resolve to the same SHA either way. Keeping the pin
+    # exact here means a future xcodebuild-based path can't drift.
+    exactVersion: 2.9.1
 
 targets:
   # ─── Main app (dashboard + sysext activator) ──────────────────────

@@ -76,7 +76,12 @@ done
 # ─── Step 4: SMAppService user-side LaunchAgent ─────────────────────
 # v1.3+ menubar app registers itself for launch-at-login via
 # SMAppService; the registration plist lives in the user's home dir.
-SUDO_HOME="${SUDO_USER:+$(eval echo ~$SUDO_USER)}"
+# Resolve the invoking user's home dir via DirectoryServices rather
+# than eval-based tilde expansion. `dscl . -read` is the canonical
+# macOS lookup; the previous eval form worked in practice (SUDO_USER
+# is set by sudo(8) from getpwuid()) but the explicit argv path is
+# cleaner and easier to audit.
+SUDO_HOME="${SUDO_USER:+$(dscl . -read /Users/"$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')}"
 USER_LAUNCH_AGENT_DIR="${SUDO_HOME:-$HOME}/Library/LaunchAgents"
 for variant in "com.maccrab.app.plist" "${TEAM_ID}.com.maccrab.app.plist"; do
     plist="$USER_LAUNCH_AGENT_DIR/$variant"

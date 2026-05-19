@@ -151,7 +151,10 @@ jobs:
           fi
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        # Pinned to full commit SHA (v2.6.2). Mutable major-version
+        # refs like @v2 can be repointed by the action author; the
+        # SHA cannot. Bump in lockstep with the v2.x changelog.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: |
             dist/maccrab-*.tar.gz

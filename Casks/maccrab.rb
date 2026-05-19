@@ -43,9 +43,16 @@ cask "maccrab" do
     if Dir.exist?(profile_dir)
       Dir.glob("#{profile_dir}/*.provisionprofile").each do |profile|
         tmp = "/tmp/maccrab-cask-profile-#{Process.pid}.plist"
-        system("/usr/bin/security cms -D -i '#{profile}' -o '#{tmp}' 2>/dev/null")
+        # Decode the profile to a plist via argv (no shell, no
+        # string interpolation into a command line).
+        system_command "/usr/bin/security",
+                       args:         ["cms", "-D", "-i", profile, "-o", tmp],
+                       must_succeed: false
         next unless File.exist?(tmp)
-        app_id = `/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' '#{tmp}' 2>/dev/null`.strip
+        plist_result = system_command "/usr/libexec/PlistBuddy",
+                                      args:         ["-c", "Print :Entitlements:application-identifier", tmp],
+                                      must_succeed: false
+        app_id = plist_result.stdout.strip
         File.delete(tmp) rescue nil
         if app_id.include?("com.maccrab.")
           system_command "/bin/rm", args: ["-f", profile], sudo: true
