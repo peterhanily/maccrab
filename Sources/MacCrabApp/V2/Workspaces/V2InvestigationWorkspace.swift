@@ -216,7 +216,14 @@ struct V2InvestigationWorkspace: View {
     // MARK: - TraceGraph
 
     private var traceGraphTab: some View {
-        HStack(alignment: .top, spacing: 0) {
+        // v1.12.9: floating inspector overlay (see V2AlertsWorkspace
+        // for the rationale). HStack push-layout overflowed the
+        // window at the 1180 minimum; ZStack lets the trace
+        // inspector float over the rightmost ~340 pt of the graph
+        // canvas. The slim "Show details" rail re-open affordance
+        // gets the same overlay treatment so the canvas width stays
+        // stable as the user toggles the inspector open/closed.
+        ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
                 traceGraphExplainer
                 tracePickerRow
@@ -227,10 +234,14 @@ struct V2InvestigationWorkspace: View {
 
             if traceInspectorOpen, let trace = selectedTrace ?? traces.first {
                 traceInspector(trace)
+                    .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             } else if !traceInspectorOpen {
                 showInspectorButton
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(.easeInOut(duration: 0.18), value: traceInspectorOpen)
     }
 
     /// Brief explainer at the top of the TraceGraph tab. Pre-fix the

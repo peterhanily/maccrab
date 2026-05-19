@@ -3,6 +3,42 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.9] — 2026-05-19
+
+Single-purpose patch on top of v1.12.7. SwiftUI layout code only
+— no schema migrations, no new entitlements, no new external
+network paths, no rule changes.
+
+**Window minimum unified.** The dashboard's outer window minimum
+and inner content minimum were two different values (950 × 600
+on the WindowGroup, 1280 × 800 inside `V2DashboardShell`), so
+dragging the window into the gap forced the inner HStack to lay
+out at 1280 pt regardless of actual window width and pushed the
+top bar's trailing icon cluster (theme / Help / Settings) past
+the right edge. Both frames now agree on 1180 × 760 declared
+once at the WindowGroup, and the trailing icon cluster picks up
+`.layoutPriority(1)` as a defensive guard against future layout
+shifts squeezing it out.
+
+**Detail inspector floats instead of pushing.** The Alerts,
+Detection, Intelligence, and Investigation workspaces all
+rendered their 340 pt detail inspector via an
+`HStack [content | inspector]` push-layout. At the new 1180
+minimum the table's natural width plus the inspector plus the
+sidebar exceeded the window, so opening an inspector clipped
+either the rightmost table columns or the inspector itself. Each
+of those four workspaces now wraps its content in
+`ZStack(alignment: .topTrailing)` and the inspector floats over
+the rightmost ~340 pt of the workspace with a soft left-edge
+shadow and a slide-in transition. The table keeps its natural
+width and the overall layout stays stable as the user opens and
+closes the inspector. The Investigation workspace's "Show
+details" re-open rail gets the same overlay treatment so
+toggling the trace inspector no longer reflows the graph canvas
+underneath.
+
+See `RELEASE_NOTES/v1.12.9.md` for the full layout breakdown.
+
 ## [1.12.7] — 2026-05-18
 
 Single-purpose patch on top of v1.12.6. Fixes two field-reported

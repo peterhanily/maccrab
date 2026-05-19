@@ -91,6 +91,11 @@ public struct V2CommandBar: View {
 
             Spacer()
 
+            // Trailing icon cluster keeps `.layoutPriority(1)` so that
+            // even if the breadcrumb or a future workspace title widens
+            // unexpectedly (long localizations, accessibility text
+            // scaling), the theme / help / settings buttons keep their
+            // 32×32 slots at the right edge and stay reachable.
             HStack(spacing: 6) {
                 IconButton(icon: schemeIcon, tooltip: schemeTooltip) {
                     toggleScheme()
@@ -102,6 +107,7 @@ public struct V2CommandBar: View {
                     V2SettingsBridge.openSettings()
                 }
             }
+            .layoutPriority(1)
         }
         .padding(.horizontal, 16)
         .frame(height: V2Theme.topBarHeight)

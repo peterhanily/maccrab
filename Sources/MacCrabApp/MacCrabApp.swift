@@ -63,7 +63,18 @@ struct MacCrabApp: App {
         // Main dashboard window — opens on launch.
         WindowGroup("MacCrab Dashboard") {
             V2RootView(appState: appState)
-                .frame(minWidth: 950, minHeight: 600)
+                // Single source of truth for the dashboard's minimum
+                // window size. Pre-v1.12.9 there were two competing
+                // minimums — 950×600 here and 1280×800 inside
+                // V2DashboardShell — which let the window drag smaller
+                // than the content's natural width. The inner frame
+                // forced the HStack to lay out at 1280pt regardless of
+                // window size, so the top bar's trailing icon buttons
+                // (theme / help / settings) ended up past the window's
+                // right edge, unreachable. Now only one frame governs:
+                // window can't shrink below 1180×760, and the inner
+                // shell renders to whatever the window gives it.
+                .frame(minWidth: 1180, minHeight: 760)
                 // Tint every native control (buttons, links, toggles,
                 // progress views, sliders) with MacCrab's brand orange,
                 // mirroring the `--accent` color used on maccrab.com.

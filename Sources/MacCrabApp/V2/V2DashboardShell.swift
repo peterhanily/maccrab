@@ -77,7 +77,12 @@ struct V2DashboardShell: View {
             }
         }
         .preferredColorScheme(resolvedColorScheme)
-        .frame(minWidth: 1280, minHeight: 800)
+        // Window-minimum sizing lives on the WindowGroup's V2RootView
+        // (see MacCrabApp.swift). A second `.frame(minWidth:)` here used
+        // to force the HStack to lay out at 1280pt regardless of the
+        // actual window size, pushing the top bar's trailing icon
+        // buttons past the right edge when the window was dragged
+        // narrower than 1280. Removed in v1.12.9.
         .background(workspaceShortcutHandlers)
         .animation(V2Motion.overlay(reduceMotion: reduceMotion), value: state.paletteOpen)
         .animation(V2Motion.toast(reduceMotion: reduceMotion), value: state.toast?.id)

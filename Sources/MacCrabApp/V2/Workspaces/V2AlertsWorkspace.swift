@@ -550,7 +550,20 @@ struct V2AlertsWorkspace: View {
         // also called it 5× more (once per severity case); that's
         // now precomputed as a counts dict.
         let visible = filteredAlerts(severity: severityFilter.wrappedValue, applyExternalFilter: true)
-        return HStack(alignment: .top, spacing: 0) {
+        // v1.12.9: inspector floats over the table's right edge
+        // instead of pushing the table leftward. Pre-fix, an HStack
+        // [table | inspector] forced the table + 340 pt inspector +
+        // sidebar to sum to ~1424 pt of content; at the 1180 window
+        // minimum the trailing edge overflowed the window and either
+        // the inspector or the rightmost table columns became
+        // unreachable depending on layout priority. ZStack keeps the
+        // table at its natural width; the inspector covers the
+        // rightmost ~340 pt with a slide-in transition and a left-
+        // edge shadow so it reads as a floating sidebar (Mail-style
+        // detail pane). The user can still see Severity / Alert /
+        // Process — the columns that matter for triage — in the
+        // un-covered ~620 pt on the left.
+        return ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
                 timeRangeChips
                 severityCards
@@ -562,8 +575,11 @@ struct V2AlertsWorkspace: View {
 
             if let alert = selected {
                 alertInspector(for: alert)
+                    .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(.easeInOut(duration: 0.18), value: selected?.id)
     }
 
     /// Time-range chip group used by Open + History + Campaigns tabs.

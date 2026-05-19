@@ -672,7 +672,12 @@ public struct V2IntelligenceWorkspace: View {
     }
 
     private var packagesTable: some View {
-        HStack(alignment: .top, spacing: 0) {
+        // v1.12.9: floating inspector overlay (see V2AlertsWorkspace
+        // for the rationale). HStack push-layout overflowed the
+        // window at the 1180 minimum; ZStack lets the package
+        // inspector float over the rightmost ~340 pt of the
+        // packages table.
+        ZStack(alignment: .topTrailing) {
             V2DataTable(
                 columns: [
                     V2DataColumn(id: "name", title: "Package", width: .flexible(min: 200)) { p in
@@ -704,8 +709,11 @@ public struct V2IntelligenceWorkspace: View {
             .frame(minHeight: 360, maxHeight: .infinity)
             if let pkg = selectedPackage {
                 packageInspector(pkg)
+                    .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(.easeInOut(duration: 0.18), value: selectedPackage?.id)
     }
 
     @ViewBuilder

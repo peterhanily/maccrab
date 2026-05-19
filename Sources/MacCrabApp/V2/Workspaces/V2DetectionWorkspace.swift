@@ -343,7 +343,11 @@ public struct V2DetectionWorkspace: View {
     }
 
     private var rulesTab: some View {
-        HStack(alignment: .top, spacing: 0) {
+        // v1.12.9: floating inspector overlay (see V2AlertsWorkspace
+        // for the rationale). HStack push-layout overflowed the
+        // window at the 1180 minimum; ZStack lets the rule inspector
+        // float over the rightmost ~340 pt of the rules table.
+        ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 16) {
                 rulesStatsRow
                 rulesSearchBar
@@ -354,8 +358,11 @@ public struct V2DetectionWorkspace: View {
 
             if let rule = selectedRule {
                 ruleInspector(rule)
+                    .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(.easeInOut(duration: 0.18), value: selectedRule?.id)
         .sheet(item: $yamlViewerRule) { rule in
             RuleYAMLViewerSheet(rule: rule, onClose: { yamlViewerRule = nil })
         }
