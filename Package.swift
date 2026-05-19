@@ -9,6 +9,13 @@ let package = Package(
     ],
     products: [
         .library(name: "MacCrabCore", targets: ["MacCrabCore"]),
+        // MacCrabForensics: Mac Context Plugin Platform (Track 2,
+        // plan §3). Hosts the plugin runtime, encrypted ArtifactStore,
+        // Case model. Linked by maccrabctl + MacCrabApp + maccrab-mcp;
+        // intentionally NOT linked by MacCrabAgent (sysext) or maccrabd
+        // (legacy daemon) — the plugin runtime must not crash the
+        // detection engine.
+        .library(name: "MacCrabForensics", targets: ["MacCrabForensics"]),
         .executable(name: "maccrabd", targets: ["maccrabd"]),
         .executable(name: "maccrabctl", targets: ["maccrabctl"]),
         .executable(name: "MacCrabApp", targets: ["MacCrabApp"]),
@@ -119,12 +126,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "maccrabctl",
-            dependencies: ["MacCrabCore"]
+            dependencies: ["MacCrabCore", "MacCrabForensics"]
         ),
         .executableTarget(
             name: "MacCrabApp",
             dependencies: [
                 "MacCrabCore",
+                "MacCrabForensics",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             resources: [
@@ -133,7 +141,16 @@ let package = Package(
         ),
         .executableTarget(
             name: "maccrab-mcp",
-            dependencies: ["MacCrabCore"]
+            dependencies: ["MacCrabCore", "MacCrabForensics"]
+        ),
+        // Mac Context Plugin Platform — see Sources/MacCrabForensics/
+        // README for module layout. Depends on MacCrabCore for shared
+        // event / alert / process-identity types, and on CSQLCipher for
+        // the encrypted per-case ArtifactStore + blob vault.
+        .target(
+            name: "MacCrabForensics",
+            dependencies: ["MacCrabCore", "CSQLCipher"],
+            exclude: ["README.md"]
         ),
         // Shared daemon bootstrap — wraps everything that used to sit
         // inside the `maccrabd` executable target except for the entry
@@ -173,6 +190,13 @@ let package = Package(
             dependencies: [
                 "MacCrabApp",
                 "MacCrabCore",
+                .product(name: "Testing", package: "swift-testing"),
+            ]
+        ),
+        .testTarget(
+            name: "MacCrabForensicsTests",
+            dependencies: [
+                "MacCrabForensics",
                 .product(name: "Testing", package: "swift-testing"),
             ]
         ),
