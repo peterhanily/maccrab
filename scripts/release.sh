@@ -220,6 +220,44 @@ elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
     else
         echo "  ! release.json publish failed — run 'scripts/publish-release-json.sh' manually" >&2
     fi
+
+    # Step 6c: Cross-source SHA sanity check. v1.12.7 shipped with
+    # release.json's SHA pointing at RC2's DMG (96d408db...) while
+    # the GitHub release asset and Casks/maccrab.rb correctly pointed
+    # at RC3's DMG (7c862c29...) — the squash-merge flow had restored
+    # a pre-RC3 release.json snapshot and nobody noticed until a
+    # post-publish manual check. v1.12.8 codifies the check: after
+    # both publish steps land, diff the three sources of truth for
+    # the DMG SHA. Three sources must agree:
+    #   1. release.json on the local repo (just pushed to site)
+    #   2. Casks/maccrab.rb (just bumped + pushed)
+    #   3. GitHub release asset's recorded digest
+    # If any disagree, the release is internally inconsistent and
+    # users may end up with conflicting integrity signals.
+    echo ""
+    echo "Step 6c: Cross-source SHA sanity check..."
+    # || true so set -e + pipefail don't abort the post-publish step
+    # when grep finds nothing (we WANT to fall through and report).
+    local_release_sha=$(grep -oE '"sha256":\s*"[a-f0-9]{64}"' release.json 2>/dev/null | head -1 | grep -oE '[a-f0-9]{64}' || true)
+    cask_sha=$(grep -oE 'sha256\s+"[a-f0-9]{64}"' Casks/maccrab.rb 2>/dev/null | head -1 | grep -oE '[a-f0-9]{64}' || true)
+    gh_release_sha=$(gh release view "v$VERSION" --json assets --jq '.assets[0].digest' 2>/dev/null | sed 's/^sha256://' || true)
+
+    cross_check_ok=1
+    if [ -z "$local_release_sha" ] || [ -z "$cask_sha" ] || [ -z "$gh_release_sha" ]; then
+        echo "  ! Could not read all three SHAs (release.json=$local_release_sha cask=$cask_sha gh=$gh_release_sha) — manual verification required" >&2
+        cross_check_ok=0
+    elif [ "$local_release_sha" != "$cask_sha" ] || [ "$cask_sha" != "$gh_release_sha" ]; then
+        echo "  ✗ SHA MISMATCH — published artifact is internally inconsistent:" >&2
+        echo "      release.json:      $local_release_sha" >&2
+        echo "      Casks/maccrab.rb:  $cask_sha" >&2
+        echo "      GH release asset:  $gh_release_sha" >&2
+        echo "  Users will see SHA validation failures against at least one of the three." >&2
+        echo "  Recover by republishing the lagging file with the correct SHA." >&2
+        cross_check_ok=0
+    fi
+    if [ "$cross_check_ok" = "1" ]; then
+        echo "  ✓ release.json, Casks/maccrab.rb, and GitHub release all agree on SHA ${local_release_sha:0:16}..."
+    fi
 else
     echo ""
     echo "  Step 6/6: Skipping appcast publish."

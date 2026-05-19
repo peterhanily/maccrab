@@ -2512,6 +2512,170 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS I — SwiftUI .task(id:) sequential-await detector (v1.12.8)
+# ---------------------------------------------------------------------
+# Lesson source: Wave 9G (v1.12.6 RC2) + Wave 9P (v1.12.7).
+#
+# A .task(id:) body whose `id` includes `state.refreshTick` is
+# cancelled and re-entered every refresh tick (default 5 s). If the
+# body has multiple sequential `await state.provider.X(...)` calls
+# gated behind a single trailing `MainActor.run` writing all of @State
+# at once, then on a busy host where the combined load exceeds 5 s
+# the trailing MainActor.run never fires — the cancelled task body
+# discards every fresh read. Symptom: panel silently stops updating
+# until the user closes and reopens the menubar window (which resets
+# refreshTick to 0 and gives the first load uncontested runway).
+#
+# Detection: per-workspace, walk each .task(id:) block whose id
+# expression mentions `refreshTick`. Count `await state.provider.X(`
+# calls and `await MainActor.run` calls inside the block. WARN when
+# provider-awaits >= 2 AND MainActor.run count == 1 (the canonical
+# pre-9P shape). Workspaces fixed in Wave 9G / 9P now have 1 MainActor
+# .run per await, so they pass.
+#
+# How to fix the warning: split into per-await MainActor.run writes
+# so faster queries always land even if a later one is cancelled.
+#
+# Test reproduction (manual, not automated — costly to inject the
+# race in a test):
+#   1. Add a new workspace with multiple sequential `await state.provider`
+#      calls in a .task(id: refreshTick) body and one trailing MainActor.run.
+#   2. Run scripts/pre-release-audit.sh
+#   3. Expect: Pass I warns `<workspace> has N awaits + 1 trailing MainActor.run`
+
+section "PASS I — SwiftUI .task(id:) sequential-await detector"
+
+passI_findings=$(python3 <<'PY'
+import re, os, sys
+findings = []
+WORKSPACES_DIR = 'Sources/MacCrabApp/V2/Workspaces'
+if not os.path.isdir(WORKSPACES_DIR):
+    sys.exit(0)
+for f in sorted(os.listdir(WORKSPACES_DIR)):
+    if not f.endswith('.swift'): continue
+    path = os.path.join(WORKSPACES_DIR, f)
+    with open(path, 'r') as fh:
+        text = fh.read()
+    # Find .task(id: "...refreshTick...") { ... } blocks.
+    for m in re.finditer(r'\.task\(id:[^)]*refreshTick[^)]*\)\s*\{', text):
+        start = m.end()
+        depth = 1
+        i = start
+        # Walk forward through the body, respecting brace nesting + string literals.
+        in_string = False
+        while i < len(text) and depth > 0:
+            c = text[i]
+            if c == '"' and (i == 0 or text[i-1] != '\\'):
+                in_string = not in_string
+            elif not in_string:
+                if c == '{': depth += 1
+                elif c == '}': depth -= 1
+            i += 1
+        body = text[start:i-1]
+        provider_awaits = len(re.findall(r'\bawait\s+state\.provider\.[a-zA-Z_]+\(', body))
+        # Also count `await reload()` since several workspaces wrap
+        # the provider awaits in a private async reload() function.
+        if re.search(r'\bawait\s+reload\(\)', body):
+            # Treat as "has its own audit context" — the reload function
+            # itself needs Pass I'ing, which we do by scanning all funcs below.
+            pass
+        mainactor_runs = len(re.findall(r'\bawait\s+MainActor\.run', body))
+        if provider_awaits >= 2 and mainactor_runs == 1:
+            lineno = text[:m.start()].count('\n') + 1
+            findings.append(f"{path}:{lineno} (.task body): {provider_awaits} sequential provider awaits + only 1 trailing MainActor.run — Wave 9P risk shape")
+    # Also scan private async reload() functions in the same file —
+    # these are called from .task(id:) bodies so inherit the cancel risk.
+    for m in re.finditer(r'private\s+func\s+reload\(\)\s+async\s*\{', text):
+        start = m.end()
+        depth = 1
+        i = start
+        in_string = False
+        while i < len(text) and depth > 0:
+            c = text[i]
+            if c == '"' and (i == 0 or text[i-1] != '\\'):
+                in_string = not in_string
+            elif not in_string:
+                if c == '{': depth += 1
+                elif c == '}': depth -= 1
+            i += 1
+        body = text[start:i-1]
+        provider_awaits = len(re.findall(r'\bawait\s+state\.provider\.[a-zA-Z_]+\(', body))
+        mainactor_runs = len(re.findall(r'\bawait\s+MainActor\.run', body))
+        if provider_awaits >= 2 and mainactor_runs == 1:
+            lineno = text[:m.start()].count('\n') + 1
+            findings.append(f"{path}:{lineno} (reload() func): {provider_awaits} sequential provider awaits + only 1 trailing MainActor.run — Wave 9P risk shape")
+for f in findings:
+    print(f)
+PY
+)
+
+if [[ -n "$passI_findings" ]]; then
+    passI_count=$(echo "$passI_findings" | wc -l | tr -d ' ')
+    warn "Pass I: $passI_count workspace .task(id:) bodies have the 9P-shape sequential-await race:"
+    echo "$passI_findings" | sed 's/^/    /'
+    echo "    Fix: split into per-await MainActor.run writes."
+    echo "    Background: Wave 9G (v1.12.6 RC2) + Wave 9P (v1.12.7) — see RELEASE_NOTES/v1.12.7.md"
+else
+    ok "Pass I: every refreshTick-bound .task(id:) body uses partial-write MainActor.run pattern"
+fi
+
+# ---------------------------------------------------------------------
+# PASS J — orphan GitHub Actions secret detector (v1.12.8)
+# ---------------------------------------------------------------------
+# Lesson source: v1.12.6 opsec sweep found SPARKLE_ED_PRIVATE_KEY
+# stored as a repo Actions secret but never referenced by any workflow.
+# Orphan secrets accumulate over time, widening the exposure surface
+# without providing CI value. The Sparkle private key in particular is
+# catastrophic-if-leaked — every additional storage point increases
+# blast radius.
+#
+# Detection: compare `gh api repos/.../actions/secrets` against a grep
+# of every `secrets.X` reference in .github/workflows/*.yml. Any secret
+# in the repo's list but NOT referenced by a workflow is an orphan.
+#
+# Network-dependent: pass is skipped when `gh` isn't authenticated
+# (CI scenarios where the test runner doesn't have a PAT).
+#
+# Test reproduction:
+#   1. Add a dummy secret via `gh secret set TEST_ORPHAN -b dummy`
+#   2. Run scripts/pre-release-audit.sh
+#   3. Expect: Pass J warns `TEST_ORPHAN is stored but never referenced`
+#   4. Cleanup: `gh secret delete TEST_ORPHAN`
+
+section "PASS J — orphan GitHub Actions secret detector"
+
+if ! command -v gh >/dev/null 2>&1; then
+    info "Pass J: skipped (gh CLI not installed)"
+elif ! gh auth status >/dev/null 2>&1; then
+    info "Pass J: skipped (gh CLI not authenticated)"
+else
+    repo_secrets=$(gh api repos/peterhanily/maccrab/actions/secrets --jq '.secrets[].name' 2>/dev/null || true)
+    if [[ -z "$repo_secrets" ]]; then
+        info "Pass J: gh API returned no secrets (insufficient permission?) — skipping"
+    else
+        workflow_refs=$(grep -rohE 'secrets\.[A-Z_][A-Z0-9_]*' .github/workflows/ 2>/dev/null | sed 's/^secrets\.//' | sort -u)
+        passJ_orphans=()
+        while IFS= read -r secret; do
+            [[ -z "$secret" ]] && continue
+            if ! echo "$workflow_refs" | grep -qx "$secret"; then
+                passJ_orphans+=("$secret")
+            fi
+        done <<< "$repo_secrets"
+        if [[ ${#passJ_orphans[@]} -gt 0 ]]; then
+            warn "Pass J: ${#passJ_orphans[@]} GitHub Actions secret(s) stored but not referenced by any workflow:"
+            for s in "${passJ_orphans[@]}"; do
+                echo "    $s"
+            done
+            echo "    Either wire each into a workflow that needs it, or run:"
+            echo "      gh secret delete <NAME>"
+            echo "    Background: v1.12.6 opsec sweep (Wave 9 / final audit) flagged SPARKLE_ED_PRIVATE_KEY as orphaned."
+        else
+            ok "Pass J: every stored GH Actions secret is referenced by at least one workflow"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 
