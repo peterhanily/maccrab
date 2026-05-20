@@ -206,9 +206,14 @@ struct V2InvestigationWorkspace: View {
     @ViewBuilder
     private var tabBody: some View {
         switch state.selectedTabs[.investigation] ?? .investigationTraceGraph {
-        case .investigationTraceGraph:    traceGraphTab
-        case .investigationAgentTraces:   agentTracesTab
-        case .investigationAIAnalysis:    aiAnalysisTab
+        case .investigationTraceGraph:        traceGraphTab
+        case .investigationAgentTraces:       agentTracesTab
+        case .investigationAIAnalysis:        aiAnalysisTab
+        // v1.13b — Mac Context Plugin Platform read-only surfaces.
+        case .investigationForensicsCases:     V2ForensicsCasesView()
+        case .investigationForensicsPlugins:   V2ForensicsPluginsView()
+        case .investigationForensicsArtifacts: V2ForensicsArtifactsView()
+        case .investigationForensicsFindings:  V2ForensicsFindingsView()
         default: traceGraphTab
         }
     }

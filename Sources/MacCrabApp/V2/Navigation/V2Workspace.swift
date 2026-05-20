@@ -73,7 +73,11 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
         case .alerts:        return [.alertsOpen, .alertsCampaigns, .alertsHistory, .alertsSuppressions]
         case .events:        return []
         case .investigation: return [.investigationTraceGraph, .investigationAgentTraces,
-                                     .investigationAIAnalysis]
+                                     .investigationAIAnalysis,
+                                     .investigationForensicsCases,
+                                     .investigationForensicsPlugins,
+                                     .investigationForensicsArtifacts,
+                                     .investigationForensicsFindings]
         case .detection:     return [.detectionRules, .detectionAIGuard, .detectionBrowser,
                                      .detectionMCP]
         case .prevention:    return []
@@ -100,6 +104,12 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
     case investigationTraceGraph
     case investigationAgentTraces
     case investigationAIAnalysis
+
+    // Investigation → Forensics (v1.13b — Mac Context Plugin Platform).
+    case investigationForensicsCases
+    case investigationForensicsPlugins
+    case investigationForensicsArtifacts
+    case investigationForensicsFindings
 
     // Detection
     case detectionRules
@@ -131,6 +141,10 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationTraceGraph:        return String(localized: "workspaceTab.investigation.traceGraph",     defaultValue: "TraceGraph")
         case .investigationAgentTraces:       return String(localized: "workspaceTab.investigation.agentTraces",    defaultValue: "Agent Traces")
         case .investigationAIAnalysis:        return String(localized: "workspaceTab.investigation.aiAnalysis",     defaultValue: "AI Analysis")
+        case .investigationForensicsCases:    return String(localized: "workspaceTab.investigation.forensicsCases", defaultValue: "Forensics · Cases")
+        case .investigationForensicsPlugins:  return String(localized: "workspaceTab.investigation.forensicsPlugins", defaultValue: "Forensics · Plugins")
+        case .investigationForensicsArtifacts: return String(localized: "workspaceTab.investigation.forensicsArtifacts", defaultValue: "Forensics · Artifacts")
+        case .investigationForensicsFindings: return String(localized: "workspaceTab.investigation.forensicsFindings", defaultValue: "Forensics · Findings")
         case .detectionRules:                 return String(localized: "workspaceTab.detection.rules",              defaultValue: "Rules")
         case .detectionAIGuard:               return String(localized: "workspaceTab.detection.aiGuard",            defaultValue: "AI Guard")
         case .detectionBrowser:               return String(localized: "workspaceTab.detection.browser",            defaultValue: "Browser")
@@ -150,7 +164,9 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .alertsOpen, .alertsCampaigns, .alertsHistory, .alertsSuppressions:
             return .alerts
         case .investigationTraceGraph, .investigationAgentTraces,
-             .investigationAIAnalysis:
+             .investigationAIAnalysis,
+             .investigationForensicsCases, .investigationForensicsPlugins,
+             .investigationForensicsArtifacts, .investigationForensicsFindings:
             return .investigation
         case .detectionRules, .detectionAIGuard, .detectionBrowser,
              .detectionMCP:

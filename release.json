@@ -1,12 +1,12 @@
 {
-  "version": "1.15.0-rc.1",
+  "version": "1.15.0-rc.2",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
-  "tests": 1755,
-  "test_suites": 324,
+  "tests": 1763,
+  "test_suites": 326,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.15.0-rc.1",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.15.0-rc.2",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.15 composition-proof feature-complete: PostureAnalyzer demonstrates all four plugin types (Collector + Enricher + Fingerprinter + Analyzer) composing end-to-end. Verified live: analyzer found 3 real findings (Docker unsigned + Google/Docker unfamiliar teams) on the developer machine. RC not advertised via appcast.xml or Casks/maccrab.rb. The v1.13a -> v1.15 plan arc is feature-complete at this tag."
+  "comment": "v1.13b back-port: Dashboard Forensics tab (4 sub-tabs under Investigation workspace) + ConsentManager policy layer for plan §10.5 / §10.8. UNUserNotification production binding deferred — needs .app bundle context. RC not advertised via appcast.xml or Casks/maccrab.rb."
 }
