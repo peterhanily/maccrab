@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.15",
+  "version": "1.16.0-rc.16",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1812,
   "test_suites": 337,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.15",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.16",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — FaceTime + Biome discovery. 24 RC tags. §9.2 catalog substantially complete except for FSEvents binary parser + research items (Tier B / plugin store / TLS fingerprinting)."
+  "comment": "v1.16 — FSEvents binary record-stream parser. 25 RC tags. §9.2 substantively COMPLETE except for explicit research items (Tier B / plugin store / TLS fingerprinting)."
 }

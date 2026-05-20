@@ -31,6 +31,7 @@ public struct FSEventsPlugin: Collector {
         inputs: [],
         outputs: [
             OutputSpec(contentType: "fsevents.log_file", privacyClass: .metadata),
+            OutputSpec(contentType: "fsevents.record", privacyClass: .metadata),
         ],
         mcpTools: [
             MCPToolDescriptor(
@@ -116,10 +117,46 @@ public struct FSEventsPlugin: Collector {
                     try await output.commit(record)
                     committed += 1
                 } catch { rejected += 1 }
+
+                // v1.16.0-rc.16: binary record-stream parse.
+                if let parsed = try? FSEventsRecordParser.parse(gzippedFile: url.path, cap: 1000) {
+                    for r in parsed {
+                        let recSeed = "fsevents.record:\(url.path):\(r.eventID)"
+                        let recSha = SHA256.hash(data: Data(recSeed.utf8)).map { String(format: "%02x", $0) }.joined()
+                        var recData: [String: JSONValue] = [
+                            "path": .string(r.path),
+                            "event_id": .integer(Int64(bitPattern: r.eventID)),
+                            "flags_raw": .integer(Int64(r.flags)),
+                            "flags_decoded": .array(r.decodedFlags.map { .string($0) }),
+                            "source_log_file": .string(url.path),
+                        ]
+                        if let n = r.nodeID {
+                            recData["node_id"] = .integer(Int64(bitPattern: n))
+                        }
+                        let recArt = ArtifactRecord(
+                            caseID: caseContext.caseID,
+                            pluginID: Self.manifest.id,
+                            pluginVersion: Self.manifest.version,
+                            schemaVersion: Self.manifest.schemaVersion,
+                            contentType: "fsevents.record",
+                            sourcePath: url.path,
+                            sha256: recSha,
+                            observedAt: mtime,
+                            capturedAt: now,
+                            summary: "FSEvent \(r.path) [\(r.decodedFlags.joined(separator: ","))]",
+                            sizeBytes: 0,
+                            confidence: .observed,
+                            privacyClass: .metadata,
+                            actor: "root",
+                            data: recData
+                        )
+                        do { try await output.commit(recArt); committed += 1 } catch { rejected += 1 }
+                    }
+                }
             }
         }
 
-        notes.append("FSEvents: \(committed) log files discovered. Binary record-stream parsing deferred.")
+        notes.append("FSEvents: \(committed) artifacts (log files + records).")
         return CollectionResult(
             artifactsCommitted: committed,
             artifactsRejected: rejected,
