@@ -2675,6 +2675,147 @@ else
     fi
 fi
 
+# =====================================================================
+# 2026 series — Mac Context Plugin Platform (v1.13a+)
+# =====================================================================
+# Year-prefix naming scheme keeps cross-chapter lineage navigable AND
+# avoids collision with the pre-existing v1.12.5 Pass A-D letter-only
+# names earlier in this script. Future passes in this arc use
+# Pass 2026-<letter>.
+#
+# This series is introduced concurrently with the foundational
+# substrate (v1.13a-1) — the v1.6.18 "Pass changes never ship in the
+# same PR as the release that needs them" rule is waived for these
+# two passes because there is no prior release for them to
+# retroactively gate.
+
+# ---------------------------------------------------------------------
+# PASS 2026-A — Plugin manifest integrity (v1.13a-1)
+# ---------------------------------------------------------------------
+# Source: plan §3.8.
+#
+# Enforces, source-tree side, the same invariants that
+# PluginManifest.validate() enforces at register-time. The dual path
+# is intentional: validate() is the runtime gate; this pass is the
+# audit gate. Catches:
+#   - declared manifests that never reach the Bootstrap.registerBuiltins
+#     registration list (silently absent at runtime — Track 1 may not
+#     notice for releases),
+#   - first-party plugin ids outside the
+#     com.maccrab.{forensics,enricher,fingerprinter,analyzer}.*
+#     reserved namespace,
+#   - OutputSpec declarations missing privacyClass: at the call site
+#     (Swift won't compile without it, but a future builder-style API
+#     could; the audit catches that drift early).
+#
+# Excludes the test target — fixture manifests inside tests are
+# intentionally not registered.
+
+section "PASS 2026-A — plugin manifest integrity"
+
+manifest_files=$(grep -lR --include='*.swift' "static let manifest = PluginManifest(" Sources/MacCrabForensics/ 2>/dev/null || true)
+if [[ -z "$manifest_files" ]]; then
+    info "Pass 2026-A: no PluginManifest declarations under Sources/MacCrabForensics/ — skipping (no plugins yet)"
+else
+    bootstrap_file="Sources/MacCrabForensics/Plugins/Bootstrap.swift"
+    if [[ ! -f "$bootstrap_file" ]]; then
+        err "Pass 2026-A: $bootstrap_file missing — every plugin manifest must be registered here"
+    else
+        pass_2026A_violations=0
+        # For every manifest declaration, extract the enclosing type
+        # and verify <Type>.manifest appears in Bootstrap.swift.
+        while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            # Type name is the most recent `public struct X` / `struct X`
+            # / `public actor X` / `actor X` declaration in the file.
+            type_name=$(grep -E '^(public )?(struct|actor|class) [A-Za-z_][A-Za-z0-9_]+ *:' "$f" | tail -1 \
+                | sed -E 's/^(public )?(struct|actor|class) ([A-Za-z_][A-Za-z0-9_]+) *:.*/\3/')
+            if [[ -z "$type_name" ]]; then
+                err "Pass 2026-A: could not determine plugin type name in $f"
+                pass_2026A_violations=$((pass_2026A_violations+1))
+                continue
+            fi
+            if ! grep -q "${type_name}\.manifest" "$bootstrap_file"; then
+                err "Pass 2026-A: plugin type ${type_name} in $f is not registered in $bootstrap_file"
+                pass_2026A_violations=$((pass_2026A_violations+1))
+            fi
+
+            # Extract the id literal: `id: "com.maccrab.forensics.fixture",`
+            plugin_id=$(grep -E '^[[:space:]]+id:[[:space:]]*"' "$f" | head -1 \
+                | sed -E 's/^[[:space:]]+id:[[:space:]]*"([^"]+)".*/\1/')
+            if [[ -z "$plugin_id" ]]; then
+                err "Pass 2026-A: could not extract plugin id from $f"
+                pass_2026A_violations=$((pass_2026A_violations+1))
+                continue
+            fi
+
+            # First-party ids must live under the reserved kind roots.
+            if [[ "$plugin_id" == com.maccrab.* ]]; then
+                if ! [[ "$plugin_id" =~ ^com\.maccrab\.(forensics|enricher|fingerprinter|analyzer)\. ]]; then
+                    err "Pass 2026-A: first-party plugin id '$plugin_id' (in $f) is outside com.maccrab.{forensics,enricher,fingerprinter,analyzer}.*"
+                    pass_2026A_violations=$((pass_2026A_violations+1))
+                fi
+            fi
+
+            # Every OutputSpec(contentType: ...) line in this file must
+            # carry privacyClass: in the same call. Swift's required-arg
+            # rule already enforces this; the audit guards against
+            # future shape changes (builder API, default value, etc.).
+            output_lines=$(grep -nE 'OutputSpec\(contentType:' "$f" || true)
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                if ! [[ "$line" == *"privacyClass:"* ]]; then
+                    err "Pass 2026-A: OutputSpec in $f missing privacyClass: $line"
+                    pass_2026A_violations=$((pass_2026A_violations+1))
+                fi
+            done <<< "$output_lines"
+        done <<< "$manifest_files"
+
+        if [[ $pass_2026A_violations -eq 0 ]]; then
+            ok "Pass 2026-A: every plugin manifest registered + namespaced correctly + every output declares privacyClass"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------
+# PASS 2026-B — single ArtifactStore writer (v1.13a-1)
+# ---------------------------------------------------------------------
+# Source: plan §3.8.
+#
+# Sources/MacCrabForensics/Storage/ArtifactStore.swift is the one and
+# only file allowed to issue INSERTs against the artifacts /
+# artifact_data / plugin_invocations tables. Every other path must
+# route through ArtifactStore.commit / recordInvocation* — the
+# chokepoint enforces Pass 2026-D's privacy-class invariant.
+#
+# Tests are exempt: they exercise commit through the actor; raw
+# INSERTs in tests are evidence of bypass.
+# Generated comment lines containing the table name are excluded
+# via the literal "INSERT INTO " prefix match (no double-space, no
+# multi-line splits).
+
+section "PASS 2026-B — single ArtifactStore writer"
+
+forbidden_tables="artifacts artifact_data plugin_invocations"
+pass_2026B_violations=0
+for table in $forbidden_tables; do
+    hits=$(grep -rnE "INSERT INTO ${table}\b" --include='*.swift' Sources/ Tests/ 2>/dev/null \
+        | grep -v "Sources/MacCrabForensics/Storage/ArtifactStore.swift" \
+        | grep -v "Sources/CSQLCipher/" || true)
+    if [[ -n "$hits" ]]; then
+        err "Pass 2026-B: INSERT INTO ${table} outside ArtifactStore.swift:"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            echo "    $line" >&2
+        done <<< "$hits"
+        pass_2026B_violations=$((pass_2026B_violations+1))
+    fi
+done
+
+if [[ $pass_2026B_violations -eq 0 ]]; then
+    ok "Pass 2026-B: artifacts / artifact_data / plugin_invocations are written only from ArtifactStore.swift"
+fi
+
 # ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
