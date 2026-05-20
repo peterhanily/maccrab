@@ -67,5 +67,17 @@ public enum MacCrabForensicsBootstrap {
             manifest: MachOAnalyzerPlugin.manifest,
             factory: { try await MachOAnalyzerPlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: ThreatIntelDomainEnricher.manifest,
+            factory: { try await ThreatIntelDomainEnricher() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: GeoIPASNEnricher.manifest,
+            factory: { try await GeoIPASNEnricher() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: CodesigningAnomalyEnricher.manifest,
+            factory: { try await CodesigningAnomalyEnricher() }
+        ))
     }
 }
