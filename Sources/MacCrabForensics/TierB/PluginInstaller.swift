@@ -29,6 +29,8 @@ public actor PluginInstaller {
         case destinationAlreadyExists(path: String)
         case manifestUnreadable(message: String)
         case missingPluginID
+        case invalidPluginID(message: String)
+        case symlinkInSourceBundle(path: String)
         case verifyFailed(reason: String)
         case ioError(message: String)
 
@@ -38,9 +40,56 @@ public actor PluginInstaller {
             case .destinationAlreadyExists(let p): return "PluginInstaller: destination already exists: \(p) (use --force to overwrite)"
             case .manifestUnreadable(let m): return "PluginInstaller: manifest unreadable: \(m)"
             case .missingPluginID: return "PluginInstaller: manifest has no 'id' field"
+            case .invalidPluginID(let m): return "PluginInstaller: invalid plugin id: \(m)"
+            case .symlinkInSourceBundle(let p): return "PluginInstaller: source bundle contains symlink (refused): \(p)"
             case .verifyFailed(let r): return "PluginInstaller: signature verification failed: \(r)"
             case .ioError(let m): return "PluginInstaller: I/O error: \(m)"
             }
+        }
+    }
+
+    /// Reject any plugin id containing path separators, traversal
+    /// sequences, leading dots, control characters, or characters
+    /// outside the allowed RFC-1035-ish set. The id ends up as a
+    /// directory name under pluginsRoot/, so its shape is part of
+    /// the security boundary.
+    ///
+    /// Accepted pattern: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`
+    /// — starts with alphanumeric, contains only alphanumerics,
+    /// dots, underscores, hyphens; at most 128 chars total.
+    public static func validatePluginID(_ id: String) throws {
+        guard !id.isEmpty else {
+            throw InstallError.invalidPluginID(message: "id is empty")
+        }
+        guard id.count <= 128 else {
+            throw InstallError.invalidPluginID(message: "id exceeds 128 characters")
+        }
+        // No path separator.
+        if id.contains("/") || id.contains("\\") {
+            throw InstallError.invalidPluginID(message: "id contains path separator: \(id)")
+        }
+        // No traversal sequence.
+        if id == ".." || id == "." || id.contains("/..") || id.contains("../") {
+            throw InstallError.invalidPluginID(message: "id contains traversal sequence: \(id)")
+        }
+        // Must start with alphanumeric (rejects leading dot/dash
+        // which could mask the bundle on listing, or be parsed as
+        // a flag by some tools).
+        guard let first = id.first, first.isLetter || first.isNumber else {
+            throw InstallError.invalidPluginID(message: "id must start with letter or digit: \(id)")
+        }
+        // Body charset.
+        for ch in id {
+            let ok = ch.isLetter || ch.isNumber || ch == "." || ch == "_" || ch == "-"
+            if !ok {
+                throw InstallError.invalidPluginID(message: "id contains disallowed character '\(ch)' in: \(id)")
+            }
+        }
+        // No null bytes (defense in depth — Swift Strings can't
+        // contain them per current Foundation, but the byte-level
+        // check survives future Foundation changes).
+        if id.utf8.contains(0) {
+            throw InstallError.invalidPluginID(message: "id contains null byte")
         }
     }
 
@@ -89,6 +138,13 @@ public actor PluginInstaller {
         guard let pluginID = obj["id"] as? String, !pluginID.isEmpty else {
             throw InstallError.missingPluginID
         }
+        try Self.validatePluginID(pluginID)
+        // Source bundle must not contain symlinks. The
+        // signature was computed against the bytes the verifier
+        // sees — if the source has a symlink to /etc/passwd,
+        // those bytes get incorporated into the install, then
+        // an attacker swaps the symlink target post-install.
+        try Self.assertNoSymlinks(in: sourceDir)
 
         // Verify against the current trust+revocation set.
         let trustedKeys = await currentTrustedKeys()
@@ -227,6 +283,41 @@ public actor PluginInstaller {
             at: pluginsRoot,
             withIntermediateDirectories: true
         )
+        // pluginsRoot must be 0o700 — only the operator can read
+        // or modify it.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: pluginsRoot.path
+        )
+    }
+
+    /// Walk a directory looking for symlinks. Refuses to install
+    /// any bundle that contains one. Symlinks are dangerous in a
+    /// signed-bundle context because the verifier reads the
+    /// symlink target (cumputing the signature on its bytes),
+    /// but the target can be swapped post-install.
+    private static func assertNoSymlinks(in dir: URL) throws {
+        let fm = FileManager.default
+        // Top-level dir itself: don't walk into it if it's a
+        // symlink.
+        let dirAttrs = try fm.attributesOfItem(atPath: dir.path)
+        if (dirAttrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            throw InstallError.symlinkInSourceBundle(path: dir.path)
+        }
+        guard let enumerator = fm.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        for case let entry as URL in enumerator {
+            let attrs = try fm.attributesOfItem(atPath: entry.path)
+            let type = attrs[.type] as? FileAttributeType
+            if type == .typeSymbolicLink {
+                throw InstallError.symlinkInSourceBundle(path: entry.path)
+            }
+        }
     }
 
     private static func readKeySet(path: String) -> Set<String> {
@@ -249,7 +340,16 @@ public actor PluginInstaller {
             withJSONObject: payload,
             options: [.prettyPrinted, .sortedKeys]
         )
-        try data.write(to: URL(fileURLWithPath: path))
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        // Lock to 0o600 — operator-only readable+writable. Trust
+        // list contents aren't secret (Ed25519 publics are
+        // public), but the *integrity* of the list is part of the
+        // security boundary. A world-readable file invites
+        // mode-mistake escalation paths.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: path
+        )
     }
 }
 

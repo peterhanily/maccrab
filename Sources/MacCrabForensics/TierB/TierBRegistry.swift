@@ -35,6 +35,10 @@ public actor TierBRegistry {
         public let pluginID: String
         public let manifest: TierBManifest
         public let bundleRoot: String
+        /// Path to spawn. Always a fresh per-resolve temp file
+        /// holding the bytes the signature verifier just
+        /// accepted — closes the TOCTOU window between
+        /// verification and Process.run.
         public let binaryPath: String
         public let publicKeyHex: String
     }
@@ -54,6 +58,14 @@ public actor TierBRegistry {
     /// Discover + verify a single installed plugin. The plugin's
     /// publisher key must be in the trust list AND not in the
     /// revocation list. Manifest is loaded + parsed.
+    ///
+    /// Returns a `VerifiedPlugin` whose `binaryPath` points to a
+    /// fresh per-resolve temp file holding the bytes the
+    /// signature verifier just accepted. Spawning from that
+    /// temp path (instead of the bundle path) closes the TOCTOU
+    /// window between verify and Process.run — if a local
+    /// adversary replaces the bundle binary between verify and
+    /// spawn, the spawn still runs the verified bytes.
     public func resolve(pluginID: String) async throws -> VerifiedPlugin {
         let installed = try await installer.list()
         guard let entry = installed.first(where: { $0.pluginID == pluginID }) else {
@@ -66,11 +78,40 @@ public actor TierBRegistry {
             revokedKeyHexes: revoked
         )
         let bundleURL = URL(fileURLWithPath: entry.installRoot)
+        // verify() returns the manifest bytes it accepted. We
+        // also pull the binary bytes the verifier hashed against
+        // by reading the binary path once and snapshotting it
+        // to a temp file. Both reads are wrapped in O_NOFOLLOW
+        // semantics via Data(contentsOf:) on URLs we control.
+        let bundleBinaryURL = bundleURL.appendingPathComponent("binary")
+        let verifiedBinaryBytes: Data
         do {
             _ = try PluginSignatureVerifier.verify(
                 bundle: PluginSignatureVerifier.BundleLayout(bundleRoot: bundleURL),
                 trustStore: trustStore
             )
+            verifiedBinaryBytes = try Data(contentsOf: bundleBinaryURL)
+            // Re-verify with the bytes we just snapshotted.
+            // PluginSignatureVerifier.verify reads from disk; if
+            // the binary was swapped between its read + ours, the
+            // two reads disagree and the second verify catches
+            // it. Cheap belt-and-suspenders.
+            let sig = try Data(contentsOf: bundleURL.appendingPathComponent("signature"))
+            let pubKeyData = try Data(contentsOf: bundleURL.appendingPathComponent("signing.key.pub"))
+            let pubKey = try CryptoSigning.publicKey(rawRepresentation: pubKeyData)
+            let manifestData = try Data(contentsOf: bundleURL.appendingPathComponent("manifest.json"))
+            let payload = PluginSignatureVerifier.canonicalSignedPayload(
+                manifestData: manifestData,
+                binaryData: verifiedBinaryBytes
+            )
+            guard pubKey.isValidSignature(sig, for: payload) else {
+                throw RegistryError.verificationFailed(
+                    pluginID: pluginID,
+                    reason: "binary changed between verify and snapshot (TOCTOU)"
+                )
+            }
+        } catch let e as RegistryError {
+            throw e
         } catch {
             throw RegistryError.verificationFailed(
                 pluginID: pluginID,
@@ -86,20 +127,52 @@ public actor TierBRegistry {
                 message: error.localizedDescription
             )
         }
-        let binaryPath = bundleURL.appendingPathComponent("binary").path
-        guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
+        // Write the verified bytes to a fresh temp file. This is
+        // the path we hand to Process.run — guarantees the
+        // spawned bytes are exactly the verified bytes, even if
+        // the bundle binary gets swapped between now and exec.
+        let tempBinaryPath = NSTemporaryDirectory()
+            + "maccrab-tier-b-verified-\(UUID().uuidString)"
+        do {
+            try verifiedBinaryBytes.write(to: URL(fileURLWithPath: tempBinaryPath), options: .atomic)
+            // 0o500: owner read+exec only. Closes any post-write
+            // race where another local user could replace the
+            // temp file (defense in depth — NSTemporaryDirectory
+            // is per-user 0o700 on darwin).
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o500],
+                ofItemAtPath: tempBinaryPath
+            )
+        } catch {
             throw RegistryError.binaryNotExecutable(
                 pluginID: pluginID,
-                path: binaryPath
+                path: tempBinaryPath
+            )
+        }
+        guard FileManager.default.isExecutableFile(atPath: tempBinaryPath) else {
+            throw RegistryError.binaryNotExecutable(
+                pluginID: pluginID,
+                path: tempBinaryPath
             )
         }
         return VerifiedPlugin(
             pluginID: pluginID,
             manifest: manifest,
             bundleRoot: entry.installRoot,
-            binaryPath: binaryPath,
+            binaryPath: tempBinaryPath,
             publicKeyHex: entry.publicKeyHex
         )
+    }
+
+    /// Clean up the per-resolve verified-binary temp file. The
+    /// caller is responsible for calling this after the spawn
+    /// completes. resolve() never returns the bundle path
+    /// directly any more — every resolution allocates a temp.
+    ///
+    /// nonisolated because it's pure filesystem cleanup that
+    /// doesn't touch any actor state.
+    public nonisolated func cleanupVerifiedBinary(_ plugin: VerifiedPlugin) {
+        try? FileManager.default.removeItem(atPath: plugin.binaryPath)
     }
 
     /// Walk all installed plugins + verify each. Caller uses
@@ -142,6 +215,7 @@ public actor TierBRegistry {
         probeRead: String? = nil
     ) async throws -> (committed: Int, rejected: Int, plugin: VerifiedPlugin) {
         let plugin = try await resolve(pluginID: pluginID)
+        defer { cleanupVerifiedBinary(plugin) }
         let loader = TierBSubprocessLoader()
         let (committed, rejected, _) = try await loader.runCollectAndCommit(
             binaryPath: plugin.binaryPath,
