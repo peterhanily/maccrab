@@ -31,5 +31,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: LaunchdLitePlugin.manifest,
             factory: { try await LaunchdLitePlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: PostureAnalyzer.manifest,
+            factory: { try await PostureAnalyzer() }
+        ))
     }
 }

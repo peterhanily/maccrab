@@ -155,21 +155,49 @@ private func pluginRun(args: [String]) async throws {
     let mgr = makeCaseManager()
     let handle = try await mgr.openCase(id: resolvedCase)
     let runner = PluginRunner()
-    let (result, invocationID) = try await runner.runCollector(
-        id: id,
-        handle: handle,
-        window: window
-    )
-    print("Ran plugin \(id) on case \(resolvedCase)")
-    print("  Invocation id:        \(invocationID)")
-    print("  Status:               \(result.status.rawValue)")
-    print("  Artifacts committed:  \(result.artifactsCommitted)")
-    print("  Artifacts rejected:   \(result.artifactsRejected)")
-    if !result.notes.isEmpty {
-        print("  Notes:")
-        for note in result.notes {
-            print("    - \(note)")
+
+    // Dispatch by plugin type. Collectors get the case+window
+    // surface; Analyzers get the analyze() surface (and findings
+    // round-trip back through the ArtifactStore as artifacts).
+    guard let registration = await PluginRegistry.shared.registration(forID: id) else {
+        throw CaseCommandError.underlying("Plugin '\(id)' is not registered.")
+    }
+    switch registration.manifest.type {
+    case .collector:
+        let (result, invocationID) = try await runner.runCollector(
+            id: id,
+            handle: handle,
+            window: window
+        )
+        print("Ran collector \(id) on case \(resolvedCase)")
+        print("  Invocation id:        \(invocationID)")
+        print("  Status:               \(result.status.rawValue)")
+        print("  Artifacts committed:  \(result.artifactsCommitted)")
+        print("  Artifacts rejected:   \(result.artifactsRejected)")
+        if !result.notes.isEmpty {
+            print("  Notes:")
+            for note in result.notes {
+                print("    - \(note)")
+            }
         }
+    case .analyzer:
+        let (findings, invocationID) = try await runner.runAnalyzer(
+            id: id,
+            handle: handle
+        )
+        print("Ran analyzer \(id) on case \(resolvedCase)")
+        print("  Invocation id:        \(invocationID)")
+        print("  Findings emitted:     \(findings.count)")
+        for f in findings.prefix(20) {
+            print("    [\(f.severity.rawValue)] \(f.findingType): \(f.title)")
+        }
+        if findings.count > 20 {
+            print("    ... \(findings.count - 20) more")
+        }
+    case .enricher, .fingerprinter:
+        throw CaseCommandError.underlying(
+            "Plugin '\(id)' is type=\(registration.manifest.type.rawValue); use 'maccrabctl fingerprint' for fingerprinters or the forensics.* MCP tool surface for enrichers."
+        )
     }
 }
 

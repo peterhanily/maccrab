@@ -19,6 +19,7 @@
 // real plugins land.
 
 import Foundation
+import CryptoKit
 
 /// Invocation arguments — what the operator typed on the CLI or
 /// what an MCP tool call supplied.
@@ -229,6 +230,138 @@ public actor PluginRunner {
                 snapshotHash: nil
             )
             return (enrichment, invocationID)
+        } catch {
+            try await handle.store.recordInvocationEnd(
+                id: invocationID,
+                exitStatus: "error",
+                artifactsCommitted: 0,
+                artifactsRejected: 0,
+                errorMessage: error.localizedDescription,
+                snapshotHash: nil
+            )
+            throw PluginRunnerError.runtimeError(
+                id: id,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    /// Run an Analyzer against a case. Returns [Finding] AND
+    /// commits each finding back to the ArtifactStore as an
+    /// artifact with `content_type = finding.findingType`, so the
+    /// downstream MCP tools (`forensics.posture_findings`) +
+    /// dashboard surfaces pick them up via the same artifact
+    /// query path as everything else.
+    @discardableResult
+    public func runAnalyzer(
+        id: String,
+        handle: CaseHandle,
+        scope: AnalyzerScope = .wholeCase,
+        inputs: PluginInvocationInputs = .empty
+    ) async throws -> (findings: [Finding], invocationID: Int64) {
+
+        guard let registration = await registry.registration(forID: id) else {
+            throw PluginRunnerError.pluginNotFound(id: id)
+        }
+        guard registration.manifest.type == .analyzer else {
+            throw PluginRunnerError.pluginKindMismatch(
+                expected: .analyzer,
+                got: registration.manifest.type
+            )
+        }
+        let pluginAny: any ForensicPlugin
+        do {
+            pluginAny = try await registration.factory()
+        } catch {
+            throw PluginRunnerError.constructionFailed(
+                id: id,
+                message: error.localizedDescription
+            )
+        }
+        guard let analyzer = pluginAny as? any Analyzer else {
+            throw PluginRunnerError.runtimeError(
+                id: id,
+                message: "plugin registered as analyzer but does not conform to Analyzer protocol"
+            )
+        }
+
+        let caseContext: CaseContext
+        if let row = try await handle.store.fetchCase(id: handle.caseID) {
+            caseContext = CaseContext(
+                caseID: row.id,
+                caseName: row.name,
+                aiContentAllowed: row.aiContentAllowed,
+                scheduledTrusted: row.scheduledTrusted,
+                directory: handle.layout.caseDirectory,
+                encryptionState: row.encryptionState
+            )
+        } else {
+            throw PluginRunnerError.runtimeError(
+                id: id,
+                message: "case row absent from store at invocation"
+            )
+        }
+
+        let inputsJSON = try Self.encodeInputs(inputs)
+        let invocationID = try await handle.store.recordInvocationStart(
+            caseID: handle.caseID,
+            pluginID: registration.manifest.id,
+            pluginVersion: registration.manifest.version,
+            inputsJSON: inputsJSON
+        )
+
+        do {
+            let findings = try await analyzer.analyze(case: caseContext, scope: scope)
+
+            // Commit each finding back to the ArtifactStore so
+            // search_artifacts / posture_findings MCP tools see
+            // them via the standard query path.
+            var commitErrors = 0
+            for finding in findings {
+                let seed = "\(finding.findingType):\(finding.title):\(finding.backedBy.map { "\($0.artifactID)" }.joined(separator: "/"))"
+                let sha = SHA256.hash(data: Data(seed.utf8))
+                    .map { String(format: "%02x", $0) }.joined()
+                let now = Date()
+                let record = ArtifactRecord(
+                    caseID: handle.caseID,
+                    pluginID: registration.manifest.id,
+                    pluginVersion: registration.manifest.version,
+                    schemaVersion: registration.manifest.schemaVersion,
+                    contentType: finding.findingType,
+                    sha256: sha,
+                    observedAt: now,
+                    capturedAt: now,
+                    summary: finding.title,
+                    sizeBytes: 0,
+                    confidence: finding.confidence,
+                    privacyClass: .metadata,
+                    data: [
+                        "severity": .string(finding.severity.rawValue),
+                        "explanation": .string(finding.explanation),
+                        "backed_by": .array(finding.backedBy.map { evidence in
+                            .object([
+                                "content_type": .string(evidence.contentType),
+                                "artifact_id": .integer(evidence.artifactID),
+                            ])
+                        }),
+                    ]
+                )
+                do {
+                    try await handle.store.commit(record)
+                } catch {
+                    commitErrors += 1
+                }
+            }
+
+            try await handle.store.recordInvocationEnd(
+                id: invocationID,
+                exitStatus: commitErrors == 0 ? "ok" : "partial",
+                artifactsCommitted: Int64(findings.count - commitErrors),
+                artifactsRejected: Int64(commitErrors),
+                errorMessage: nil,
+                snapshotHash: nil
+            )
+            return (findings, invocationID)
         } catch {
             try await handle.store.recordInvocationEnd(
                 id: invocationID,

@@ -1,12 +1,12 @@
 {
-  "version": "1.14.0-rc.1",
+  "version": "1.15.0-rc.1",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1755,
   "test_suites": 324,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.14.0-rc.1",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.15.0-rc.1",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "MCFP R0 + R1 — static-only fingerprinter ships. R0 memo (docs/mcfp-research/R0.md) selects option (d): drop dyld component, ship static-only. RCs not advertised via appcast.xml or Casks/maccrab.rb until v1.15 ships GA."
+  "comment": "v1.15 composition-proof feature-complete: PostureAnalyzer demonstrates all four plugin types (Collector + Enricher + Fingerprinter + Analyzer) composing end-to-end. Verified live: analyzer found 3 real findings (Docker unsigned + Google/Docker unfamiliar teams) on the developer machine. RC not advertised via appcast.xml or Casks/maccrab.rb. The v1.13a -> v1.15 plan arc is feature-complete at this tag."
 }
