@@ -47,5 +47,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: MailLitePlugin.manifest,
             factory: { try await MailLitePlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: iMessageMetadataPlugin.manifest,
+            factory: { try await iMessageMetadataPlugin() }
+        ))
     }
 }

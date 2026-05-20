@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.4",
+  "version": "1.16.0-rc.5",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1785,
   "test_suites": 331,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.4",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.5",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — Mail Envelope Index collector ships per plan §13.2 v4-reframed (personalComms class; bodies + DKIM deferred). RC not advertised."
+  "comment": "v1.16 — iMessage-metadata collector. Per plan §13.1 metadata-first: handles + threads + message_meta (no bodies) + url_mention. Privacy proof point. RC not advertised."
 }
