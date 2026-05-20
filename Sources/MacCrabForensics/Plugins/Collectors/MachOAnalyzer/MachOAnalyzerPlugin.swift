@@ -62,26 +62,30 @@ public struct MachOAnalyzerPlugin: Collector {
         output: any CollectorOutput
     ) async throws -> CollectionResult {
 
-        // Until PluginRunner threads operator-supplied inputs
-        // through (a follow-up sub-slice), this RC ships the
-        // analyzer with a default target: every binary under
-        // /Applications/MacCrab.app/Contents/MacOS (the dogfood
-        // case — analyze ourselves). Operators can extend via the
-        // future MCP tool path. For RC dogfood, we just iterate
-        // the standard system paths and emit ONE artifact per
-        // matched Mach-O.
+        // v1.16.0-rc.17: per-invocation `path` input honored
+        // via caseContext.inputs. Operator supplies with
+        // `maccrabctl plugin run com.maccrab.forensics.macho-analyzer
+        //  --case <id> --path=/full/path/to/binary`. Falls back to
+        // a dogfood default set when no path supplied (useful for
+        // quick smoke tests).
         let defaultTargets: [String] = [
             "/usr/bin/true",
             "/usr/bin/osascript",
             "/usr/bin/codesign",
         ]
+        let targets: [String]
+        if case .string(let p) = caseContext.inputs.values["path"], !p.isEmpty {
+            targets = [p]
+        } else {
+            targets = defaultTargets
+        }
 
         var committed = 0
         var rejected = 0
         let now = Date()
         let cache = CodeSigningCache()
 
-        for path in defaultTargets {
+        for path in targets {
             guard FileManager.default.isReadableFile(atPath: path) else { continue }
 
             // Read Mach-O magic for arch.
@@ -133,12 +137,14 @@ public struct MachOAnalyzerPlugin: Collector {
             } catch { rejected += 1 }
         }
 
+        let supplied = (targets.count == 1 && targets != defaultTargets)
         return CollectionResult(
             artifactsCommitted: committed,
             artifactsRejected: rejected,
             notes: [
-                "Mach-O analyzer: \(committed) binaries analyzed (default dogfood set).",
-                "Operator-supplied path input lands when PluginRunner threads invocation inputs (follow-up sub-slice).",
+                supplied
+                    ? "Mach-O analyzer: \(committed) binaries analyzed (operator-supplied path)."
+                    : "Mach-O analyzer: \(committed) binaries analyzed (default dogfood set; supply --path=/full/path to analyze a specific binary).",
             ],
             status: .ok
         )

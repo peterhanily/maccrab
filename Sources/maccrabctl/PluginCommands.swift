@@ -125,13 +125,15 @@ private func pluginInfo(args: [String]) async throws {
 
 private func pluginRun(args: [String]) async throws {
     guard let id = args.first else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin run <plugin-id> --case <id> [--window <dur>] [--since YYYY-MM-DD]")
+        throw CaseCommandError.usage("Usage: maccrabctl plugin run <plugin-id> --case <id> [--window <dur>] [--since YYYY-MM-DD] [--<input>=<value>]")
     }
     var caseID: String? = nil
     var window: MacCrabForensics.TimeWindow? = nil
+    var inputValues: [String: InputValue] = [:]
     var i = 1
     while i < args.count {
-        switch args[i] {
+        let arg = args[i]
+        switch arg {
         case "--case" where i + 1 < args.count:
             caseID = args[i+1]; i += 2
         case "--window" where i + 1 < args.count:
@@ -145,7 +147,21 @@ private func pluginRun(args: [String]) async throws {
             }
             i += 2
         default:
-            i += 1
+            // Generic --<key>=<value> and --<key> <value> input parsing.
+            // Skips already-known flags above; anything else is treated
+            // as plugin-supplied input.
+            if arg.hasPrefix("--"), let eq = arg.firstIndex(of: "=") {
+                let key = String(arg[arg.index(arg.startIndex, offsetBy: 2)..<eq])
+                let raw = String(arg[arg.index(after: eq)...])
+                inputValues[key] = parseInputValue(raw)
+                i += 1
+            } else if arg.hasPrefix("--"), i + 1 < args.count {
+                let key = String(arg.dropFirst(2))
+                inputValues[key] = parseInputValue(args[i + 1])
+                i += 2
+            } else {
+                i += 1
+            }
         }
     }
     guard let resolvedCase = caseID else {
@@ -155,6 +171,7 @@ private func pluginRun(args: [String]) async throws {
     let mgr = makeCaseManager()
     let handle = try await mgr.openCase(id: resolvedCase)
     let runner = PluginRunner()
+    let inputs = PluginInvocationInputs(values: inputValues)
 
     // Dispatch by plugin type. Collectors get the case+window
     // surface; Analyzers get the analyze() surface (and findings
@@ -167,7 +184,8 @@ private func pluginRun(args: [String]) async throws {
         let (result, invocationID) = try await runner.runCollector(
             id: id,
             handle: handle,
-            window: window
+            window: window,
+            inputs: inputs
         )
         print("Ran collector \(id) on case \(resolvedCase)")
         print("  Invocation id:        \(invocationID)")
@@ -183,7 +201,8 @@ private func pluginRun(args: [String]) async throws {
     case .analyzer:
         let (findings, invocationID) = try await runner.runAnalyzer(
             id: id,
-            handle: handle
+            handle: handle,
+            inputs: inputs
         )
         print("Ran analyzer \(id) on case \(resolvedCase)")
         print("  Invocation id:        \(invocationID)")
@@ -202,6 +221,17 @@ private func pluginRun(args: [String]) async throws {
 }
 
 // MARK: - Local helpers (mirrors CaseCommands; kept small)
+
+/// Parse an operator-supplied CLI value into the typed InputValue
+/// shape PluginInvocationInputs accepts. Honors the literal
+/// strings "true" / "false" → .bool, integer parse → .integer,
+/// everything else → .string.
+private func parseInputValue(_ raw: String) -> InputValue {
+    if raw == "true" || raw == "TRUE" { return .bool(true) }
+    if raw == "false" || raw == "FALSE" { return .bool(false) }
+    if let i = Int(raw) { return .integer(i) }
+    return .string(raw)
+}
 
 private func parseDurationForPlugin(_ raw: String) -> TimeInterval? {
     let s = raw.lowercased()

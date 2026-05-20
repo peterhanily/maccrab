@@ -49,13 +49,22 @@ public struct CaseContext: Sendable {
     /// regardless, so plugins don't need to gate.
     public let encryptionState: CaseEncryptionState
 
+    /// Operator-supplied invocation inputs. Plugins read this to
+    /// honor flags declared in their manifest (e.g. tcc-lite's
+    /// `includeDeniedGrants`, launchd-lite's
+    /// `includeSystemBaseline`, macho-analyzer's `path`). Default
+    /// `.empty` when no inputs were supplied — plugins should fall
+    /// back to their manifest's declared defaults.
+    public let inputs: PluginInvocationInputs
+
     public init(
         caseID: String,
         caseName: String,
         aiContentAllowed: Bool,
         scheduledTrusted: Bool,
         directory: URL,
-        encryptionState: CaseEncryptionState
+        encryptionState: CaseEncryptionState,
+        inputs: PluginInvocationInputs = .empty
     ) {
         self.caseID = caseID
         self.caseName = caseName
@@ -63,6 +72,7 @@ public struct CaseContext: Sendable {
         self.scheduledTrusted = scheduledTrusted
         self.directory = directory
         self.encryptionState = encryptionState
+        self.inputs = inputs
     }
 }
 

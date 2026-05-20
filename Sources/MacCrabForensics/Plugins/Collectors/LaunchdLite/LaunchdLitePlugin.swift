@@ -80,16 +80,19 @@ public struct LaunchdLitePlugin: Collector {
         var status: CollectionResult.ExitStatus = .ok
         let now = Date()
 
-        // Source set. (systemBaseline opt-in is wired through the
-        // manifest's inputs but PluginRunner hasn't surfaced
-        // per-invocation inputs to plugins yet — that lands later.
-        // For v1.13a-4 we default to skipping the baseline.)
+        // v1.16.0-rc.17: includeSystemBaseline input honored.
+        // Default false (manifest default + operator-friendly).
+        let includeSystemBaseline: Bool = {
+            if case .bool(let b) = caseContext.inputs.values["includeSystemBaseline"] { return b }
+            return false
+        }()
+
         struct Source {
             let path: String
             let domain: LaunchdEntry.Domain
             let sourceUser: String?
         }
-        let sources: [Source] = [
+        var sources: [Source] = [
             Source(path: "/Library/LaunchAgents", domain: .systemWideAgent, sourceUser: nil),
             Source(path: "/Library/LaunchDaemons", domain: .systemWideDaemon, sourceUser: nil),
             Source(path: NSHomeDirectory() + "/Library/LaunchAgents",
@@ -100,6 +103,12 @@ public struct LaunchdLitePlugin: Collector {
                    sourceUser: NSUserName()),
             Source(path: "/Library/StartupItems", domain: .legacyStartup, sourceUser: nil),
         ]
+        if includeSystemBaseline {
+            sources.append(contentsOf: [
+                Source(path: "/System/Library/LaunchAgents", domain: .systemProtected, sourceUser: nil),
+                Source(path: "/System/Library/LaunchDaemons", domain: .systemProtected, sourceUser: nil),
+            ])
+        }
 
         for src in sources {
             guard FileManager.default.fileExists(atPath: src.path) else { continue }

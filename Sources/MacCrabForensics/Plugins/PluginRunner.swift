@@ -116,7 +116,8 @@ public actor PluginRunner {
                 aiContentAllowed: row.aiContentAllowed,
                 scheduledTrusted: row.scheduledTrusted,
                 directory: handle.layout.caseDirectory,
-                encryptionState: row.encryptionState
+                encryptionState: row.encryptionState,
+                inputs: inputs
             )
         } else {
             // The CaseHandle wraps a real case; if fetchCase
@@ -293,7 +294,8 @@ public actor PluginRunner {
                 aiContentAllowed: row.aiContentAllowed,
                 scheduledTrusted: row.scheduledTrusted,
                 directory: handle.layout.caseDirectory,
-                encryptionState: row.encryptionState
+                encryptionState: row.encryptionState,
+                inputs: inputs
             )
         } else {
             throw PluginRunnerError.runtimeError(

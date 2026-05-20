@@ -92,6 +92,12 @@ public struct TCCLitePlugin: Collector {
         var status: CollectionResult.ExitStatus = .ok
         let now = Date()
 
+        // v1.16.0-rc.17: honor includeDeniedGrants input.
+        let includeDenied: Bool = {
+            if case .bool(let b) = caseContext.inputs.values["includeDeniedGrants"] { return b }
+            return true   // manifest default
+        }()
+
         // Aggregate buckets for summary_by_service.
         var perService: [TCCServiceCanonical: (count: Int, allowed: Int, denied: Int, riskMax: Int)] = [:]
 
@@ -175,6 +181,10 @@ public struct TCCLitePlugin: Collector {
                 let canonical = TCCServiceNormalization.canonical(for: rawService)
                 let authValue = TCCAuthValue.decode(authValueRaw)
                 let authReason = TCCAuthReason.decode(authReasonRaw)
+
+                // Skip denied rows when the operator opted out
+                // via --includeDeniedGrants=false.
+                if !includeDenied, authValue == .denied { continue }
 
                 // macOS stores last_modified as NSDate epoch (seconds
                 // since 2001-01-01 00:00:00 UTC), not Unix epoch.
