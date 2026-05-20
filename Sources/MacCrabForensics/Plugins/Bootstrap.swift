@@ -103,5 +103,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: ArchiveWalkerPlugin.manifest,
             factory: { try await ArchiveWalkerPlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: DocumentAnalyzerPlugin.manifest,
+            factory: { try await DocumentAnalyzerPlugin() }
+        ))
     }
 }
