@@ -22,6 +22,17 @@ public actor ArtifactStore {
     private let path: String
     private let encryptionState: CaseEncryptionState
 
+    /// Process-wide lock serializing the SQLite open + PRAGMA key
+    /// + initial schema migration window. SQLCipher's
+    /// `sqlcipher_extra_init` + `PRAGMA key` sequence is sensitive
+    /// to concurrent open() calls — under parallel test runs we
+    /// observed sporadic SQLITE_MISUSE (21) on subsequent
+    /// prepare() calls. Serializing the init window resolves the
+    /// race; once the connection is fully opened + keyed + migrated,
+    /// SQLITE_OPEN_FULLMUTEX handles per-connection thread safety
+    /// for normal usage.
+    private static let initLock = NSLock()
+
     /// Open / create the per-case store. If `dek` is supplied,
     /// applies `PRAGMA key` BEFORE any other PRAGMA. SQLCipher
     /// requires the key be set before reads of the encrypted
@@ -33,6 +44,11 @@ public actor ArtifactStore {
     ) async throws {
         self.path = path
         self.encryptionState = encryptionState
+
+        // Acquire the process-wide init lock and hold it through
+        // the entire open + key + migrate window.
+        Self.initLock.lock()
+        defer { Self.initLock.unlock() }
 
         var handle: OpaquePointer?
         let rc = sqlite3_open_v2(

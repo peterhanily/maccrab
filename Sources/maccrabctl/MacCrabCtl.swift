@@ -278,6 +278,9 @@ struct MacCrabCtl {
         case "plugin":
             // v1.13a-1 Mac Context Plugin Platform — plugin runtime.
             await dispatchPlugin(args: Array(args.dropFirst(2)))
+        case "fingerprint":
+            // v1.14-1 — MCFP v1 static fingerprint.
+            await dispatchFingerprint(args: Array(args.dropFirst(2)))
         case "version":
             printVersion()
         case "help", "-h", "--help":

@@ -1,12 +1,12 @@
 {
-  "version": "1.13.0-rc.6",
+  "version": "1.14.0-rc.1",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
-  "tests": 1746,
-  "test_suites": 323,
+  "tests": 1755,
+  "test_suites": 324,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.13.0-rc.6",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.14.0-rc.1",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.13b operator-MCP surface: Touch ID DEKVault + 7 forensics.* MCP meta-tools. Dashboard Forensics tab + scheduled-run consent UX deferred to Preview-only follow-up per plan §7 v1.13b kill criterion. RCs not advertised via appcast.xml or Casks/maccrab.rb."
+  "comment": "MCFP R0 + R1 — static-only fingerprinter ships. R0 memo (docs/mcfp-research/R0.md) selects option (d): drop dyld component, ship static-only. RCs not advertised via appcast.xml or Casks/maccrab.rb until v1.15 ships GA."
 }
