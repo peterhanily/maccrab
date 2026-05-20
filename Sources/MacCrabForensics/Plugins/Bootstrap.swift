@@ -119,5 +119,13 @@ public enum MacCrabForensicsBootstrap {
             manifest: ThreatIntelIPEnricher.manifest,
             factory: { try await ThreatIntelIPEnricher() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: CodesigningGraphPlugin.manifest,
+            factory: { try await CodesigningGraphPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: OfficeDocumentPlugin.manifest,
+            factory: { try await OfficeDocumentPlugin() }
+        ))
     }
 }
