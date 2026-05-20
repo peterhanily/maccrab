@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.17",
+  "version": "1.16.0-rc.18",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1812,
   "test_suites": 337,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.17",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.18",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — hardening pass starts. Per-invocation plugin inputs threaded through PluginRunner. macho-analyzer / tcc-lite / launchd-lite now honor manifest inputs (path, includeDeniedGrants, includeSystemBaseline). 26 RC tags."
+  "comment": "v1.16 hardening — CSQLCipherInitGate serializes sqlite3_open across MacCrabForensics. 4 previously-disabled LiveDBSnapshot tests re-enabled. 27 RC tags."
 }

@@ -90,59 +90,50 @@ public enum LiveDBSnapshot {
             try? FileManager.default.removeItem(at: tempURL)
         }
 
-        // Open source read-only.
-        var srcDB: OpaquePointer?
-        let srcOpen = sqlite3_open_v2(
-            sourcePath,
-            &srcDB,
-            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
-            nil
-        )
-        guard srcOpen == SQLITE_OK, let src = srcDB else {
-            let msg = srcDB.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open returned \(srcOpen)"
-            if let s = srcDB { sqlite3_close(s) }
-            throw LiveDBSnapshotError.openSourceFailed(message: msg, code: srcOpen)
-        }
-        defer { sqlite3_close(src) }
+        // v1.16.0-rc.18: serialize the sqlite3_open + backup
+        // window via the shared CSQLCipherInitGate. Resolves the
+        // parallel-test race that previously forced 3
+        // LiveDBSnapshot tests to @Test(.disabled).
+        try CSQLCipherInitGate.withLock {
+            var srcDB: OpaquePointer?
+            let srcOpen = sqlite3_open_v2(
+                sourcePath,
+                &srcDB,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                nil
+            )
+            guard srcOpen == SQLITE_OK, let src = srcDB else {
+                let msg = srcDB.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open returned \(srcOpen)"
+                if let s = srcDB { sqlite3_close(s) }
+                throw LiveDBSnapshotError.openSourceFailed(message: msg, code: srcOpen)
+            }
+            defer { sqlite3_close(src) }
 
-        // Open destination read/write/create.
-        var destDB: OpaquePointer?
-        let destOpen = sqlite3_open_v2(
-            tempURL.path,
-            &destDB,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-            nil
-        )
-        guard destOpen == SQLITE_OK, let dest = destDB else {
-            let msg = destDB.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open returned \(destOpen)"
-            if let d = destDB { sqlite3_close(d) }
-            throw LiveDBSnapshotError.openDestFailed(message: msg, code: destOpen)
-        }
-        defer { sqlite3_close(dest) }
+            var destDB: OpaquePointer?
+            let destOpen = sqlite3_open_v2(
+                tempURL.path,
+                &destDB,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                nil
+            )
+            guard destOpen == SQLITE_OK, let dest = destDB else {
+                let msg = destDB.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open returned \(destOpen)"
+                if let d = destDB { sqlite3_close(d) }
+                throw LiveDBSnapshotError.openDestFailed(message: msg, code: destOpen)
+            }
+            defer { sqlite3_close(dest) }
 
-        // sqlite3_backup_init copies entire "main" schema.
-        guard let backup = sqlite3_backup_init(dest, "main", src, "main") else {
-            let msg = String(cString: sqlite3_errmsg(dest))
-            throw LiveDBSnapshotError.backupInitFailed(message: msg)
+            guard let backup = sqlite3_backup_init(dest, "main", src, "main") else {
+                let msg = String(cString: sqlite3_errmsg(dest))
+                throw LiveDBSnapshotError.backupInitFailed(message: msg)
+            }
+            let stepRC = sqlite3_backup_step(backup, -1)
+            sqlite3_backup_finish(backup)
+            guard stepRC == SQLITE_DONE else {
+                let msg = String(cString: sqlite3_errmsg(dest))
+                throw LiveDBSnapshotError.backupStepFailed(message: msg, code: stepRC)
+            }
         }
-
-        // sqlite3_backup_step(-1) copies all remaining pages in one
-        // call. For very large DBs we'd page through with smaller
-        // batches, but TCC.db / BAM are typically < 1 MB; one step
-        // is fine.
-        let stepRC = sqlite3_backup_step(backup, -1)
-        sqlite3_backup_finish(backup)
-        guard stepRC == SQLITE_DONE else {
-            let msg = String(cString: sqlite3_errmsg(dest))
-            throw LiveDBSnapshotError.backupStepFailed(message: msg, code: stepRC)
-        }
-
-        // Close dest BEFORE reading the file for hashing — otherwise
-        // the SQLite WAL pages may not be flushed.
-        sqlite3_close(dest)
-        destDB = nil  // suppress double-close in defer
-        sqlite3_close(src)
-        srcDB = nil
 
         // Hash the resulting file.
         let data = try Data(contentsOf: tempURL)

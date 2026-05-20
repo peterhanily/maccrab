@@ -37,8 +37,7 @@ struct LiveDBSnapshotTests {
             """, nil, nil, nil)
     }
 
-    @Test("Snapshot produces a sha256-named file under snapshots/",
-          .disabled("flaky in parallel runs — same SQLite global-init race family as snapshotDedups / snapshotIsolationDuringWrite; covered single-target"))
+    @Test("Snapshot produces a sha256-named file under snapshots/")
     func snapshotProducesFile() throws {
         let layout = makeLayout()
         defer { try? FileManager.default.removeItem(at: layout.caseDirectory) }
@@ -53,8 +52,7 @@ struct LiveDBSnapshotTests {
         #expect(result.sizeBytes > 0)
     }
 
-    @Test("Snapshot is parsable read-only as a normal SQLite DB",
-          .disabled("flaky in parallel runs — see snapshotProducesFile note"))
+    @Test("Snapshot is parsable read-only as a normal SQLite DB")
     func snapshotIsParsable() throws {
         let layout = makeLayout()
         defer { try? FileManager.default.removeItem(at: layout.caseDirectory) }
@@ -81,8 +79,7 @@ struct LiveDBSnapshotTests {
         #expect(count == 2)
     }
 
-    @Test("Snapshotting unchanged source twice dedupes via sha256 filename",
-          .disabled("flaky in parallel runs — same race family as snapshotIsolationDuringWrite; dedup property is also covered implicitly by the BlobVault deterministic-ciphertext test"))
+    @Test("Snapshotting unchanged source twice dedupes via sha256 filename")
     func snapshotDedups() throws {
         let layout = makeLayout()
         defer { try? FileManager.default.removeItem(at: layout.caseDirectory) }
@@ -134,8 +131,7 @@ struct LiveDBSnapshotTests {
     /// Re-enable once the suite-level parallelism issue is
     /// understood (likely a SQLite global-init race; same family
     /// as the v1.13.0-rc.5 → rc.6 flake).
-    @Test("Snapshot reflects pre-write state when source is modified after snapshot",
-          .disabled("flaky in parallel test runs; invariant covered by other tests + sqlite3 backup API"))
+    @Test("Snapshot reflects pre-write state when source is modified after snapshot")
     func snapshotIsolationDuringWrite() throws {
         let layout = makeLayout()
         defer { try? FileManager.default.removeItem(at: layout.caseDirectory) }
