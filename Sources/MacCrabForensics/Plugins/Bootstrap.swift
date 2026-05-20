@@ -79,5 +79,21 @@ public enum MacCrabForensicsBootstrap {
             manifest: CodesigningAnomalyEnricher.manifest,
             factory: { try await CodesigningAnomalyEnricher() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: PlistAnalyzerPlugin.manifest,
+            factory: { try await PlistAnalyzerPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: MobileconfigPlugin.manifest,
+            factory: { try await MobileconfigPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: ShortcutsAnalyzerPlugin.manifest,
+            factory: { try await ShortcutsAnalyzerPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: ImageMetadataPlugin.manifest,
+            factory: { try await ImageMetadataPlugin() }
+        ))
     }
 }

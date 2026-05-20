@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.8",
+  "version": "1.16.0-rc.9",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1798,
   "test_suites": 334,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.8",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.9",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — three enrichers (§13.8): threatintel-domain + geoip-asn + codesigning-anomaly. Each paired with idempotency test per Pass 2026-C. All four 2026-series audit passes green. RC not advertised."
+  "comment": "v1.16 — four §13.7 file analyzers (plist + mobileconfig + shortcuts + image-metadata). RC not advertised."
 }
