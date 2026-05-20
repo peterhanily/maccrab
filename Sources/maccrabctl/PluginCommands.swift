@@ -21,6 +21,8 @@ func dispatchPlugin(args: [String]) async {
             try await pluginInfo(args: rest)
         case "run":
             try await pluginRun(args: rest)
+        case "run-tierb":
+            try await pluginRunTierB(args: rest)
         case "help", "-h", "--help":
             printPluginUsage()
         default:
@@ -47,6 +49,11 @@ func printPluginUsage() {
       run <plugin-id> --case <id>     Invoke a plugin against a case.
         [--window <dur>]              Optional time window (e.g. --window 24h).
         [--since YYYY-MM-DD]          Open-ended time window.
+      run-tierb <binary-path>         (Research) Spawn a Tier B plugin binary
+        --case <id>                   via subprocess + JSON-RPC, commit
+        [--plugin-id <id>]            artifacts. Default plugin-id is the
+        [--ticks <N>]                 binary basename. --ticks N requests N
+                                      fixture heartbeats.
     """)
 }
 
@@ -217,6 +224,65 @@ private func pluginRun(args: [String]) async throws {
         throw CaseCommandError.underlying(
             "Plugin '\(id)' is type=\(registration.manifest.type.rawValue); use 'maccrabctl fingerprint' for fingerprinters or the forensics.* MCP tool surface for enrichers."
         )
+    }
+}
+
+// MARK: - Tier B run
+
+/// `maccrabctl plugin run-tierb <binary> --case <id>` — spawns
+/// the Tier B subprocess plugin, runs collect, commits artifacts
+/// via the case's ArtifactStore. Research-grade — surface for
+/// validating the IPC contract end-to-end.
+private func pluginRunTierB(args: [String]) async throws {
+    guard let binaryPath = args.first else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin run-tierb <binary> --case <id> [--plugin-id <id>] [--ticks <N>]")
+    }
+    var caseID: String? = nil
+    var pluginID: String? = nil
+    var ticks: Int = 1
+    var i = 1
+    while i < args.count {
+        let arg = args[i]
+        switch arg {
+        case "--case" where i + 1 < args.count:
+            caseID = args[i + 1]; i += 2
+        case "--plugin-id" where i + 1 < args.count:
+            pluginID = args[i + 1]; i += 2
+        case "--ticks" where i + 1 < args.count:
+            ticks = Int(args[i + 1]) ?? 1; i += 2
+        default:
+            i += 1
+        }
+    }
+    guard let resolvedCase = caseID else {
+        throw CaseCommandError.usage("Missing --case <id>")
+    }
+    let resolvedID = pluginID ?? (binaryPath as NSString).lastPathComponent
+
+    let mgr = makeCaseManager()
+    let handle = try await mgr.openCase(id: resolvedCase)
+    let loader = TierBSubprocessLoader()
+    let (committed, rejected, result) = try await loader.runCollectAndCommit(
+        binaryPath: binaryPath,
+        pluginID: resolvedID,
+        pluginVersion: "research",
+        schemaVersion: 1,
+        caseID: resolvedCase,
+        caseName: handle.caseID,
+        encryptionState: handle.encryptionState,
+        store: handle.store,
+        tickCount: ticks
+    )
+    print("Ran Tier B subprocess plugin \(resolvedID) on case \(resolvedCase)")
+    print("  Binary:               \(binaryPath)")
+    print("  Subprocess exit:      \(result.subprocessExitCode)")
+    print("  Status:               \(result.status)")
+    print("  Artifacts received:   \(result.artifacts.count)")
+    print("  Artifacts committed:  \(committed)")
+    print("  Artifacts rejected:   \(rejected)")
+    if !result.notes.isEmpty {
+        print("  Notes:")
+        for note in result.notes { print("    - \(note)") }
     }
 }
 

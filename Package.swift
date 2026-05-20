@@ -26,6 +26,12 @@ let package = Package(
         // full Xcode — the bundle layout is just a directory with
         // Info.plist + MacOS/<binary> + codesign-generated _CodeSignature.
         .executable(name: "MacCrabAgent", targets: ["MacCrabAgent"]),
+        // Research/post-v15 — Tier B reference fixture plugin. A
+        // standalone executable demonstrating the subprocess +
+        // JSON-RPC IPC contract that Tier B plugins use. Not
+        // shipped to operators; the daemon spawns it from a
+        // known path during research/post-v15 demos.
+        .executable(name: "tier-b-fixture-plugin", targets: ["tier-b-fixture-plugin"]),
     ],
     dependencies: [
         // Test-only dep. Pinned to an exact revision rather than a branch
@@ -196,6 +202,14 @@ let package = Package(
                 "MacCrabCore",
                 .product(name: "Testing", package: "swift-testing"),
             ]
+        ),
+        // Tier B reference fixture plugin. Research/post-v15.
+        // Standalone executable that reads JSON-RPC from stdin
+        // and writes responses to stdout. Spawned by
+        // TierBSubprocessLoader for end-to-end IPC demos.
+        .executableTarget(
+            name: "tier-b-fixture-plugin",
+            dependencies: []
         ),
         .testTarget(
             name: "MacCrabForensicsTests",
