@@ -39,5 +39,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: AppleScriptRuntimePlugin.manifest,
             factory: { try await AppleScriptRuntimePlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: SafariLitePlugin.manifest,
+            factory: { try await SafariLitePlugin() }
+        ))
     }
 }
