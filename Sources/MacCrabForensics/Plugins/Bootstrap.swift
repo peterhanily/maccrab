@@ -51,5 +51,13 @@ public enum MacCrabForensicsBootstrap {
             manifest: iMessageMetadataPlugin.manifest,
             factory: { try await iMessageMetadataPlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: KnowledgeCPlugin.manifest,
+            factory: { try await KnowledgeCPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: QuarantinePlugin.manifest,
+            factory: { try await QuarantinePlugin() }
+        ))
     }
 }
