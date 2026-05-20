@@ -19,6 +19,8 @@ func dispatchMCFP(args: [String]) async {
         await dispatchCorpus(args: rest)
     case "imposter":
         await runImposter(args: rest)
+    case "separation":
+        await runSeparation(args: rest)
     case "help", "-h", "--help":
         printMCFPUsage()
     default:
@@ -44,6 +46,12 @@ private func printMCFPUsage() {
       imposter --target <binary-path>
           Run the R2 imposter experiment: copy + strip-sign +
           re-fingerprint. Expects cs + ent divergence.
+
+      separation <corpus.jsonl>
+          Different-family separation measurement (plan §6.4 R2).
+          Computes %% of cross-family pairs with diverging cs or
+          ent components + Wilson 95%% CI. Verdict PASS when CI
+          lower-bound ≥ 80%%.
     """)
 }
 
@@ -125,6 +133,17 @@ private func runCorpusDiff(args: [String]) async {
         print(String(format: "  sha256(file) %6.2f%%", report.fileSha256StabilityPercent))
         print("")
         print("R2 ship verdict (plan §6.4 — ≥3 components at ≥95%): \(report.r2StabilityVerdict.rawValue.uppercased())")
+        let cis = report.stabilityConfidenceIntervals()
+        if !cis.isEmpty {
+            print("")
+            print("Wilson 95% CI per component (lower bound is the conservative ship gate):")
+            for ci in cis {
+                print(String(
+                    format: "  %-4s  point %6.2f%%   95%% CI [%5.2f%%, %5.2f%%]",
+                    ci.component, ci.pointEstimatePct, ci.ci95LowerPct, ci.ci95UpperPct
+                ))
+            }
+        }
         if !report.divergenceSamples.isEmpty {
             print("")
             print("Divergence samples (first \(report.divergenceSamples.count)):")
@@ -140,6 +159,32 @@ private func runCorpusDiff(args: [String]) async {
         }
     } catch {
         print("Corpus diff failed: \(error)")
+        exit(1)
+    }
+}
+
+private func runSeparation(args: [String]) async {
+    guard let corpusPath = args.first else {
+        print("Usage: maccrabctl mcfp separation <corpus.jsonl>")
+        exit(1)
+    }
+    do {
+        let entries = try CorpusCollector.load(corpusPath: corpusPath)
+        let report = MCFPStatistics.differentFamilySeparation(entries: entries) { entry in
+            MCFPStatistics.defaultFamilyToken(forPath: entry.path)
+        }
+        print("MCFP R2 Different-Family Separation")
+        print("====================================")
+        print("Corpus:               \(corpusPath) (\(entries.count) binaries)")
+        print("Distinct families:    \(report.familyCount)")
+        print("Pairs compared:       \(report.pairsCompared)")
+        print(String(format: "Pairs cs∨ent differ:  %d  (%6.2f%%)", report.csOrEntDifferentCount, report.csOrEntSeparationPercent))
+        print(String(format: "Pairs fully differ:   %d  (%6.2f%%)", report.fullyDifferentCount, report.fullSeparationPercent))
+        print(String(format: "95%% CI:              [%6.2f%%, %6.2f%%]", report.ci95Lower, report.ci95Upper))
+        print("")
+        print("R2 separation verdict (CI lower-bound ≥ 80%): \(report.verdict.rawValue.uppercased())")
+    } catch {
+        print("Separation run failed: \(error)")
         exit(1)
     }
 }
