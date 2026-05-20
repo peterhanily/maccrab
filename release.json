@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.13",
+  "version": "1.16.0-rc.14",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1812,
   "test_suites": 337,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.13",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.14",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — codesigning-graph + Office document analyzer (§13.6 + §13.7). 22 RC tags."
+  "comment": "v1.16 — three opt-in content-class collectors: iMessage-bodies + Mail-bodies + Safari-deep. 23 RC tags. Pass 2026-D rejects on plaintext cases; encrypted-case-only."
 }

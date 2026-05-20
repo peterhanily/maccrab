@@ -127,5 +127,17 @@ public enum MacCrabForensicsBootstrap {
             manifest: OfficeDocumentPlugin.manifest,
             factory: { try await OfficeDocumentPlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: iMessageBodiesPlugin.manifest,
+            factory: { try await iMessageBodiesPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: MailBodiesPlugin.manifest,
+            factory: { try await MailBodiesPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: SafariDeepPlugin.manifest,
+            factory: { try await SafariDeepPlugin() }
+        ))
     }
 }
