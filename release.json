@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.14",
+  "version": "1.16.0-rc.15",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1812,
   "test_suites": 337,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.14",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.15",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — three opt-in content-class collectors: iMessage-bodies + Mail-bodies + Safari-deep. 23 RC tags. Pass 2026-D rejects on plaintext cases; encrypted-case-only."
+  "comment": "v1.16 — FaceTime + Biome discovery. 24 RC tags. §9.2 catalog substantially complete except for FSEvents binary parser + research items (Tier B / plugin store / TLS fingerprinting)."
 }

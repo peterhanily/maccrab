@@ -139,5 +139,13 @@ public enum MacCrabForensicsBootstrap {
             manifest: SafariDeepPlugin.manifest,
             factory: { try await SafariDeepPlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: FaceTimePlugin.manifest,
+            factory: { try await FaceTimePlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: BiomePlugin.manifest,
+            factory: { try await BiomePlugin() }
+        ))
     }
 }
