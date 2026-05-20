@@ -35,5 +35,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: PostureAnalyzer.manifest,
             factory: { try await PostureAnalyzer() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: AppleScriptRuntimePlugin.manifest,
+            factory: { try await AppleScriptRuntimePlugin() }
+        ))
     }
 }

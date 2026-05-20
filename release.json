@@ -1,12 +1,12 @@
 {
-  "version": "1.15.0-rc.2",
+  "version": "1.16.0-rc.1",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
-  "tests": 1763,
-  "test_suites": 326,
+  "tests": 1776,
+  "test_suites": 329,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.15.0-rc.2",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.1",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.13b back-port: Dashboard Forensics tab (4 sub-tabs under Investigation workspace) + ConsentManager policy layer for plan §10.5 / §10.8. UNUserNotification production binding deferred — needs .app bundle context. RC not advertised via appcast.xml or Casks/maccrab.rb."
+  "comment": "v1.16 — plan §13.5 AppleScript runtime monitor (the named v1.16 candidate). First §9.2 backlog item to ship. RC not advertised via appcast.xml or Casks/maccrab.rb."
 }
