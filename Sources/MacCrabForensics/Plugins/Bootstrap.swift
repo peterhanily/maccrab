@@ -95,5 +95,13 @@ public enum MacCrabForensicsBootstrap {
             manifest: ImageMetadataPlugin.manifest,
             factory: { try await ImageMetadataPlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: DMGPKGAnalyzerPlugin.manifest,
+            factory: { try await DMGPKGAnalyzerPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: ArchiveWalkerPlugin.manifest,
+            factory: { try await ArchiveWalkerPlugin() }
+        ))
     }
 }

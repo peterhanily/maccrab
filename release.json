@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.9",
+  "version": "1.16.0-rc.10",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1798,
   "test_suites": 334,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.9",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.10",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — four §13.7 file analyzers (plist + mobileconfig + shortcuts + image-metadata). RC not advertised."
+  "comment": "v1.16 — DMG/PKG + archive walker file analyzers (§13.7). RC not advertised."
 }
