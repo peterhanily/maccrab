@@ -59,9 +59,69 @@ public enum PluginRunnerError: Error, CustomStringConvertible {
 public actor PluginRunner {
 
     private let registry: PluginRegistry
+    private let consent: any ConsentManager
 
-    public init(registry: PluginRegistry = .shared) {
+    public init(
+        registry: PluginRegistry = .shared,
+        consent: any ConsentManager = LoggingConsentManager()
+    ) {
         self.registry = registry
+        self.consent = consent
+    }
+
+    /// Default execution mode for `runCollector` / `runEnricher` /
+    /// `runAnalyzer`. Production callers (maccrabctl, the MCP
+    /// server) override per call site:
+    ///   - interactive (CLI dashboard click) is the default
+    ///   - .scheduled when the case scheduler fires
+    ///   - .mcpFromAgent when invoked via maccrab-mcp
+    public static let defaultMode: ConsentMode = .interactive
+
+    /// Check the consent layer before invoking. Surfaces the
+    /// verdict's `denied` reason as `runtimeError` so the CLI /
+    /// MCP layer can render the §10.8 structured error.
+    private func gateConsent(
+        registration: PluginRegistration,
+        caseRow: CaseRecord,
+        mode: ConsentMode,
+        agentName: String?
+    ) async throws {
+        let highestClass = registration.manifest.outputs
+            .map { $0.privacyClass }
+            .max { Self.classRank($0) < Self.classRank($1) }
+            ?? .metadata
+        let req = ConsentRequest(
+            caseID: caseRow.id,
+            caseName: caseRow.name,
+            pluginID: registration.manifest.id,
+            pluginDisplayName: registration.manifest.displayName,
+            pluginType: registration.manifest.type,
+            mode: mode,
+            caseAIContentAllowed: caseRow.aiContentAllowed,
+            caseScheduledTrusted: caseRow.scheduledTrusted,
+            highestEmittedPrivacyClass: highestClass,
+            agentName: agentName
+        )
+        let decision = await consent.decide(req)
+        switch decision {
+        case .granted, .autoApproved:
+            return
+        case .denied(let reason):
+            throw PluginRunnerError.runtimeError(
+                id: registration.manifest.id,
+                message: "consent denied: \(reason)"
+            )
+        }
+    }
+
+    private static func classRank(_ pc: PrivacyClass) -> Int {
+        switch pc {
+        case .metadata: return 0
+        case .content: return 1
+        case .personalComms: return 2
+        case .credentialAdjacent: return 3
+        case .secret: return 4
+        }
     }
 
     /// Run a Collector against a CaseHandle. Returns the
@@ -71,7 +131,9 @@ public actor PluginRunner {
         id: String,
         handle: CaseHandle,
         window: TimeWindow? = nil,
-        inputs: PluginInvocationInputs = .empty
+        inputs: PluginInvocationInputs = .empty,
+        mode: ConsentMode = PluginRunner.defaultMode,
+        agentName: String? = nil
     ) async throws -> (result: CollectionResult, invocationID: Int64) {
 
         guard let registration = await registry.registration(forID: id) else {
@@ -109,7 +171,9 @@ public actor PluginRunner {
 
         // Build the CaseContext + write-only output.
         let caseContext: CaseContext
+        let caseRow: CaseRecord
         if let row = try await handle.store.fetchCase(id: handle.caseID) {
+            caseRow = row
             caseContext = CaseContext(
                 caseID: row.id,
                 caseName: row.name,
@@ -120,14 +184,18 @@ public actor PluginRunner {
                 inputs: inputs
             )
         } else {
-            // The CaseHandle wraps a real case; if fetchCase
-            // returns nil at this point, something has gone deeply
-            // wrong with the store. Surface as runtime error.
             throw PluginRunnerError.runtimeError(
                 id: id,
                 message: "case row absent from store at invocation"
             )
         }
+        // Consent gate — plan §10.5 / §10.8 enforcement.
+        try await gateConsent(
+            registration: registration,
+            caseRow: caseRow,
+            mode: mode,
+            agentName: agentName
+        )
         let output = StoreCollectorOutput(store: handle.store)
 
         // Open the plugin_invocations row.
