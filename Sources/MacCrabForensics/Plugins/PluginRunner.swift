@@ -169,6 +169,82 @@ public actor PluginRunner {
         }
     }
 
+    /// Run an Enricher against a single subject + stage. Returns
+    /// the Enrichment plus the plugin_invocations row id (so the
+    /// caller can attribute the enrichment to a specific run).
+    ///
+    /// v1.13a-2 ships only the codesign-resolve enricher; the runner
+    /// supports the protocol surface but no Track 1 pipeline
+    /// integration is wired yet — that's a follow-up.
+    @discardableResult
+    public func runEnricher(
+        id: String,
+        handle: CaseHandle,
+        subject: EnrichmentSubject,
+        stage: EnrichmentStage,
+        inputs: PluginInvocationInputs = .empty
+    ) async throws -> (enrichment: Enrichment, invocationID: Int64) {
+
+        guard let registration = await registry.registration(forID: id) else {
+            throw PluginRunnerError.pluginNotFound(id: id)
+        }
+        guard registration.manifest.type == .enricher else {
+            throw PluginRunnerError.pluginKindMismatch(
+                expected: .enricher,
+                got: registration.manifest.type
+            )
+        }
+        let pluginAny: any ForensicPlugin
+        do {
+            pluginAny = try await registration.factory()
+        } catch {
+            throw PluginRunnerError.constructionFailed(
+                id: id,
+                message: error.localizedDescription
+            )
+        }
+        guard let enricher = pluginAny as? any Enricher else {
+            throw PluginRunnerError.runtimeError(
+                id: id,
+                message: "plugin registered as enricher but does not conform to Enricher protocol"
+            )
+        }
+
+        let inputsJSON = try Self.encodeInputs(inputs)
+        let invocationID = try await handle.store.recordInvocationStart(
+            caseID: handle.caseID,
+            pluginID: registration.manifest.id,
+            pluginVersion: registration.manifest.version,
+            inputsJSON: inputsJSON
+        )
+
+        do {
+            let enrichment = try await enricher.enrich(subject, stage: stage)
+            try await handle.store.recordInvocationEnd(
+                id: invocationID,
+                exitStatus: "ok",
+                artifactsCommitted: 0,
+                artifactsRejected: 0,
+                errorMessage: nil,
+                snapshotHash: nil
+            )
+            return (enrichment, invocationID)
+        } catch {
+            try await handle.store.recordInvocationEnd(
+                id: invocationID,
+                exitStatus: "error",
+                artifactsCommitted: 0,
+                artifactsRejected: 0,
+                errorMessage: error.localizedDescription,
+                snapshotHash: nil
+            )
+            throw PluginRunnerError.runtimeError(
+                id: id,
+                message: error.localizedDescription
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     private static func encodeInputs(_ inputs: PluginInvocationInputs) throws -> String {

@@ -19,5 +19,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: FixturePlugin.manifest,
             factory: { try await FixturePlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: CodesignResolveEnricher.manifest,
+            factory: { try await CodesignResolveEnricher() }
+        ))
     }
 }

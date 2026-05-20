@@ -2778,6 +2778,68 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS 2026-C — enricher idempotency coverage (v1.13a-2)
+# ---------------------------------------------------------------------
+# Source: plan §3.8, §5.2.
+#
+# Every Enricher in MacCrabForensics MUST be paired with a test file
+# that exercises the byte-identical-across-re-runs invariant. The
+# enricher's `enrich(subject, stage)` is supposed to be a pure
+# function of (subject, stage); side-effects, time-based fields,
+# network calls, or random input all violate the invariant. The
+# byte-identical assertion in tests catches the violation early,
+# before downstream consumers (event pipeline, dashboard, MCP
+# tools) start seeing flapping enrichment fields.
+#
+# The audit doesn't run the tests itself — that's swift test's job.
+# It enforces presence + naming convention: any Enricher type in
+# Sources/MacCrabForensics/Plugins/Enrichers/ must have a paired
+# Tests/MacCrabForensicsTests/<Name>Tests.swift file containing
+# a suite tagged "idempotency" (the test suite's name string).
+
+section "PASS 2026-C — enricher idempotency coverage"
+
+enricher_files=$(grep -lR --include='*.swift' "public struct [A-Za-z_][A-Za-z0-9_]*: Enricher" Sources/MacCrabForensics/Plugins/Enrichers/ 2>/dev/null || true)
+if [[ -z "$enricher_files" ]]; then
+    info "Pass 2026-C: no Enricher types under Sources/MacCrabForensics/Plugins/Enrichers/ — skipping (no enrichers yet)"
+else
+    pass_2026C_violations=0
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        type_name=$(grep -E 'public struct [A-Za-z_][A-Za-z0-9_]+: Enricher' "$f" | head -1 \
+            | sed -E 's/.*public struct ([A-Za-z_][A-Za-z0-9_]+): Enricher.*/\1/')
+        if [[ -z "$type_name" ]]; then
+            err "Pass 2026-C: could not determine Enricher type name in $f"
+            pass_2026C_violations=$((pass_2026C_violations+1))
+            continue
+        fi
+        # Look for either <Type>Tests.swift OR <Type>IdempotencyTests.swift
+        test_file_a="Tests/MacCrabForensicsTests/${type_name}Tests.swift"
+        test_file_b="Tests/MacCrabForensicsTests/${type_name}IdempotencyTests.swift"
+        if [[ ! -f "$test_file_a" ]] && [[ ! -f "$test_file_b" ]]; then
+            err "Pass 2026-C: enricher ${type_name} (in $f) has no paired test file (looked for $test_file_a or $test_file_b)"
+            pass_2026C_violations=$((pass_2026C_violations+1))
+            continue
+        fi
+        # Require the test file to mention "idempotency" — proves
+        # the byte-identical-across-re-runs assertion exists.
+        # Either file present + matching keyword satisfies the check.
+        for candidate in "$test_file_a" "$test_file_b"; do
+            [[ -f "$candidate" ]] || continue
+            if grep -qiE 'idempot|byte-identical|fields == .*\.fields' "$candidate"; then
+                continue 2  # outer loop — this enricher is OK
+            fi
+        done
+        err "Pass 2026-C: enricher ${type_name} test file exists but contains no idempotency assertion (grep for 'idempot' or 'fields == ' failed)"
+        pass_2026C_violations=$((pass_2026C_violations+1))
+    done <<< "$enricher_files"
+
+    if [[ $pass_2026C_violations -eq 0 ]]; then
+        ok "Pass 2026-C: every Enricher in Sources/MacCrabForensics/Plugins/Enrichers/ has a paired idempotency test"
+    fi
+fi
+
+# ---------------------------------------------------------------------
 # PASS 2026-B — single ArtifactStore writer (v1.13a-1)
 # ---------------------------------------------------------------------
 # Source: plan §3.8.
