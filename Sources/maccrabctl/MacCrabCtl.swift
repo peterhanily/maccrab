@@ -272,6 +272,12 @@ struct MacCrabCtl {
                 print("usage: maccrabctl intel refresh")
                 exit(1)
             }
+        case "case":
+            // v1.13a-1 Mac Context Plugin Platform — case lifecycle.
+            await dispatchCase(args: Array(args.dropFirst(2)))
+        case "plugin":
+            // v1.13a-1 Mac Context Plugin Platform — plugin runtime.
+            await dispatchPlugin(args: Array(args.dropFirst(2)))
         case "version":
             printVersion()
         case "help", "-h", "--help":

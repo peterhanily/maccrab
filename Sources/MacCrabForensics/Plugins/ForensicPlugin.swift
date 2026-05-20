@@ -29,13 +29,22 @@ public protocol ForensicPlugin: Sendable {
 /// (§4.1) and launchd-lite (§4.2).
 public protocol Collector: ForensicPlugin {
     /// Invoked by `maccrabctl plugin run`, the case scheduler, or
-    /// an AI agent via MCP. Receives the case context (DEK already
-    /// unlocked; SQLCipher cipher key applied to the case DB) and
-    /// an optional time window — collectors may ignore the window
-    /// if their source is point-in-time.
+    /// an AI agent via MCP.
+    ///
+    /// Receives:
+    ///   - `case`: the unlocked CaseContext (DEK already applied
+    ///     to SQLCipher; encryption_state available for plugin
+    ///     decisioning).
+    ///   - `window`: optional time window; plugins MAY ignore if
+    ///     their source is point-in-time (TCC.db, launchd state).
+    ///   - `output`: narrow write-only handle for committing
+    ///     artifacts. The plugin calls `output.commit(_:)` for
+    ///     each artifact discovered; the runtime tallies counts
+    ///     into `CollectionResult.artifactsCommitted`.
     func collect(
         case: CaseContext,
-        window: TimeWindow?
+        window: TimeWindow?,
+        output: any CollectorOutput
     ) async throws -> CollectionResult
 }
 

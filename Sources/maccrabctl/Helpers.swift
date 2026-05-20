@@ -109,6 +109,12 @@ extension MacCrabCtl {
         Forensics:
           hunt <query>            Natural language threat hunting
           report [--hours N] [--output file]  Generate HTML incident report
+
+        Mac Context Plugin Platform (v1.13a-1):
+          case <subcommand>       Case lifecycle (new / list / show / artifacts /
+                                  allow-ai / mark-trusted-scheduled / delete)
+          plugin <subcommand>     Plugin runtime (list / info / run)
+          (Run `maccrabctl case help` or `maccrabctl plugin help` for detail.)
           cdhash <PID>            Extract CDHash for a process
           cdhash --all            Extract CDHashes for all processes
           tree-score [N]          Top-N suspicious processes (behavioral + Markov scoring)
