@@ -59,5 +59,13 @@ public enum MacCrabForensicsBootstrap {
             manifest: QuarantinePlugin.manifest,
             factory: { try await QuarantinePlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: FSEventsPlugin.manifest,
+            factory: { try await FSEventsPlugin() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: MachOAnalyzerPlugin.manifest,
+            factory: { try await MachOAnalyzerPlugin() }
+        ))
     }
 }
