@@ -27,5 +27,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: TCCLitePlugin.manifest,
             factory: { try await TCCLitePlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: LaunchdLitePlugin.manifest,
+            factory: { try await LaunchdLitePlugin() }
+        ))
     }
 }
