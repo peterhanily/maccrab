@@ -481,6 +481,92 @@ let tools: [[String: Any]] = [
             "required": ["tree_key"],
         ] as [String: Any],
     ],
+    // ===================================================================
+    // Mac Context Plugin Platform (v1.13a / v1.13b)
+    // ===================================================================
+    [
+        "name": "forensics.list_plugins",
+        "description": "List every forensic plugin registered in MacCrabForensics. Optional `category` filters by plugin type (collector / enricher / fingerprinter / analyzer).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "category": ["type": "string", "description": "Optional. One of: collector, enricher, fingerprinter, analyzer."],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics.run_collector",
+        "description": "Invoke a Collector plugin against a case. Returns the CollectionResult (artifacts committed / rejected / status).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "Plugin id, e.g. com.maccrab.forensics.tcc-lite."],
+                "case_id": ["type": "string", "description": "Target case UUID."],
+            ],
+            "required": ["plugin_id", "case_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics.search_artifacts",
+        "description": "Search a case's committed artifacts. Filters: contentType, observedAfter (ISO8601), observedBefore (ISO8601), limit. Returns metadata-class artifacts unconditionally; higher classes require case.ai_content_allowed=1.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "case_id": ["type": "string"],
+                "content_type": ["type": "string"],
+                "observed_after": ["type": "string"],
+                "observed_before": ["type": "string"],
+                "limit": ["type": "integer"],
+            ],
+            "required": ["case_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics.get_artifact",
+        "description": "Fetch a single artifact by id within a case.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "case_id": ["type": "string"],
+                "artifact_id": ["type": "integer"],
+            ],
+            "required": ["case_id", "artifact_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics.timeline",
+        "description": "Return a case's artifacts ordered by observed_at across all content types. Default 200 entries. (v1.13b extended meta-tool.)",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "case_id": ["type": "string"],
+                "limit": ["type": "integer"],
+            ],
+            "required": ["case_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics.explain_case",
+        "description": "Summarize a case for an operator: name + creation date + encryption state + plugin invocation count + artifact totals by content type. (v1.13b extended meta-tool.)",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "case_id": ["type": "string"],
+            ],
+            "required": ["case_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "forensics.posture_findings",
+        "description": "Return findings emitted by the v1.15 posture Analyzer. v1.13b: returns an empty array — the Analyzer ships at v1.15, this tool reserves the surface.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "case_id": ["type": "string"],
+            ],
+            "required": ["case_id"],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Tool Handlers
@@ -540,6 +626,21 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleScoreTextStyle(args)
     case "get_intent_posterior":
         return await handleGetIntentPosterior(args)
+    // v1.13a / v1.13b — Mac Context Plugin Platform meta-tools.
+    case "forensics.list_plugins":
+        return await handleForensicsListPlugins(args)
+    case "forensics.run_collector":
+        return await handleForensicsRunCollector(args)
+    case "forensics.search_artifacts":
+        return await handleForensicsSearchArtifacts(args)
+    case "forensics.get_artifact":
+        return await handleForensicsGetArtifact(args)
+    case "forensics.timeline":
+        return await handleForensicsTimeline(args)
+    case "forensics.explain_case":
+        return await handleForensicsExplainCase(args)
+    case "forensics.posture_findings":
+        return await handleForensicsPostureFindings(args)
     default:
         return ["content": [["type": "text", "text": "Unknown tool: \(name)"]]]
     }
@@ -1491,6 +1592,297 @@ func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
     } catch {
         return ["content": [["type": "text", "text": "Error looking up trace: \(error.localizedDescription)"]]]
     }
+}
+
+// MARK: - v1.13a / v1.13b — Mac Context Plugin Platform meta-tool handlers
+
+import MacCrabForensics
+
+/// Lazy registry bootstrap shared across all forensics MCP tools.
+/// Subsequent calls are idempotent.
+@MainActor
+final class ForensicsMCPBootstrapper {
+    static let shared = ForensicsMCPBootstrapper()
+    private var bootstrapped = false
+    private init() {}
+    func ensure() async throws {
+        if !bootstrapped {
+            try await MacCrabForensicsBootstrap.registerBuiltins()
+            bootstrapped = true
+        }
+    }
+}
+
+private func forensicsCaseManager() -> CaseManager {
+    CaseManager(
+        casesRoot: CaseDirectoryLayout.defaultCasesRoot,
+        dekVault: KeychainDEKVault()
+    )
+}
+
+/// Encode a CommittedArtifact as the dict shape MCP tools return.
+private func encodeArtifact(_ a: CommittedArtifact) -> [String: Any] {
+    var out: [String: Any] = [
+        "id": Int(a.id),
+        "case_id": a.record.caseID,
+        "plugin_id": a.record.pluginID,
+        "plugin_version": a.record.pluginVersion,
+        "schema_version": a.record.schemaVersion,
+        "content_type": a.record.contentType,
+        "sha256": a.record.sha256,
+        "observed_at": ISO8601DateFormatter().string(from: a.record.observedAt),
+        "captured_at": ISO8601DateFormatter().string(from: a.record.capturedAt),
+        "size_bytes": Int(a.record.sizeBytes),
+        "confidence": a.record.confidence.rawValue,
+        "privacy_class": a.record.privacyClass.rawValue,
+    ]
+    if let s = a.record.summary { out["summary"] = s }
+    if let actor = a.record.actor { out["actor"] = actor }
+    return out
+}
+
+/// Block non-metadata exposure unless ai_content_allowed is set.
+/// Plan §10.8: returns a structured error naming the case, the
+/// privacy class, and the CLI command the operator runs to grant.
+private func aiContentBlockedError(
+    caseID: String, caseName: String, tool: String, classRaw: String
+) -> [String: Any] {
+    let text = "This tool exposes \(classRaw)-class artifacts. The case '\(caseName)' (id: \(caseID)) has not been granted AI content access. To enable, the operator can run:\n\n  maccrabctl case allow-ai --content \(caseID)\n\nor open the case in the MacCrab dashboard → Case Settings → 'Allow AI access to content'.\n\nThis tool will not proceed until access is granted."
+    return [
+        "isError": true,
+        "content": [["type": "text", "text": text]],
+        "structuredContent": [
+            "error": "case_content_access_denied",
+            "case_id": caseID,
+            "case_name": caseName,
+            "tool": tool,
+            "exposesPrivacyClass": classRaw,
+            "ai_action_required": "operator_grants_content_access",
+        ] as [String: Any],
+    ]
+}
+
+func handleForensicsListPlugins(_ args: [String: Any]) async -> Any {
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+    } catch {
+        return ["content": [["type": "text", "text": "bootstrap failed: \(error)"]]]
+    }
+    let category = args["category"] as? String
+    let manifests: [PluginManifest]
+    if let cat = category.flatMap({ PluginType(rawValue: $0) }) {
+        manifests = await PluginRegistry.shared.manifests(ofType: cat)
+    } else {
+        manifests = await PluginRegistry.shared.manifests()
+    }
+    let payload = manifests.map { m -> [String: Any] in
+        return [
+            "id": m.id,
+            "version": m.version,
+            "display_name": m.displayName,
+            "type": m.type.rawValue,
+            "runtime": m.runtime.rawValue,
+            "stability": m.stability.rawValue,
+            "description": m.description,
+        ]
+    }
+    return ["content": [["type": "text", "text": jsonStringify(["plugins": payload])]]]
+}
+
+func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
+    guard let pluginID = args["plugin_id"] as? String,
+          let caseID = args["case_id"] as? String else {
+        return ["content": [["type": "text", "text": "missing required arguments: plugin_id, case_id"]]]
+    }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        let runner = PluginRunner()
+        let (result, invocationID) = try await runner.runCollector(
+            id: pluginID,
+            handle: handle
+        )
+        return ["content": [["type": "text", "text": jsonStringify([
+            "plugin_id": pluginID,
+            "case_id": caseID,
+            "invocation_id": Int(invocationID),
+            "status": result.status.rawValue,
+            "artifacts_committed": result.artifactsCommitted,
+            "artifacts_rejected": result.artifactsRejected,
+            "notes": result.notes,
+        ] as [String: Any])]]]
+    } catch {
+        return ["content": [["type": "text", "text": "run_collector failed: \(error)"]]]
+    }
+}
+
+func handleForensicsSearchArtifacts(_ args: [String: Any]) async -> Any {
+    guard let caseID = args["case_id"] as? String else {
+        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+    }
+    let contentType = args["content_type"] as? String
+    let limit = (args["limit"] as? Int) ?? 100
+    let observedAfter = (args["observed_after"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
+    let observedBefore = (args["observed_before"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        guard let row = try await handle.store.fetchCase(id: caseID) else {
+            return ["content": [["type": "text", "text": "case not found"]]]
+        }
+        // Apply privacy gate: cap result class at metadata unless
+        // the case has granted AI content access.
+        let ceiling: PrivacyClass = row.aiContentAllowed ? .secret : .metadata
+        let q = ArtifactQuery(
+            caseID: caseID,
+            contentType: contentType,
+            observedAfter: observedAfter,
+            observedBefore: observedBefore,
+            privacyClassAtMost: ceiling,
+            limit: limit
+        )
+        let rows = try await handle.store.query(q)
+        let payload = rows.map(encodeArtifact)
+        return ["content": [["type": "text", "text": jsonStringify(["artifacts": payload])]]]
+    } catch {
+        return ["content": [["type": "text", "text": "search_artifacts failed: \(error)"]]]
+    }
+}
+
+func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
+    guard let caseID = args["case_id"] as? String,
+          let artifactID = args["artifact_id"] as? Int else {
+        return ["content": [["type": "text", "text": "missing required arguments: case_id, artifact_id"]]]
+    }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        guard let row = try await handle.store.fetchCase(id: caseID) else {
+            return ["content": [["type": "text", "text": "case not found"]]]
+        }
+        let ceiling: PrivacyClass = row.aiContentAllowed ? .secret : .metadata
+        // Cheap path: query by case + take the artifact id locally.
+        // (A future store-side getByID would be more efficient.)
+        let rows = try await handle.store.query(ArtifactQuery(
+            caseID: caseID,
+            privacyClassAtMost: ceiling,
+            limit: 10_000
+        ))
+        guard let found = rows.first(where: { $0.id == Int64(artifactID) }) else {
+            return ["content": [["type": "text", "text": "artifact not found in case (or blocked by privacy gate)"]]]
+        }
+        return ["content": [["type": "text", "text": jsonStringify(encodeArtifact(found))]]]
+    } catch {
+        return ["content": [["type": "text", "text": "get_artifact failed: \(error)"]]]
+    }
+}
+
+func handleForensicsTimeline(_ args: [String: Any]) async -> Any {
+    guard let caseID = args["case_id"] as? String else {
+        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+    }
+    let limit = (args["limit"] as? Int) ?? 200
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        guard let row = try await handle.store.fetchCase(id: caseID) else {
+            return ["content": [["type": "text", "text": "case not found"]]]
+        }
+        let ceiling: PrivacyClass = row.aiContentAllowed ? .secret : .metadata
+        let q = ArtifactQuery(
+            caseID: caseID,
+            privacyClassAtMost: ceiling,
+            limit: limit
+        )
+        let rows = try await handle.store.query(q)
+        let payload = rows.map(encodeArtifact)
+        return ["content": [["type": "text", "text": jsonStringify(["timeline": payload])]]]
+    } catch {
+        return ["content": [["type": "text", "text": "timeline failed: \(error)"]]]
+    }
+}
+
+func handleForensicsExplainCase(_ args: [String: Any]) async -> Any {
+    guard let caseID = args["case_id"] as? String else {
+        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+    }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        guard let row = try await handle.store.fetchCase(id: caseID) else {
+            return ["content": [["type": "text", "text": "case not found"]]]
+        }
+        // Aggregate artifact counts by content type.
+        // Cheap: pull everything and bucket. Future iteration can
+        // do this server-side with COUNT GROUP BY.
+        let rows = try await handle.store.query(ArtifactQuery(caseID: caseID, limit: 100_000))
+        var byContentType: [String: Int] = [:]
+        for r in rows {
+            byContentType[r.record.contentType, default: 0] += 1
+        }
+        let summary: [String: Any] = [
+            "case_id": row.id,
+            "case_name": row.name,
+            "created_at": ISO8601DateFormatter().string(from: row.createdAt),
+            "encryption_state": row.encryptionState.rawValue,
+            "ai_content_allowed": row.aiContentAllowed,
+            "scheduled_trusted": row.scheduledTrusted,
+            "artifact_total": rows.count,
+            "artifacts_by_content_type": byContentType,
+        ]
+        return ["content": [["type": "text", "text": jsonStringify(summary)]]]
+    } catch {
+        return ["content": [["type": "text", "text": "explain_case failed: \(error)"]]]
+    }
+}
+
+func handleForensicsPostureFindings(_ args: [String: Any]) async -> Any {
+    guard let caseID = args["case_id"] as? String else {
+        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+    }
+    // v1.13b: stub. The v1.15 posture Analyzer emits posture.*
+    // findings; until that lands, the tool returns an empty array
+    // with a note. Tool surface is reserved so consumers can wire
+    // against it now.
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        // Query any committed `posture.*` artifacts — the v1.15
+        // Analyzer commits findings as artifacts with content_type
+        // posture.<finding_type>. v1.13b finds none; the response
+        // shape is forward-compatible.
+        let rows = try await handle.store.query(ArtifactQuery(
+            caseID: caseID,
+            limit: 10_000
+        ))
+        let findings = rows.filter { $0.record.contentType.hasPrefix("posture.") }.map(encodeArtifact)
+        return ["content": [["type": "text", "text": jsonStringify([
+            "findings": findings,
+            "note": findings.isEmpty
+                ? "No findings yet. The v1.15 posture Analyzer emits posture.* artifacts; until v1.15 ships, this returns an empty array."
+                : "Findings emitted by the v1.15 posture Analyzer.",
+        ] as [String: Any])]]]
+    } catch {
+        return ["content": [["type": "text", "text": "posture_findings failed: \(error)"]]]
+    }
+}
+
+/// Tiny JSON stringifier. Matches the existing handlers' habit of
+/// returning a JSON-encoded string as the tool result's text body.
+private func jsonStringify(_ obj: Any) -> String {
+    guard let data = try? JSONSerialization.data(
+        withJSONObject: obj,
+        options: [.prettyPrinted, .sortedKeys]
+    ) else {
+        return "{}"
+    }
+    return String(data: data, encoding: .utf8) ?? "{}"
 }
 
 // MARK: - Main Loop (stdio JSON-RPC)

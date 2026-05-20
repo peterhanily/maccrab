@@ -25,10 +25,29 @@ public actor KeychainDEKVault: DEKVault {
     /// namespace MacCrab's per-case DEKs live in.
     public static let defaultService = "com.maccrab.forensics.dek"
 
-    private let service: String
+    /// Authentication policy bound to each stored DEK item.
+    public enum AuthenticationPolicy: Sendable {
+        /// Device-passcode only. The unlock prompt asks for the
+        /// login password. v1.13a-1 baseline.
+        case devicePasscode
 
-    public init(service: String = KeychainDEKVault.defaultService) {
+        /// Touch ID OR device-passcode (`.userPresence` per
+        /// SecAccessControlCreateFlags). Touch ID is preferred on
+        /// supported hardware; passcode is the fallback. v1.13b
+        /// upgrade — the convenience layer for cases the operator
+        /// expects to open repeatedly.
+        case biometryOrPasscode
+    }
+
+    private let service: String
+    private let authPolicy: AuthenticationPolicy
+
+    public init(
+        service: String = KeychainDEKVault.defaultService,
+        authPolicy: AuthenticationPolicy = .biometryOrPasscode
+    ) {
         self.service = service
+        self.authPolicy = authPolicy
     }
 
     public func store(dek: Data, for caseID: String) async throws {
@@ -36,14 +55,18 @@ public actor KeychainDEKVault: DEKVault {
             throw DEKVaultError.malformedDEK(actualBytes: dek.count)
         }
 
-        // Build the access control. v1.13a-1 uses device-passcode
-        // only. v1.13b will add .biometryAny via a second
-        // SecAccessControlCreateWithFlags call.
+        // Build the access control. The policy decides whether Touch
+        // ID participates (biometryOrPasscode) or only the device
+        // passcode is honored (devicePasscode — for cases the
+        // operator created with --no-biometric).
         var acError: Unmanaged<CFError>?
+        let flags: SecAccessControlCreateFlags = (authPolicy == .biometryOrPasscode)
+            ? .userPresence                // Touch ID OR passcode
+            : .devicePasscode              // passcode only
         guard let access = SecAccessControlCreateWithFlags(
             kCFAllocatorDefault,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.devicePasscode],
+            flags,
             &acError
         ) else {
             let msg = acError.map { String(describing: $0.takeRetainedValue()) } ?? "access control creation failed"

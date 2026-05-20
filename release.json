@@ -1,12 +1,12 @@
 {
-  "version": "1.13.0-rc.5",
+  "version": "1.13.0-rc.6",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1746,
   "test_suites": 323,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.13.0-rc.5",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.13.0-rc.6",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.13a substrate feature-complete (sub-slices 1-5). RC tags during the v1.13a -> v1.15 arc are not advertised via appcast.xml or Casks/maccrab.rb. The public Sparkle + Homebrew channels stay on the previous GA (1.12.9) until v1.13.0 ships non-RC. v1.13b operator surface begins next."
+  "comment": "v1.13b operator-MCP surface: Touch ID DEKVault + 7 forensics.* MCP meta-tools. Dashboard Forensics tab + scheduled-run consent UX deferred to Preview-only follow-up per plan §7 v1.13b kill criterion. RCs not advertised via appcast.xml or Casks/maccrab.rb."
 }
