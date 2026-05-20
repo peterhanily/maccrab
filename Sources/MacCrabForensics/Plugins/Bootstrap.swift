@@ -107,5 +107,17 @@ public enum MacCrabForensicsBootstrap {
             manifest: DocumentAnalyzerPlugin.manifest,
             factory: { try await DocumentAnalyzerPlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: DNSPassiveReputationEnricher.manifest,
+            factory: { try await DNSPassiveReputationEnricher() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: StylometricSupplyChainEnricher.manifest,
+            factory: { try await StylometricSupplyChainEnricher() }
+        ))
+        try await registry.register(PluginRegistration(
+            manifest: ThreatIntelIPEnricher.manifest,
+            factory: { try await ThreatIntelIPEnricher() }
+        ))
     }
 }
