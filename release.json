@@ -1,12 +1,12 @@
 {
-  "version": "1.13.0-rc.4",
+  "version": "1.13.0-rc.5",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
-  "tests": 1745,
+  "tests": 1746,
   "test_suites": 323,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.13.0-rc.4",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.13.0-rc.5",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "RC tags during the v1.13a -> v1.15 Mac Context Plugin Platform arc are not advertised via appcast.xml or Casks/maccrab.rb. The public Sparkle + Homebrew channels stay on the previous GA (1.12.9) until v1.13.0 ships non-RC. See GOAL.md sections 6 and 8."
+  "comment": "v1.13a substrate feature-complete (sub-slices 1-5). RC tags during the v1.13a -> v1.15 arc are not advertised via appcast.xml or Casks/maccrab.rb. The public Sparkle + Homebrew channels stay on the previous GA (1.12.9) until v1.13.0 ships non-RC. v1.13b operator surface begins next."
 }

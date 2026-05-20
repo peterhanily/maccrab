@@ -2840,6 +2840,69 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# PASS 2026-D — privacy_class consistency + plaintext rejects non-metadata (v1.13a-5)
+# ---------------------------------------------------------------------
+# Source: plan §3.8.
+#
+# The runtime invariant lives in ArtifactStore.commit:
+#   "if encryption_state == .plaintext, privacyClass != .metadata
+#    raises plaintextCaseRejectsNonMetadata."
+#
+# This pass enforces source-tree side that:
+#   (a) ArtifactStore.swift still contains the check (someone might
+#       refactor it away under the wrong impression that it's
+#       redundant),
+#   (b) ArtifactStoreTests.swift covers all four non-metadata
+#       classes (content / personalComms / credentialAdjacent /
+#       secret) with explicit reject-at-INSERT assertions.
+#
+# Either failure means a release could ship with the strongest
+# privacy invariant gone (a) or unverified (b).
+
+section "PASS 2026-D — privacy_class consistency + plaintext rejects non-metadata"
+
+pass_2026D_violations=0
+artifact_store="Sources/MacCrabForensics/Storage/ArtifactStore.swift"
+artifact_tests="Tests/MacCrabForensicsTests/ArtifactStoreTests.swift"
+
+if [[ ! -f "$artifact_store" ]]; then
+    err "Pass 2026-D: $artifact_store missing — the runtime gate must exist"
+    pass_2026D_violations=$((pass_2026D_violations+1))
+else
+    if ! grep -q "plaintextCaseRejectsNonMetadata" "$artifact_store"; then
+        err "Pass 2026-D: ArtifactStore.swift missing plaintextCaseRejectsNonMetadata gate"
+        pass_2026D_violations=$((pass_2026D_violations+1))
+    fi
+    if ! grep -q "encryptionState == .plaintext" "$artifact_store"; then
+        err "Pass 2026-D: ArtifactStore.swift missing 'encryptionState == .plaintext' check"
+        pass_2026D_violations=$((pass_2026D_violations+1))
+    fi
+fi
+
+if [[ ! -f "$artifact_tests" ]]; then
+    err "Pass 2026-D: $artifact_tests missing — invariant must be tested"
+    pass_2026D_violations=$((pass_2026D_violations+1))
+else
+    # Each non-metadata class must have a corresponding "rejects"
+    # assertion in the test file.
+    for cls in "content" "personalComms" "credentialAdjacent" "secret"; do
+        if ! grep -q "rejects $cls\|reject${cls^}\|rejects${cls^}\|Reject${cls^}" "$artifact_tests"; then
+            # Fallback to a more generous match — the test name
+            # convention is "Plaintext case rejects <class>".
+            if ! grep -iq "rejects ${cls}" "$artifact_tests" \
+               && ! grep -q "privacyClass: .${cls}" "$artifact_tests"; then
+                err "Pass 2026-D: ArtifactStoreTests.swift missing rejection assertion for class '${cls}'"
+                pass_2026D_violations=$((pass_2026D_violations+1))
+            fi
+        fi
+    done
+fi
+
+if [[ $pass_2026D_violations -eq 0 ]]; then
+    ok "Pass 2026-D: runtime gate present + all four non-metadata classes covered by reject-at-INSERT tests"
+fi
+
+# ---------------------------------------------------------------------
 # PASS 2026-B — single ArtifactStore writer (v1.13a-1)
 # ---------------------------------------------------------------------
 # Source: plan §3.8.

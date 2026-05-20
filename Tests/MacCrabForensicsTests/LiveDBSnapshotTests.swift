@@ -105,4 +105,66 @@ struct LiveDBSnapshotTests {
             )
         }
     }
+
+    /// Pass 2026-D-adjacent invariant: snapshot-before-parse must
+    /// produce a consistent view even when the source is being
+    /// written concurrently. This test takes a snapshot, writes a
+    /// new row into the source DB after the snapshot, and verifies
+    /// the snapshot still reflects only the pre-write state.
+    ///
+    /// Documents the contract by demonstration — TCC-lite and the
+    /// future BAM collector both rely on this property.
+    @Test("Snapshot reflects pre-write state when source is modified after snapshot")
+    func snapshotIsolationDuringWrite() throws {
+        let layout = makeLayout()
+        defer { try? FileManager.default.removeItem(at: layout.caseDirectory) }
+        let sourcePath = NSTemporaryDirectory() + "test-isolation-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: sourcePath) }
+
+        try makeSourceDB(at: sourcePath)
+
+        // Capture the pre-write row count.
+        var srcDB: OpaquePointer?
+        _ = sqlite3_open_v2(sourcePath, &srcDB, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
+        var stmt: OpaquePointer?
+        _ = sqlite3_prepare_v2(srcDB, "SELECT COUNT(*) FROM access", -1, &stmt, nil)
+        sqlite3_step(stmt)
+        let preWriteCount = sqlite3_column_int(stmt, 0)
+        sqlite3_finalize(stmt)
+        #expect(preWriteCount == 2)
+
+        // Snapshot now.
+        let snap = try LiveDBSnapshot.snapshot(sourcePath: sourcePath, layout: layout)
+
+        // Write a new row into the source AFTER snapshot.
+        _ = sqlite3_exec(srcDB,
+            "INSERT INTO access VALUES ('kTCCServiceCamera', 'com.late.app', 2, 800000000)",
+            nil, nil, nil
+        )
+        sqlite3_close(srcDB)
+
+        // Verify the source now has 3 rows.
+        var srcDB2: OpaquePointer?
+        _ = sqlite3_open_v2(sourcePath, &srcDB2, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        var stmt2: OpaquePointer?
+        _ = sqlite3_prepare_v2(srcDB2, "SELECT COUNT(*) FROM access", -1, &stmt2, nil)
+        sqlite3_step(stmt2)
+        let postWriteCount = sqlite3_column_int(stmt2, 0)
+        sqlite3_finalize(stmt2)
+        sqlite3_close(srcDB2)
+        #expect(postWriteCount == 3)
+
+        // Verify the snapshot STILL reflects only the pre-write
+        // state (2 rows).
+        var snapDB: OpaquePointer?
+        _ = sqlite3_open_v2(snap.path.path, &snapDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        var snapStmt: OpaquePointer?
+        _ = sqlite3_prepare_v2(snapDB, "SELECT COUNT(*) FROM access", -1, &snapStmt, nil)
+        sqlite3_step(snapStmt)
+        let snapshotCount = sqlite3_column_int(snapStmt, 0)
+        sqlite3_finalize(snapStmt)
+        sqlite3_close(snapDB)
+        #expect(snapshotCount == 2)
+        #expect(snapshotCount == preWriteCount)
+    }
 }
