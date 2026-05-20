@@ -23,5 +23,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: CodesignResolveEnricher.manifest,
             factory: { try await CodesignResolveEnricher() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: TCCLitePlugin.manifest,
+            factory: { try await TCCLitePlugin() }
+        ))
     }
 }
