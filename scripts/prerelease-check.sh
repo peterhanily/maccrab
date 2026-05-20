@@ -27,7 +27,26 @@ VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
     echo "Usage: $0 <version>" >&2
     echo "Example: $0 1.3.12" >&2
+    echo "         $0 1.13.0-rc.1   # release-candidate; source files still carry 1.13.0" >&2
     exit 2
+fi
+
+# Mac Context Plugin Platform RC handling (v1.13a+):
+#
+# Release-candidate versions look like "1.13.0-rc.1". Source files
+# carrying SemVer-only fields (Info.plists, project.yml, MacCrabVersion
+# fallback, cask versions) can't hold the -rc suffix — Apple
+# constrains CFBundleShortVersionString to MAJOR.MINOR.PATCH; the cask
+# would publish ahead of the GA build. Only release.json + the git
+# tag carry the full RC string.
+#
+# VERSION_SEMVER strips the -rc suffix for the source-tree parity
+# checks; VERSION carries the full string for release.json / DMG
+# filename / tag checks. The two diverge only when shipping an RC.
+VERSION_SEMVER="${VERSION%%-rc.*}"
+VERSION_IS_RC=0
+if [[ "$VERSION_SEMVER" != "$VERSION" ]]; then
+    VERSION_IS_RC=1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -71,37 +90,37 @@ section "Version sync"
 # the syntax error caused `[[` to exit non-zero, the `else` branch
 # ran, and a stale project.yml shipped green. Capture grep's stdout
 # alone and reset to 0 only if grep itself failed.
-PROJECT_YML_COUNT=$(grep -c "CFBundleVersion: \"$VERSION\"" Xcode/project.yml 2>/dev/null) || PROJECT_YML_COUNT=0
+PROJECT_YML_COUNT=$(grep -c "CFBundleVersion: \"$VERSION_SEMVER\"" Xcode/project.yml 2>/dev/null) || PROJECT_YML_COUNT=0
 if [[ "$PROJECT_YML_COUNT" -lt 2 ]]; then
-    err "Xcode/project.yml: CFBundleVersion not set to $VERSION in both targets (found $PROJECT_YML_COUNT)"
+    err "Xcode/project.yml: CFBundleVersion not set to $VERSION_SEMVER in both targets (found $PROJECT_YML_COUNT)"
 else
-    ok "Xcode/project.yml → $VERSION (app + sysext)"
+    ok "Xcode/project.yml → $VERSION_SEMVER (app + sysext)"
 fi
 
 # v1.6.18: also validate CFBundleShortVersionString. The pre-v1.6.18
 # check covered CFBundleVersion only, so the short version drifted to
 # 1.6.4 across 13 releases until a manual audit caught it.
-PROJECT_YML_SHORT_COUNT=$(grep -c "CFBundleShortVersionString: \"$VERSION\"" Xcode/project.yml 2>/dev/null) || PROJECT_YML_SHORT_COUNT=0
+PROJECT_YML_SHORT_COUNT=$(grep -c "CFBundleShortVersionString: \"$VERSION_SEMVER\"" Xcode/project.yml 2>/dev/null) || PROJECT_YML_SHORT_COUNT=0
 if [[ "$PROJECT_YML_SHORT_COUNT" -lt 2 ]]; then
-    err "Xcode/project.yml: CFBundleShortVersionString not set to $VERSION in both targets (found $PROJECT_YML_SHORT_COUNT)"
+    err "Xcode/project.yml: CFBundleShortVersionString not set to $VERSION_SEMVER in both targets (found $PROJECT_YML_SHORT_COUNT)"
 else
-    ok "Xcode/project.yml → CFBundleShortVersionString $VERSION (app + sysext)"
+    ok "Xcode/project.yml → CFBundleShortVersionString $VERSION_SEMVER (app + sysext)"
 fi
 
 # Info.plist — must contain the version string somewhere
 for plist in Xcode/Resources/MacCrabApp-Info.plist Xcode/Resources/MacCrabAgent-Info.plist; do
-    if grep -q "<string>$VERSION</string>" "$plist" 2>/dev/null; then
-        ok "$plist → $VERSION"
+    if grep -q "<string>$VERSION_SEMVER</string>" "$plist" 2>/dev/null; then
+        ok "$plist → $VERSION_SEMVER"
     else
-        err "$plist does not contain <string>$VERSION</string>"
+        err "$plist does not contain <string>$VERSION_SEMVER</string>"
     fi
 done
 
 # README.md badge
-if grep -q "version-${VERSION//./\\.}-" README.md 2>/dev/null; then
-    ok "README.md version badge → $VERSION"
+if grep -q "version-${VERSION_SEMVER//./\\.}-" README.md 2>/dev/null; then
+    ok "README.md version badge → $VERSION_SEMVER"
 else
-    err "README.md version badge doesn't reference $VERSION"
+    err "README.md version badge doesn't reference $VERSION_SEMVER"
 fi
 
 # MacCrabVersion.fallback parity. Bundle-less binaries (maccrabctl
@@ -115,10 +134,10 @@ FALLBACK_VER=$(grep -E '^[[:space:]]*public static let fallback:' \
     | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$FALLBACK_VER" ]; then
     err "MacCrabVersion.fallback: couldn't parse the constant"
-elif [ "$FALLBACK_VER" != "$VERSION" ]; then
-    err "MacCrabVersion.fallback=\"$FALLBACK_VER\" but expected \"$VERSION\""
+elif [ "$FALLBACK_VER" != "$VERSION_SEMVER" ]; then
+    err "MacCrabVersion.fallback=\"$FALLBACK_VER\" but expected \"$VERSION_SEMVER\""
 else
-    ok "Sources/MacCrabCore/MacCrabVersion.swift → fallback $VERSION"
+    ok "Sources/MacCrabCore/MacCrabVersion.swift → fallback $VERSION_SEMVER"
 fi
 
 # ---------------------------------------------------------------------
@@ -129,18 +148,31 @@ section "Release notes"
 
 if grep -q "^## \[$VERSION\] — " CHANGELOG.md 2>/dev/null; then
     ok "CHANGELOG.md → has [$VERSION] section"
+elif [[ "$VERSION_IS_RC" == "1" ]]; then
+    # RCs don't require a CHANGELOG entry. The GA release that
+    # follows the RC arc will carry the cumulative entry. Warn so
+    # the omission is visible but not blocking.
+    warn "CHANGELOG.md has no [$VERSION] section — acceptable for RCs; the GA release will carry the entry"
 else
     err "CHANGELOG.md is missing a ## [$VERSION] — YYYY-MM-DD header"
 fi
 
 NOTES_FILE="RELEASE_NOTES/v${VERSION}.md"
 if [[ ! -f "$NOTES_FILE" ]]; then
-    err "$NOTES_FILE does not exist (user-facing release notes are required)"
+    if [[ "$VERSION_IS_RC" == "1" ]]; then
+        warn "$NOTES_FILE does not exist — acceptable for RCs; full release notes ship with the GA"
+    else
+        err "$NOTES_FILE does not exist (user-facing release notes are required)"
+    fi
 else
     # Rough stub detector: fewer than 10 non-blank lines is a stub.
     CONTENT_LINES=$(grep -cE '\S' "$NOTES_FILE")
     if [[ "$CONTENT_LINES" -lt 10 ]]; then
-        err "$NOTES_FILE exists but has only $CONTENT_LINES lines of content (looks like a stub)"
+        if [[ "$VERSION_IS_RC" == "1" ]]; then
+            warn "$NOTES_FILE has only $CONTENT_LINES lines — acceptable for RCs"
+        else
+            err "$NOTES_FILE exists but has only $CONTENT_LINES lines of content (looks like a stub)"
+        fi
     else
         ok "$NOTES_FILE → $CONTENT_LINES lines"
     fi
@@ -312,15 +344,25 @@ BREW_VER=$(grep -E '^[[:space:]]*version[[:space:]]+"' homebrew/maccrab.rb 2>/de
     | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 if [[ -z "$CASKS_VER" ]]; then
     err "Casks/maccrab.rb: couldn't parse version field"
-elif [[ "$CASKS_VER" != "$VERSION" ]]; then
-    err "Casks/maccrab.rb version=\"$CASKS_VER\" but expected \"$VERSION\""
+elif [[ "$VERSION_IS_RC" == "1" ]]; then
+    # Casks stay on the previous GA during RC arcs — Sparkle and
+    # Homebrew don't ship RCs to the public channel. The cask
+    # version must NOT match VERSION_SEMVER (which would imply the
+    # cask is the same as the in-progress source) — that's a sign
+    # someone bumped the cask prematurely. Just report what's on
+    # the cask; don't fail.
+    info "Casks/maccrab.rb → $CASKS_VER (held; bumped at GA, not on RCs)"
+elif [[ "$CASKS_VER" != "$VERSION_SEMVER" ]]; then
+    err "Casks/maccrab.rb version=\"$CASKS_VER\" but expected \"$VERSION_SEMVER\""
 else
     ok "Casks/maccrab.rb → $CASKS_VER"
 fi
 if [[ -z "$BREW_VER" ]]; then
     err "homebrew/maccrab.rb: couldn't parse version field"
-elif [[ "$BREW_VER" != "$VERSION" ]]; then
-    err "homebrew/maccrab.rb version=\"$BREW_VER\" but expected \"$VERSION\" (Casks/ and homebrew/ drift caused 9 stale releases pre-v1.6.13)"
+elif [[ "$VERSION_IS_RC" == "1" ]]; then
+    info "homebrew/maccrab.rb → $BREW_VER (held; bumped at GA, not on RCs)"
+elif [[ "$BREW_VER" != "$VERSION_SEMVER" ]]; then
+    err "homebrew/maccrab.rb version=\"$BREW_VER\" but expected \"$VERSION_SEMVER\" (Casks/ and homebrew/ drift caused 9 stale releases pre-v1.6.13)"
 else
     ok "homebrew/maccrab.rb → $BREW_VER"
 fi

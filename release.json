@@ -1,16 +1,12 @@
 {
-  "version": "1.12.9",
-  "release_date": "2026-05-19T14:20:52Z",
+  "version": "1.13.0-rc.1",
+  "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
-  "tests": 1637,
-  "test_suites": 303,
-  "dmg": {
-    "filename": "MacCrab-v1.12.9.dmg",
-    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.12.9/MacCrab-v1.12.9.dmg",
-    "sha256": "9b2e314b5387f1932ec3676655f7df892450ab29bf22acce1c925bdb2849b566",
-    "size_bytes": 71041440
-  },
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.12.9",
+  "tests": 1698,
+  "test_suites": 315,
+  "release_channel": "rc",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.13.0-rc.1",
   "appcast_url": "https://maccrab.com/appcast.xml",
-  "min_macos": "13.0"
+  "min_macos": "13.0",
+  "comment": "RC tags during the v1.13a -> v1.15 Mac Context Plugin Platform arc are not advertised via appcast.xml or Casks/maccrab.rb. The public Sparkle + Homebrew channels stay on the previous GA (1.12.9) until v1.13.0 ships non-RC. See GOAL.md sections 6 and 8."
 }
