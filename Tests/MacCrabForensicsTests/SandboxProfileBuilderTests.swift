@@ -10,20 +10,31 @@ import Testing
 @Suite("SandboxProfileBuilder")
 struct SandboxProfileBuilderTests {
 
-    @Test("Default-deny profile produces (deny default) directive")
-    func defaultDeny() {
+    @Test("Strict profile emits (allow default) + targeted denies")
+    func strictProfile() {
+        // SBPL is last-match-wins and a pure (deny default) at
+        // the top blocks execvp before the profile takes effect.
+        // The builder uses (allow default) as a baseline + emits
+        // targeted denies for sensitive paths (login keychain,
+        // /etc, /var/db). Manifest-declared allows come last so
+        // they override the denies on overlap.
         let spec = SandboxProfileSpec(allowAllByDefault: false)
         let out = SandboxProfileBuilder.compile(spec)
-        #expect(out.contains("(deny default)"))
-        #expect(!out.contains("(allow default)"))
+        #expect(out.contains("(allow default)"))
+        #expect(out.contains("/Library/Keychains"))
+        #expect(out.contains("/private/etc"))
+        #expect(out.contains("(deny network*)"))
     }
 
-    @Test("Default-allow profile produces (allow default) directive")
-    func defaultAllow() {
+    @Test("Permissive profile emits only (allow default)")
+    func permissiveProfile() {
         let spec = SandboxProfileSpec(allowAllByDefault: true)
         let out = SandboxProfileBuilder.compile(spec)
         #expect(out.contains("(allow default)"))
-        #expect(!out.contains("(deny default)"))
+        // Permissive profile must NOT contain the targeted-deny
+        // sensitive-area block — those are strict-only.
+        #expect(!out.contains("(deny file-read*"))
+        #expect(!out.contains("(deny network*)"))
     }
 
     @Test("File-read subpath compiles to file-read* allow")
@@ -33,14 +44,16 @@ struct SandboxProfileBuilderTests {
         #expect(out.contains("(allow file-read* (subpath \"/tmp/maccrab-test\"))"))
     }
 
-    @Test("Process-exec allow + process-fork enables when set")
+    @Test("Process-exec allowlist compiles when set")
     func processExecCompiles() {
         let spec = SandboxProfileSpec(
             processExecPaths: ["/usr/bin/codesign", "/usr/bin/otool"],
             allowProcessFork: true
         )
         let out = SandboxProfileBuilder.compile(spec)
-        #expect(out.contains("(allow process-fork)"))
+        // process-fork is permitted by (allow default); the
+        // manifest-declared process-exec allowlist appears
+        // explicitly.
         #expect(out.contains("(allow process-exec (literal \"/usr/bin/codesign\"))"))
         #expect(out.contains("(allow process-exec (literal \"/usr/bin/otool\"))"))
     }
@@ -72,6 +85,8 @@ struct SandboxProfileBuilderTests {
         let out = SandboxProfileBuilder.compile(spec)
         #expect(out.hasPrefix("(version 1)"))
         #expect(out.contains("Library/Safari"))
-        #expect(out.contains("(deny default)"))
+        // Strict profile baseline.
+        #expect(out.contains("(allow default)"))
+        #expect(out.contains("(deny file-read*"))
     }
 }

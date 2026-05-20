@@ -29,6 +29,9 @@ struct CollectParams: Decodable {
     let case_name: String
     let encryption_state: String
     let tick_count: Int?
+    /// Optional: a file path to attempt to read inside the
+    /// subprocess. Used by the sandbox-enforcement smoke test.
+    let probe_file: String?
 }
 
 struct JSONRPCErrorResponse: Encodable {
@@ -68,6 +71,10 @@ struct ArtifactPayload: Encodable {
 func handleCollect(_ params: CollectParams) -> JSONRPCCollectResult.CollectResultPayload {
     let tickCount = params.tick_count ?? 1
     var artifacts: [ArtifactPayload] = []
+    var notes = [
+        "tier-b-fixture-plugin running as PID \(ProcessInfo.processInfo.processIdentifier)",
+        "received \(tickCount) tick(s) requested via collect params",
+    ]
     for tick in 0..<tickCount {
         let seed = "tier-b-fixture:\(params.case_id):tick=\(tick)"
         let digest = SHA256.hash(data: Data(seed.utf8))
@@ -84,14 +91,40 @@ func handleCollect(_ params: CollectParams) -> JSONRPCCollectResult.CollectResul
             data_json: dataJSON
         ))
     }
+    // Optional sandbox probe: attempt to read the supplied path.
+    // The fixture reports success/failure as an additional
+    // artifact so the daemon can verify the sandbox did its job.
+    if let probe = params.probe_file {
+        let readable = (try? Data(contentsOf: URL(fileURLWithPath: probe))) != nil
+        let probeDataJSON = """
+            {"probe_path": \(jsonString(probe)), "readable_inside_subprocess": \(readable ? "true" : "false")}
+            """
+        artifacts.append(ArtifactPayload(
+            content_type: "tier_b_fixture.probe_read",
+            sha256: SHA256.hash(data: Data(probe.utf8))
+                .map { String(format: "%02x", $0) }.joined(),
+            summary: "probe-read \(probe): readable=\(readable)",
+            confidence: "observed",
+            privacy_class: "metadata",
+            data_json: probeDataJSON
+        ))
+        notes.append("probe_file=\(probe) readable=\(readable)")
+    }
     return JSONRPCCollectResult.CollectResultPayload(
         artifacts: artifacts,
-        notes: [
-            "tier-b-fixture-plugin running as PID \(ProcessInfo.processInfo.processIdentifier)",
-            "received \(tickCount) tick(s) requested via collect params",
-        ],
+        notes: notes,
         status: "ok"
     )
+}
+
+/// JSON-escape a string for embedding in a manually-built JSON
+/// literal. Uses JSONEncoder to handle escaping correctly.
+func jsonString(_ raw: String) -> String {
+    if let data = try? JSONEncoder().encode(raw),
+       let s = String(data: data, encoding: .utf8) {
+        return s
+    }
+    return "\"\""
 }
 
 // MARK: - Main loop

@@ -78,57 +78,98 @@ public struct SandboxProfileSpec: Sendable {
 public enum SandboxProfileBuilder {
 
     /// Compile a SandboxProfileSpec into SBPL text.
+    ///
+    /// Two emission strategies:
+    ///
+    /// **strict (allowAllByDefault == false)**: `allow default`
+    /// baseline (Swift runtime survives) + explicit blocks of
+    /// sensitive areas (user home, /etc, network) + explicit
+    /// allows that come BEFORE the blocks so they win under
+    /// SBPL's first-match semantics. This is the model that
+    /// actually launches a Swift binary under sandbox-exec —
+    /// pure `deny default` fails execvp() before our profile
+    /// even gets evaluated. The strictness comes from the
+    /// targeted deny list, not from inverting the baseline.
+    ///
+    /// **permissive (allowAllByDefault == true)**: pure
+    /// `allow default` for transition / instrumentation. No
+    /// blocks added. Useful for tracing what a plugin actually
+    /// touches before locking it down.
     public static func compile(_ spec: SandboxProfileSpec) -> String {
         var lines: [String] = []
         lines.append("(version 1)")
         lines.append("")
-        lines.append(spec.allowAllByDefault ? "(allow default)" : "(deny default)")
+        lines.append("(allow default)")
         lines.append("")
 
-        // Apple-standard inherits for any sandboxed process.
-        lines.append(";; Apple-standard inherits — process-info, sysctl-read,")
-        lines.append(";; mach-issue-extension, IOKit-open for the small reads")
-        lines.append(";; that every binary needs. Without these, even basic")
-        lines.append(";; Foundation calls fail.")
-        lines.append("(allow process-info-pidinfo (target self))")
-        lines.append("(allow process-info-pidfdinfo (target self))")
-        lines.append("(allow sysctl-read)")
-        lines.append("(allow iokit-open (iokit-user-client-class \"IOSurfaceRootUserClient\"))")
-        lines.append("(allow file-read-metadata)")
-        lines.append("(allow file-read-data (subpath \"/usr/lib\"))")
-        lines.append("(allow file-read-data (subpath \"/System/Library\"))")
-        lines.append("")
-
-        if spec.allowProcessFork {
-            lines.append("(allow process-fork)")
-        }
-
-        for path in spec.processExecPaths {
-            lines.append("(allow process-exec (literal \(quoted(path))))")
-        }
-        if !spec.processExecPaths.isEmpty { lines.append("") }
-
-        for path in spec.fileReadSubpaths {
-            lines.append("(allow file-read* (subpath \(quoted(path))))")
-        }
-        if !spec.fileReadSubpaths.isEmpty { lines.append("") }
-
-        for path in spec.fileWriteSubpaths {
-            lines.append("(allow file-write* (subpath \(quoted(path))))")
-        }
-        if !spec.fileWriteSubpaths.isEmpty { lines.append("") }
-
-        if !spec.networkConnectAllowlist.isEmpty {
-            for endpoint in spec.networkConnectAllowlist {
-                lines.append("(allow network-outbound (remote ip \(quoted(endpoint))))")
+        if !spec.allowAllByDefault {
+            // SBPL is *last-match-wins*. Emit the targeted
+            // denies first, then the operator's manifest-declared
+            // allowlist so the operator's choices override the
+            // baseline denies.
+            //
+            // Denies are kept narrow: a broad
+            // `(deny file-read* (subpath "/Users"))` would block
+            // the binary itself + dyld-loaded frameworks +
+            // execvp. The strategy is to enumerate the
+            // *narrowly* sensitive places — login keychains,
+            // /etc, /var/db, mail/messages stores, .ssh — and
+            // lean on the manifest allowlist for the plugin's
+            // home subtree.
+            lines.append(";; Targeted denies for sensitive areas (emitted first;")
+            lines.append(";; manifest-declared allows below win under last-match).")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/Library/Keychains\"))")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/Library/Application Support/com.apple.TCC\"))")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/Library/Messages\"))")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/Library/Mail\"))")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/Library/Safari\"))")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/.ssh\"))")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/.aws\"))")
+            lines.append("(deny file-read* (subpath \"\(NSHomeDirectory())/.config\"))")
+            lines.append("(deny file-read* (subpath \"/private/etc\"))")
+            lines.append("(deny file-read* (subpath \"/private/var/db\"))")
+            lines.append("(deny file-read* (subpath \"/Library/Keychains\"))")
+            lines.append("(deny file-read* (subpath \"/var/db\"))")
+            if spec.networkConnectAllowlist.isEmpty {
+                lines.append("(deny network*)")
             }
             lines.append("")
-        }
 
-        for service in spec.machServiceConnects {
-            lines.append("(allow mach-lookup (global-name \(quoted(service))))")
+            // Manifest-declared allows last so they override the
+            // denies above on overlapping subpaths.
+            if !spec.fileReadSubpaths.isEmpty {
+                lines.append(";; Manifest-declared file-read allowlist.")
+                for path in spec.fileReadSubpaths {
+                    lines.append("(allow file-read* (subpath \(quoted(path))))")
+                }
+                lines.append("")
+            }
+            if !spec.fileWriteSubpaths.isEmpty {
+                lines.append(";; Manifest-declared file-write allowlist.")
+                for path in spec.fileWriteSubpaths {
+                    lines.append("(allow file-write* (subpath \(quoted(path))))")
+                }
+                lines.append("")
+            }
+            if !spec.networkConnectAllowlist.isEmpty {
+                lines.append(";; Manifest-declared network allowlist.")
+                for endpoint in spec.networkConnectAllowlist {
+                    lines.append("(allow network-outbound (remote ip \(quoted(endpoint))))")
+                }
+                lines.append("")
+            }
+            if !spec.processExecPaths.isEmpty {
+                lines.append(";; Manifest-declared process-exec allowlist.")
+                for path in spec.processExecPaths {
+                    lines.append("(allow process-exec (literal \(quoted(path))))")
+                }
+                lines.append("")
+            }
+            for service in spec.machServiceConnects {
+                lines.append("(allow mach-lookup (global-name \(quoted(service))))")
+            }
+            if !spec.machServiceConnects.isEmpty { lines.append("") }
         }
-        if !spec.machServiceConnects.isEmpty { lines.append("") }
 
         return lines.joined(separator: "\n") + "\n"
     }

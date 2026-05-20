@@ -35,6 +35,10 @@ func dispatchPlugin(args: [String]) async {
             try await pluginRevoke(args: rest)
         case "trust-list":
             try await pluginTrustList()
+        case "verify-all":
+            try await pluginVerifyAll()
+        case "run-installed":
+            try await pluginRunInstalled(args: rest)
         case "help", "-h", "--help":
             printPluginUsage()
         default:
@@ -76,6 +80,12 @@ func printPluginUsage() {
       revoke <key-hex>                Revoke a publisher key (preempts trust
                                       list; refused at install + load).
       trust-list                      Show trusted + revoked publisher keys.
+      verify-all                      Verify every installed Tier B plugin
+                                      against the current trust/revocation lists.
+      run-installed <plugin-id>       Spawn an installed + verified Tier B
+        --case <id>                   plugin under its manifest's sandbox
+        [--ticks <N>]                 profile. Refuses to spawn on signature
+        [--probe-read <path>]         failure or revoked key.
     """)
 }
 
@@ -257,11 +267,14 @@ private func pluginRun(args: [String]) async throws {
 /// validating the IPC contract end-to-end.
 private func pluginRunTierB(args: [String]) async throws {
     guard let binaryPath = args.first else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin run-tierb <binary> --case <id> [--plugin-id <id>] [--ticks <N>]")
+        throw CaseCommandError.usage("Usage: maccrabctl plugin run-tierb <binary> --case <id> [--plugin-id <id>] [--ticks <N>] [--sandbox] [--allow-read <path>] [--probe-read <path>]")
     }
     var caseID: String? = nil
     var pluginID: String? = nil
     var ticks: Int = 1
+    var sandbox = false
+    var allowReads: [String] = []
+    var probeRead: String? = nil
     var i = 1
     while i < args.count {
         let arg = args[i]
@@ -272,6 +285,12 @@ private func pluginRunTierB(args: [String]) async throws {
             pluginID = args[i + 1]; i += 2
         case "--ticks" where i + 1 < args.count:
             ticks = Int(args[i + 1]) ?? 1; i += 2
+        case "--sandbox":
+            sandbox = true; i += 1
+        case "--allow-read" where i + 1 < args.count:
+            allowReads.append(args[i + 1]); i += 2
+        case "--probe-read" where i + 1 < args.count:
+            probeRead = args[i + 1]; i += 2
         default:
             i += 1
         }
@@ -284,6 +303,20 @@ private func pluginRunTierB(args: [String]) async throws {
     let mgr = makeCaseManager()
     let handle = try await mgr.openCase(id: resolvedCase)
     let loader = TierBSubprocessLoader()
+    // Build the sandbox profile (deny-default + supplied allow
+    // reads + binary dir auto-added by the loader).
+    let profile: SandboxProfileSpec? = sandbox
+        ? SandboxProfileSpec(
+            allowAllByDefault: false,
+            fileReadSubpaths: allowReads,
+            fileWriteSubpaths: [],
+            networkConnectAllowlist: [],
+            machServiceConnects: [],
+            processExecPaths: [],
+            allowProcessFork: true
+        )
+        : nil
+
     let (committed, rejected, result) = try await loader.runCollectAndCommit(
         binaryPath: binaryPath,
         pluginID: resolvedID,
@@ -293,10 +326,13 @@ private func pluginRunTierB(args: [String]) async throws {
         caseName: handle.caseID,
         encryptionState: handle.encryptionState,
         store: handle.store,
-        tickCount: ticks
+        tickCount: ticks,
+        probeRead: probeRead,
+        sandboxProfile: profile
     )
     print("Ran Tier B subprocess plugin \(resolvedID) on case \(resolvedCase)")
     print("  Binary:               \(binaryPath)")
+    print("  Sandbox enforced:     \(sandbox ? "yes" : "no")")
     print("  Subprocess exit:      \(result.subprocessExitCode)")
     print("  Status:               \(result.status)")
     print("  Artifacts received:   \(result.artifacts.count)")
@@ -403,6 +439,80 @@ private func pluginTrustList() async throws {
         for k in revoked.sorted() {
             print("  \(k)")
         }
+    }
+}
+
+// MARK: - verify-all + run-installed
+
+private func pluginVerifyAll() async throws {
+    let registry = TierBRegistry()
+    let report = await registry.verifyAll()
+    print("Tier B plugin verification (\(report.total) installed)")
+    print("======================================================")
+    if !report.verified.isEmpty {
+        print("Verified (\(report.verified.count)):")
+        for p in report.verified {
+            print("  \(p.pluginID)  v\(p.manifest.version)  key=\(p.publicKeyHex.prefix(16))…")
+        }
+    }
+    if !report.failed.isEmpty {
+        print("")
+        print("Failed (\(report.failed.count)):")
+        for f in report.failed {
+            print("  \(f.pluginID)")
+            print("    Reason: \(f.reason)")
+        }
+    }
+    if report.failed.isEmpty && report.verified.isEmpty {
+        print("(no plugins installed)")
+    }
+}
+
+private func pluginRunInstalled(args: [String]) async throws {
+    guard let pluginID = args.first else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin run-installed <plugin-id> --case <id> [--ticks <N>] [--probe-read <path>]")
+    }
+    var caseID: String? = nil
+    var ticks: Int = 1
+    var probeRead: String? = nil
+    var i = 1
+    while i < args.count {
+        let arg = args[i]
+        switch arg {
+        case "--case" where i + 1 < args.count:
+            caseID = args[i + 1]; i += 2
+        case "--ticks" where i + 1 < args.count:
+            ticks = Int(args[i + 1]) ?? 1; i += 2
+        case "--probe-read" where i + 1 < args.count:
+            probeRead = args[i + 1]; i += 2
+        default:
+            i += 1
+        }
+    }
+    guard let resolvedCase = caseID else {
+        throw CaseCommandError.usage("Missing --case <id>")
+    }
+
+    let mgr = makeCaseManager()
+    let handle = try await mgr.openCase(id: resolvedCase)
+    let registry = TierBRegistry()
+    let (committed, rejected, plugin) = try await registry.runCollectAndCommit(
+        pluginID: pluginID,
+        caseID: resolvedCase,
+        caseName: handle.caseID,
+        encryptionState: handle.encryptionState,
+        store: handle.store,
+        tickCount: ticks,
+        probeRead: probeRead
+    )
+    print("Ran installed Tier B plugin \(pluginID) on case \(resolvedCase)")
+    print("  Manifest version:     \(plugin.manifest.version)")
+    print("  Bundle root:          \(plugin.bundleRoot)")
+    print("  Publisher key:        \(plugin.publicKeyHex.prefix(16))…")
+    print("  Artifacts committed:  \(committed)")
+    print("  Artifacts rejected:   \(rejected)")
+    if let probe = probeRead {
+        print("  Probed path:          \(probe) (see artifacts for result)")
     }
 }
 

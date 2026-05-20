@@ -63,12 +63,19 @@ public actor TierBSubprocessLoader {
     /// Spawn the plugin, send a `collect` request, read the
     /// response, signal shutdown, wait for exit. Returns the
     /// parsed Tier B result for the daemon to commit.
+    ///
+    /// When `sandboxProfile` is non-nil, the binary is spawned
+    /// inside a /usr/bin/sandbox-exec wrapper with the compiled
+    /// profile applied. The profile is written to a temp file
+    /// that is deleted after the subprocess exits.
     public func runCollect(
         binaryPath: String,
         caseID: String,
         caseName: String,
         encryptionState: String,
-        tickCount: Int = 1
+        tickCount: Int = 1,
+        probeRead: String? = nil,
+        sandboxProfile: SandboxProfileSpec? = nil
     ) async throws -> TierBCollectResult {
 
         guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
@@ -76,7 +83,41 @@ public actor TierBSubprocessLoader {
         }
 
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binaryPath)
+        // Compile + materialize the sandbox profile if supplied.
+        var profileFileToDelete: String? = nil
+        if let spec = sandboxProfile {
+            // Always allow process-exec + file-read on the binary
+            // itself, plus its containing directory + .build/debug
+            // for Swift runtime / dyld cache discovery. Operators
+            // declare the rest in the manifest's SandboxProfileSpec.
+            let binaryDir = (binaryPath as NSString).deletingLastPathComponent
+            let augmented = SandboxProfileSpec(
+                allowAllByDefault: spec.allowAllByDefault,
+                fileReadSubpaths: spec.fileReadSubpaths + [binaryDir],
+                fileWriteSubpaths: spec.fileWriteSubpaths,
+                networkConnectAllowlist: spec.networkConnectAllowlist,
+                machServiceConnects: spec.machServiceConnects,
+                processExecPaths: spec.processExecPaths + [binaryPath],
+                allowProcessFork: true
+            )
+            let sbplText = SandboxProfileBuilder.compile(augmented)
+            let profilePath = NSTemporaryDirectory()
+                + "maccrab-tier-b-\(UUID().uuidString).sb"
+            do {
+                try sbplText.write(
+                    toFile: profilePath,
+                    atomically: true,
+                    encoding: .utf8
+                )
+            } catch {
+                throw LoaderError.spawnFailed(message: "could not write sandbox profile: \(error.localizedDescription)")
+            }
+            profileFileToDelete = profilePath
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+            proc.arguments = ["-f", profilePath, binaryPath]
+        } else {
+            proc.executableURL = URL(fileURLWithPath: binaryPath)
+        }
         let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
@@ -91,16 +132,20 @@ public actor TierBSubprocessLoader {
         }
 
         // Send collect request.
+        var params: [String: Any] = [
+            "case_id": caseID,
+            "case_name": caseName,
+            "encryption_state": encryptionState,
+            "tick_count": tickCount,
+        ]
+        if let probe = probeRead {
+            params["probe_file"] = probe
+        }
         let request: [String: Any] = [
             "jsonrpc": "2.0",
             "id": 1,
             "method": "collect",
-            "params": [
-                "case_id": caseID,
-                "case_name": caseName,
-                "encryption_state": encryptionState,
-                "tick_count": tickCount,
-            ],
+            "params": params,
         ]
         guard let reqData = try? JSONSerialization.data(withJSONObject: request) else {
             proc.terminate()
@@ -169,6 +214,11 @@ public actor TierBSubprocessLoader {
         proc.waitUntilExit()
         let exitCode = proc.terminationStatus
 
+        // Clean up the temp profile file after subprocess exits.
+        if let path = profileFileToDelete {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+
         return TierBCollectResult(
             artifacts: artifacts,
             notes: notes,
@@ -228,14 +278,18 @@ public extension TierBSubprocessLoader {
         caseName: String,
         encryptionState: CaseEncryptionState,
         store: ArtifactStore,
-        tickCount: Int = 1
+        tickCount: Int = 1,
+        probeRead: String? = nil,
+        sandboxProfile: SandboxProfileSpec? = nil
     ) async throws -> (committed: Int, rejected: Int, result: TierBCollectResult) {
         let result = try await runCollect(
             binaryPath: binaryPath,
             caseID: caseID,
             caseName: caseName,
             encryptionState: encryptionState.rawValue,
-            tickCount: tickCount
+            tickCount: tickCount,
+            probeRead: probeRead,
+            sandboxProfile: sandboxProfile
         )
         var committed = 0
         var rejected = 0

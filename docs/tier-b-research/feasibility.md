@@ -1,6 +1,75 @@
 # Tier B Feasibility
 
-**Status:** research, not committed. Plan §3.9 + §12.
+**Status:** research, mostly delivered as `research-post-v15-rc.3`. Plan §3.9 + §12.
+
+## What landed in rc.2 + rc.3
+
+This memo originally framed Tier B as "1-2 are research prototypes; 3-5 are out of scope." rc.2 + rc.3 closed substantially more of that scope while keeping the work on the research branch:
+
+| Pillar | Status as of rc.3 | Detail |
+|---|---|---|
+| 1. Sandbox profile generator (`SandboxProfileBuilder`) | **shipped + enforced** | Now compiles to SBPL with `(allow default)` baseline + targeted denies (Keychains, /etc, /var/db, Mail/Messages/Safari stores, .ssh/.aws/.config, network). Manifest allows emitted last so they override on overlap (SBPL last-match-wins). Used live by `TierBSubprocessLoader`. |
+| 2. Daemon-side loader (`XPCPluginLoader` stub) | **stub for XPC; real subprocess path in `TierBSubprocessLoader`** | The subprocess loader actually spawns plugins via `/usr/bin/sandbox-exec -f <profile.sb>` and proves end-to-end JSON-RPC IPC. NSXPCConnection still deferred (see "Gap" below). |
+| 3. Signing CA + revocation list | **shipped (research-grade)** | `PluginSignatureVerifier` (Ed25519 sign/verify), `PluginInstaller` (trusted-keys.json + revoked-keys.json), revocation pre-empts trust at both install + load. Live-verified end-to-end. |
+| 4. Operator trust model | **shipped via CLI** | `maccrabctl plugin {install, uninstall, installed-list, trust, revoke, trust-list, verify-all, run-installed}` exposes the trust model to operators. |
+| 5. Plan-level commitment | **still open** | Tier B remains a research chapter. No release chapter has been committed; the work above is the foundation that lets a release chapter focus narrowly on the gaps in §"Remaining gap" below. |
+
+## Remaining gap: NSXPCConnection
+
+`TierBSubprocessLoader` proves the IPC + commit + sandbox-enforcement contract using a `Process` + stdio pipes + `sandbox-exec`. This is **research-acceptable** but not production-acceptable for two reasons:
+
+1. **`sandbox-exec` is private.** Apple has marked the binary `__SANDBOX_INTERNAL` since macOS 10.14. It still works on 10.15 → 15.x (verified rc.3 on macOS 25.3), but Apple could remove it without warning. A production Tier B plugin store cannot depend on it.
+2. **`sandbox-exec` doesn't get the full hardening App Sandbox + XPC services receive.** TCC inheritance, mach service quotas, dyld closure caching — these need the launchd-spawned XPC service path.
+
+The production move is to bundle each Tier B plugin's binary as an XPC service inside a parent `.app` (or `.framework`) bundle, with:
+
+- `Info.plist` declaring `XPCService.ServiceType = Application` + Tier B-specific entitlements
+- `com.apple.security.app-sandbox = YES`
+- The sandbox profile applied via the service's Info.plist `com.apple.security.*` entitlement set + a paired `.sb` file referenced via `XPCService.RunLoopType` overrides
+
+The Swift wiring is straightforward (`NSXPCConnection(machServiceName:options:)` + `exportedInterface` + `remoteObjectInterface`). The non-code blockers are:
+
+- An Apple Developer-ID team certificate registered for XPC service signing
+- Notarization for distributed Tier B plugins
+- App-shape decision (do Tier B plugins live in `MacCrab.app/Contents/XPCServices/`, or in operator-installed external `.app` bundles?)
+
+These are the items a release chapter would have to absorb.
+
+## What "shipped end to end" looks like
+
+The full chain demonstrated live in rc.3:
+
+```bash
+# Build, sign, install (with trust-on-install).
+$ maccrabctl plugin install <bundle> --trust-on-install
+Installed Tier B plugin 'com.research.tier-b-fixture'
+  Publisher key:   8b202a1fba07b32a…
+  Trusted:         yes (added on install)
+
+# Verify every installed bundle against the current trust + revocation set.
+$ maccrabctl plugin verify-all
+Tier B plugin verification (1 installed)
+Verified (1):
+  com.research.tier-b-fixture  v0.1.0  key=8b202a1fba07b32a…
+
+# Run the verified plugin under its manifest-declared sandbox profile.
+# The plugin tries to read /private/etc/hosts; the sandbox blocks it.
+$ maccrabctl plugin run-installed com.research.tier-b-fixture \
+    --case <case-id> --probe-read /private/etc/hosts
+Artifacts committed:  2
+Probed path:          /private/etc/hosts (see artifacts for result)
+
+# The committed probe artifact reports readable=false — the sandbox is real.
+$ maccrabctl case artifacts <case-id> --limit 1
+  tier_b_fixture.probe_read — probe-read /private/etc/hosts: readable=false
+
+# Operator-driven revocation immediately invalidates the plugin.
+$ maccrabctl plugin revoke 8b202a1fba07b32a...
+$ maccrabctl plugin run-installed com.research.tier-b-fixture --case <id>
+Error: TierBRegistry: verification failed: publisher key ... is on the revocation list
+```
+
+Five unit tests in `TierBRegistryTests` assert each step machine-checkable.
 
 ## TL;DR
 
