@@ -43,5 +43,9 @@ public enum MacCrabForensicsBootstrap {
             manifest: SafariLitePlugin.manifest,
             factory: { try await SafariLitePlugin() }
         ))
+        try await registry.register(PluginRegistration(
+            manifest: MailLitePlugin.manifest,
+            factory: { try await MailLitePlugin() }
+        ))
     }
 }

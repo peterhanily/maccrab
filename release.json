@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.3",
+  "version": "1.16.0-rc.4",
   "release_date": "2026-05-20T00:00:00Z",
   "rules": 481,
   "tests": 1785,
   "test_suites": 331,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.3",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.4",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 — Safari-lite collector ships (history + downloads + extensions). Metadata-only; Safari-deep cookies / LocalStorage stay in backlog. RC not advertised."
+  "comment": "v1.16 — Mail Envelope Index collector ships per plan §13.2 v4-reframed (personalComms class; bodies + DKIM deferred). RC not advertised."
 }
