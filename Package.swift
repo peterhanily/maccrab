@@ -150,7 +150,11 @@ let package = Package(
         .target(
             name: "MacCrabForensics",
             dependencies: ["MacCrabCore", "CSQLCipher"],
-            exclude: ["README.md"]
+            exclude: [
+                "README.md",
+                "TierB/README.md",
+                "MCFPResearch/README.md",
+            ]
         ),
         // Shared daemon bootstrap — wraps everything that used to sit
         // inside the `maccrabd` executable target except for the entry

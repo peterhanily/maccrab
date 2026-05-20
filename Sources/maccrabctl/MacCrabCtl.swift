@@ -281,6 +281,10 @@ struct MacCrabCtl {
         case "fingerprint":
             // v1.14-1 — MCFP v1 static fingerprint.
             await dispatchFingerprint(args: Array(args.dropFirst(2)))
+        case "mcfp":
+            // research/post-v15 — MCFP R2 corpus + diff + imposter
+            // tooling.
+            await dispatchMCFP(args: Array(args.dropFirst(2)))
         case "version":
             printVersion()
         case "help", "-h", "--help":
