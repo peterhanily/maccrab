@@ -23,6 +23,18 @@ func dispatchPlugin(args: [String]) async {
             try await pluginRun(args: rest)
         case "run-tierb":
             try await pluginRunTierB(args: rest)
+        case "install":
+            try await pluginInstall(args: rest)
+        case "uninstall":
+            try await pluginUninstall(args: rest)
+        case "installed-list":
+            try await pluginInstalledList()
+        case "trust":
+            try await pluginTrust(args: rest)
+        case "revoke":
+            try await pluginRevoke(args: rest)
+        case "trust-list":
+            try await pluginTrustList()
         case "help", "-h", "--help":
             printPluginUsage()
         default:
@@ -54,6 +66,16 @@ func printPluginUsage() {
         [--plugin-id <id>]            artifacts. Default plugin-id is the
         [--ticks <N>]                 binary basename. --ticks N requests N
                                       fixture heartbeats.
+      install <bundle-dir>            Install a signed Tier B plugin bundle.
+        [--trust-on-install]          Add bundle's publisher key to trust list.
+        [--force]                     Overwrite if already installed.
+      uninstall <plugin-id>           Remove an installed Tier B plugin.
+      installed-list                  List installed Tier B plugins.
+      trust <key-hex>                 Add a publisher public key (64-hex
+                                      / 32 bytes) to the trust store.
+      revoke <key-hex>                Revoke a publisher key (preempts trust
+                                      list; refused at install + load).
+      trust-list                      Show trusted + revoked publisher keys.
     """)
 }
 
@@ -283,6 +305,104 @@ private func pluginRunTierB(args: [String]) async throws {
     if !result.notes.isEmpty {
         print("  Notes:")
         for note in result.notes { print("    - \(note)") }
+    }
+}
+
+// MARK: - install / uninstall / trust list
+
+private func pluginInstall(args: [String]) async throws {
+    guard let sourceDir = args.first else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin install <bundle-dir> [--trust-on-install] [--force]")
+    }
+    var trustOnInstall = false
+    var force = false
+    for arg in args.dropFirst() {
+        if arg == "--trust-on-install" { trustOnInstall = true }
+        if arg == "--force" { force = true }
+    }
+    let installer = PluginInstaller()
+    let installed = try await installer.install(
+        sourceDir: URL(fileURLWithPath: sourceDir),
+        trustOnInstall: trustOnInstall,
+        force: force
+    )
+    print("Installed Tier B plugin '\(installed.pluginID)'")
+    print("  Root:            \(installed.installRoot)")
+    print("  Publisher key:   \(installed.publicKeyHex.prefix(16))…")
+    print("  Trusted:         \(trustOnInstall ? "yes (added on install)" : "no (run 'maccrabctl plugin trust <hex>' to trust)")")
+}
+
+private func pluginUninstall(args: [String]) async throws {
+    guard let pluginID = args.first else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin uninstall <plugin-id>")
+    }
+    let installer = PluginInstaller()
+    try await installer.uninstall(pluginID: pluginID)
+    print("Uninstalled \(pluginID).")
+}
+
+private func pluginInstalledList() async throws {
+    let installer = PluginInstaller()
+    let plugins = try await installer.list()
+    guard !plugins.isEmpty else {
+        print("No Tier B plugins installed.")
+        print("  (Plugins root: \(installer.pluginsRootPath))")
+        return
+    }
+    for p in plugins {
+        print("\(p.pluginID)")
+        print("  Root:           \(p.installRoot)")
+        print("  Publisher key:  \(p.publicKeyHex.prefix(16))…")
+    }
+}
+
+private func pluginTrust(args: [String]) async throws {
+    guard let key = args.first else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin trust <key-hex>")
+    }
+    let cleaned = key.replacingOccurrences(of: " ", with: "").lowercased()
+    guard cleaned.count == 64, cleaned.allSatisfy({ $0.isHexDigit }) else {
+        throw CaseCommandError.usage("Public key must be 64-char hex (32 bytes raw Ed25519). Got: \(key)")
+    }
+    let installer = PluginInstaller()
+    try await installer.addTrustedKey(cleaned)
+    print("Added publisher key to trust list:")
+    print("  \(cleaned)")
+}
+
+private func pluginRevoke(args: [String]) async throws {
+    guard let key = args.first else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin revoke <key-hex>")
+    }
+    let cleaned = key.replacingOccurrences(of: " ", with: "").lowercased()
+    guard cleaned.count == 64, cleaned.allSatisfy({ $0.isHexDigit }) else {
+        throw CaseCommandError.usage("Public key must be 64-char hex (32 bytes raw Ed25519). Got: \(key)")
+    }
+    let installer = PluginInstaller()
+    try await installer.revokeKey(cleaned)
+    print("Revoked publisher key (removed from trust list, added to revocation list):")
+    print("  \(cleaned)")
+}
+
+private func pluginTrustList() async throws {
+    let installer = PluginInstaller()
+    let trusted = await installer.currentTrustedKeys()
+    let revoked = await installer.currentRevokedKeys()
+    if trusted.isEmpty && revoked.isEmpty {
+        print("No keys in trust or revocation list.")
+        return
+    }
+    if !trusted.isEmpty {
+        print("Trusted publisher keys (\(trusted.count)):")
+        for k in trusted.sorted() {
+            print("  \(k)")
+        }
+    }
+    if !revoked.isEmpty {
+        print("Revoked publisher keys (\(revoked.count)):")
+        for k in revoked.sorted() {
+            print("  \(k)")
+        }
     }
 }
 

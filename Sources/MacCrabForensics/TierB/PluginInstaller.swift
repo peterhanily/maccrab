@@ -1,0 +1,260 @@
+// PluginInstaller — copies a signed Tier B bundle into the
+// operator's plugin directory, verifies its signature, and
+// updates the trust store. Plus a JSON-on-disk revocation list
+// that future PluginRegistry.load() consults.
+//
+// Plan §3.6 + §12 + plan §3.9 trust model.
+//
+// Layout the installer manages:
+//   ~/Library/Application Support/MacCrab/plugins/tier-b/
+//     <plugin-id>/
+//       manifest.json
+//       binary
+//       signature
+//       signing.key.pub
+//     trusted-keys.json   {"keys": ["<hex>", ...]}
+//     revoked-keys.json   {"keys": ["<hex>", ...]}
+//
+// Research-grade. Network-based plugin store + signed appcast is
+// a release chapter (plan §12). For now: installs from a local
+// directory and trust-keys are operator-managed via maccrabctl.
+
+import Foundation
+import CryptoKit
+
+public actor PluginInstaller {
+
+    public enum InstallError: Error, CustomStringConvertible {
+        case sourceNotADirectory(path: String)
+        case destinationAlreadyExists(path: String)
+        case manifestUnreadable(message: String)
+        case missingPluginID
+        case verifyFailed(reason: String)
+        case ioError(message: String)
+
+        public var description: String {
+            switch self {
+            case .sourceNotADirectory(let p): return "PluginInstaller: source is not a directory: \(p)"
+            case .destinationAlreadyExists(let p): return "PluginInstaller: destination already exists: \(p) (use --force to overwrite)"
+            case .manifestUnreadable(let m): return "PluginInstaller: manifest unreadable: \(m)"
+            case .missingPluginID: return "PluginInstaller: manifest has no 'id' field"
+            case .verifyFailed(let r): return "PluginInstaller: signature verification failed: \(r)"
+            case .ioError(let m): return "PluginInstaller: I/O error: \(m)"
+            }
+        }
+    }
+
+    private let pluginsRoot: URL
+
+    public init(pluginsRoot: URL? = nil) {
+        if let r = pluginsRoot {
+            self.pluginsRoot = r
+        } else {
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            self.pluginsRoot = support
+                .appendingPathComponent("MacCrab")
+                .appendingPathComponent("plugins")
+                .appendingPathComponent("tier-b")
+        }
+    }
+
+    public nonisolated var pluginsRootPath: String { pluginsRoot.path }
+
+    /// Install from a source directory containing the signed bundle
+    /// files (`manifest.json` / `binary` / `signature` /
+    /// `signing.key.pub`). Verifies the signature, refuses to
+    /// install if the key is revoked, copies the bundle into the
+    /// plugin root, and (when `trustOnInstall == true`) marks the
+    /// publisher key as trusted.
+    public func install(
+        sourceDir: URL,
+        trustOnInstall: Bool = false,
+        force: Bool = false
+    ) async throws -> InstalledPlugin {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: sourceDir.path, isDirectory: &isDir), isDir.boolValue else {
+            throw InstallError.sourceNotADirectory(path: sourceDir.path)
+        }
+        try fm.createDirectory(at: pluginsRoot, withIntermediateDirectories: true)
+
+        // Decode manifest to extract plugin id.
+        let manifestURL = sourceDir.appendingPathComponent("manifest.json")
+        guard let manifestData = try? Data(contentsOf: manifestURL) else {
+            throw InstallError.manifestUnreadable(message: "could not read \(manifestURL.path)")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any] else {
+            throw InstallError.manifestUnreadable(message: "manifest is not valid JSON")
+        }
+        guard let pluginID = obj["id"] as? String, !pluginID.isEmpty else {
+            throw InstallError.missingPluginID
+        }
+
+        // Verify against the current trust+revocation set.
+        let trustedKeys = await currentTrustedKeys()
+        let revokedKeys = await currentRevokedKeys()
+        let publicKeyData = (try? Data(contentsOf: sourceDir.appendingPathComponent("signing.key.pub"))) ?? Data()
+        let publicKeyHex = publicKeyData.map { String(format: "%02x", $0) }.joined()
+
+        var verifyTrust = trustedKeys
+        if trustOnInstall {
+            verifyTrust.insert(publicKeyHex)
+        }
+        let trustStore = PluginSignatureVerifier.TrustStore(
+            allowedKeyHexes: verifyTrust,
+            revokedKeyHexes: revokedKeys
+        )
+        do {
+            _ = try PluginSignatureVerifier.verify(
+                bundle: PluginSignatureVerifier.BundleLayout(bundleRoot: sourceDir),
+                trustStore: trustStore
+            )
+        } catch {
+            throw InstallError.verifyFailed(reason: "\(error)")
+        }
+
+        // Copy bundle into pluginsRoot/<pluginID>/.
+        let destURL = pluginsRoot.appendingPathComponent(pluginID)
+        if fm.fileExists(atPath: destURL.path) {
+            if !force {
+                throw InstallError.destinationAlreadyExists(path: destURL.path)
+            }
+            try? fm.removeItem(at: destURL)
+        }
+        do {
+            try fm.copyItem(at: sourceDir, to: destURL)
+        } catch {
+            throw InstallError.ioError(message: error.localizedDescription)
+        }
+        // 0o700 on the install dir; 0o755 on the binary so it can
+        // execute.
+        try? fm.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: destURL.path
+        )
+        try? fm.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: destURL.appendingPathComponent("binary").path
+        )
+
+        if trustOnInstall {
+            try await addTrustedKey(publicKeyHex)
+        }
+        return InstalledPlugin(
+            pluginID: pluginID,
+            installRoot: destURL.path,
+            publicKeyHex: publicKeyHex
+        )
+    }
+
+    /// Uninstall by plugin id. Removes the bundle directory.
+    public func uninstall(pluginID: String) async throws {
+        let dest = pluginsRoot.appendingPathComponent(pluginID)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: dest.path) else {
+            throw InstallError.ioError(message: "not installed: \(pluginID)")
+        }
+        try fm.removeItem(at: dest)
+    }
+
+    /// List installed plugins.
+    public func list() async throws -> [InstalledPlugin] {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: pluginsRoot.path) else { return [] }
+        let entries = try fm.contentsOfDirectory(atPath: pluginsRoot.path)
+        var results: [InstalledPlugin] = []
+        for entry in entries.sorted() where !entry.hasSuffix(".json") {
+            let dir = pluginsRoot.appendingPathComponent(entry)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let pubURL = dir.appendingPathComponent("signing.key.pub")
+            let pubHex: String = {
+                guard let data = try? Data(contentsOf: pubURL) else { return "" }
+                return data.map { String(format: "%02x", $0) }.joined()
+            }()
+            results.append(InstalledPlugin(
+                pluginID: entry,
+                installRoot: dir.path,
+                publicKeyHex: pubHex
+            ))
+        }
+        return results
+    }
+
+    // MARK: - Trust + revocation lists
+
+    public func currentTrustedKeys() async -> Set<String> {
+        Self.readKeySet(path: pluginsRoot.appendingPathComponent("trusted-keys.json").path)
+    }
+
+    public func currentRevokedKeys() async -> Set<String> {
+        Self.readKeySet(path: pluginsRoot.appendingPathComponent("revoked-keys.json").path)
+    }
+
+    public func addTrustedKey(_ keyHex: String) async throws {
+        try ensureRoot()
+        try await Self.mutateKeySet(
+            path: pluginsRoot.appendingPathComponent("trusted-keys.json").path
+        ) { $0.insert(keyHex) }
+    }
+
+    public func removeTrustedKey(_ keyHex: String) async throws {
+        try ensureRoot()
+        try await Self.mutateKeySet(
+            path: pluginsRoot.appendingPathComponent("trusted-keys.json").path
+        ) { $0.remove(keyHex) }
+    }
+
+    public func revokeKey(_ keyHex: String) async throws {
+        try ensureRoot()
+        try await Self.mutateKeySet(
+            path: pluginsRoot.appendingPathComponent("revoked-keys.json").path
+        ) { $0.insert(keyHex) }
+        // Removing from trust set is best-effort; revocation alone
+        // is sufficient because verify() checks revocation first.
+        try? await removeTrustedKey(keyHex)
+    }
+
+    public func unrevokeKey(_ keyHex: String) async throws {
+        try ensureRoot()
+        try await Self.mutateKeySet(
+            path: pluginsRoot.appendingPathComponent("revoked-keys.json").path
+        ) { $0.remove(keyHex) }
+    }
+
+    private func ensureRoot() throws {
+        try FileManager.default.createDirectory(
+            at: pluginsRoot,
+            withIntermediateDirectories: true
+        )
+    }
+
+    private static func readKeySet(path: String) -> Set<String> {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = obj["keys"] as? [String] else {
+            return []
+        }
+        return Set(arr)
+    }
+
+    private static func mutateKeySet(
+        path: String,
+        _ change: (inout Set<String>) -> Void
+    ) async throws {
+        var keys = readKeySet(path: path)
+        change(&keys)
+        let payload: [String: Any] = ["keys": keys.sorted()]
+        let data = try JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
+public struct InstalledPlugin: Sendable {
+    public let pluginID: String
+    public let installRoot: String
+    public let publicKeyHex: String
+}
