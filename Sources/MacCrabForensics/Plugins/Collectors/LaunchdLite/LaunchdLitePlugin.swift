@@ -37,6 +37,7 @@ public struct LaunchdLitePlugin: Collector {
         ],
         outputs: [
             OutputSpec(contentType: "launchd.entry", privacyClass: .metadata),
+            OutputSpec(contentType: "launchd.bam_entry", privacyClass: .metadata),
         ],
         mcpTools: [
             MCPToolDescriptor(
@@ -221,7 +222,58 @@ public struct LaunchdLitePlugin: Collector {
             }
         }
 
-        notes.append("BAM (BackgroundItems-v9.btm) parse deferred to v1.13a-4 follow-up — login items not yet inventoried")
+        // v1.16.0-rc.2: BAM (BackgroundItems-v9.btm) parse landed.
+        let bamPath = BAMParser.defaultPath()
+        if FileManager.default.fileExists(atPath: bamPath) {
+            do {
+                let bamRecords = try BAMParser.parse(path: bamPath)
+                for bam in bamRecords {
+                    let dedupSeed = "bam:\(bam.uuid):\(bam.identifier)"
+                    let sha = SHA256.hash(data: Data(dedupSeed.utf8))
+                        .map { String(format: "%02x", $0) }.joined()
+                    var bamData: [String: JSONValue] = [
+                        "uuid": .string(bam.uuid),
+                        "display_name": .string(bam.displayName),
+                        "identifier": .string(bam.identifier),
+                        "is_bundle_id": .bool(bam.isBundleID),
+                        "type_raw": .integer(Int64(bam.typeRaw)),
+                        "type_token": .string(bam.typeToken),
+                    ]
+                    if let p = bam.parentBundleID { bamData["parent_bundle_id"] = .string(p) }
+                    if let u = bam.url { bamData["url"] = .string(u) }
+                    if let g = bam.generation { bamData["generation"] = .integer(Int64(g)) }
+                    let bamRecord = ArtifactRecord(
+                        caseID: caseContext.caseID,
+                        pluginID: Self.manifest.id,
+                        pluginVersion: Self.manifest.version,
+                        schemaVersion: Self.manifest.schemaVersion,
+                        contentType: "launchd.bam_entry",
+                        sourcePath: bamPath,
+                        sha256: sha,
+                        observedAt: now,
+                        capturedAt: now,
+                        summary: "BAM \(bam.typeToken): \(bam.displayName) (\(bam.identifier))",
+                        sizeBytes: 0,
+                        confidence: .observed,
+                        privacyClass: .metadata,
+                        actor: NSUserName(),
+                        data: bamData
+                    )
+                    do {
+                        try await output.commit(bamRecord)
+                        committed += 1
+                    } catch {
+                        rejected += 1
+                    }
+                }
+                notes.append("BAM parse: \(bamRecords.count) entries emitted")
+            } catch {
+                notes.append("BAM parse failed: \(error)")
+                status = .partial
+            }
+        } else {
+            notes.append("BAM file not present at \(bamPath) — skipped")
+        }
 
         _ = enricher
         return CollectionResult(
