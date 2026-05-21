@@ -567,6 +567,38 @@ let tools: [[String: Any]] = [
             "required": ["case_id"],
         ] as [String: Any],
     ],
+    // ===================================================================
+    // Tier B plugin platform (research-post-v15)
+    // ===================================================================
+    [
+        "name": "tierb.list_plugins",
+        "description": "List installed Tier B (third-party) plugins with their verification status. Returns plugins_root, trusted_key_count, revoked_key_count, verified+failed buckets. Verified plugins include manifest version + public key prefix; failed plugins include reason (e.g. revoked key).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [:] as [String: Any],
+        ] as [String: Any],
+    ],
+    [
+        "name": "tierb.verify",
+        "description": "Force re-verification of every installed Tier B plugin against the current trust + revocation lists. Same as `tierb.list_plugins` but bypasses the bootstrap cache.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [:] as [String: Any],
+        ] as [String: Any],
+    ],
+    [
+        "name": "tierb.run_installed",
+        "description": "Spawn an installed + verified Tier B plugin against a case. Plugin runs under its manifest's sandbox profile; daemon enforces signature + revocation + DoS guards. Driven via the maccrabctl CLI subprocess (the MCP server doesn't open the case directly because Keychain access can block on UI consent the headless server can't satisfy). Returns the CLI's exit_code + stdout + stderr.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "plugin_id": ["type": "string", "description": "Plugin id from the manifest. Validated against PluginInstaller.validatePluginID — must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}."],
+                "case_id": ["type": "string", "description": "Target case UUID. Validated: [A-Za-z0-9._-]{1,128}."],
+                "ticks": ["type": "integer", "description": "Optional. Heartbeat count to request (default 1)."],
+            ],
+            "required": ["plugin_id", "case_id"],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Tool Handlers
@@ -641,9 +673,139 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleForensicsExplainCase(args)
     case "forensics.posture_findings":
         return await handleForensicsPostureFindings(args)
+    case "tierb.list_plugins":
+        return await handleTierBListPlugins()
+    case "tierb.verify":
+        return await handleTierBVerify()
+    case "tierb.run_installed":
+        return await handleTierBRunInstalled(args)
     default:
         return ["content": [["type": "text", "text": "Unknown tool: \(name)"]]]
     }
+}
+
+// MARK: - Tier B MCP handlers
+
+private let sharedTierBBootstrap = TierBBootstrap()
+
+func handleTierBListPlugins() async -> Any {
+    let status = await sharedTierBBootstrap.status(force: false)
+    return ["content": [["type": "text", "text": jsonStringify(tierBStatusPayload(status))]]]
+}
+
+func handleTierBVerify() async -> Any {
+    let status = await sharedTierBBootstrap.refresh()
+    return ["content": [["type": "text", "text": jsonStringify(tierBStatusPayload(status))]]]
+}
+
+func handleTierBRunInstalled(_ args: [String: Any]) async -> Any {
+    guard let pluginID = args["plugin_id"] as? String,
+          let caseID = args["case_id"] as? String else {
+        return ["content": [["type": "text", "text": "missing required arguments: plugin_id, case_id"]]]
+    }
+    let ticks = (args["ticks"] as? Int) ?? 1
+
+    // Validate plugin_id strictly before passing to argv —
+    // matches PluginInstaller.validatePluginID so the MCP
+    // surface can't be used to inject arbitrary argv tokens.
+    do {
+        try PluginInstaller.validatePluginID(pluginID)
+    } catch {
+        return ["content": [["type": "text", "text": "invalid plugin_id: \(error)"]]]
+    }
+    // case_id is a UUID-ish opaque string the operator chose
+    // at case creation. Reject anything that could escape argv.
+    // Accept: alphanumerics + hyphen + underscore + dot.
+    for ch in caseID {
+        let ok = ch.isLetter || ch.isNumber || ch == "-" || ch == "_" || ch == "."
+        if !ok {
+            return ["content": [["type": "text", "text": "invalid case_id (allowed: [A-Za-z0-9._-])"]]]
+        }
+    }
+    if caseID.count > 128 {
+        return ["content": [["type": "text", "text": "case_id exceeds 128 chars"]]]
+    }
+    // Shell out to maccrabctl. The MCP server process can't
+    // safely take the in-process CaseManager path because that
+    // path touches KeychainDEKVault, which can block on a UI
+    // consent prompt the headless MCP process can't satisfy.
+    // The CLI is the operator's primary surface anyway; the
+    // MCP tool here is a discovery+drive wrapper.
+    let ctlPath = locateMaccrabctl()
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: ctlPath)
+    proc.arguments = [
+        "plugin", "run-installed", pluginID,
+        "--case", caseID,
+        "--ticks", String(ticks),
+    ]
+    let stdoutPipe = Pipe()
+    let stderrPipe = Pipe()
+    proc.standardOutput = stdoutPipe
+    proc.standardError = stderrPipe
+    do {
+        try proc.run()
+    } catch {
+        return ["content": [["type": "text", "text": "tierb.run_installed: could not spawn \(ctlPath): \(error)"]]]
+    }
+    proc.waitUntilExit()
+    let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+    let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+    let outStr = String(data: outData, encoding: .utf8) ?? ""
+    let errStr = String(data: errData, encoding: .utf8) ?? ""
+    return ["content": [["type": "text", "text": jsonStringify([
+        "plugin_id": pluginID,
+        "case_id": caseID,
+        "ticks": ticks,
+        "exit_code": Int(proc.terminationStatus),
+        "stdout": outStr,
+        "stderr": errStr,
+    ] as [String: Any])]]]
+}
+
+/// Find the maccrabctl binary. Looks at:
+///   - ./.build/debug/maccrabctl (dev)
+///   - ./.build/release/maccrabctl
+///   - /usr/local/bin/maccrabctl (homebrew install)
+///   - /opt/homebrew/bin/maccrabctl (homebrew arm64)
+private func locateMaccrabctl() -> String {
+    let candidates = [
+        ".build/debug/maccrabctl",
+        ".build/release/maccrabctl",
+        "/usr/local/bin/maccrabctl",
+        "/opt/homebrew/bin/maccrabctl",
+        "/Applications/MacCrab.app/Contents/Resources/bin/maccrabctl",
+    ]
+    let fm = FileManager.default
+    for c in candidates where fm.isExecutableFile(atPath: c) {
+        return c
+    }
+    // Last resort: return the bare name and let PATH resolve.
+    return "maccrabctl"
+}
+
+private func tierBStatusPayload(_ status: TierBBootstrap.Status) -> [String: Any] {
+    let isoFmt = ISO8601DateFormatter()
+    return [
+        "plugins_root": status.pluginsRoot,
+        "verified_at": isoFmt.string(from: status.verifiedAt),
+        "trusted_key_count": status.trustedKeyCount,
+        "revoked_key_count": status.revokedKeyCount,
+        "verified": status.verified.map { v -> [String: Any] in
+            [
+                "plugin_id": v.pluginID,
+                "version": v.version,
+                "bundle_root": v.bundleRoot,
+                "publisher_key_hex": v.publicKeyHex,
+            ]
+        },
+        "failed": status.failed.map { f -> [String: Any] in
+            [
+                "plugin_id": f.pluginID,
+                "reason": f.reason,
+            ]
+        },
+    ]
 }
 
 // MARK: - v1.12.0 Package Intelligence + Intent handlers
