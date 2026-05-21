@@ -21,8 +21,6 @@ func dispatchPlugin(args: [String]) async {
             try await pluginInfo(args: rest)
         case "run":
             try await pluginRun(args: rest)
-        case "run-tierb":
-            try await pluginRunTierB(args: rest)
         case "install":
             try await pluginInstall(args: rest)
         case "uninstall":
@@ -37,12 +35,8 @@ func dispatchPlugin(args: [String]) async {
             try await pluginTrustList()
         case "verify-all":
             try await pluginVerifyAll()
-        case "run-installed":
-            try await pluginRunInstalled(args: rest)
         case "daemon-status":
             try await pluginDaemonStatus()
-        case "run-all-installed":
-            try await pluginRunAllInstalled(args: rest)
         case "help", "-h", "--help":
             printPluginUsage()
         default:
@@ -69,11 +63,6 @@ func printPluginUsage() {
       run <plugin-id> --case <id>     Invoke a plugin against a case.
         [--window <dur>]              Optional time window (e.g. --window 24h).
         [--since YYYY-MM-DD]          Open-ended time window.
-      run-tierb <binary-path>         (Research) Spawn a Tier B plugin binary
-        --case <id>                   via subprocess + JSON-RPC, commit
-        [--plugin-id <id>]            artifacts. Default plugin-id is the
-        [--ticks <N>]                 binary basename. --ticks N requests N
-                                      fixture heartbeats.
       install <bundle-dir>            Install a signed Tier B plugin bundle.
         [--trust-on-install]          Add bundle's publisher key to trust list.
         [--force]                     Overwrite if already installed.
@@ -86,19 +75,17 @@ func printPluginUsage() {
       trust-list                      Show trusted + revoked publisher keys.
       verify-all                      Verify every installed Tier B plugin
                                       against the current trust/revocation lists.
-      run-installed <plugin-id>       Spawn an installed + verified Tier B
-        --case <id>                   plugin under its manifest's sandbox
-        [--ticks <N>]                 profile. Refuses to spawn on signature
-        [--probe-read <path>]         failure or revoked key.
       daemon-status                   Structured summary of the verified plugin
                                       set, trust + revocation list sizes,
                                       plugins root path, and last-verified
                                       timestamp. Use to confirm the daemon
                                       sees the installed plugins.
-      run-all-installed --case <id>   Run every verified Tier B plugin against
-        [--scheduled]                 the case. Per-plugin status reported.
-        [--ticks <N>]                 With --scheduled, refuses unless the
-                                      case is marked scheduled-trusted (§10.5).
+
+    Tier B subprocess spawn (`run-tierb`, `run-installed`,
+    `run-all-installed`) is a research-only surface and remains
+    on the `research/post-v15` branch. v1.16 ships the install +
+    verify + trust chain; spawn enforcement ships when XPC
+    service bundling lands.
     """)
 }
 
@@ -272,92 +259,8 @@ private func pluginRun(args: [String]) async throws {
     }
 }
 
-// MARK: - Tier B run
 
-/// `maccrabctl plugin run-tierb <binary> --case <id>` — spawns
-/// the Tier B subprocess plugin, runs collect, commits artifacts
-/// via the case's ArtifactStore. Research-grade — surface for
-/// validating the IPC contract end-to-end.
-private func pluginRunTierB(args: [String]) async throws {
-    guard let binaryPath = args.first else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin run-tierb <binary> --case <id> [--plugin-id <id>] [--ticks <N>] [--sandbox] [--allow-read <path>] [--probe-read <path>]")
-    }
-    var caseID: String? = nil
-    var pluginID: String? = nil
-    var ticks: Int = 1
-    var sandbox = false
-    var allowReads: [String] = []
-    var probeRead: String? = nil
-    var i = 1
-    while i < args.count {
-        let arg = args[i]
-        switch arg {
-        case "--case" where i + 1 < args.count:
-            caseID = args[i + 1]; i += 2
-        case "--plugin-id" where i + 1 < args.count:
-            pluginID = args[i + 1]; i += 2
-        case "--ticks" where i + 1 < args.count:
-            ticks = Int(args[i + 1]) ?? 1; i += 2
-        case "--sandbox":
-            sandbox = true; i += 1
-        case "--allow-read" where i + 1 < args.count:
-            allowReads.append(args[i + 1]); i += 2
-        case "--probe-read" where i + 1 < args.count:
-            probeRead = args[i + 1]; i += 2
-        default:
-            i += 1
-        }
-    }
-    guard let resolvedCase = caseID else {
-        throw CaseCommandError.usage("Missing --case <id>")
-    }
-    let resolvedID = pluginID ?? (binaryPath as NSString).lastPathComponent
-
-    let mgr = makeCaseManager()
-    let handle = try await mgr.openCase(id: resolvedCase)
-    let loader = TierBSubprocessLoader()
-    // Build the sandbox profile (deny-default + supplied allow
-    // reads + binary dir auto-added by the loader).
-    let profile: SandboxProfileSpec? = sandbox
-        ? SandboxProfileSpec(
-            allowAllByDefault: false,
-            fileReadSubpaths: allowReads,
-            fileWriteSubpaths: [],
-            networkConnectAllowlist: [],
-            machServiceConnects: [],
-            processExecPaths: [],
-            allowProcessFork: true
-        )
-        : nil
-
-    let (committed, rejected, result) = try await loader.runCollectAndCommit(
-        binaryPath: binaryPath,
-        pluginID: resolvedID,
-        pluginVersion: "research",
-        schemaVersion: 1,
-        caseID: resolvedCase,
-        caseName: handle.caseID,
-        encryptionState: handle.encryptionState,
-        store: handle.store,
-        tickCount: ticks,
-        probeRead: probeRead,
-        sandboxProfile: profile
-    )
-    print("Ran Tier B subprocess plugin \(resolvedID) on case \(resolvedCase)")
-    print("  Binary:               \(binaryPath)")
-    print("  Sandbox enforced:     \(sandbox ? "yes" : "no")")
-    print("  Subprocess exit:      \(result.subprocessExitCode)")
-    print("  Status:               \(result.status)")
-    print("  Artifacts received:   \(result.artifacts.count)")
-    print("  Artifacts committed:  \(committed)")
-    print("  Artifacts rejected:   \(rejected)")
-    if !result.notes.isEmpty {
-        print("  Notes:")
-        for note in result.notes { print("    - \(note)") }
-    }
-}
-
-// MARK: - daemon-status + run-all-installed
+// MARK: - daemon-status
 
 private func pluginDaemonStatus() async throws {
     let bootstrap = TierBBootstrap()
@@ -386,78 +289,6 @@ private func pluginDaemonStatus() async throws {
             print("    Reason: \(f.reason)")
         }
     }
-}
-
-private func pluginRunAllInstalled(args: [String]) async throws {
-    var caseID: String? = nil
-    var ticks: Int = 1
-    var scheduledOnly = false
-    var i = 0
-    while i < args.count {
-        let arg = args[i]
-        switch arg {
-        case "--case" where i + 1 < args.count:
-            caseID = args[i + 1]; i += 2
-        case "--ticks" where i + 1 < args.count:
-            ticks = Int(args[i + 1]) ?? 1; i += 2
-        case "--scheduled":
-            scheduledOnly = true; i += 1
-        default:
-            i += 1
-        }
-    }
-    guard let resolvedCase = caseID else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin run-all-installed --case <id> [--scheduled] [--ticks <N>]")
-    }
-    let mgr = makeCaseManager()
-    let handle = try await mgr.openCase(id: resolvedCase)
-
-    // Scheduled-mode gating per plan §10.5.
-    if scheduledOnly {
-        let caseRow = try await handle.store.fetchCase(id: resolvedCase)
-        guard caseRow?.scheduledTrusted == true else {
-            throw CaseCommandError.underlying(
-                "--scheduled refused: case '\(resolvedCase)' is not marked scheduled-trusted. " +
-                "Run 'maccrabctl case mark-trusted-scheduled \(resolvedCase)' first."
-            )
-        }
-    }
-
-    let bootstrap = TierBBootstrap()
-    let status = await bootstrap.refresh()
-    guard !status.verified.isEmpty else {
-        print("No verified Tier B plugins installed under \(status.pluginsRoot).")
-        if !status.failed.isEmpty {
-            print("(\(status.failed.count) installed but failed verification — run 'plugin daemon-status' for detail.)")
-        }
-        return
-    }
-
-    let registry = TierBRegistry()
-    var ranOK = 0
-    var ranFailed = 0
-    print("Running \(status.verified.count) verified Tier B plugin(s) against case \(resolvedCase)\(scheduledOnly ? " [--scheduled]" : "")")
-    print("=========================================================")
-    for p in status.verified {
-        do {
-            let (committed, rejected, _) = try await registry.runCollectAndCommit(
-                pluginID: p.pluginID,
-                caseID: resolvedCase,
-                caseName: handle.caseID,
-                encryptionState: handle.encryptionState,
-                store: handle.store,
-                tickCount: ticks
-            )
-            print("  ✓ \(p.pluginID) — committed=\(committed) rejected=\(rejected)")
-            ranOK += 1
-        } catch {
-            print("  ✗ \(p.pluginID) — \(error)")
-            ranFailed += 1
-        }
-    }
-    print("---")
-    print("Plugins succeeded:  \(ranOK)")
-    print("Plugins failed:     \(ranFailed)")
 }
 
 // MARK: - install / uninstall / trust list
@@ -558,7 +389,7 @@ private func pluginTrustList() async throws {
     }
 }
 
-// MARK: - verify-all + run-installed
+// MARK: - verify-all
 
 private func pluginVerifyAll() async throws {
     let registry = TierBRegistry()
@@ -581,54 +412,6 @@ private func pluginVerifyAll() async throws {
     }
     if report.failed.isEmpty && report.verified.isEmpty {
         print("(no plugins installed)")
-    }
-}
-
-private func pluginRunInstalled(args: [String]) async throws {
-    guard let pluginID = args.first else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin run-installed <plugin-id> --case <id> [--ticks <N>] [--probe-read <path>]")
-    }
-    var caseID: String? = nil
-    var ticks: Int = 1
-    var probeRead: String? = nil
-    var i = 1
-    while i < args.count {
-        let arg = args[i]
-        switch arg {
-        case "--case" where i + 1 < args.count:
-            caseID = args[i + 1]; i += 2
-        case "--ticks" where i + 1 < args.count:
-            ticks = Int(args[i + 1]) ?? 1; i += 2
-        case "--probe-read" where i + 1 < args.count:
-            probeRead = args[i + 1]; i += 2
-        default:
-            i += 1
-        }
-    }
-    guard let resolvedCase = caseID else {
-        throw CaseCommandError.usage("Missing --case <id>")
-    }
-
-    let mgr = makeCaseManager()
-    let handle = try await mgr.openCase(id: resolvedCase)
-    let registry = TierBRegistry()
-    let (committed, rejected, plugin) = try await registry.runCollectAndCommit(
-        pluginID: pluginID,
-        caseID: resolvedCase,
-        caseName: handle.caseID,
-        encryptionState: handle.encryptionState,
-        store: handle.store,
-        tickCount: ticks,
-        probeRead: probeRead
-    )
-    print("Ran installed Tier B plugin \(pluginID) on case \(resolvedCase)")
-    print("  Manifest version:     \(plugin.manifest.version)")
-    print("  Bundle root:          \(plugin.bundleRoot)")
-    print("  Publisher key:        \(plugin.publicKeyHex.prefix(16))…")
-    print("  Artifacts committed:  \(committed)")
-    print("  Artifacts rejected:   \(rejected)")
-    if let probe = probeRead {
-        print("  Probed path:          \(probe) (see artifacts for result)")
     }
 }
 

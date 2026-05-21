@@ -202,34 +202,9 @@ public actor TierBRegistry {
         )
     }
 
-    /// Run a verified installed Tier B plugin against a case.
-    /// Spawns under the manifest's sandbox profile. The daemon
-    /// commits returned artifacts to the supplied ArtifactStore.
-    public func runCollectAndCommit(
-        pluginID: String,
-        caseID: String,
-        caseName: String,
-        encryptionState: CaseEncryptionState,
-        store: ArtifactStore,
-        tickCount: Int = 1,
-        probeRead: String? = nil
-    ) async throws -> (committed: Int, rejected: Int, plugin: VerifiedPlugin) {
-        let plugin = try await resolve(pluginID: pluginID)
-        defer { cleanupVerifiedBinary(plugin) }
-        let loader = TierBSubprocessLoader()
-        let (committed, rejected, _) = try await loader.runCollectAndCommit(
-            binaryPath: plugin.binaryPath,
-            pluginID: plugin.pluginID,
-            pluginVersion: plugin.manifest.version,
-            schemaVersion: plugin.manifest.schemaVersion,
-            caseID: caseID,
-            caseName: caseName,
-            encryptionState: encryptionState,
-            store: store,
-            tickCount: tickCount,
-            probeRead: probeRead,
-            sandboxProfile: plugin.manifest.toSandboxProfileSpec()
-        )
-        return (committed, rejected, plugin)
-    }
+    // runCollectAndCommit (subprocess spawn path) is research-only
+    // and lives on the research/post-v15 branch. v1.16 ships the
+    // install + verify + trust + discovery surface; the spawn path
+    // ships when NSXPCConnection + XPC service bundling lands.
+    // See docs/tier-b-research/feasibility.md "Remaining gap".
 }

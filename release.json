@@ -1,12 +1,12 @@
 {
-  "version": "1.16.0-rc.19",
-  "release_date": "2026-05-20T00:00:00Z",
+  "version": "1.16.0-rc.20",
+  "release_date": "2026-05-21T00:00:00Z",
   "rules": 481,
-  "tests": 1812,
-  "test_suites": 337,
+  "tests": 1863,
+  "test_suites": 345,
   "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.19",
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.20",
   "appcast_url": "https://maccrab.com/appcast.xml",
   "min_macos": "13.0",
-  "comment": "v1.16 hardening — ConsentManager wired into PluginRunner.runCollector. Plan §10.5/§10.8 enforcement now fires per invocation. 28 RC tags."
+  "comment": "v1.16 Tier B plugin platform: install + verify + trust + revoke + daemon-status, Ed25519 manifest signing, MCFP Wilson CI + cross-family separation, manifest validators + symlink rejection + trust-list 0o600. Spawn surface remains research-only. 29 RC tags."
 }
