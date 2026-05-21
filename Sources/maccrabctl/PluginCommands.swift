@@ -39,6 +39,10 @@ func dispatchPlugin(args: [String]) async {
             try await pluginVerifyAll()
         case "run-installed":
             try await pluginRunInstalled(args: rest)
+        case "daemon-status":
+            try await pluginDaemonStatus()
+        case "run-all-installed":
+            try await pluginRunAllInstalled(args: rest)
         case "help", "-h", "--help":
             printPluginUsage()
         default:
@@ -86,6 +90,15 @@ func printPluginUsage() {
         --case <id>                   plugin under its manifest's sandbox
         [--ticks <N>]                 profile. Refuses to spawn on signature
         [--probe-read <path>]         failure or revoked key.
+      daemon-status                   Structured summary of the verified plugin
+                                      set, trust + revocation list sizes,
+                                      plugins root path, and last-verified
+                                      timestamp. Use to confirm the daemon
+                                      sees the installed plugins.
+      run-all-installed --case <id>   Run every verified Tier B plugin against
+        [--scheduled]                 the case. Per-plugin status reported.
+        [--ticks <N>]                 With --scheduled, refuses unless the
+                                      case is marked scheduled-trusted (§10.5).
     """)
 }
 
@@ -342,6 +355,109 @@ private func pluginRunTierB(args: [String]) async throws {
         print("  Notes:")
         for note in result.notes { print("    - \(note)") }
     }
+}
+
+// MARK: - daemon-status + run-all-installed
+
+private func pluginDaemonStatus() async throws {
+    let bootstrap = TierBBootstrap()
+    let status = await bootstrap.refresh()
+    let isoFmt = ISO8601DateFormatter()
+    print("Tier B daemon status")
+    print("=====================")
+    print("Plugins root:       \(status.pluginsRoot)")
+    print("Verified at:        \(isoFmt.string(from: status.verifiedAt))")
+    print("Trusted keys:       \(status.trustedKeyCount)")
+    print("Revoked keys:       \(status.revokedKeyCount)")
+    print("Verified plugins:   \(status.verified.count)")
+    print("Failed plugins:     \(status.failed.count)")
+    if !status.verified.isEmpty {
+        print("")
+        print("Verified:")
+        for p in status.verified {
+            print("  \(p.pluginID)  v\(p.version)  key=\(p.publicKeyHex.prefix(16))…")
+        }
+    }
+    if !status.failed.isEmpty {
+        print("")
+        print("Failed:")
+        for f in status.failed {
+            print("  \(f.pluginID)")
+            print("    Reason: \(f.reason)")
+        }
+    }
+}
+
+private func pluginRunAllInstalled(args: [String]) async throws {
+    var caseID: String? = nil
+    var ticks: Int = 1
+    var scheduledOnly = false
+    var i = 0
+    while i < args.count {
+        let arg = args[i]
+        switch arg {
+        case "--case" where i + 1 < args.count:
+            caseID = args[i + 1]; i += 2
+        case "--ticks" where i + 1 < args.count:
+            ticks = Int(args[i + 1]) ?? 1; i += 2
+        case "--scheduled":
+            scheduledOnly = true; i += 1
+        default:
+            i += 1
+        }
+    }
+    guard let resolvedCase = caseID else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin run-all-installed --case <id> [--scheduled] [--ticks <N>]")
+    }
+    let mgr = makeCaseManager()
+    let handle = try await mgr.openCase(id: resolvedCase)
+
+    // Scheduled-mode gating per plan §10.5.
+    if scheduledOnly {
+        let caseRow = try await handle.store.fetchCase(id: resolvedCase)
+        guard caseRow?.scheduledTrusted == true else {
+            throw CaseCommandError.underlying(
+                "--scheduled refused: case '\(resolvedCase)' is not marked scheduled-trusted. " +
+                "Run 'maccrabctl case mark-trusted-scheduled \(resolvedCase)' first."
+            )
+        }
+    }
+
+    let bootstrap = TierBBootstrap()
+    let status = await bootstrap.refresh()
+    guard !status.verified.isEmpty else {
+        print("No verified Tier B plugins installed under \(status.pluginsRoot).")
+        if !status.failed.isEmpty {
+            print("(\(status.failed.count) installed but failed verification — run 'plugin daemon-status' for detail.)")
+        }
+        return
+    }
+
+    let registry = TierBRegistry()
+    var ranOK = 0
+    var ranFailed = 0
+    print("Running \(status.verified.count) verified Tier B plugin(s) against case \(resolvedCase)\(scheduledOnly ? " [--scheduled]" : "")")
+    print("=========================================================")
+    for p in status.verified {
+        do {
+            let (committed, rejected, _) = try await registry.runCollectAndCommit(
+                pluginID: p.pluginID,
+                caseID: resolvedCase,
+                caseName: handle.caseID,
+                encryptionState: handle.encryptionState,
+                store: handle.store,
+                tickCount: ticks
+            )
+            print("  ✓ \(p.pluginID) — committed=\(committed) rejected=\(rejected)")
+            ranOK += 1
+        } catch {
+            print("  ✗ \(p.pluginID) — \(error)")
+            ranFailed += 1
+        }
+    }
+    print("---")
+    print("Plugins succeeded:  \(ranOK)")
+    print("Plugins failed:     \(ranFailed)")
 }
 
 // MARK: - install / uninstall / trust list
