@@ -4,6 +4,12 @@ import MacCrabCore
 @main
 struct MacCrabCtl {
     static func main() async {
+        // Ignore SIGPIPE — we read + write pipes for Tier B
+        // subprocess plugins, and a hostile (or buggy) subprocess
+        // can close its end mid-conversation. Default SIGPIPE
+        // handler terminates the process with exit code 141; we
+        // want graceful EPIPE handling via try? instead.
+        signal(SIGPIPE, SIG_IGN)
         let args = CommandLine.arguments
 
         guard args.count >= 2 else {

@@ -174,12 +174,30 @@ public enum SandboxProfileBuilder {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// Quote a string for SBPL. SBPL uses double-quoted strings;
-    /// embedded quotes need a backslash.
+    /// Quote a string for SBPL. SBPL uses double-quoted strings.
+    /// Backslash + double-quote need escaping. Newlines and other
+    /// control chars need to be either stripped or hex-escaped
+    /// because they can break out of the literal in some SBPL
+    /// parser variants. Defense-in-depth above the manifest-time
+    /// validation in PluginInstaller.validateSandboxPath.
     private static func quoted(_ s: String) -> String {
-        let escaped = s.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(escaped)\""
+        var result = ""
+        result.reserveCapacity(s.count + 2)
+        result.append("\"")
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            switch v {
+            case 0x5C: result.append("\\\\")     // backslash
+            case 0x22: result.append("\\\"")     // double quote
+            case 0x09: result.append(" ")        // tab → space
+            case 0x0A, 0x0D: result.append(" ")  // newline/CR → space (last-line defense)
+            case 0x00...0x1F, 0x7F: result.append("?")  // other controls → ?
+            case 0x80...0x9F: result.append("?") // C1 controls → ?
+            default: result.unicodeScalars.append(scalar)
+            }
+        }
+        result.append("\"")
+        return result
     }
 
     /// Example: profile a hypothetical Tier B plugin that

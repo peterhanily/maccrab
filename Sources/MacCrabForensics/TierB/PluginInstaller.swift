@@ -93,6 +93,127 @@ public actor PluginInstaller {
         }
     }
 
+    /// Validate a free-form display string (displayName, version,
+    /// description). Rejects ANSI escape sequences + control
+    /// characters that would let a hostile manifest hijack the
+    /// operator's terminal when `installed-list` renders it.
+    ///
+    /// Allowed: printable Unicode (letters, digits, punctuation,
+    /// whitespace = space + tab). Disallowed: ASCII control 0x00-
+    /// 0x1F (except 0x20 + 0x09), 0x7F. Caps length at `maxChars`.
+    public static func validateDisplayString(
+        _ value: String,
+        field: String,
+        maxChars: Int = 256
+    ) throws {
+        guard value.count <= maxChars else {
+            throw InstallError.invalidPluginID(
+                message: "\(field) exceeds \(maxChars) chars"
+            )
+        }
+        for scalar in value.unicodeScalars {
+            let v = scalar.value
+            // Allow space (0x20) and tab (0x09). Reject everything
+            // else under 0x20, plus DEL (0x7F). Range 0x80-0x9F
+            // contains "C1" control codes (less commonly weaponized
+            // but still control). Strict mode: reject those too.
+            let isAsciiPrintable = v >= 0x20 && v != 0x7F
+            let isTab = v == 0x09
+            // C1 controls (Unicode 0x80-0x9F): reject.
+            let isC1Control = v >= 0x80 && v <= 0x9F
+            if isC1Control {
+                throw InstallError.invalidPluginID(
+                    message: "\(field) contains C1 control char U+\(String(v, radix: 16, uppercase: true))"
+                )
+            }
+            if !(isAsciiPrintable || isTab || v > 0x9F) {
+                throw InstallError.invalidPluginID(
+                    message: "\(field) contains control char U+\(String(v, radix: 16, uppercase: true))"
+                )
+            }
+        }
+    }
+
+    /// Validate a manifest-declared path entry (member of
+    /// fileReadSubpaths / fileWriteSubpaths). Rejects newlines /
+    /// quotes / parens / control chars that could break out of
+    /// SBPL string literals; rejects relative paths; caps length.
+    public static func validateSandboxPath(
+        _ path: String,
+        field: String,
+        maxChars: Int = 1024
+    ) throws {
+        guard !path.isEmpty else {
+            throw InstallError.invalidPluginID(
+                message: "\(field) entry is empty"
+            )
+        }
+        guard path.count <= maxChars else {
+            throw InstallError.invalidPluginID(
+                message: "\(field) entry exceeds \(maxChars) chars"
+            )
+        }
+        guard path.hasPrefix("/") else {
+            throw InstallError.invalidPluginID(
+                message: "\(field) entry must be absolute path (starts with /): \(path)"
+            )
+        }
+        // Reject `..` segments (path traversal in deny/allow rules).
+        let segments = path.split(separator: "/", omittingEmptySubsequences: true)
+        for seg in segments where seg == ".." {
+            throw InstallError.invalidPluginID(
+                message: "\(field) entry contains '..' segment: \(path)"
+            )
+        }
+        // No control chars (newlines, tabs, etc.) — these can
+        // close out the SBPL string literal in the profile.
+        for scalar in path.unicodeScalars {
+            let v = scalar.value
+            if v < 0x20 || v == 0x7F || (v >= 0x80 && v <= 0x9F) {
+                throw InstallError.invalidPluginID(
+                    message: "\(field) entry contains control char U+\(String(v, radix: 16, uppercase: true)): \(path)"
+                )
+            }
+        }
+    }
+
+    /// Validate the full manifest payload as parsed from
+    /// manifest.json. Runs validatePluginID + validateDisplayString
+    /// + validateSandboxPath across every field. Called before
+    /// signature verification so an attacker can't supply a
+    /// manifest with a hostile name + dummy binary + wait for the
+    /// installer to render the name in installed-list before the
+    /// signature mismatch is caught.
+    public static func validateManifest(_ json: [String: Any]) throws {
+        guard let id = json["id"] as? String else {
+            throw InstallError.missingPluginID
+        }
+        try validatePluginID(id)
+        if let s = json["displayName"] as? String {
+            try validateDisplayString(s, field: "displayName")
+        }
+        if let s = json["version"] as? String {
+            try validateDisplayString(s, field: "version", maxChars: 64)
+        }
+        if let s = json["description"] as? String {
+            try validateDisplayString(s, field: "description", maxChars: 1024)
+        }
+        if let arr = json["fileReadSubpaths"] as? [String] {
+            for p in arr { try validateSandboxPath(p, field: "fileReadSubpaths") }
+        }
+        if let arr = json["fileWriteSubpaths"] as? [String] {
+            for p in arr { try validateSandboxPath(p, field: "fileWriteSubpaths") }
+        }
+        if let arr = json["networkConnectAllowlist"] as? [String] {
+            for endpoint in arr {
+                // Looser shape — just reject control chars + cap
+                // length. Allowlist entries are host:port-style;
+                // can't enforce more without a parser.
+                try validateDisplayString(endpoint, field: "networkConnectAllowlist", maxChars: 256)
+            }
+        }
+    }
+
     private let pluginsRoot: URL
 
     public init(pluginsRoot: URL? = nil) {
@@ -135,10 +256,13 @@ public actor PluginInstaller {
         guard let obj = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any] else {
             throw InstallError.manifestUnreadable(message: "manifest is not valid JSON")
         }
+        // Full manifest validation before signature check so
+        // hostile field values can't slip into the install dir
+        // even briefly.
+        try Self.validateManifest(obj)
         guard let pluginID = obj["id"] as? String, !pluginID.isEmpty else {
             throw InstallError.missingPluginID
         }
-        try Self.validatePluginID(pluginID)
         // Source bundle must not contain symlinks. The
         // signature was computed against the bytes the verifier
         // sees — if the source has a symlink to /etc/passwd,
