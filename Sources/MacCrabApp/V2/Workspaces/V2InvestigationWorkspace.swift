@@ -212,6 +212,7 @@ struct V2InvestigationWorkspace: View {
         // v1.13b — Mac Context Plugin Platform read-only surfaces.
         case .investigationForensicsCases:     V2ForensicsCasesView()
         case .investigationForensicsPlugins:   V2ForensicsPluginsView()
+        case .investigationForensicsTierB:     V2ForensicsTierBView()
         case .investigationForensicsArtifacts: V2ForensicsArtifactsView()
         case .investigationForensicsFindings:  V2ForensicsFindingsView()
         default: traceGraphTab

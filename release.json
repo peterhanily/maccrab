@@ -1,12 +1,16 @@
 {
-  "version": "1.16.0-rc.20",
-  "release_date": "2026-05-21T00:00:00Z",
+  "version": "1.16.0-rc.21",
+  "release_date": "2026-05-21T22:25:23Z",
   "rules": 481,
   "tests": 1863,
   "test_suites": 345,
-  "release_channel": "rc",
-  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.20",
+  "dmg": {
+    "filename": "MacCrab-v1.16.0-rc.21.dmg",
+    "url": "https://github.com/peterhanily/maccrab/releases/download/v1.16.0-rc.21/MacCrab-v1.16.0-rc.21.dmg",
+    "sha256": "54c9f4f75776188e79c8ea2df0fbbd5508842177c147c10bcd99068063bcd675",
+    "size_bytes": 91319643
+  },
+  "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.16.0-rc.21",
   "appcast_url": "https://maccrab.com/appcast.xml",
-  "min_macos": "13.0",
-  "comment": "v1.16 Tier B plugin platform: install + verify + trust + revoke + daemon-status, Ed25519 manifest signing, MCFP Wilson CI + cross-family separation, manifest validators + symlink rejection + trust-list 0o600. Spawn surface remains research-only. 29 RC tags."
+  "min_macos": "13.0"
 }

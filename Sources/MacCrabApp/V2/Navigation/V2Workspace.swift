@@ -76,6 +76,7 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
                                      .investigationAIAnalysis,
                                      .investigationForensicsCases,
                                      .investigationForensicsPlugins,
+                                     .investigationForensicsTierB,
                                      .investigationForensicsArtifacts,
                                      .investigationForensicsFindings]
         case .detection:     return [.detectionRules, .detectionAIGuard, .detectionBrowser,
@@ -108,6 +109,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
     // Investigation → Forensics (v1.13b — Mac Context Plugin Platform).
     case investigationForensicsCases
     case investigationForensicsPlugins
+    case investigationForensicsTierB
     case investigationForensicsArtifacts
     case investigationForensicsFindings
 
@@ -143,6 +145,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationAIAnalysis:        return String(localized: "workspaceTab.investigation.aiAnalysis",     defaultValue: "AI Analysis")
         case .investigationForensicsCases:    return String(localized: "workspaceTab.investigation.forensicsCases", defaultValue: "Forensics · Cases")
         case .investigationForensicsPlugins:  return String(localized: "workspaceTab.investigation.forensicsPlugins", defaultValue: "Forensics · Plugins")
+        case .investigationForensicsTierB:    return String(localized: "workspaceTab.investigation.forensicsTierB", defaultValue: "Forensics · Tier B")
         case .investigationForensicsArtifacts: return String(localized: "workspaceTab.investigation.forensicsArtifacts", defaultValue: "Forensics · Artifacts")
         case .investigationForensicsFindings: return String(localized: "workspaceTab.investigation.forensicsFindings", defaultValue: "Forensics · Findings")
         case .detectionRules:                 return String(localized: "workspaceTab.detection.rules",              defaultValue: "Rules")
@@ -166,6 +169,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationTraceGraph, .investigationAgentTraces,
              .investigationAIAnalysis,
              .investigationForensicsCases, .investigationForensicsPlugins,
+             .investigationForensicsTierB,
              .investigationForensicsArtifacts, .investigationForensicsFindings:
             return .investigation
         case .detectionRules, .detectionAIGuard, .detectionBrowser,
