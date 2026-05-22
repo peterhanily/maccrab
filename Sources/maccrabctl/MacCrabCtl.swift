@@ -280,9 +280,21 @@ struct MacCrabCtl {
             }
         case "case":
             // v1.13a-1 Mac Context Plugin Platform — case lifecycle.
+            // v1.17 deprecation: 'case' renamed to 'scan'. Alias
+            // continues to work through v1.18; removed v1.19.
+            printScanAliasWarning("case")
             await dispatchCase(args: Array(args.dropFirst(2)))
+        case "scan":
+            // v1.17 — customer-shaped rename of 'case'. Per
+            // docs/forensics-ia-redesign-plan.md §4.2.
+            await dispatchScan(args: Array(args.dropFirst(2)))
+        case "evidence":
+            // v1.17 — operator-facing namespace for artifact
+            // export + search. Per plan §4.2.
+            await dispatchEvidence(args: Array(args.dropFirst(2)))
         case "plugin":
             // v1.13a-1 Mac Context Plugin Platform — plugin runtime.
+            // v1.17 adds search/info/update/pin/verify/status.
             await dispatchPlugin(args: Array(args.dropFirst(2)))
         case "fingerprint":
             // v1.14-1 — MCFP v1 static fingerprint.

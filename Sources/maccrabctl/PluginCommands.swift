@@ -16,7 +16,7 @@ func dispatchPlugin(args: [String]) async {
         try await MacCrabForensicsBootstrap.registerBuiltins()
         switch sub {
         case "list":
-            await pluginList()
+            await pluginList(args: rest)
         case "info":
             try await pluginInfo(args: rest)
         case "run":
@@ -26,6 +26,7 @@ func dispatchPlugin(args: [String]) async {
         case "uninstall":
             try await pluginUninstall(args: rest)
         case "installed-list":
+            printPluginAliasWarning("installed-list", "list --filter installed")
             try await pluginInstalledList()
         case "trust":
             try await pluginTrust(args: rest)
@@ -34,9 +35,25 @@ func dispatchPlugin(args: [String]) async {
         case "trust-list":
             try await pluginTrustList()
         case "verify-all":
+            printPluginAliasWarning("verify-all", "verify")
+            try await pluginVerifyAll()
+        case "verify":
+            // v1.17 — `verify` covers all-installed by default;
+            // future: `verify <plugin-id>` for a single plugin.
             try await pluginVerifyAll()
         case "daemon-status":
+            printPluginAliasWarning("daemon-status", "status")
             try await pluginDaemonStatus()
+        case "status":
+            try await pluginDaemonStatus()
+        // v1.17 rc.1: store-side commands. Stubbed until rc.4
+        // brings up the rave catalog fetcher + Sigstore verifier.
+        case "search":
+            try await pluginSearchStub(args: rest)
+        case "update":
+            try await pluginUpdateStub(args: rest)
+        case "pin":
+            try await pluginPinStub(args: rest)
         case "help", "-h", "--help":
             printPluginUsage()
         default:
@@ -57,62 +74,155 @@ func printPluginUsage() {
     print("""
     Usage: maccrabctl plugin <subcommand>
 
-    Subcommands:
-      list                            List registered plugins.
-      info <plugin-id>                Show manifest detail for one plugin.
-      run <plugin-id> --case <id>     Invoke a plugin against a case.
-        [--window <dur>]              Optional time window (e.g. --window 24h).
-        [--since YYYY-MM-DD]          Open-ended time window.
-      install <bundle-dir>            Install a signed Tier B plugin bundle.
-        [--trust-on-install]          Add bundle's publisher key to trust list.
-        [--force]                     Overwrite if already installed.
-      uninstall <plugin-id>           Remove an installed Tier B plugin.
-      installed-list                  List installed Tier B plugins.
-      trust <key-hex>                 Add a publisher public key (64-hex
-                                      / 32 bytes) to the trust store.
-      revoke <key-hex>                Revoke a publisher key (preempts trust
-                                      list; refused at install + load).
-      trust-list                      Show trusted + revoked publisher keys.
-      verify-all                      Verify every installed Tier B plugin
-                                      against the current trust/revocation lists.
-      daemon-status                   Structured summary of the verified plugin
-                                      set, trust + revocation list sizes,
-                                      plugins root path, and last-verified
-                                      timestamp. Use to confirm the daemon
-                                      sees the installed plugins.
+    Browse, install, manage, and audit MacCrab plugins.
 
-    Tier B subprocess spawn (`run-tierb`, `run-installed`,
-    `run-all-installed`) is a research-only surface and remains
-    on the `research/post-v15` branch. v1.16 ships the install +
-    verify + trust chain; spawn enforcement ships when XPC
-    service bundling lands.
+    Subcommands:
+      list [--filter built-in|installed|all]
+                                      List plugins. Default: all.
+      info <plugin-id>                Show manifest detail.
+      search "<query>"                Search the rave catalog at maccrab.com/rave/.
+                                      (Catalog fetcher lands v1.17.0-rc.4.)
+      install <bundle-dir>            Install a signed plugin bundle.
+        [--trust-on-install]          Trust this publisher for future installs.
+        [--force]                     Overwrite if already installed.
+      install <plugin-id>             Install from the rave catalog.
+                                      (Catalog install lands v1.17.0-rc.4.)
+        [--channel official|community] Default: official.
+        [--version <semver>]          Pin to a specific version.
+      install --local <path>          Sideload an unvetted local bundle.
+                                      Persistent "Sideloaded · Unverified" badge.
+      update <plugin-id>              Update to the catalog's current_version.
+                                      [--yes] permitted ONLY for patch updates
+                                      with no capability / TCC / network /
+                                      privacy / signing-identity change.
+      pin <plugin-id>                 Freeze at current installed version.
+      uninstall <plugin-id>           Remove an installed plugin.
+      verify [<plugin-id>]            Verify all installed (or one by id) against
+                                      the current trust + revocation lists.
+      status                          Structured summary: plugins root,
+                                      trusted/revoked counts, verified/failed
+                                      buckets, last-verified timestamp.
+      trust <key-hex>                 Add a publisher public key (64-hex / 32 bytes).
+      revoke <key-hex>                Revoke a publisher key (preempts trust).
+      trust-list                      Show trusted + revoked publisher keys.
+      run <plugin-id> --case <id>     Invoke a built-in plugin against a case.
+
+    Renamed in v1.17 (aliases work through v1.18, removed v1.19):
+      installed-list  → list --filter installed
+      verify-all      → verify
+      daemon-status   → status
+
+    Third-party plugin Run is disabled until subprocess spawn ships
+    in a future release (rave Phase 1 dependency). Built-in (Tier A)
+    Run via `maccrabctl plugin run` continues to work as today.
     """)
 }
 
-private func pluginList() async {
-    let manifests = await PluginRegistry.shared.manifests()
-    guard !manifests.isEmpty else {
-        print("No plugins registered.")
-        return
+private func pluginList(args: [String] = []) async {
+    // v1.17 — `--filter built-in|installed|all` lets operators
+    // separate first-party (Tier A) plugins from third-party
+    // (installed via PluginInstaller). Default is `all`.
+    var filter: String = "all"
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--filter" where i + 1 < args.count:
+            filter = args[i + 1]; i += 2
+        default:
+            i += 1
+        }
     }
-    let idWidth = max(manifests.map { $0.id.count }.max() ?? 0, "ID".count)
-    let typeWidth = "fingerprinter".count
-    let stabilityWidth = "stability".count
-    print(rowAligned([
-        ("ID", idWidth),
-        ("Type", typeWidth),
-        ("Version", 9),
-        ("Stability", stabilityWidth),
-    ]))
-    print(String(repeating: "-", count: idWidth + typeWidth + 9 + stabilityWidth + 6))
-    for m in manifests {
-        print(rowAligned([
-            (m.id, idWidth),
-            (m.type.rawValue, typeWidth),
-            (m.version, 9),
-            (m.stability.rawValue, stabilityWidth),
-        ]))
+    let showBuiltIn = filter == "all" || filter == "built-in"
+    let showInstalled = filter == "all" || filter == "installed"
+
+    if showBuiltIn {
+        let manifests = await PluginRegistry.shared.manifests()
+        if manifests.isEmpty {
+            print("No built-in plugins registered.")
+        } else {
+            print("Built-in plugins:")
+            let idWidth = max(manifests.map { $0.id.count }.max() ?? 0, "ID".count)
+            let typeWidth = "fingerprinter".count
+            let stabilityWidth = "stability".count
+            print(rowAligned([
+                ("ID", idWidth),
+                ("Type", typeWidth),
+                ("Version", 9),
+                ("Stability", stabilityWidth),
+            ]))
+            print(String(repeating: "-", count: idWidth + typeWidth + 9 + stabilityWidth + 6))
+            for m in manifests {
+                print(rowAligned([
+                    (m.id, idWidth),
+                    (m.type.rawValue, typeWidth),
+                    (m.version, 9),
+                    (m.stability.rawValue, stabilityWidth),
+                ]))
+            }
+            if showInstalled { print("") }
+        }
     }
+    if showInstalled {
+        do {
+            let installer = PluginInstaller()
+            let installed = try await installer.list()
+            if installed.isEmpty {
+                if filter == "installed" {
+                    print("No third-party plugins installed.")
+                }
+                // Don't double-print under filter=all if there are none
+            } else {
+                print("Installed third-party plugins:")
+                for p in installed {
+                    print("  \(p.pluginID)  key=\(p.publicKeyHex.prefix(16))…")
+                    print("    Root: \(p.installRoot)")
+                }
+            }
+        } catch {
+            print("(could not list installed plugins: \(error))")
+        }
+    }
+}
+
+/// Emit a deprecation hint when an operator hits an old plugin
+/// subcommand name. v1.17 renames a few without breaking aliases.
+func printPluginAliasWarning(_ oldName: String, _ newName: String) {
+    let msg = "WARNING: 'maccrabctl plugin \(oldName)' is renamed 'maccrabctl plugin \(newName)' in v1.17. Aliases work through v1.18; removed in v1.19.\n"
+    FileHandle.standardError.write(Data(msg.utf8))
+}
+
+// MARK: - v1.17 rc.1 store stubs
+//
+// search/update/pin all touch the rave catalog at maccrab.com/rave/,
+// which doesn't yet have a publicly served catalog index. These
+// stubs return a clear "lands in rc.4" message so operators
+// (and any scripts) get a documented signal.
+
+private func pluginSearchStub(args: [String]) async throws {
+    let q = args.first ?? ""
+    print("plugin search: catalog lookup lands in v1.17.0-rc.4.")
+    print("Until then: maccrabctl plugin list --filter installed (for local).")
+    print("Search query was: \(q.isEmpty ? "(none)" : q)")
+    exit(2)
+}
+
+private func pluginUpdateStub(args: [String]) async throws {
+    guard let id = args.first else {
+        print("Usage: maccrabctl plugin update <plugin-id> [--yes]")
+        exit(1)
+    }
+    print("plugin update: catalog lookup lands in v1.17.0-rc.4. (plugin-id: \(id))")
+    print("Until then: reinstall manually via maccrabctl plugin install <bundle>.")
+    exit(2)
+}
+
+private func pluginPinStub(args: [String]) async throws {
+    guard let id = args.first else {
+        print("Usage: maccrabctl plugin pin <plugin-id>")
+        exit(1)
+    }
+    print("plugin pin: version pinning lands in v1.17.0-rc.4 alongside catalog lookup. (plugin-id: \(id))")
+    exit(2)
 }
 
 private func pluginInfo(args: [String]) async throws {
