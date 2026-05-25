@@ -45,11 +45,19 @@ public final class KitRunner: ObservableObject {
             // Create the scan (case) — auto-named from kit + now.
             let mgr = makeCaseManager()
             let scanName = "\(kit.name) — \(Date().formatted(date: .abbreviated, time: .shortened))"
+            // rc.5 — default kit-driven scans to plaintext so the
+            // operator doesn't get Keychain password prompts on
+            // every Run click. Built-in kit collectors only emit
+            // metadata-class artifacts (TCC inventory, launch agent
+            // inventory, /etc/hosts baseline), so the audit Pass
+            // 2026-D restriction is naturally satisfied. Operators
+            // who want encrypted scans (for content-class kits)
+            // can opt in via the future Custom Scan sheet (rc.6).
             let handle = try await mgr.createCase(
                 name: scanName,
                 timeWindow: nil,
                 notes: "Auto-created from kit: \(kit.id)",
-                encrypted: true
+                encrypted: false
             )
             let runner = PluginRunner()
 

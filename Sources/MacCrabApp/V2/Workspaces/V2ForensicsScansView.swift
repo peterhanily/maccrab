@@ -14,6 +14,12 @@ struct V2ForensicsScansView: View {
     @State private var scans: [CaseManifest] = []
     @State private var loading = true
     @State private var kits: [Kit] = []
+    @State private var openScanID: String? = nil
+
+    private var openScan: CaseManifest? {
+        guard let id = openScanID else { return nil }
+        return scans.first { $0.id == id }
+    }
 
     var body: some View {
         ScrollView {
@@ -44,6 +50,23 @@ struct V2ForensicsScansView: View {
             // appears in the timeline.
             if case .done = runner.state {
                 Task { await reload() }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { openScanID != nil },
+            set: { if !$0 { openScanID = nil } }
+        )) {
+            if let scan = openScan {
+                V2ForensicsScanDetailView(
+                    scanID: scan.id,
+                    scanName: scan.name,
+                    encryptionState: scan.encryptionState,
+                    createdAt: scan.createdAt,
+                    isPresented: Binding(
+                        get: { openScanID != nil },
+                        set: { if !$0 { openScanID = nil } }
+                    )
+                )
             }
         }
     }
@@ -239,22 +262,33 @@ struct V2ForensicsScansView: View {
     }
 
     private func pastScanRow(_ scan: CaseManifest) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(scan.name)
-                    .font(.system(size: 13, weight: .semibold))
-                Text(timeAgo(scan.createdAt))
+        Button {
+            openScanID = scan.id
+        } label: {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(scan.name)
+                        .font(.system(size: 13, weight: .semibold))
+                    HStack(spacing: 6) {
+                        Text(timeAgo(scan.createdAt))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        if scan.encryptionState != .plaintext {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Spacer()
+                Text("View")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tint)
             }
-            Spacer()
-            // Finding count placeholder — rc.6 wires the real count
-            Text("View")
-                .font(.system(size: 11))
-                .foregroundStyle(.tint)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
+        .buttonStyle(.plain)
     }
 
     private func kitCardCompact(_ kit: Kit) -> some View {

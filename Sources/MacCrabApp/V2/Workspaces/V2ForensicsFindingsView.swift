@@ -93,7 +93,12 @@ struct V2ForensicsFindingsView: View {
 
     private func reload() async {
         loading = true
-        // Aggregate artifacts across all operator-visible scans.
+        // Aggregate artifacts across operator-visible PLAINTEXT
+        // scans only. Encrypted scans require Keychain unlock,
+        // which fires a macOS password prompt — we never trigger
+        // those from a passive dashboard refresh. The operator
+        // unlocks an encrypted scan explicitly by clicking it
+        // in the Scans tab.
         var all: [CommittedArtifact] = []
         do {
             let mgr = CaseManager(
@@ -103,7 +108,7 @@ struct V2ForensicsFindingsView: View {
             let scans = OperatorVisibilityFilter.filter(
                 try await mgr.listCases().sorted { $0.createdAt > $1.createdAt }
             )
-            for scan in scans.prefix(20) {
+            for scan in scans.prefix(20) where scan.encryptionState == .plaintext {
                 let handle = try await mgr.openCase(id: scan.id)
                 let rows = try await handle.store.query(ArtifactQuery(
                     caseID: scan.id,
