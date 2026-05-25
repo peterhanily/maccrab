@@ -30,7 +30,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-VERSION="${VERSION:-1.0.0}"
+# Default to the latest annotated git tag (strip leading 'v') so
+# we never accidentally ship MacCrab-v1.0.0.dmg when the operator
+# forgets to pass VERSION=. Falls back to 1.0.0 only if there are
+# no tags at all (fresh clone, dev sandbox).
+DEFAULT_VERSION="$(cd "$PROJECT_DIR" && git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
+VERSION="${VERSION:-${DEFAULT_VERSION:-1.0.0}}"
 
 # v1.10.0 audit fix: derive a unique CFBundleVersion (build number)
 # per build so sysextd can tell two builds of the same VERSION apart

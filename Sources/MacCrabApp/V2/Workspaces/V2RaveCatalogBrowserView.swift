@@ -1,11 +1,15 @@
-// V2RaveCatalogBrowserSheet.swift — rc.8 full-bleed store.
+// V2RaveCatalogBrowserView.swift — rc.9 in-workspace catalog panel.
 //
-// Bambu-Studio-shape browse experience:
-//   - Hero header with catalog source + last-updated
+// Bambu-Studio-shape browse experience, now mounted as the third
+// Forensics tab (Scans / Findings / Catalog) instead of a buried
+// Settings sheet.
+//
+// Layout:
+//   - Hero header with catalog source + refresh
 //   - Left sidebar: All / Featured / Categories
 //   - Center grid: plugin cards with icon + name + tags
 //   - Right detail panel when a card is selected: description,
-//     screenshots, what it does, install command
+//     install command
 //
 // Source data is RaveCatalogClient (Ed25519-verified fetch).
 // Rich fields (icon URL, screenshots, long description) are
@@ -14,9 +18,7 @@
 
 import SwiftUI
 
-struct V2RaveCatalogBrowserSheet: View {
-    @Binding var isPresented: Bool
-
+struct V2RaveCatalogBrowserView: View {
     @State private var entries: [RaveCatalogEntry] = []
     @State private var loading = true
     @State private var error: String? = nil
@@ -65,7 +67,7 @@ struct V2RaveCatalogBrowserSheet: View {
                 }
             }
         }
-        .frame(minWidth: 980, minHeight: 600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { await reload() }
     }
 
@@ -93,8 +95,6 @@ struct V2RaveCatalogBrowserSheet: View {
                 Image(systemName: "arrow.clockwise")
             }
             .help("Refresh")
-            Button("Close") { isPresented = false }
-                .keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 20).padding(.vertical, 16)
     }

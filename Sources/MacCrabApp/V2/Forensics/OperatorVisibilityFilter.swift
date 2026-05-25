@@ -66,7 +66,11 @@ public enum OperatorVisibilityFilter {
 
     /// Filter for CaseManifest entries. Used by Scans tab.
     public static func filter(_ scans: [CaseManifest]) -> [CaseManifest] {
-        scans.filter { isOperatorVisible(scanName: $0.name) }
+        let hidden = HiddenScans.ids
+        return scans.filter { scan in
+            if hidden.contains(scan.id) { return false }
+            return isOperatorVisible(scanName: scan.name)
+        }
     }
 
     /// Filter for CommittedArtifact entries. Used by Evidence
@@ -76,5 +80,36 @@ public enum OperatorVisibilityFilter {
             isOperatorVisible(contentType: $0.record.contentType,
                               pluginID: $0.record.pluginID)
         }
+    }
+}
+
+/// Operator-driven hide list for scans they've dismissed from
+/// the past-scans timeline. UserDefaults-backed so it persists
+/// across launches but never touches the on-disk case data —
+/// the operator can always restore via maccrabctl or by clearing
+/// the hide list from settings.
+public enum HiddenScans {
+    private static let key = "forensics.hiddenScanIDs"
+
+    /// Comma-joined set of dismissed scan IDs.
+    public static var ids: Set<String> {
+        let raw = UserDefaults.standard.string(forKey: key) ?? ""
+        return Set(raw.split(separator: ",").map(String.init))
+    }
+
+    public static func hide(_ scanID: String) {
+        var set = ids
+        set.insert(scanID)
+        UserDefaults.standard.set(set.sorted().joined(separator: ","), forKey: key)
+    }
+
+    public static func restore(_ scanID: String) {
+        var set = ids
+        set.remove(scanID)
+        UserDefaults.standard.set(set.sorted().joined(separator: ","), forKey: key)
+    }
+
+    public static func clearAll() {
+        UserDefaults.standard.removeObject(forKey: key)
     }
 }

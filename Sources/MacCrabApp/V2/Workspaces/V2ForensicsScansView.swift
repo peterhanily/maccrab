@@ -1,10 +1,18 @@
-// V2ForensicsScansView.swift — rc.4 rebuild.
+// V2ForensicsScansView.swift — rc.9 reordered.
 //
-// Operator-shaped Scans tab. Kit-driven: empty state shows
-// 4 bundled kit cards (IR Quickstart / Phishing Triage /
-// Supply Chain Audit / AI Agent Posture). "Run" actually
-// runs the kit inline via KitRunner. No CLI dependency.
-// No modal-pretending-to-be-a-wizard.
+// Layout from top to bottom:
+//   1. Header
+//   2. Active runner banner (if any)
+//   3. Past scans (most recent first) — each row has a per-row
+//      dismiss action that hides it via HiddenScans
+//   4. "Run a new scan" — kit cards
+//
+// rc.9 changes vs rc.8:
+//   - Past scans surface ABOVE the kit picker (operator sees
+//     what they already did before being asked what to start)
+//   - Per-row dismiss via context menu + hover button
+//   - Single source of truth for kit cards (no duplicate render
+//     in empty-state vs scan-list state)
 
 import SwiftUI
 import MacCrabForensics
@@ -23,9 +31,11 @@ struct V2ForensicsScansView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 header
                 if case .running = runner.state {
+                    runningCard
+                } else if case .starting = runner.state {
                     runningCard
                 } else if case .done(let scanID, let kitName, let tally) = runner.state {
                     doneCard(scanID: scanID, kitName: kitName, tally: tally)
@@ -39,15 +49,14 @@ struct V2ForensicsScansView: View {
                 } else if scans.isEmpty {
                     emptyState
                 } else {
-                    scanList
+                    pastScansSection
                 }
+                runNewScanSection
             }
             .padding(20)
         }
         .task { await reload() }
         .onChange(of: runnerStateID) { _ in
-            // Reload past-scans list when a scan finishes so it
-            // appears in the timeline.
             if case .done = runner.state {
                 Task { await reload() }
             }
@@ -71,7 +80,7 @@ struct V2ForensicsScansView: View {
         }
     }
 
-    // Re-derive a stable Identifier from the runner state so
+    // Re-derive a stable identifier from the runner state so
     // onChange fires.
     private var runnerStateID: String {
         switch runner.state {
@@ -96,39 +105,145 @@ struct V2ForensicsScansView: View {
         }
     }
 
-    // MARK: - Empty state — kit cards
+    // MARK: - Empty state (no past scans)
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 6) {
             Text("You haven't run a scan yet.")
                 .font(.headline)
-            Text("Pick what kind of scan to run — each one is shaped for a specific situation.")
+            Text("Pick what kind of scan to run below — each one is shaped for a specific situation.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+        }
+        .padding(.top, 4)
+    }
 
+    // MARK: - Past scans
+
+    private var pastScansSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Past scans").font(.headline)
+                Spacer()
+                Text("\(scans.count) total")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            VStack(spacing: 0) {
+                ForEach(scans, id: \.id) { scan in
+                    pastScanRow(scan)
+                    if scan.id != scans.last?.id {
+                        Divider()
+                    }
+                }
+            }
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(8)
+        }
+    }
+
+    private func pastScanRow(_ scan: CaseManifest) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Button {
+                openScanID = scan.id
+            } label: {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(scan.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        HStack(spacing: 6) {
+                            Text(timeAgo(scan.createdAt))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            if scan.encryptionState != .plaintext {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Spacer()
+                    Text("View")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tint)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Menu {
+                Button {
+                    openScanID = scan.id
+                } label: {
+                    Label("Open", systemImage: "eye")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    HiddenScans.hide(scan.id)
+                    Task { await reload() }
+                } label: {
+                    Label("Dismiss from list", systemImage: "eye.slash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 28)
+            .help("Actions")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .contextMenu {
+            Button {
+                openScanID = scan.id
+            } label: {
+                Label("Open", systemImage: "eye")
+            }
+            Button(role: .destructive) {
+                HiddenScans.hide(scan.id)
+                Task { await reload() }
+            } label: {
+                Label("Dismiss from list", systemImage: "eye.slash")
+            }
+        }
+    }
+
+    // MARK: - Run a new scan (kits)
+
+    private var runNewScanSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(scans.isEmpty ? "Start a scan" : "Run a new scan")
+                    .font(.headline)
+                Spacer()
+                Text("\(kits.count) kit\(kits.count == 1 ? "" : "s")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
             VStack(spacing: 10) {
                 ForEach(kits, id: \.id) { kit in
                     kitCard(kit)
                 }
             }
-            .padding(.top, 6)
         }
     }
 
     private func kitCard(_ kit: Kit) -> some View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: kit.category.sfSymbol)
-                .font(.system(size: 24))
+                .font(.system(size: 22))
                 .foregroundStyle(.tint)
-                .frame(width: 32, alignment: .center)
-            VStack(alignment: .leading, spacing: 4) {
+                .frame(width: 28, alignment: .center)
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(kit.name)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                     Text(kit.category.displayName)
                         .font(.system(size: 10, weight: .medium))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
                         .background(Color.accentColor.opacity(0.15))
                         .foregroundStyle(.tint)
                         .cornerRadius(3)
@@ -254,82 +369,6 @@ struct V2ForensicsScansView: View {
         .cornerRadius(8)
     }
 
-    // MARK: - Non-empty — past scans
-
-    private var scanList: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Past scans")
-                    .font(.headline)
-                ForEach(scans, id: \.id) { scan in
-                    pastScanRow(scan)
-                    Divider()
-                }
-            }
-            Text("Run another scan")
-                .font(.system(size: 12, weight: .medium))
-                .padding(.top, 8)
-            VStack(spacing: 8) {
-                ForEach(kits, id: \.id) { kit in
-                    kitCardCompact(kit)
-                }
-            }
-        }
-    }
-
-    private func pastScanRow(_ scan: CaseManifest) -> some View {
-        Button {
-            openScanID = scan.id
-        } label: {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(scan.name)
-                        .font(.system(size: 13, weight: .semibold))
-                    HStack(spacing: 6) {
-                        Text(timeAgo(scan.createdAt))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                        if scan.encryptionState != .plaintext {
-                            Image(systemName: "lock.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                Spacer()
-                Text("View")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tint)
-            }
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func kitCardCompact(_ kit: Kit) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: kit.category.sfSymbol)
-                .foregroundStyle(.tint)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(kit.name).font(.system(size: 12, weight: .medium))
-                Text(kit.description)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            Button("Run") { Task { await runner.run(kit) } }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(isRunnerBusy)
-        }
-        .padding(8)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(6)
-    }
-
     // MARK: - Helpers
 
     private func timeAgo(_ d: Date) -> String {
@@ -368,4 +407,3 @@ struct V2ForensicsScansView: View {
         loading = false
     }
 }
-

@@ -83,7 +83,8 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
                                      .investigationForensicsArtifacts,
                                      .investigationForensicsFindings]
         case .forensics:     return [.forensicsScans,
-                                     .forensicsFindings]
+                                     .forensicsFindings,
+                                     .forensicsCatalog]
         case .detection:     return [.detectionRules, .detectionAIGuard, .detectionBrowser,
                                      .detectionMCP]
         case .prevention:    return []
@@ -125,6 +126,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
     //   forensicsFindings  actionable findings feed across all scans
     case forensicsScans
     case forensicsFindings
+    case forensicsCatalog
 
     // Detection
     case detectionRules
@@ -160,6 +162,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationForensicsPlugins:  return String(localized: "workspaceTab.investigation.forensicsPlugins", defaultValue: "Forensics · Plugins")
         case .forensicsScans:                 return String(localized: "workspaceTab.forensics.scans",    defaultValue: "Scans")
         case .forensicsFindings:              return String(localized: "workspaceTab.forensics.findings", defaultValue: "Findings")
+        case .forensicsCatalog:               return String(localized: "workspaceTab.forensics.catalog",  defaultValue: "Catalog")
         case .investigationForensicsArtifacts: return String(localized: "workspaceTab.investigation.forensicsArtifacts", defaultValue: "Forensics · Artifacts")
         case .investigationForensicsFindings: return String(localized: "workspaceTab.investigation.forensicsFindings", defaultValue: "Forensics · Findings")
         case .detectionRules:                 return String(localized: "workspaceTab.detection.rules",              defaultValue: "Rules")
@@ -185,7 +188,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
              .investigationForensicsCases, .investigationForensicsPlugins,
              .investigationForensicsArtifacts, .investigationForensicsFindings:
             return .investigation
-        case .forensicsScans, .forensicsFindings:
+        case .forensicsScans, .forensicsFindings, .forensicsCatalog:
             return .forensics
         case .detectionRules, .detectionAIGuard, .detectionBrowser,
              .detectionMCP:
