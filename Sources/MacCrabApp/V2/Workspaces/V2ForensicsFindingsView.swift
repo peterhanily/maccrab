@@ -18,6 +18,19 @@ struct V2ForensicsFindingsView: View {
     @State private var loading = true
     @State private var groups: [ScanGroup] = []
     @State private var scannerFilter: String = "all"
+    @State private var severityFilter: FindingSeverity? = nil
+    @State private var copiedFindingID: Int64? = nil
+    @AppStorage("forensics.seenFindingIDs") private var seenIDsRaw: String = ""
+
+    private var seenIDs: Set<String> {
+        get { Set(seenIDsRaw.split(separator: ",").map(String.init)) }
+    }
+    private func markSeen(_ id: Int64) {
+        var s = seenIDs
+        s.insert(String(id))
+        seenIDsRaw = s.sorted().joined(separator: ",")
+    }
+    private func isSeen(_ id: Int64) -> Bool { seenIDs.contains(String(id)) }
 
     /// All distinct scanners across groups, for the filter chip row.
     private var allScanners: [String] {
@@ -33,9 +46,15 @@ struct V2ForensicsFindingsView: View {
     }
 
     private var filteredGroups: [ScanGroup] {
-        guard scannerFilter != "all" else { return groups }
-        return groups.compactMap { g in
-            let filtered = g.findings.filter { $0.record.pluginID == scannerFilter }
+        groups.compactMap { g in
+            let filtered = g.findings.filter { a in
+                let scannerOK = scannerFilter == "all" || a.record.pluginID == scannerFilter
+                let sevOK: Bool = {
+                    guard let need = severityFilter else { return true }
+                    return FindingHeuristics.severity(for: a) == need
+                }()
+                return scannerOK && sevOK
+            }
             guard !filtered.isEmpty else { return nil }
             return ScanGroup(scanID: g.scanID, scanName: g.scanName, createdAt: g.createdAt, findings: filtered)
         }
@@ -52,6 +71,7 @@ struct V2ForensicsFindingsView: View {
                 } else if groups.isEmpty {
                     emptyState
                 } else {
+                    severitySummaryCard
                     if !allScanners.isEmpty {
                         scannerFilterBar
                     }
@@ -160,29 +180,133 @@ struct V2ForensicsFindingsView: View {
     }
 
     private func findingRow(_ a: CommittedArtifact) -> some View {
-        HStack(alignment: .top) {
-            Image(systemName: severityIcon(for: a))
+        let sev = FindingHeuristics.severity(for: a)
+        let seen = isSeen(a.id)
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: sev.sfSymbol)
                 .font(.system(size: 11))
-                .foregroundStyle(severityColor(for: a))
+                .foregroundStyle(color(for: sev))
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(a.record.summary ?? friendlyContentType(a.record.contentType))
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 12, weight: seen ? .regular : .medium))
+                    .foregroundStyle(seen ? .secondary : .primary)
                 HStack(spacing: 6) {
+                    Text(sev.displayName)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(color(for: sev))
+                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
                     Text(friendlyScannerName(a.record.pluginID))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
-                    Text("·")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
                     Text(a.record.observedAt.formatted(date: .omitted, time: .shortened))
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
             }
             Spacer()
+            Menu {
+                Button {
+                    copyAsJSON(a)
+                } label: {
+                    Label("Copy as JSON", systemImage: "doc.on.clipboard")
+                }
+                Button {
+                    markSeen(a.id)
+                } label: {
+                    Label(seen ? "Already marked seen" : "Mark seen", systemImage: seen ? "checkmark.circle" : "eye")
+                }
+                .disabled(seen)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 28)
+            .help("Actions")
         }
         .padding(.vertical, 4)
+        .overlay(alignment: .trailing) {
+            if copiedFindingID == a.id {
+                Text("Copied")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.green)
+                    .padding(.trailing, 36)
+            }
+        }
+    }
+
+    private func color(for sev: FindingSeverity) -> Color {
+        switch sev {
+        case .routine:   return .secondary
+        case .notable:   return .blue
+        case .attention: return .orange
+        case .critical:  return .red
+        }
+    }
+
+    private func copyAsJSON(_ a: CommittedArtifact) {
+        let dict: [String: Any] = [
+            "id": Int(a.id),
+            "case_id": a.record.caseID,
+            "plugin_id": a.record.pluginID,
+            "content_type": a.record.contentType,
+            "summary": a.record.summary ?? "",
+            "observed_at": ISO8601DateFormatter().string(from: a.record.observedAt),
+            "severity": FindingHeuristics.severity(for: a).rawValue,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
+           let s = String(data: data, encoding: .utf8) {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(s, forType: .string)
+            copiedFindingID = a.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                if copiedFindingID == a.id { copiedFindingID = nil }
+            }
+        }
+    }
+
+    private var severitySummaryCard: some View {
+        let allFindings = groups.flatMap { $0.findings }
+        let t = FindingHeuristics.tally(allFindings)
+        return HStack(spacing: 16) {
+            severityChip("Critical", t.critical, .red, value: .critical)
+            severityChip("Needs review", t.attention, .orange, value: .attention)
+            severityChip("Notable", t.notable, .blue, value: .notable)
+            severityChip("Inventoried", t.routine, .secondary, value: .routine)
+            Spacer()
+            if severityFilter != nil {
+                Button("Clear filter") { severityFilter = nil }
+                    .font(.system(size: 11))
+                    .buttonStyle(.borderless)
+            }
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private func severityChip(_ label: String, _ count: Int, _ color: Color, value: FindingSeverity) -> some View {
+        Button {
+            severityFilter = (severityFilter == value) ? nil : value
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(count)")
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundStyle(count == 0 ? Color.secondary.opacity(0.6) : color)
+                Text(label)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(8)
+            .background(severityFilter == value ? color.opacity(0.12) : Color.clear)
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .disabled(count == 0)
     }
 
     // MARK: - Plain-English mappers
@@ -219,25 +343,7 @@ struct V2ForensicsFindingsView: View {
         return map[ct] ?? ct.replacingOccurrences(of: ".", with: " · ").capitalized
     }
 
-    /// Heuristic severity by content type. Real severities come
-    /// from the posture analyzer (v1.18 finding type).
-    private func severityIcon(for a: CommittedArtifact) -> String {
-        let ct = a.record.contentType.lowercased()
-        if ct.contains("posture") || ct.contains("anomaly") {
-            return "exclamationmark.triangle.fill"
-        }
-        if ct.contains("permission") || ct.contains("launchd") || ct.contains("hosts") {
-            return "info.circle.fill"
-        }
-        return "circle.fill"
-    }
-
-    private func severityColor(for a: CommittedArtifact) -> Color {
-        let ct = a.record.contentType.lowercased()
-        if ct.contains("posture") || ct.contains("anomaly") { return .orange }
-        if ct.contains("permission") || ct.contains("launchd") || ct.contains("hosts") { return .blue }
-        return .secondary
-    }
+    // Severity now sourced from FindingHeuristics.swift.
 
     // MARK: - Loading
 

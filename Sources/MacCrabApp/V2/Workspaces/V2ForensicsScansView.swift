@@ -27,8 +27,8 @@ struct V2ForensicsScansView: View {
                 header
                 if case .running = runner.state {
                     runningCard
-                } else if case .done(let scanID, let kitName, let findings) = runner.state {
-                    doneCard(scanID: scanID, kitName: kitName, findings: findings)
+                } else if case .done(let scanID, let kitName, let tally) = runner.state {
+                    doneCard(scanID: scanID, kitName: kitName, tally: tally)
                 } else if case .failed(let kitName, let err) = runner.state {
                     failedCard(kitName: kitName, err: err)
                 }
@@ -78,7 +78,8 @@ struct V2ForensicsScansView: View {
         case .idle: return "idle"
         case .starting(let n): return "starting:\(n)"
         case .running(let n, let p, let c, let t): return "running:\(n):\(p):\(c)/\(t)"
-        case .done(let id, _, _): return "done:\(id)"
+        case .done(let id, _, let t):
+            return "done:\(id):\(t.routine)/\(t.notable)/\(t.attention)/\(t.critical)"
         case .failed(let n, _): return "failed:\(n)"
         }
     }
@@ -192,27 +193,42 @@ struct V2ForensicsScansView: View {
         }
     }
 
-    private func doneCard(scanID: String, kitName: String, findings: Int) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+    private func doneCard(scanID: String, kitName: String, tally: SeverityTally) -> some View {
+        let headlineColor: Color = tally.critical > 0 ? .red
+            : tally.attention > 0 ? .orange
+            : .green
+        let bgColor: Color = tally.critical > 0 ? Color.red.opacity(0.10)
+            : tally.attention > 0 ? Color.orange.opacity(0.10)
+            : Color.green.opacity(0.10)
+        let iconName: String = tally.critical > 0 ? "exclamationmark.octagon.fill"
+            : tally.attention > 0 ? "exclamationmark.triangle.fill"
+            : "checkmark.circle.fill"
+        return HStack(spacing: 10) {
+            Image(systemName: iconName)
+                .foregroundStyle(headlineColor)
                 .font(.system(size: 18))
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(kitName) finished")
                     .font(.system(size: 13, weight: .semibold))
-                Text("\(findings) finding\(findings == 1 ? "" : "s") collected.")
+                Text(tally.bannerSummary)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if tally.attention + tally.critical > 0 {
+                Button("Open findings") {
+                    openScanID = scanID
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
             Button("Dismiss") {
-                runner.objectWillChange.send()
                 runner.reset()
             }
             .buttonStyle(.borderless)
         }
         .padding(12)
-        .background(Color.green.opacity(0.10))
+        .background(bgColor)
         .cornerRadius(8)
     }
 

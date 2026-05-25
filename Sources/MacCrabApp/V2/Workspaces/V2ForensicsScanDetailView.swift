@@ -84,10 +84,18 @@ struct V2ForensicsScanDetailView: View {
     }
 
     private var summary: some View {
-        HStack(spacing: 24) {
-            metric("Evidence rows", "\(artifacts.count)")
-            metric("Scanners run", "\(distinctPluginIDs.count)")
-            metric("State", encryptionState == .plaintext ? "Plaintext (metadata only)" : "Encrypted")
+        let tally = FindingHeuristics.tally(artifacts)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 24) {
+                metric("Evidence rows", "\(artifacts.count)")
+                metric("Scanners run", "\(distinctPluginIDs.count)")
+                metric("State", encryptionState == .plaintext ? "Plaintext (metadata only)" : "Encrypted")
+            }
+            if !artifacts.isEmpty {
+                Text(tally.bannerSummary)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(tally.attention + tally.critical > 0 ? .orange : .secondary)
+            }
         }
     }
 
@@ -184,22 +192,40 @@ struct V2ForensicsScanDetailView: View {
     }
 
     private func evidenceRow(_ a: CommittedArtifact) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(a.record.summary ?? a.record.contentType)
-                .font(.system(size: 12, weight: .medium))
-            HStack(spacing: 6) {
-                Text(friendlyScannerName(a.record.pluginID))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text("·")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                Text(a.record.observedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+        let sev = FindingHeuristics.severity(for: a)
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: sev.sfSymbol)
+                .font(.system(size: 10))
+                .foregroundStyle(sevColor(sev))
+                .padding(.top, 3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(a.record.summary ?? a.record.contentType)
+                    .font(.system(size: 12, weight: .medium))
+                HStack(spacing: 6) {
+                    Text(sev.displayName)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(sevColor(sev))
+                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text(friendlyScannerName(a.record.pluginID))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text(a.record.observedAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func sevColor(_ s: FindingSeverity) -> Color {
+        switch s {
+        case .routine:   return .secondary
+        case .notable:   return .blue
+        case .attention: return .orange
+        case .critical:  return .red
+        }
     }
 
     private func friendlyScannerName(_ id: String) -> String {

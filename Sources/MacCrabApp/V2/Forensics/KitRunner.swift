@@ -22,7 +22,7 @@ public final class KitRunner: ObservableObject {
         case idle
         case starting(kitName: String)
         case running(kitName: String, currentPlugin: String, completed: Int, total: Int)
-        case done(scanID: String, kitName: String, findingCount: Int)
+        case done(scanID: String, kitName: String, tally: SeverityTally)
         case failed(kitName: String, error: String)
     }
 
@@ -89,7 +89,20 @@ public final class KitRunner: ObservableObject {
                     continue
                 }
             }
-            state = .done(scanID: handle.caseID, kitName: kit.name, findingCount: findingCount)
+            // Compute heuristic tally over what landed in the
+            // scan's store so the done banner can say
+            // "Inventoried 3, 1 needs review" instead of just
+            // counting raw rows.
+            let tally: SeverityTally
+            do {
+                let rows = try await handle.store.query(ArtifactQuery(
+                    caseID: handle.caseID, limit: 500
+                ))
+                tally = FindingHeuristics.tally(rows)
+            } catch {
+                tally = SeverityTally(routine: findingCount, notable: 0, attention: 0, critical: 0)
+            }
+            state = .done(scanID: handle.caseID, kitName: kit.name, tally: tally)
         } catch {
             state = .failed(kitName: kit.name, error: "\(error)")
         }
