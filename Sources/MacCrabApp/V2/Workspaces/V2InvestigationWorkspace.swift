@@ -211,9 +211,9 @@ struct V2InvestigationWorkspace: View {
         case .investigationAIAnalysis:        aiAnalysisTab
         // v1.13b — Mac Context Plugin Platform read-only surfaces.
         case .investigationForensicsCases:     forensicsMovedBanner(legacyTab: "Cases", newTab: .forensicsScans) { V2ForensicsCasesView() }
-        case .investigationForensicsPlugins:   forensicsMovedBanner(legacyTab: "Plugins", newTab: .forensicsPlugins) { V2ForensicsPluginsView() }
-        case .investigationForensicsArtifacts: forensicsMovedBanner(legacyTab: "Artifacts", newTab: .forensicsEvidence) { V2ForensicsArtifactsView() }
-        case .investigationForensicsFindings:  forensicsMovedBanner(legacyTab: "Findings", newTab: .forensicsScans) { V2ForensicsFindingsView() }
+        case .investigationForensicsPlugins:   forensicsMovedBanner(legacyTab: "Plugins", newTab: .forensicsScans) { V2ForensicsPluginsView() }
+        case .investigationForensicsArtifacts: forensicsMovedBanner(legacyTab: "Artifacts", newTab: .forensicsScans) { V2ForensicsArtifactsView() }
+        case .investigationForensicsFindings:  forensicsMovedBanner(legacyTab: "Findings", newTab: .forensicsFindings) { V2ForensicsLegacyFindingsView() }
         default: traceGraphTab
         }
     }

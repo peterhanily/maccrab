@@ -81,12 +81,18 @@ public enum V2DeepLink {
         path: String
     ) -> (workspaceRaw: String, pathRaw: String) {
         guard host == "investigation" else { return (host, path) }
+        // rc.4 — Forensics workspace collapsed to 2 tabs.
+        // All legacy investigation/forensics* + the rc.2/3
+        // forensics*Plugins / forensics*Evidence URLs land on
+        // either Scans (default for non-findings) or Findings.
         switch path.lowercased() {
         case "investigationforensicscases":     return ("forensics", "forensicsScans")
-        case "investigationforensicsplugins":   return ("forensics", "forensicsPlugins")
-        case "investigationforensicstierb":     return ("forensics", "forensicsPlugins")
-        case "investigationforensicsartifacts": return ("forensics", "forensicsEvidence")
-        case "investigationforensicsfindings":  return ("forensics", "forensicsScans")
+        case "investigationforensicsplugins":   return ("forensics", "forensicsScans")
+        case "investigationforensicstierb":     return ("forensics", "forensicsScans")
+        case "investigationforensicsartifacts": return ("forensics", "forensicsScans")
+        case "investigationforensicsfindings":  return ("forensics", "forensicsFindings")
+        case "forensicsplugins":                return ("forensics", "forensicsScans")
+        case "forensicsevidence":               return ("forensics", "forensicsScans")
         default:
             return (host, path)
         }

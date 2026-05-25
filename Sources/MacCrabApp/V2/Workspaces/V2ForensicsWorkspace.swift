@@ -65,8 +65,7 @@ struct V2ForensicsWorkspace: View {
     private var content: some View {
         switch currentTab {
         case .forensicsScans:    V2ForensicsScansView()
-        case .forensicsPlugins:  V2ForensicsPluginsTabView()
-        case .forensicsEvidence: V2ForensicsEvidenceView()
+        case .forensicsFindings: V2ForensicsFindingsView()
         default:                 V2ForensicsScansView()
         }
     }

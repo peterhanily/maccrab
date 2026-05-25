@@ -224,6 +224,16 @@ for arch in arm64-apple-macosx x86_64-apple-macosx; do
         break
     fi
 done
+# rc.4 — also copy the MacCrabApp resource bundle so bundled
+# rave kits + catalog signing key reach Bundle.main.resourceURL.
+for arch in arm64-apple-macosx x86_64-apple-macosx; do
+    SPM_APP_BUNDLE="$PROJECT_DIR/.build/$arch/release/MacCrab_MacCrabApp.bundle"
+    if [ -d "$SPM_APP_BUNDLE" ]; then
+        cp -R "$SPM_APP_BUNDLE" "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle"
+        echo "    ✓ Bundled MacCrab_MacCrabApp resource bundle ($arch) → Resources/"
+        break
+    fi
+done
 if [ ! -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
     echo "    ✗ WARNING: MacCrab_MacCrabCore.bundle not found in .build/*/release/"
     echo "      TyposquatDatabase will fall back to in-source starter corpus."

@@ -533,7 +533,7 @@ struct V2ForensicsArtifactsView: View {
 
 // MARK: - Findings (v1.15 posture.* artifacts)
 
-struct V2ForensicsFindingsView: View {
+struct V2ForensicsLegacyFindingsView: View {
     @State private var caseManifests: [CaseManifest] = []
     @State private var selectedCaseID: String?
     @State private var findings: [CommittedArtifact] = []

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://maccrab.com/rave/schemas/kit.json",
+
+  "id": "com.maccrab.kit.ir-quick",
+  "name": "IR Quickstart",
+  "description": "Triage kit for the first 60 minutes of an incident. Captures persistence baselines, recent process activity, and current network state. Designed to run end-to-end in under a minute and produce structured artifacts MacCrab's IR queue can import directly.",
+  "version": "0.0.1",
+  "maintainer": "peterhanily",
+  "category": "incident-response",
+  "min_maccrab_version": "1.16.0",
+
+  "plugins": [
+    {
+      "plugin_id": "com.maccrab.hosts-collector",
+      "min_version": "0.0.1",
+      "role": "Baseline /etc/hosts to detect domain redirection persistence",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.launch-agents-collector",
+      "min_version": "0.0.1",
+      "role": "Baseline ~/Library/LaunchAgents to detect the most common boot/login persistence vector",
+      "required": true
+    }
+  ],
+
+  "trust_tier": "first-party",
+  "created_at": "2026-05-21",
+  "updated_at": "2026-05-21"
+}

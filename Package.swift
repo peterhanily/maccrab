@@ -136,7 +136,7 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             resources: [
-                .process("Resources"),
+                .process("Resources", localization: nil),
             ]
         ),
         .executableTarget(

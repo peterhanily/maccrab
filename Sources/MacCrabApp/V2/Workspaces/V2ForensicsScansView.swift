@@ -1,25 +1,33 @@
-// V2ForensicsScansView.swift
-// MacCrabApp — v1.17 Forensics → Scans tab.
+// V2ForensicsScansView.swift — rc.4 rebuild.
 //
-// Per docs/forensics-ia-redesign-plan.md §3.3. Empty-state-first
-// design — the most important screen because new operators land
-// here. The "Start a scan" wizard ships in rc.3; rc.2 wires the
-// CTA stub.
+// Operator-shaped Scans tab. Kit-driven: empty state shows
+// 4 bundled kit cards (IR Quickstart / Phishing Triage /
+// Supply Chain Audit / AI Agent Posture). "Run" actually
+// runs the kit inline via KitRunner. No CLI dependency.
+// No modal-pretending-to-be-a-wizard.
 
 import SwiftUI
 import MacCrabForensics
 
 struct V2ForensicsScansView: View {
+    @StateObject private var runner = KitRunner()
     @State private var scans: [CaseManifest] = []
     @State private var loading = true
-    @State private var showingWizardStub = false
+    @State private var kits: [Kit] = []
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                if case .running = runner.state {
+                    runningCard
+                } else if case .done(let scanID, let kitName, let findings) = runner.state {
+                    doneCard(scanID: scanID, kitName: kitName, findings: findings)
+                } else if case .failed(let kitName, let err) = runner.state {
+                    failedCard(kitName: kitName, err: err)
+                }
                 if loading {
-                    ProgressView("Loading scans…")
+                    ProgressView("Loading…")
                         .frame(maxWidth: .infinity)
                         .padding(40)
                 } else if scans.isEmpty {
@@ -31,156 +39,283 @@ struct V2ForensicsScansView: View {
             .padding(20)
         }
         .task { await reload() }
-        .sheet(isPresented: $showingWizardStub) {
-            wizardStub
+        .onChange(of: runnerStateID) { _ in
+            // Reload past-scans list when a scan finishes so it
+            // appears in the timeline.
+            if case .done = runner.state {
+                Task { await reload() }
+            }
+        }
+    }
+
+    // Re-derive a stable Identifier from the runner state so
+    // onChange fires.
+    private var runnerStateID: String {
+        switch runner.state {
+        case .idle: return "idle"
+        case .starting(let n): return "starting:\(n)"
+        case .running(let n, let p, let c, let t): return "running:\(n):\(p):\(c)/\(t)"
+        case .done(let id, _, _): return "done:\(id)"
+        case .failed(let n, _): return "failed:\(n)"
         }
     }
 
     // MARK: - Header
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Scans")
-                    .font(.title2).fontWeight(.semibold)
-                Text("Run, schedule, and review scans of this Mac.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button {
-                showingWizardStub = true
-            } label: {
-                Label("Start a scan", systemImage: "play.fill")
-            }
-            .buttonStyle(.borderedProminent)
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Forensics")
+                .font(.title2).fontWeight(.semibold)
+            Text("Check this Mac for signs of compromise.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
         }
     }
 
-    // MARK: - Empty state
+    // MARK: - Empty state — kit cards
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("No scans yet")
-                        .font(.headline)
-                    Text("Start a scan to check this Mac for signs of compromise, misconfiguration, or unauthorized changes.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Divider()
-            Text("Each scan creates a record you can review, export, or share. Built-in plugins look at TCC permissions, launch agents, codesigning anomalies, and more. Third-party plugins add coverage from the maccrab.com/rave catalog.")
+            Text("You haven't run a scan yet.")
+                .font(.headline)
+            Text("Pick what kind of scan to run — each one is shaped for a specific situation.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .padding(.bottom, 4)
+
+            VStack(spacing: 10) {
+                ForEach(kits, id: \.id) { kit in
+                    kitCard(kit)
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private func kitCard(_ kit: Kit) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: kit.category.sfSymbol)
+                .font(.system(size: 24))
+                .foregroundStyle(.tint)
+                .frame(width: 32, alignment: .center)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(kit.name)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(kit.category.displayName)
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor.opacity(0.15))
+                        .foregroundStyle(.tint)
+                        .cornerRadius(3)
+                }
+                Text(kit.description)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Text("\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s")")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
             Button {
-                showingWizardStub = true
+                Task { await runner.run(kit) }
             } label: {
-                Label("Start your first scan", systemImage: "arrow.right.circle.fill")
+                Text("Run")
+                    .frame(minWidth: 60)
             }
             .buttonStyle(.borderedProminent)
+            .disabled(isRunnerBusy)
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
     }
 
-    // MARK: - Non-empty: scan list
+    private var isRunnerBusy: Bool {
+        switch runner.state {
+        case .starting, .running: return true
+        default: return false
+        }
+    }
 
-    private var scanList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(scans, id: \.id) { scan in
-                scanRow(scan)
-                Divider()
+    // MARK: - Runner status cards
+
+    private var runningCard: some View {
+        Group {
+            if case .running(let kitName, let currentPlugin, let completed, let total) = runner.state {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Running \(kitName)…").font(.system(size: 13, weight: .semibold))
+                    }
+                    Text("Scanner \(completed + 1) of \(total): \(friendlyScannerName(currentPlugin))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.accentColor.opacity(0.08))
+                .cornerRadius(8)
+            } else if case .starting(let n) = runner.state {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Starting \(n)…").font(.system(size: 13))
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.accentColor.opacity(0.08))
+                .cornerRadius(8)
             }
         }
     }
 
-    private func scanRow(_ scan: CaseManifest) -> some View {
+    private func doneCard(scanID: String, kitName: String, findings: Int) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.system(size: 18))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(kitName) finished")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(findings) finding\(findings == 1 ? "" : "s") collected.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Dismiss") {
+                runner.objectWillChange.send()
+                runner.reset()
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(12)
+        .background(Color.green.opacity(0.10))
+        .cornerRadius(8)
+    }
+
+    private func failedCard(kitName: String, err: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .font(.system(size: 18))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(kitName) failed")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(err)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            Spacer()
+            Button("Dismiss") { runner.reset() }
+                .buttonStyle(.borderless)
+        }
+        .padding(12)
+        .background(Color.red.opacity(0.08))
+        .cornerRadius(8)
+    }
+
+    // MARK: - Non-empty — past scans
+
+    private var scanList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Past scans")
+                    .font(.headline)
+                ForEach(scans, id: \.id) { scan in
+                    pastScanRow(scan)
+                    Divider()
+                }
+            }
+            Text("Run another scan")
+                .font(.system(size: 12, weight: .medium))
+                .padding(.top, 8)
+            VStack(spacing: 8) {
+                ForEach(kits, id: \.id) { kit in
+                    kitCardCompact(kit)
+                }
+            }
+        }
+    }
+
+    private func pastScanRow(_ scan: CaseManifest) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(scan.name)
                     .font(.system(size: 13, weight: .semibold))
-                HStack(spacing: 8) {
-                    Text(timeAgo(scan.createdAt))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    if scan.encryptionState == .plaintext {
-                        Text("Metadata only")
-                            .font(.system(size: 10))
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Color.orange.opacity(0.18))
-                            .foregroundColor(.orange)
-                            .cornerRadius(3)
-                    }
-                }
+                Text(timeAgo(scan.createdAt))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             Spacer()
+            // Finding count placeholder — rc.6 wires the real count
+            Text("View")
+                .font(.system(size: 11))
+                .foregroundStyle(.tint)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
-    /// Relative "5 minutes ago" / "yesterday" / "Mar 18, 2026"
-    /// rendering. Operators read at-a-glance recency, not exact
-    /// timestamps. Click-through detail view shows the precise
-    /// time (rc.3).
-    private func timeAgo(_ date: Date) -> String {
+    private func kitCardCompact(_ kit: Kit) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: kit.category.sfSymbol)
+                .foregroundStyle(.tint)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(kit.name).font(.system(size: 12, weight: .medium))
+                Text(kit.description)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button("Run") { Task { await runner.run(kit) } }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isRunnerBusy)
+        }
+        .padding(8)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(6)
+    }
+
+    // MARK: - Helpers
+
+    private func timeAgo(_ d: Date) -> String {
         let fmt = RelativeDateTimeFormatter()
         fmt.unitsStyle = .full
-        return "Started " + fmt.localizedString(for: date, relativeTo: Date())
+        return "Started " + fmt.localizedString(for: d, relativeTo: Date())
     }
 
-    // MARK: - Wizard stub (rc.3)
-
-    private var wizardStub: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 36))
-                .foregroundStyle(.tint)
-            Text("Start-a-scan wizard")
-                .font(.title2).fontWeight(.semibold)
-            Text("The guided wizard lands in v1.17.0-rc.3 alongside the unified plugin catalog. For now, use the CLI:")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 320)
-            Text("maccrabctl scan new \"my scan\" --reason routine")
-                .font(.system(size: 11, design: .monospaced))
-                .padding(8)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(4)
-                .textSelection(.enabled)
-            Button("Got it") { showingWizardStub = false }
-                .keyboardShortcut(.defaultAction)
-        }
-        .padding(28)
-        .frame(width: 420)
+    private func friendlyScannerName(_ id: String) -> String {
+        let map: [String: String] = [
+            "com.maccrab.hosts-collector":          "Hosts file baseline",
+            "com.maccrab.launch-agents-collector":  "Launch agents inventory",
+            "com.maccrab.forensics.tcc-lite":       "Privacy permissions",
+            "com.maccrab.forensics.launchd-lite":   "Launch items",
+            "com.maccrab.forensics.applescript-runtime": "AppleScript activity",
+            "com.maccrab.forensics.quarantine":     "Quarantined downloads",
+            "com.maccrab.forensics.posture":        "Security posture",
+        ]
+        return map[id] ?? id.split(separator: ".").last
+            .map { $0.replacingOccurrences(of: "-", with: " ").capitalized } ?? id
     }
-
-    // MARK: - Data
 
     private func reload() async {
         loading = true
+        kits = KitLoader.loadBundledKits()
         do {
-            let mgr = makeForensicsCaseManager()
-            let manifests = try await mgr.listCases()
-            scans = manifests
+            let mgr = CaseManager(
+                casesRoot: CaseDirectoryLayout.defaultCasesRoot,
+                dekVault: KeychainDEKVault()
+            )
+            let raw = try await mgr.listCases().sorted { $0.createdAt > $1.createdAt }
+            scans = OperatorVisibilityFilter.filter(raw)
         } catch {
             scans = []
         }
         loading = false
     }
-
-    private func makeForensicsCaseManager() -> CaseManager {
-        CaseManager(
-            casesRoot: CaseDirectoryLayout.defaultCasesRoot,
-            dekVault: KeychainDEKVault()
-        )
-    }
 }
+

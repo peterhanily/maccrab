@@ -85,9 +85,15 @@ func printPluginUsage() {
       install <bundle-dir>            Install a signed plugin bundle.
         [--trust-on-install]          Trust this publisher for future installs.
         [--force]                     Overwrite if already installed.
-      install <plugin-id>             Install from the rave catalog.
-                                      (Catalog install lands v1.17.0-rc.4.)
-        [--channel official|community] Default: official.
+      install <plugin-id>             Install from the rave catalog. Fetches
+                                      <catalog-base>/catalog.json + per-plugin
+                                      entry, verifies Ed25519 signatures
+                                      against the bundled rave catalog key,
+                                      downloads the bundle .zip, verifies
+                                      artifact_sha256, then delegates to the
+                                      local install + verify path.
+        [--catalog-base <url>]        Default: https://maccrab.com/rave/
+                                      (or env MACCRAB_RAVE_BASE_URL).
         [--version <semver>]          Pin to a specific version.
       install --local <path>          Sideload an unvetted local bundle.
                                       Persistent "Sideloaded · Unverified" badge.
@@ -404,25 +410,73 @@ private func pluginDaemonStatus() async throws {
 // MARK: - install / uninstall / trust list
 
 private func pluginInstall(args: [String]) async throws {
-    guard let sourceDir = args.first else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin install <bundle-dir> [--trust-on-install] [--force]")
+    guard let first = args.first else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin install <bundle-dir>|<plugin-id> [--trust-on-install] [--force] [--catalog-base <url>] [--version <ver>]")
     }
     var trustOnInstall = false
     var force = false
-    for arg in args.dropFirst() {
-        if arg == "--trust-on-install" { trustOnInstall = true }
-        if arg == "--force" { force = true }
+    var catalogBase: String?
+    var version: String?
+    var i = 1
+    while i < args.count {
+        let arg = args[i]
+        switch arg {
+        case "--trust-on-install":
+            trustOnInstall = true
+        case "--force":
+            force = true
+        case "--catalog-base":
+            i += 1
+            guard i < args.count else { throw CaseCommandError.usage("--catalog-base requires a URL") }
+            catalogBase = args[i]
+        case "--version":
+            i += 1
+            guard i < args.count else { throw CaseCommandError.usage("--version requires a version") }
+            version = args[i]
+        default:
+            break
+        }
+        i += 1
     }
-    let installer = PluginInstaller()
-    let installed = try await installer.install(
-        sourceDir: URL(fileURLWithPath: sourceDir),
-        trustOnInstall: trustOnInstall,
-        force: force
-    )
-    print("Installed Tier B plugin '\(installed.pluginID)'")
+
+    // Plugin-id (reverse-DNS, no slashes) → HTTP catalog-fetch path.
+    // Path / URL / anything-else → existing local bundle-dir path.
+    let installed: InstalledPlugin
+    if isLikelyPluginID(first) {
+        let base = catalogBase
+            ?? ProcessInfo.processInfo.environment["MACCRAB_RAVE_BASE_URL"]
+            ?? "https://maccrab.com/rave/"
+        let fetcher = try PluginCatalogFetcher(catalogBase: base)
+        installed = try await fetcher.installPluginByID(
+            pluginID: first,
+            version: version,
+            trustOnInstall: trustOnInstall,
+            force: force
+        )
+        print("Installed Tier B plugin '\(installed.pluginID)' from \(base)")
+    } else {
+        let installer = PluginInstaller()
+        installed = try await installer.install(
+            sourceDir: URL(fileURLWithPath: first),
+            trustOnInstall: trustOnInstall,
+            force: force
+        )
+        print("Installed Tier B plugin '\(installed.pluginID)'")
+    }
     print("  Root:            \(installed.installRoot)")
     print("  Publisher key:   \(installed.publicKeyHex.prefix(16))…")
     print("  Trusted:         \(trustOnInstall ? "yes (added on install)" : "no (run 'maccrabctl plugin trust <hex>' to trust)")")
+}
+
+// Treat as a plugin-id if it looks like reverse-DNS and contains no path
+// separator. Anything with a `/` or starting with `.` is a local path.
+private func isLikelyPluginID(_ s: String) -> Bool {
+    if s.contains("/") || s.contains("\\") { return false }
+    if s.hasPrefix(".") || s.hasPrefix("~") { return false }
+    let parts = s.split(separator: ".")
+    return parts.count >= 2 && parts.allSatisfy { p in
+        p.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+    }
 }
 
 private func pluginUninstall(args: [String]) async throws {

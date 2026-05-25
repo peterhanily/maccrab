@@ -1,0 +1,24 @@
+{
+  "$schema": "https://maccrab.com/rave/schemas/kit.json",
+
+  "id": "com.maccrab.kit.supply-chain-audit",
+  "name": "Supply-Chain Audit",
+  "description": "Inventory of installed software signatures + a check against known compromised package patterns. Tuned for engineering laptops where the npm / PyPI / Homebrew supply chain is the primary attack surface. Stub plugin set at v0 — expands once the underlying maccrabctl supply-chain hooks land in the platform.",
+  "version": "0.0.1",
+  "maintainer": "peterhanily",
+  "category": "audit",
+  "min_maccrab_version": "1.16.0",
+
+  "plugins": [
+    {
+      "plugin_id": "com.maccrab.hosts-collector",
+      "min_version": "0.0.1",
+      "role": "Baseline /etc/hosts — supply-chain attacks have used hosts entries to redirect package mirrors",
+      "required": true
+    }
+  ],
+
+  "trust_tier": "first-party",
+  "created_at": "2026-05-21",
+  "updated_at": "2026-05-21"
+}

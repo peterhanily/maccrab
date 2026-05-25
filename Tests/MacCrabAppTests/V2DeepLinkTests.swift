@@ -130,39 +130,36 @@ struct V2DeepLinkTests {
         #expect(dest.tab == .forensicsScans)
     }
 
-    @Test("legacy investigation/forensicsPlugins redirects to forensics/forensicsPlugins")
+    @Test("legacy investigation/forensicsPlugins lands on forensicsScans (rc.4 — Plugins tab removed)")
     func testLegacyForensicsPluginsRedirect() throws {
         let url = try #require(URL(string: "maccrab://investigation/investigationForensicsPlugins"))
         let dest = try #require(V2DeepLink.parse(url))
         #expect(dest.workspace == .forensics)
-        #expect(dest.tab == .forensicsPlugins)
+        #expect(dest.tab == .forensicsScans)
     }
 
-    @Test("legacy investigation/forensicsTierB (removed enum) still redirects to forensics/forensicsPlugins")
+    @Test("legacy investigation/forensicsTierB lands on forensicsScans (rc.4 — Tier B + Plugins tabs both removed)")
     func testLegacyForensicsTierBRedirect() throws {
-        // The .investigationForensicsTierB enum case is gone in
-        // rc.3 — the rc.2 "Tier B" terminology leak. Old persisted
-        // raw values + old deep links still redirect cleanly.
         let url = try #require(URL(string: "maccrab://investigation/investigationForensicsTierB"))
         let dest = try #require(V2DeepLink.parse(url))
         #expect(dest.workspace == .forensics)
-        #expect(dest.tab == .forensicsPlugins)
+        #expect(dest.tab == .forensicsScans)
     }
 
-    @Test("legacy investigation/forensicsArtifacts redirects to forensics/forensicsEvidence")
+    @Test("legacy investigation/forensicsArtifacts lands on forensicsScans (rc.4 — Evidence tab removed; lives in scan detail)")
     func testLegacyForensicsArtifactsRedirect() throws {
         let url = try #require(URL(string: "maccrab://investigation/investigationForensicsArtifacts"))
         let dest = try #require(V2DeepLink.parse(url))
         #expect(dest.workspace == .forensics)
-        #expect(dest.tab == .forensicsEvidence)
+        #expect(dest.tab == .forensicsScans)
     }
 
-    @Test("legacy investigation/forensicsFindings merges into forensics/forensicsScans")
+    @Test("legacy investigation/forensicsFindings redirects to forensics/forensicsFindings")
     func testLegacyForensicsFindingsRedirect() throws {
         let url = try #require(URL(string: "maccrab://investigation/investigationForensicsFindings"))
         let dest = try #require(V2DeepLink.parse(url))
         #expect(dest.workspace == .forensics)
-        #expect(dest.tab == .forensicsScans)
+        #expect(dest.tab == .forensicsFindings)
     }
 
     @Test("non-forensics investigation tabs pass through unchanged")
