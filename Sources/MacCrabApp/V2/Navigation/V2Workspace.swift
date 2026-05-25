@@ -12,6 +12,7 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
     case alerts
     case events
     case investigation
+    case forensics
     case detection
     case prevention
     case intelligence
@@ -26,6 +27,7 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
         case .alerts:        return String(localized: "workspace.alerts.title",        defaultValue: "Alerts")
         case .events:        return String(localized: "workspace.events.title",        defaultValue: "Events")
         case .investigation: return String(localized: "workspace.investigation.title", defaultValue: "Investigation")
+        case .forensics:     return String(localized: "workspace.forensics.title",     defaultValue: "Forensics")
         case .detection:     return String(localized: "workspace.detection.title",     defaultValue: "Detection")
         case .prevention:    return String(localized: "workspace.prevention.title",    defaultValue: "Prevention")
         case .intelligence:  return String(localized: "workspace.intelligence.title",  defaultValue: "Intelligence")
@@ -40,6 +42,7 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
         case .alerts:        return "bell.fill"
         case .events:        return "list.bullet.rectangle"
         case .investigation: return "magnifyingglass"
+        case .forensics:     return "doc.text.magnifyingglass"
         case .detection:     return "shield.lefthalf.filled"
         case .prevention:    return "bolt.shield.fill"
         case .intelligence:  return "globe.americas.fill"
@@ -53,7 +56,8 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
         case .overview:      return "At-a-glance system posture and shortcuts"
         case .alerts:        return "Triage and route findings"
         case .events:        return "Live event stream — filter, search, and drill in"
-        case .investigation: return "Trace graph and AI analysis"
+        case .investigation: return "Trace graph and AI analysis (Forensics moved to its own workspace)"
+        case .forensics:     return "Scan this Mac, browse plugins, export evidence"
         case .detection:     return "Rules, AI Guard, browser, and MCP"
         case .prevention:    return "DNS sinkhole, network blocker, persistence guard, response actions"
         case .intelligence:  return "IOC context, feeds, packages, and integrations"
@@ -79,6 +83,9 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
                                      .investigationForensicsTierB,
                                      .investigationForensicsArtifacts,
                                      .investigationForensicsFindings]
+        case .forensics:     return [.forensicsScans,
+                                     .forensicsPlugins,
+                                     .forensicsEvidence]
         case .detection:     return [.detectionRules, .detectionAIGuard, .detectionBrowser,
                                      .detectionMCP]
         case .prevention:    return []
@@ -107,11 +114,23 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
     case investigationAIAnalysis
 
     // Investigation → Forensics (v1.13b — Mac Context Plugin Platform).
+    // v1.17: legacy tabs — show "Moved to Forensics →" redirect
+    // banner. New work lives under the .forensics workspace tabs.
     case investigationForensicsCases
     case investigationForensicsPlugins
     case investigationForensicsTierB
     case investigationForensicsArtifacts
     case investigationForensicsFindings
+
+    // v1.17 — customer-shaped Forensics workspace per
+    // docs/forensics-ia-redesign-plan.md §3.2. Three tabs
+    // collapse the old five:
+    //   forensicsScans     was: Cases + Findings
+    //   forensicsPlugins   was: Plugins + Tier B (unified, no Tier A/B taxonomy)
+    //   forensicsEvidence  was: Artifacts (with scan context restored)
+    case forensicsScans
+    case forensicsPlugins
+    case forensicsEvidence
 
     // Detection
     case detectionRules
@@ -146,6 +165,9 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationForensicsCases:    return String(localized: "workspaceTab.investigation.forensicsCases", defaultValue: "Forensics · Cases")
         case .investigationForensicsPlugins:  return String(localized: "workspaceTab.investigation.forensicsPlugins", defaultValue: "Forensics · Plugins")
         case .investigationForensicsTierB:    return String(localized: "workspaceTab.investigation.forensicsTierB", defaultValue: "Forensics · Tier B")
+        case .forensicsScans:                 return String(localized: "workspaceTab.forensics.scans",   defaultValue: "Scans")
+        case .forensicsPlugins:               return String(localized: "workspaceTab.forensics.plugins", defaultValue: "Plugins")
+        case .forensicsEvidence:              return String(localized: "workspaceTab.forensics.evidence", defaultValue: "Evidence")
         case .investigationForensicsArtifacts: return String(localized: "workspaceTab.investigation.forensicsArtifacts", defaultValue: "Forensics · Artifacts")
         case .investigationForensicsFindings: return String(localized: "workspaceTab.investigation.forensicsFindings", defaultValue: "Forensics · Findings")
         case .detectionRules:                 return String(localized: "workspaceTab.detection.rules",              defaultValue: "Rules")
@@ -172,6 +194,8 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
              .investigationForensicsTierB,
              .investigationForensicsArtifacts, .investigationForensicsFindings:
             return .investigation
+        case .forensicsScans, .forensicsPlugins, .forensicsEvidence:
+            return .forensics
         case .detectionRules, .detectionAIGuard, .detectionBrowser,
              .detectionMCP:
             return .detection

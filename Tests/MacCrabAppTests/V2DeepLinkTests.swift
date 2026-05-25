@@ -119,4 +119,54 @@ struct V2DeepLinkTests {
         let dest = try #require(V2DeepLink.parse(url))
         #expect(dest.tab == .alertsOpen)
     }
+
+    // MARK: - v1.17 legacy Forensics redirects (audit-D)
+
+    @Test("legacy investigation/forensicsCases redirects to forensics/forensicsScans")
+    func testLegacyForensicsCasesRedirect() throws {
+        let url = try #require(URL(string: "maccrab://investigation/investigationForensicsCases"))
+        let dest = try #require(V2DeepLink.parse(url))
+        #expect(dest.workspace == .forensics)
+        #expect(dest.tab == .forensicsScans)
+    }
+
+    @Test("legacy investigation/forensicsPlugins redirects to forensics/forensicsPlugins")
+    func testLegacyForensicsPluginsRedirect() throws {
+        let url = try #require(URL(string: "maccrab://investigation/investigationForensicsPlugins"))
+        let dest = try #require(V2DeepLink.parse(url))
+        #expect(dest.workspace == .forensics)
+        #expect(dest.tab == .forensicsPlugins)
+    }
+
+    @Test("legacy investigation/forensicsTierB merges into forensics/forensicsPlugins")
+    func testLegacyForensicsTierBRedirect() throws {
+        let url = try #require(URL(string: "maccrab://investigation/investigationForensicsTierB"))
+        let dest = try #require(V2DeepLink.parse(url))
+        #expect(dest.workspace == .forensics)
+        #expect(dest.tab == .forensicsPlugins)
+    }
+
+    @Test("legacy investigation/forensicsArtifacts redirects to forensics/forensicsEvidence")
+    func testLegacyForensicsArtifactsRedirect() throws {
+        let url = try #require(URL(string: "maccrab://investigation/investigationForensicsArtifacts"))
+        let dest = try #require(V2DeepLink.parse(url))
+        #expect(dest.workspace == .forensics)
+        #expect(dest.tab == .forensicsEvidence)
+    }
+
+    @Test("legacy investigation/forensicsFindings merges into forensics/forensicsScans")
+    func testLegacyForensicsFindingsRedirect() throws {
+        let url = try #require(URL(string: "maccrab://investigation/investigationForensicsFindings"))
+        let dest = try #require(V2DeepLink.parse(url))
+        #expect(dest.workspace == .forensics)
+        #expect(dest.tab == .forensicsScans)
+    }
+
+    @Test("non-forensics investigation tabs pass through unchanged")
+    func testInvestigationNonForensicsPassThrough() throws {
+        let url = try #require(URL(string: "maccrab://investigation/investigationTraceGraph"))
+        let dest = try #require(V2DeepLink.parse(url))
+        #expect(dest.workspace == .investigation)
+        #expect(dest.tab == .investigationTraceGraph)
+    }
 }
