@@ -120,16 +120,16 @@ struct V2ForensicsEvidenceView: View {
     private func evidenceRow(_ a: CommittedArtifact) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(a.record.summary ?? a.record.contentType)
+                Text(a.record.summary ?? friendlyContentType(a.record.contentType))
                     .font(.system(size: 12, weight: .medium))
                 HStack(spacing: 8) {
-                    Text(a.record.pluginID)
-                        .font(.system(size: 10, design: .monospaced))
+                    Text(friendlyPluginID(a.record.pluginID))
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
-                    Text("· \(a.record.contentType)")
+                    Text("·")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    Text("· \(plainEnglishDataClass(a.record.privacyClass))")
+                    Text(plainEnglishDataClass(a.record.privacyClass))
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
@@ -140,6 +140,43 @@ struct V2ForensicsEvidenceView: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 6)
+    }
+
+    /// Replace engineering content_type strings with operator-
+    /// friendly summaries when the plugin didn't supply one.
+    private func friendlyContentType(_ ct: String) -> String {
+        let map: [String: String] = [
+            "tcc.permission":           "Privacy permission grant",
+            "launchd.agent":            "Launch agent",
+            "launchd.daemon":           "Launch daemon",
+            "applescript.execution":    "AppleScript execution",
+            "quarantine.download":      "Quarantined download",
+            "mail.body":                "Mail message body",
+            "safari.extension":         "Safari extension",
+            "facetime.call":            "FaceTime call record",
+            "biome.stream":             "Apple Biome activity",
+            "posture.finding":          "Security posture finding",
+            "codesigning.relationship": "Code-signing relationship",
+        ]
+        return map[ct] ?? ct.replacingOccurrences(of: ".", with: " · ").capitalized
+    }
+
+    private func friendlyPluginID(_ id: String) -> String {
+        let map: [String: String] = [
+            "com.maccrab.forensics.tcc-lite":          "Privacy permissions inventory",
+            "com.maccrab.forensics.launchd-lite":      "Launch agents + daemons",
+            "com.maccrab.forensics.applescript-runtime": "AppleScript runtime activity",
+            "com.maccrab.forensics.quarantine":        "Quarantined downloads",
+            "com.maccrab.forensics.mail-bodies":       "Mail content",
+            "com.maccrab.forensics.safari-lite":       "Safari extensions + state",
+            "com.maccrab.forensics.facetime":          "FaceTime call history",
+            "com.maccrab.forensics.biome":             "Apple Biome activity streams",
+            "com.maccrab.forensics.posture":           "Security posture report",
+        ]
+        if let nice = map[id] { return nice }
+        // Fallback: take the last segment + title-case it.
+        let last = id.split(separator: ".").last.map(String.init) ?? id
+        return last.replacingOccurrences(of: "-", with: " ").capitalized
     }
 
     private func plainEnglishDataClass(_ pc: PrivacyClass) -> String {

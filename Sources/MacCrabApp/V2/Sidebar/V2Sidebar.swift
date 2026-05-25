@@ -268,7 +268,7 @@ private enum V2SidebarGroup: String, CaseIterable, Identifiable {
     var workspaces: [V2Workspace] {
         switch self {
         case .monitor:     return [.overview, .alerts]
-        case .investigate: return [.events, .investigation]
+        case .investigate: return [.events, .investigation, .forensics]
         case .configure:   return [.detection, .prevention, .intelligence]
         case .system:      return [.system, .docs]
         }

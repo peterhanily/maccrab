@@ -17,7 +17,10 @@ import MacCrabForensics
 struct V2ForensicsPluginsTabView: View {
     @State private var builtIns: [PluginManifest] = []
     @State private var installed: [InstalledPlugin] = []
-    @State private var tierBStatus: TierBBootstrap.Status? = nil
+    /// Plugin ids that passed signature + revocation verification.
+    /// Used to distinguish a verified third-party install from an
+    /// unverified sideload at render time.
+    @State private var installedVerified: Set<String> = []
     @State private var loading = true
     @State private var filter: Filter = .all
 
@@ -99,50 +102,71 @@ struct V2ForensicsPluginsTabView: View {
         let showBuiltIn = filter == .all || filter == .builtIn
         let showInstalled = filter == .all || filter == .installed
         let showStore = filter == .all || filter == .store
+
+        // Operator-facing filter: only show plugins that an
+        // operator runs explicitly — collectors (things that go
+        // look at the Mac) and analyzers (things that produce
+        // findings from collected artifacts). Enrichers + finger-
+        // printers run as plumbing during the collection pipeline;
+        // they're not operator-facing actions.
+        let operatorScanners = builtIns.filter { $0.type == .collector }
+        let operatorAnalyses = builtIns.filter { $0.type == .analyzer }
+
         if showBuiltIn {
-            sectionHeader("Built-in")
-            if builtIns.isEmpty {
-                Text("No built-in plugins.").font(.system(size: 11)).foregroundStyle(.secondary)
+            sectionHeader("Scanners", subtitle: "What MacCrab can look at on this Mac.")
+            if operatorScanners.isEmpty {
+                emptyHint("No built-in scanners loaded.")
             } else {
-                ForEach(builtIns, id: \.id) { m in
+                ForEach(operatorScanners, id: \.id) { m in
                     pluginCard(
-                        title: m.displayName,
-                        id: m.id,
+                        title: friendlyName(m),
                         description: m.description,
-                        badge: "Built-in",
+                        badge: "Standard",
+                        badgeColor: .green,
+                        dataClass: plainEnglishDataClass(m.outputs.first?.privacyClass)
+                    )
+                }
+            }
+
+            if !operatorAnalyses.isEmpty {
+                sectionHeader("Analyses", subtitle: "Reports run after a scan finishes.")
+                ForEach(operatorAnalyses, id: \.id) { m in
+                    pluginCard(
+                        title: friendlyName(m),
+                        description: m.description,
+                        badge: "Standard",
                         badgeColor: .green,
                         dataClass: plainEnglishDataClass(m.outputs.first?.privacyClass)
                     )
                 }
             }
         }
+
         if showInstalled {
-            sectionHeader("Installed (third-party)")
+            sectionHeader("Installed by you", subtitle: "Third-party scanners you've added.")
             if installed.isEmpty {
-                Text("No third-party plugins installed. Drag a .maccrabplugin bundle onto the dashboard (lands v1.18) or run: maccrabctl plugin install <bundle>")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 6)
+                emptyHint("Nothing installed yet. Visit the catalog (rc.4) or install a bundle via the CLI: maccrabctl plugin install <bundle>")
             } else {
                 ForEach(installed, id: \.pluginID) { p in
+                    let isVerified = installedVerified.contains(p.pluginID)
                     pluginCard(
-                        title: p.pluginID,
-                        id: "key=" + String(p.publicKeyHex.prefix(16)) + "…",
-                        description: "Installed at \(p.installRoot)",
-                        badge: tierBStatus?.verified.contains(where: { $0.pluginID == p.pluginID }) == true ? "Verified" : "Sideloaded · Unverified",
-                        badgeColor: tierBStatus?.verified.contains(where: { $0.pluginID == p.pluginID }) == true ? .blue : .orange,
+                        title: friendlyPluginID(p.pluginID),
+                        description: "Installed at \(shortenPath(p.installRoot))",
+                        badge: isVerified ? "Verified" : "Unverified · Sideloaded",
+                        badgeColor: isVerified ? .blue : .orange,
                         dataClass: "—"
                     )
                 }
             }
         }
+
         if showStore {
-            sectionHeader("Available in store")
+            sectionHeader("From the catalog", subtitle: "Browse new scanners from maccrab.com/rave.")
             VStack(alignment: .leading, spacing: 6) {
-                Text("Store browser lands v1.17.0-rc.4.")
+                Text("Catalog browser is on the way.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                Text("The maccrab.com/rave catalog will list verified-community plugins with Sigstore-pinned signing identities. Until then, sideload via `maccrabctl plugin install --local <bundle>`.")
+                Text("v1.17.0-rc.4 wires the catalog fetch + per-plugin install flow. The maccrab.com/rave catalog will list community-published scanners with verified signing identities.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .padding(.top, 2)
@@ -151,16 +175,72 @@ struct V2ForensicsPluginsTabView: View {
         }
     }
 
-    private func sectionHeader(_ s: String) -> some View {
+    private func emptyHint(_ s: String) -> some View {
         Text(s)
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: 11))
             .foregroundStyle(.secondary)
-            .padding(.top, 8)
+            .padding(.vertical, 6)
+    }
+
+    /// Replace engineering identifiers like
+    /// "com.maccrab.forensics.tcc-lite" with operator-readable
+    /// names. Falls back to the manifest's displayName if no
+    /// override is registered.
+    private func friendlyName(_ m: PluginManifest) -> String {
+        let map: [String: String] = [
+            "com.maccrab.forensics.tcc-lite":         "Privacy permissions inventory",
+            "com.maccrab.forensics.launchd-lite":     "Launch agents + daemons",
+            "com.maccrab.forensics.applescript-runtime": "AppleScript runtime activity",
+            "com.maccrab.forensics.quarantine":       "Quarantined downloads",
+            "com.maccrab.forensics.mail-bodies":      "Mail content (opt-in)",
+            "com.maccrab.forensics.safari-lite":      "Safari extensions + state",
+            "com.maccrab.forensics.facetime":         "FaceTime call history",
+            "com.maccrab.forensics.biome":            "Apple Biome activity streams",
+            "com.maccrab.forensics.codesigning-graph": "Code-signing relationships",
+            "com.maccrab.forensics.office-analyzer":  "Office document analysis",
+            "com.maccrab.forensics.pdf-analyzer":     "PDF document analysis",
+            "com.maccrab.forensics.dmg-pkg-analyzer": "DMG / PKG installer analysis",
+            "com.maccrab.forensics.archive-analyzer": "Archive contents analysis",
+            "com.maccrab.forensics.posture":          "Security posture report",
+        ]
+        if let nice = map[m.id] { return nice }
+        return m.displayName
+    }
+
+    /// Turn a reverse-DNS plugin id into the human-recognizable
+    /// last segment for third-party plugins.
+    /// `com.acme.macops.usb-history` → "USB History (com.acme.macops)"
+    private func friendlyPluginID(_ id: String) -> String {
+        let parts = id.split(separator: ".")
+        guard parts.count >= 2 else { return id }
+        let last = parts.last!.replacingOccurrences(of: "-", with: " ")
+                              .capitalized
+        let publisher = parts.dropLast().joined(separator: ".")
+        return "\(last) (\(publisher))"
+    }
+
+    private func shortenPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) {
+            return "~" + String(path.dropFirst(home.count))
+        }
+        return path
+    }
+
+    private func sectionHeader(_ title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+            Text(subtitle)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.top, 10)
+        .padding(.bottom, 2)
     }
 
     private func pluginCard(
         title: String,
-        id: String,
         description: String,
         badge: String,
         badgeColor: Color,
@@ -178,16 +258,13 @@ struct V2ForensicsPluginsTabView: View {
                         .foregroundColor(badgeColor)
                         .cornerRadius(3)
                 }
-                Text(description).font(.system(size: 11)).foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    Text(id)
-                        .font(.system(size: 10, design: .monospaced))
+                Text(description)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                if dataClass != "—" {
+                    Text(dataClass)
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    if dataClass != "—" {
-                        Text("· \(dataClass)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
                 }
             }
             Spacer()
@@ -221,8 +298,11 @@ struct V2ForensicsPluginsTabView: View {
         builtIns = await PluginRegistry.shared.manifests()
         let installer = PluginInstaller()
         installed = (try? await installer.list()) ?? []
+        // Compute which installed plugins pass verification so the
+        // card can show "Verified" vs "Unverified · Sideloaded".
         let bootstrap = TierBBootstrap()
-        tierBStatus = await bootstrap.status(force: false)
+        let status = await bootstrap.status(force: false)
+        installedVerified = Set(status.verified.map { $0.pluginID })
         loading = false
     }
 }

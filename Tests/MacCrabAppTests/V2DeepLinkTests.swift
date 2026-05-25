@@ -138,8 +138,11 @@ struct V2DeepLinkTests {
         #expect(dest.tab == .forensicsPlugins)
     }
 
-    @Test("legacy investigation/forensicsTierB merges into forensics/forensicsPlugins")
+    @Test("legacy investigation/forensicsTierB (removed enum) still redirects to forensics/forensicsPlugins")
     func testLegacyForensicsTierBRedirect() throws {
+        // The .investigationForensicsTierB enum case is gone in
+        // rc.3 — the rc.2 "Tier B" terminology leak. Old persisted
+        // raw values + old deep links still redirect cleanly.
         let url = try #require(URL(string: "maccrab://investigation/investigationForensicsTierB"))
         let dest = try #require(V2DeepLink.parse(url))
         #expect(dest.workspace == .forensics)

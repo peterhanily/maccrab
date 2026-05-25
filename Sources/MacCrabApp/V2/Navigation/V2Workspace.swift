@@ -80,7 +80,6 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
                                      .investigationAIAnalysis,
                                      .investigationForensicsCases,
                                      .investigationForensicsPlugins,
-                                     .investigationForensicsTierB,
                                      .investigationForensicsArtifacts,
                                      .investigationForensicsFindings]
         case .forensics:     return [.forensicsScans,
@@ -118,7 +117,6 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
     // banner. New work lives under the .forensics workspace tabs.
     case investigationForensicsCases
     case investigationForensicsPlugins
-    case investigationForensicsTierB
     case investigationForensicsArtifacts
     case investigationForensicsFindings
 
@@ -164,7 +162,6 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationAIAnalysis:        return String(localized: "workspaceTab.investigation.aiAnalysis",     defaultValue: "AI Analysis")
         case .investigationForensicsCases:    return String(localized: "workspaceTab.investigation.forensicsCases", defaultValue: "Forensics · Cases")
         case .investigationForensicsPlugins:  return String(localized: "workspaceTab.investigation.forensicsPlugins", defaultValue: "Forensics · Plugins")
-        case .investigationForensicsTierB:    return String(localized: "workspaceTab.investigation.forensicsTierB", defaultValue: "Forensics · Tier B")
         case .forensicsScans:                 return String(localized: "workspaceTab.forensics.scans",   defaultValue: "Scans")
         case .forensicsPlugins:               return String(localized: "workspaceTab.forensics.plugins", defaultValue: "Plugins")
         case .forensicsEvidence:              return String(localized: "workspaceTab.forensics.evidence", defaultValue: "Evidence")
@@ -191,7 +188,6 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationTraceGraph, .investigationAgentTraces,
              .investigationAIAnalysis,
              .investigationForensicsCases, .investigationForensicsPlugins,
-             .investigationForensicsTierB,
              .investigationForensicsArtifacts, .investigationForensicsFindings:
             return .investigation
         case .forensicsScans, .forensicsPlugins, .forensicsEvidence:

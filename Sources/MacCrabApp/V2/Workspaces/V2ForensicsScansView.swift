@@ -107,21 +107,33 @@ struct V2ForensicsScansView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(scan.name)
                     .font(.system(size: 13, weight: .semibold))
-                Text("Started \(scan.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                if scan.encryptionState == .plaintext {
-                    Text("Plaintext (metadata only)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.orange)
+                HStack(spacing: 8) {
+                    Text(timeAgo(scan.createdAt))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    if scan.encryptionState == .plaintext {
+                        Text("Metadata only")
+                            .font(.system(size: 10))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.18))
+                            .foregroundColor(.orange)
+                            .cornerRadius(3)
+                    }
                 }
             }
             Spacer()
-            Text(scan.id.prefix(8) + "…")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+    }
+
+    /// Relative "5 minutes ago" / "yesterday" / "Mar 18, 2026"
+    /// rendering. Operators read at-a-glance recency, not exact
+    /// timestamps. Click-through detail view shows the precise
+    /// time (rc.3).
+    private func timeAgo(_ date: Date) -> String {
+        let fmt = RelativeDateTimeFormatter()
+        fmt.unitsStyle = .full
+        return "Started " + fmt.localizedString(for: date, relativeTo: Date())
     }
 
     // MARK: - Wizard stub (rc.3)
