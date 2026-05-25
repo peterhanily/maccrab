@@ -18,12 +18,16 @@ import SwiftUI
 struct V2ForensicsWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    @State private var settingsOpen = false
 
     var body: some View {
         VStack(spacing: 0) {
             tabBar
             Divider()
             content
+        }
+        .sheet(isPresented: $settingsOpen) {
+            V2ForensicsSettingsSheet(isPresented: $settingsOpen)
         }
     }
 
@@ -53,6 +57,17 @@ struct V2ForensicsWorkspace: View {
                 .buttonStyle(.plain)
             }
             Spacer()
+            Button {
+                settingsOpen = true
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .help("Forensics settings")
         }
         .padding(.horizontal, 8)
     }
