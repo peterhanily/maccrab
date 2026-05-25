@@ -568,19 +568,23 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     // ===================================================================
-    // Tier B plugin platform (research-post-v15)
+    // Forensics plugins — third-party scanners installed by the
+    // operator. The on-the-wire MCP names use the customer-shaped
+    // `forensics.*` namespace; the legacy `tierb.*` names from
+    // v1.16 are kept as silent aliases through v1.18 so existing
+    // AI-agent integrations don't break.
     // ===================================================================
     [
-        "name": "tierb.list_plugins",
-        "description": "List installed Tier B (third-party) plugins with their verification status. Returns plugins_root, trusted_key_count, revoked_key_count, verified+failed buckets. Verified plugins include manifest version + public key prefix; failed plugins include reason (e.g. revoked key).",
+        "name": "forensics.list_installed_plugins",
+        "description": "List installed third-party scanners with their verification status. Returns plugins_root, trusted_key_count, revoked_key_count, verified + failed buckets. Verified plugins include manifest version + publisher key prefix; failed plugins include reason (e.g. revoked key).",
         "inputSchema": [
             "type": "object",
             "properties": [:] as [String: Any],
         ] as [String: Any],
     ],
     [
-        "name": "tierb.verify",
-        "description": "Force re-verification of every installed Tier B plugin against the current trust + revocation lists. Same as `tierb.list_plugins` but bypasses the bootstrap cache.",
+        "name": "forensics.verify_installed_plugins",
+        "description": "Force re-verification of every installed third-party scanner against the current trust + revocation lists. Same payload as forensics.list_installed_plugins but bypasses the bootstrap cache.",
         "inputSchema": [
             "type": "object",
             "properties": [:] as [String: Any],
@@ -660,6 +664,12 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleForensicsExplainCase(args)
     case "forensics.posture_findings":
         return await handleForensicsPostureFindings(args)
+    case "forensics.list_installed_plugins":
+        return await handleTierBListPlugins()
+    case "forensics.verify_installed_plugins":
+        return await handleTierBVerify()
+    // v1.17 rc.7 — legacy aliases (silent, no warning). Keep
+    // through v1.18; remove in v1.19.
     case "tierb.list_plugins":
         return await handleTierBListPlugins()
     case "tierb.verify":

@@ -382,7 +382,7 @@ private func pluginDaemonStatus() async throws {
     let bootstrap = TierBBootstrap()
     let status = await bootstrap.refresh()
     let isoFmt = ISO8601DateFormatter()
-    print("Tier B daemon status")
+    print("Plugin catalog status")
     print("=====================")
     print("Plugins root:       \(status.pluginsRoot)")
     print("Verified at:        \(isoFmt.string(from: status.verifiedAt))")
@@ -453,7 +453,7 @@ private func pluginInstall(args: [String]) async throws {
             trustOnInstall: trustOnInstall,
             force: force
         )
-        print("Installed Tier B plugin '\(installed.pluginID)' from \(base)")
+        print("Installed plugin '\(installed.pluginID)' from \(base)")
     } else {
         let installer = PluginInstaller()
         installed = try await installer.install(
@@ -461,7 +461,7 @@ private func pluginInstall(args: [String]) async throws {
             trustOnInstall: trustOnInstall,
             force: force
         )
-        print("Installed Tier B plugin '\(installed.pluginID)'")
+        print("Installed plugin '\(installed.pluginID)'")
     }
     print("  Root:            \(installed.installRoot)")
     print("  Publisher key:   \(installed.publicKeyHex.prefix(16))…")
@@ -492,7 +492,7 @@ private func pluginInstalledList() async throws {
     let installer = PluginInstaller()
     let plugins = try await installer.list()
     guard !plugins.isEmpty else {
-        print("No Tier B plugins installed.")
+        print("No third-party plugins installed.")
         print("  (Plugins root: \(installer.pluginsRootPath))")
         return
     }
@@ -558,7 +558,7 @@ private func pluginTrustList() async throws {
 private func pluginVerifyAll() async throws {
     let registry = TierBRegistry()
     let report = await registry.verifyAll()
-    print("Tier B plugin verification (\(report.total) installed)")
+    print("Plugin verification (\(report.total) installed)")
     print("======================================================")
     if !report.verified.isEmpty {
         print("Verified (\(report.verified.count)):")

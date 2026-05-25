@@ -30,6 +30,7 @@ struct V2ForensicsSettingsSheet: View {
     @State private var devResidue: [String] = []
     @State private var loading = true
     @State private var actionMessage: String? = nil
+    @State private var catalogSheetOpen = false
 
     private let installer = PluginInstaller()
 
@@ -40,6 +41,8 @@ struct V2ForensicsSettingsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     installedSection
+                    Divider()
+                    catalogSection
                     Divider()
                     trustSection
                     if !devResidue.isEmpty {
@@ -58,8 +61,29 @@ struct V2ForensicsSettingsSheet: View {
                 .padding(20)
             }
         }
-        .frame(width: 600, height: 520)
+        .frame(width: 600, height: 580)
         .task { await reload() }
+        .sheet(isPresented: $catalogSheetOpen) {
+            V2RaveCatalogBrowserSheet(isPresented: $catalogSheetOpen)
+        }
+    }
+
+    private var catalogSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Catalog",
+                          "Browse community-published scanners from maccrab.com/rave.")
+            HStack {
+                Text("New scanners are signed + vetted by the rave catalog. Install from the catalog or sideload your own.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    catalogSheetOpen = true
+                } label: {
+                    Label("Browse catalog", systemImage: "globe")
+                }
+            }
+        }
     }
 
     // MARK: - Header

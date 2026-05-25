@@ -224,7 +224,58 @@ public actor PluginInstaller {
             self.pluginsRoot = support
                 .appendingPathComponent("MacCrab")
                 .appendingPathComponent("plugins")
-                .appendingPathComponent("tier-b")
+            // v1.17 rc.7 — one-time migration from the rc.20-era
+            // engineering-named subdir to the operator-shaped path.
+            // Old: ~/Library/Application Support/MacCrab/plugins/tier-b/
+            // New: ~/Library/Application Support/MacCrab/plugins/
+            // If old exists + new is missing, move it. Idempotent.
+            Self.migrateLegacyTierBDirIfNeeded(newRoot: self.pluginsRoot, support: support)
+        }
+    }
+
+    /// One-shot migration of the rc.20-era `plugins/tier-b/`
+    /// subdirectory contents into `plugins/`. Runs on every
+    /// PluginInstaller init but cheap: a single fileExists check.
+    /// If the legacy dir exists and the new root contains no
+    /// plugin entries yet, contents are moved + the legacy
+    /// directory is removed. Existing installations gain the
+    /// rename without any operator action.
+    private static func migrateLegacyTierBDirIfNeeded(newRoot: URL, support: URL) {
+        let fm = FileManager.default
+        let legacy = support
+            .appendingPathComponent("MacCrab")
+            .appendingPathComponent("plugins")
+            .appendingPathComponent("tier-b")
+        guard fm.fileExists(atPath: legacy.path) else { return }
+        // Ensure the new root exists (peer of `tier-b/` under `plugins/`).
+        try? fm.createDirectory(at: newRoot, withIntermediateDirectories: true)
+        guard let entries = try? fm.contentsOfDirectory(atPath: legacy.path) else {
+            return
+        }
+        var moved = 0
+        for entry in entries {
+            let src = legacy.appendingPathComponent(entry)
+            let dst = newRoot.appendingPathComponent(entry)
+            if fm.fileExists(atPath: dst.path) {
+                // Already migrated entry — skip; don't clobber.
+                continue
+            }
+            do {
+                try fm.moveItem(at: src, to: dst)
+                moved += 1
+            } catch {
+                // Best-effort migration; failures don't block init.
+            }
+        }
+        // If we moved everything, drop the empty legacy dir.
+        if let leftover = try? fm.contentsOfDirectory(atPath: legacy.path),
+           leftover.isEmpty {
+            try? fm.removeItem(at: legacy)
+        }
+        if moved > 0 {
+            FileHandle.standardError.write(Data(
+                "MacCrab: migrated \(moved) plugin entr\(moved == 1 ? "y" : "ies") from plugins/tier-b/ to plugins/\n".utf8
+            ))
         }
     }
 
