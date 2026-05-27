@@ -524,6 +524,35 @@ public actor ArtifactStore {
         return out
     }
 
+    /// Cheap COUNT(*) for live progress UI — used by the kit
+    /// runner's poll loop while a collector is mid-flight to show
+    /// "X rows so far". Sub-millisecond on indexed case_id.
+    public func count(caseID: String, pluginID: String? = nil) throws -> Int {
+        guard let db = db else { return 0 }
+        let sql: String
+        if pluginID != nil {
+            sql = "SELECT COUNT(*) FROM artifacts WHERE case_id = ? AND plugin_id = ?"
+        } else {
+            sql = "SELECT COUNT(*) FROM artifacts WHERE case_id = ?"
+        }
+        var stmt: OpaquePointer?
+        let p = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        defer { sqlite3_finalize(stmt) }
+        guard p == SQLITE_OK else {
+            throw ArtifactStoreError.stepFailed(
+                operation: "count prepare",
+                message: String(cString: sqlite3_errmsg(db)),
+                code: p
+            )
+        }
+        sqlite3_bind_text(stmt, 1, caseID, -1, SQLITE_TRANSIENT)
+        if let pid = pluginID {
+            sqlite3_bind_text(stmt, 2, pid, -1, SQLITE_TRANSIENT)
+        }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
     // MARK: - Invocations
 
     /// Open a `plugin_invocations` row. Returns the assigned id;

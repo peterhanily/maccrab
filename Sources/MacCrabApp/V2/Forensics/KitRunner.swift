@@ -24,7 +24,7 @@ public final class KitRunner: ObservableObject {
     public enum State: Sendable {
         case idle
         case starting(kitName: String)
-        case running(kitName: String, currentPlugin: String, completed: Int, total: Int)
+        case running(kitName: String, currentPlugin: String, completed: Int, total: Int, rowsSoFar: Int)
         case done(scanID: String, kitName: String, tally: SeverityTally, skipped: [SkippedPlugin])
         case failed(kitName: String, error: String)
     }
@@ -80,7 +80,8 @@ public final class KitRunner: ObservableObject {
                 state = .running(kitName: kit.name,
                                  currentPlugin: pref.pluginID,
                                  completed: idx,
-                                 total: total)
+                                 total: total,
+                                 rowsSoFar: 0)
                 guard let reg = await PluginRegistry.shared.registration(forID: pref.pluginID) else {
                     skipped.append(SkippedPlugin(
                         pluginID: pref.pluginID,
@@ -88,6 +89,36 @@ public final class KitRunner: ObservableObject {
                     ))
                     continue
                 }
+
+                // Spawn a poll task that updates rowsSoFar every
+                // ~400ms while the plugin runs. count() is a
+                // sub-ms SQLite COUNT so polling is cheap. Task
+                // is cancelled when the plugin finishes.
+                let pollTask = Task<Void, Never> { @MainActor [weak self] in
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        if Task.isCancelled { break }
+                        let rows = (try? await handle.store.count(
+                            caseID: handle.caseID,
+                            pluginID: pref.pluginID
+                        )) ?? 0
+                        if Task.isCancelled { break }
+                        guard let self else { break }
+                        if case .running(let n, let p, let c, let t, _) = self.state,
+                           p == pref.pluginID {
+                            self.state = .running(
+                                kitName: n,
+                                currentPlugin: p,
+                                completed: c,
+                                total: t,
+                                rowsSoFar: rows
+                            )
+                        } else {
+                            break
+                        }
+                    }
+                }
+
                 do {
                     switch reg.manifest.type {
                     case .collector:
@@ -102,6 +133,7 @@ public final class KitRunner: ObservableObject {
                         )
                     case .enricher, .fingerprinter:
                         // Pipeline plumbing — not directly invoked.
+                        pollTask.cancel()
                         continue
                     }
                 } catch {
@@ -110,6 +142,7 @@ public final class KitRunner: ObservableObject {
                         reason: shortReason(error)
                     ))
                 }
+                pollTask.cancel()
             }
 
             // Tally what landed in the store. Use a generous limit

@@ -24,7 +24,10 @@ struct V2ForensicsScansView: View {
     @State private var kits: [Kit] = []
     @State private var openScanID: String? = nil
     @State private var pendingEncryptedKit: Kit? = nil
+    @State private var detailKit: Kit? = nil
+    @State private var fdaStatus: FullDiskAccessStatus = .unknown
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
+    @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
 
     private var openScan: CaseManifest? {
         guard let id = openScanID else { return nil }
@@ -35,6 +38,9 @@ struct V2ForensicsScansView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                if fdaStatus == .denied && !fdaBannerDismissed {
+                    fdaBanner
+                }
                 if case .running = runner.state {
                     runningCard
                 } else if case .starting = runner.state {
@@ -57,7 +63,13 @@ struct V2ForensicsScansView: View {
             }
             .padding(20)
         }
-        .task { await reload() }
+        .task {
+            fdaStatus = PermissionsProbe.fullDiskAccess()
+            await reload()
+        }
+        .onAppear {
+            fdaStatus = PermissionsProbe.fullDiskAccess()
+        }
         .onChange(of: runnerStateID) { _ in
             if case .done = runner.state {
                 Task { await reload() }
@@ -98,6 +110,21 @@ struct V2ForensicsScansView: View {
         } message: { kit in
             Text("This kit collects personal data (messages, mail, call history). MacCrab will store it encrypted on disk and the OS will ask for your Keychain password to unlock the encryption key. You'll only be asked once per session.")
         }
+        .sheet(isPresented: Binding(
+            get: { detailKit != nil },
+            set: { if !$0 { detailKit = nil } }
+        )) {
+            if let kit = detailKit {
+                V2KitDetailSheet(
+                    kit: kit,
+                    isPresented: Binding(
+                        get: { detailKit != nil },
+                        set: { if !$0 { detailKit = nil } }
+                    ),
+                    onRun: { runOrConfirm(kit) }
+                )
+            }
+        }
     }
 
     // Re-derive a stable identifier from the runner state so
@@ -106,7 +133,7 @@ struct V2ForensicsScansView: View {
         switch runner.state {
         case .idle: return "idle"
         case .starting(let n): return "starting:\(n)"
-        case .running(let n, let p, let c, let t): return "running:\(n):\(p):\(c)/\(t)"
+        case .running(let n, let p, let c, let t, let r): return "running:\(n):\(p):\(c)/\(t):\(r)"
         case .done(let id, _, let t, let s):
             return "done:\(id):\(t.routine)/\(t.notable)/\(t.attention)/\(t.critical):\(s.count)"
         case .failed(let n, _): return "failed:\(n)"
@@ -123,6 +150,54 @@ struct V2ForensicsScansView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
+    }
+
+    // MARK: - FDA banner
+
+    private var fdaBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("MacCrab doesn't have Full Disk Access")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Most scanners read system databases (Messages, Mail, Safari, TCC, KnowledgeC) that macOS protects behind Full Disk Access. Without it your scans will come back with 'X scanners didn't run' for those entries.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button {
+                        PermissionsProbe.openSystemSettingsFullDiskAccess()
+                    } label: {
+                        Label("Open System Settings", systemImage: "arrow.up.right.square")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    Button("Re-check") {
+                        fdaStatus = PermissionsProbe.fullDiskAccess()
+                    }
+                    .font(.system(size: 11))
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Spacer()
+                    Button {
+                        fdaBannerDismissed = true
+                    } label: {
+                        Text("Hide")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Don't show this banner again on this Mac")
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.10))
+        .cornerRadius(8)
     }
 
     // MARK: - Empty state (no past scans)
@@ -286,11 +361,16 @@ struct V2ForensicsScansView: View {
             }
             Spacer()
             Button {
-                if kit.encrypted && !encryptedWarningSeen {
-                    pendingEncryptedKit = kit
-                } else {
-                    Task { await runner.run(kit) }
-                }
+                detailKit = kit
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("How this kit works")
+            Button {
+                runOrConfirm(kit)
             } label: {
                 Text("Run")
                     .frame(minWidth: 60)
@@ -301,6 +381,17 @@ struct V2ForensicsScansView: View {
         .padding(14)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
+    }
+
+    /// Encrypted-kit confirmation gate: once-per-profile alert
+    /// the first time the operator runs a kit that asks for
+    /// Keychain access, then direct run thereafter.
+    private func runOrConfirm(_ kit: Kit) {
+        if kit.encrypted && !encryptedWarningSeen {
+            pendingEncryptedKit = kit
+        } else {
+            Task { await runner.run(kit) }
+        }
     }
 
     private var isRunnerBusy: Bool {
@@ -314,15 +405,38 @@ struct V2ForensicsScansView: View {
 
     private var runningCard: some View {
         Group {
-            if case .running(let kitName, let currentPlugin, let completed, let total) = runner.state {
-                VStack(alignment: .leading, spacing: 6) {
+            if case .running(let kitName, let currentPlugin, let completed, let total, let rows) = runner.state {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Running \(kitName)…").font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        Text("Scanner \(completed + 1) / \(total)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
                     }
-                    Text("Scanner \(completed + 1) of \(total): \(friendlyScannerName(currentPlugin))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tint)
+                        Text(friendlyScannerName(currentPlugin))
+                            .font(.system(size: 11, weight: .medium))
+                        if rows > 0 {
+                            Text("· \(rows) row\(rows == 1 ? "" : "s") collected so far")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("· starting…")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    if let sources = scannerSources(currentPlugin), !sources.isEmpty {
+                        Text("Reading: \(sources.first ?? "")")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -339,6 +453,10 @@ struct V2ForensicsScansView: View {
                 .cornerRadius(8)
             }
         }
+    }
+
+    private func scannerSources(_ pluginID: String) -> [String]? {
+        ScannerCatalog.fact(forPluginID: pluginID)?.dataSources
     }
 
     private func doneCard(scanID: String, kitName: String, tally: SeverityTally, skipped: [KitRunner.SkippedPlugin]) -> some View {
