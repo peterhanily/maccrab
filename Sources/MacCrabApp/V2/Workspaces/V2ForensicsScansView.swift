@@ -23,6 +23,8 @@ struct V2ForensicsScansView: View {
     @State private var loading = true
     @State private var kits: [Kit] = []
     @State private var openScanID: String? = nil
+    @State private var pendingEncryptedKit: Kit? = nil
+    @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
 
     private var openScan: CaseManifest? {
         guard let id = openScanID else { return nil }
@@ -37,8 +39,8 @@ struct V2ForensicsScansView: View {
                     runningCard
                 } else if case .starting = runner.state {
                     runningCard
-                } else if case .done(let scanID, let kitName, let tally) = runner.state {
-                    doneCard(scanID: scanID, kitName: kitName, tally: tally)
+                } else if case .done(let scanID, let kitName, let tally, let skipped) = runner.state {
+                    doneCard(scanID: scanID, kitName: kitName, tally: tally, skipped: skipped)
                 } else if case .failed(let kitName, let err) = runner.state {
                     failedCard(kitName: kitName, err: err)
                 }
@@ -78,6 +80,24 @@ struct V2ForensicsScansView: View {
                 )
             }
         }
+        .alert("Encrypted scan",
+               isPresented: Binding(
+                   get: { pendingEncryptedKit != nil },
+                   set: { if !$0 { pendingEncryptedKit = nil } }
+               ),
+               presenting: pendingEncryptedKit) { kit in
+            Button("Run scan") {
+                encryptedWarningSeen = true
+                let toRun = kit
+                pendingEncryptedKit = nil
+                Task { await runner.run(toRun) }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingEncryptedKit = nil
+            }
+        } message: { kit in
+            Text("This kit collects personal data (messages, mail, call history). MacCrab will store it encrypted on disk and the OS will ask for your Keychain password to unlock the encryption key. You'll only be asked once per session.")
+        }
     }
 
     // Re-derive a stable identifier from the runner state so
@@ -87,8 +107,8 @@ struct V2ForensicsScansView: View {
         case .idle: return "idle"
         case .starting(let n): return "starting:\(n)"
         case .running(let n, let p, let c, let t): return "running:\(n):\(p):\(c)/\(t)"
-        case .done(let id, _, let t):
-            return "done:\(id):\(t.routine)/\(t.notable)/\(t.attention)/\(t.critical)"
+        case .done(let id, _, let t, let s):
+            return "done:\(id):\(t.routine)/\(t.notable)/\(t.attention)/\(t.critical):\(s.count)"
         case .failed(let n, _): return "failed:\(n)"
         }
     }
@@ -247,17 +267,30 @@ struct V2ForensicsScansView: View {
                         .background(Color.accentColor.opacity(0.15))
                         .foregroundStyle(.tint)
                         .cornerRadius(3)
+                    if kit.encrypted {
+                        Label("Encrypted", systemImage: "lock.fill")
+                            .labelStyle(.titleAndIcon)
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Color.purple.opacity(0.15))
+                            .foregroundStyle(.purple)
+                            .cornerRadius(3)
+                    }
                 }
                 Text(kit.description)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                Text("\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s")")
+                Text("\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s")\(kit.encrypted ? " · asks for your Keychain password" : "")")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
             Spacer()
             Button {
-                Task { await runner.run(kit) }
+                if kit.encrypted && !encryptedWarningSeen {
+                    pendingEncryptedKit = kit
+                } else {
+                    Task { await runner.run(kit) }
+                }
             } label: {
                 Text("Run")
                     .frame(minWidth: 60)
@@ -308,7 +341,7 @@ struct V2ForensicsScansView: View {
         }
     }
 
-    private func doneCard(scanID: String, kitName: String, tally: SeverityTally) -> some View {
+    private func doneCard(scanID: String, kitName: String, tally: SeverityTally, skipped: [KitRunner.SkippedPlugin]) -> some View {
         let headlineColor: Color = tally.critical > 0 ? .red
             : tally.attention > 0 ? .orange
             : .green
@@ -318,33 +351,60 @@ struct V2ForensicsScansView: View {
         let iconName: String = tally.critical > 0 ? "exclamationmark.octagon.fill"
             : tally.attention > 0 ? "exclamationmark.triangle.fill"
             : "checkmark.circle.fill"
-        return HStack(spacing: 10) {
-            Image(systemName: iconName)
-                .foregroundStyle(headlineColor)
-                .font(.system(size: 18))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(kitName) finished")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(tally.bannerSummary)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if tally.attention + tally.critical > 0 {
-                Button("Open findings") {
-                    openScanID = scanID
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: iconName)
+                    .foregroundStyle(headlineColor)
+                    .font(.system(size: 18))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(kitName) finished")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(tally.bannerSummary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                Spacer()
+                if tally.attention + tally.critical > 0 {
+                    Button("Open findings") {
+                        openScanID = scanID
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                Button("Dismiss") {
+                    runner.reset()
+                }
+                .buttonStyle(.borderless)
             }
-            Button("Dismiss") {
-                runner.reset()
+            if !skipped.isEmpty {
+                skippedList(skipped)
             }
-            .buttonStyle(.borderless)
         }
         .padding(12)
         .background(bgColor)
         .cornerRadius(8)
+    }
+
+    private func skippedList(_ skipped: [KitRunner.SkippedPlugin]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("\(skipped.count) scanner\(skipped.count == 1 ? "" : "s") didn't run:")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            ForEach(skipped, id: \.pluginID) { s in
+                HStack(spacing: 6) {
+                    Image(systemName: "minus.circle")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text(friendlyScannerName(s.pluginID))
+                        .font(.system(size: 10, weight: .medium))
+                    Text("— \(s.reason)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.leading, 28)
     }
 
     private func failedCard(kitName: String, err: String) -> some View {
@@ -378,17 +438,7 @@ struct V2ForensicsScansView: View {
     }
 
     private func friendlyScannerName(_ id: String) -> String {
-        let map: [String: String] = [
-            "com.maccrab.hosts-collector":          "Hosts file baseline",
-            "com.maccrab.launch-agents-collector":  "Launch agents inventory",
-            "com.maccrab.forensics.tcc-lite":       "Privacy permissions",
-            "com.maccrab.forensics.launchd-lite":   "Launch items",
-            "com.maccrab.forensics.applescript-runtime": "AppleScript activity",
-            "com.maccrab.forensics.quarantine":     "Quarantined downloads",
-            "com.maccrab.forensics.posture":        "Security posture",
-        ]
-        return map[id] ?? id.split(separator: ".").last
-            .map { $0.replacingOccurrences(of: "-", with: " ").capitalized } ?? id
+        ScannerDisplay.name(forPluginID: id)
     }
 
     private func reload() async {

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://maccrab.com/rave/schemas/kit.json",
+
+  "id": "com.maccrab.kit.comms-forensics",
+  "name": "Comms Forensics",
+  "description": "Deep extract of personal communications: iMessage handles + threads + URLs + bodies, Mail.app envelopes + bodies, FaceTime call history. Encrypted by default — message bodies and call records carry personal content. Use this for investigating a specific incident, not for routine posture monitoring.",
+  "version": "0.1.0",
+  "maintainer": "peterhanily",
+  "category": "incident-response",
+  "min_maccrab_version": "1.17.0",
+  "encrypted": true,
+
+  "plugins": [
+    {
+      "plugin_id": "com.maccrab.forensics.imessage-metadata",
+      "min_version": "0.1.0",
+      "role": "iMessage handles + threads + URL mentions",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.imessage-bodies",
+      "min_version": "0.1.0",
+      "role": "Full iMessage message bodies (encrypted at rest)",
+      "required": false
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.mail",
+      "min_version": "0.1.0",
+      "role": "Mail.app envelope metadata: sender, subject, headers, received-at",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.mail-bodies",
+      "min_version": "0.1.0",
+      "role": "Full Mail.app message bodies (encrypted at rest)",
+      "required": false
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.facetime",
+      "min_version": "0.1.0",
+      "role": "FaceTime call history: peers, durations, connection state",
+      "required": true
+    }
+  ],
+
+  "trust_tier": "first-party",
+  "created_at": "2026-05-27",
+  "updated_at": "2026-05-27"
+}

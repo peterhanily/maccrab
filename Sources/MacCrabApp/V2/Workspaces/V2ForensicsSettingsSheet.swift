@@ -210,15 +210,7 @@ struct V2ForensicsSettingsSheet: View {
     }
 
     private func friendlyName(_ id: String) -> String {
-        let map: [String: String] = [
-            "com.maccrab.hosts-collector":         "Hosts file baseline",
-            "com.maccrab.launch-agents-collector": "Launch agents inventory",
-        ]
-        if let n = map[id] { return n }
-        let parts = id.split(separator: ".")
-        guard let last = parts.last else { return id }
-        return last.replacingOccurrences(of: "-", with: " ").capitalized
-            + " (\(parts.dropLast().joined(separator: ".")))"
+        ScannerDisplay.name(forPluginID: id)
     }
 
     // MARK: - Actions

@@ -3,22 +3,41 @@
 
   "id": "com.maccrab.kit.phishing-triage",
   "name": "Phishing Triage",
-  "description": "PLACEHOLDER kit per plan §9.3. The intended scope is: Mail.app message metadata + Safari history + recent downloads + iMessage URL collection. Each requires its own collector plugin that hasn't been built yet. This entry documents the intent so operators can subscribe early; the kit becomes useful once at least three of the four collector plugins ship.",
-  "version": "0.0.0-placeholder",
+  "description": "Trace a suspected phish across its delivery vectors. Pulls Mail.app message metadata, iMessage handle + URL history, Safari history + downloads, and recent quarantined downloads. Encrypted because Mail + iMessage carry personal communications.",
+  "version": "0.1.0",
   "maintainer": "peterhanily",
   "category": "triage",
-  "min_maccrab_version": "1.16.0",
+  "min_maccrab_version": "1.17.0",
+  "encrypted": true,
 
   "plugins": [
     {
-      "plugin_id": "com.maccrab.hosts-collector",
-      "min_version": "0.0.1",
-      "role": "Stand-in until real triage plugins land — provides a hostname baseline for phishing URL detection",
+      "plugin_id": "com.maccrab.forensics.mail",
+      "min_version": "0.1.0",
+      "role": "Mail.app envelope metadata (sender, subject, received-at) for recent messages",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.imessage-metadata",
+      "min_version": "0.1.0",
+      "role": "iMessage handles + threads + URL mentions (no message bodies)",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.safari-lite",
+      "min_version": "0.1.0",
+      "role": "Browser history + downloads + installed extensions for clicked-link tracing",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.quarantine",
+      "min_version": "0.1.0",
+      "role": "Recently quarantined downloads matched against Safari + Mail traffic",
       "required": true
     }
   ],
 
   "trust_tier": "first-party",
   "created_at": "2026-05-21",
-  "updated_at": "2026-05-21"
+  "updated_at": "2026-05-27"
 }

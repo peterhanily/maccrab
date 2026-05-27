@@ -312,35 +312,11 @@ struct V2ForensicsFindingsView: View {
     // MARK: - Plain-English mappers
 
     private func friendlyScannerName(_ id: String) -> String {
-        let map: [String: String] = [
-            "com.maccrab.hosts-collector":         "Hosts file baseline",
-            "com.maccrab.launch-agents-collector": "Launch agents inventory",
-            "com.maccrab.forensics.tcc-lite":      "Privacy permissions",
-            "com.maccrab.forensics.launchd-lite":  "Launch items",
-            "com.maccrab.forensics.applescript-runtime": "AppleScript activity",
-            "com.maccrab.forensics.quarantine":    "Quarantined downloads",
-            "com.maccrab.forensics.posture":       "Security posture",
-        ]
-        return map[id]
-            ?? id.split(separator: ".").last.map {
-                $0.replacingOccurrences(of: "-", with: " ").capitalized
-            } ?? id
+        ScannerDisplay.name(forPluginID: id)
     }
 
     private func friendlyContentType(_ ct: String) -> String {
-        let map: [String: String] = [
-            "tcc.permission":           "Privacy permission grant",
-            "launchd.agent":            "Launch agent",
-            "launchd.daemon":           "Launch daemon",
-            "applescript.execution":    "AppleScript execution",
-            "quarantine.download":      "Quarantined download",
-            "mail.body":                "Mail message body",
-            "safari.extension":         "Safari extension",
-            "facetime.call":            "FaceTime call record",
-            "biome.stream":             "Apple Biome activity",
-            "posture.finding":          "Security posture finding",
-        ]
-        return map[ct] ?? ct.replacingOccurrences(of: ".", with: " · ").capitalized
+        ScannerDisplay.name(forContentType: ct)
     }
 
     // Severity now sourced from FindingHeuristics.swift.

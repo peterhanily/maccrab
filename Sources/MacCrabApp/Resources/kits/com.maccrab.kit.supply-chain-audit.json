@@ -3,22 +3,41 @@
 
   "id": "com.maccrab.kit.supply-chain-audit",
   "name": "Supply-Chain Audit",
-  "description": "Inventory of installed software signatures + a check against known compromised package patterns. Tuned for engineering laptops where the npm / PyPI / Homebrew supply chain is the primary attack surface. Stub plugin set at v0 — expands once the underlying maccrabctl supply-chain hooks land in the platform.",
-  "version": "0.0.1",
+  "description": "Inventory of installed binaries + their codesigning posture. Walks Mach-O headers, builds a codesigning graph (signer → binaries), and inspects recently installed DMG/PKG payloads. Tuned for engineering laptops where the npm / PyPI / Homebrew supply chain is the primary attack surface.",
+  "version": "0.1.0",
   "maintainer": "peterhanily",
   "category": "audit",
-  "min_maccrab_version": "1.16.0",
+  "min_maccrab_version": "1.17.0",
+  "encrypted": false,
 
   "plugins": [
     {
-      "plugin_id": "com.maccrab.hosts-collector",
-      "min_version": "0.0.1",
-      "role": "Baseline /etc/hosts — supply-chain attacks have used hosts entries to redirect package mirrors",
+      "plugin_id": "com.maccrab.forensics.codesigning-graph",
+      "min_version": "0.1.0",
+      "role": "Build signer→binary graph for /Applications + ~/Applications + user-installed CLI tools",
       "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.macho-analyzer",
+      "min_version": "0.1.0",
+      "role": "Deep Mach-O inspection: dyld bindings, suspicious load commands, missing hardened-runtime",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.dmg-pkg-analyzer",
+      "min_version": "0.1.0",
+      "role": "Inspect DMG/PKG installer packages encountered in quarantine for unsigned payloads",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.plist-analyzer",
+      "min_version": "0.1.0",
+      "role": "Cross-reference plist files for suspicious entitlement or LSEnvironment patterns",
+      "required": false
     }
   ],
 
   "trust_tier": "first-party",
   "created_at": "2026-05-21",
-  "updated_at": "2026-05-21"
+  "updated_at": "2026-05-27"
 }

@@ -3,28 +3,47 @@
 
   "id": "com.maccrab.kit.ir-quick",
   "name": "IR Quickstart",
-  "description": "Triage kit for the first 60 minutes of an incident. Captures persistence baselines, recent process activity, and current network state. Designed to run end-to-end in under a minute and produce structured artifacts MacCrab's IR queue can import directly.",
-  "version": "0.0.1",
+  "description": "Triage kit for the first 60 minutes of an incident. Captures persistence baselines, current privacy grants, recent quarantined downloads, and browser activity, then runs the posture analyzer to surface unsigned persistence + unfamiliar team automation.",
+  "version": "0.1.0",
   "maintainer": "peterhanily",
   "category": "incident-response",
-  "min_maccrab_version": "1.16.0",
+  "min_maccrab_version": "1.17.0",
+  "encrypted": false,
 
   "plugins": [
     {
-      "plugin_id": "com.maccrab.hosts-collector",
-      "min_version": "0.0.1",
-      "role": "Baseline /etc/hosts to detect domain redirection persistence",
+      "plugin_id": "com.maccrab.forensics.launchd-lite",
+      "min_version": "0.1.0",
+      "role": "Persistence baseline: LaunchAgents + LaunchDaemons + StartupItems + BAM entries",
       "required": true
     },
     {
-      "plugin_id": "com.maccrab.launch-agents-collector",
-      "min_version": "0.0.1",
-      "role": "Baseline ~/Library/LaunchAgents to detect the most common boot/login persistence vector",
+      "plugin_id": "com.maccrab.forensics.tcc-lite",
+      "min_version": "0.1.0",
+      "role": "Privacy permissions: what has been granted access to what",
       "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.quarantine",
+      "min_version": "0.1.0",
+      "role": "Recently quarantined downloads (LSQuarantine) for download-borne first-stage payloads",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.safari-lite",
+      "min_version": "0.1.0",
+      "role": "Browser history + downloads + extensions metadata (no page bodies)",
+      "required": false
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.posture-analyzer",
+      "min_version": "0.1.0",
+      "role": "Cross-reference persistence + permissions to surface unsigned/unfamiliar combinations",
+      "required": false
     }
   ],
 
   "trust_tier": "first-party",
   "created_at": "2026-05-21",
-  "updated_at": "2026-05-21"
+  "updated_at": "2026-05-27"
 }

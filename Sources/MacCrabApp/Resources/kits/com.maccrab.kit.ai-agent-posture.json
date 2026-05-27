@@ -3,22 +3,41 @@
 
   "id": "com.maccrab.kit.ai-agent-posture",
   "name": "AI Agent Posture",
-  "description": "What's running, what it can touch, where it phones home. Identifies AI coding tools (Cursor / Claude Code / Codex / Copilot) by their launch agents + installed binaries, then reports their effective TCC scope. Helps operators answer 'which of my AI tools has read access to my source tree, and to my message archive?'",
-  "version": "0.0.1",
+  "description": "What's running, what it can touch, what it has scripted. Identifies AI coding tools (Cursor / Claude Code / Codex / Copilot) by their launch agents + installed binaries, reports their effective TCC scope, and surfaces any AppleScript runtime activity those tools have triggered.",
+  "version": "0.1.0",
   "maintainer": "peterhanily",
   "category": "posture",
-  "min_maccrab_version": "1.16.0",
+  "min_maccrab_version": "1.17.0",
+  "encrypted": true,
 
   "plugins": [
     {
-      "plugin_id": "com.maccrab.launch-agents-collector",
-      "min_version": "0.0.1",
-      "role": "Identify AI tools by their launch agent labels (most modern AI dev tools install a launchd helper)",
+      "plugin_id": "com.maccrab.forensics.launchd-lite",
+      "min_version": "0.1.0",
+      "role": "Identify AI tools by their launchd helpers + RunAtLoad flags",
       "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.tcc-lite",
+      "min_version": "0.1.0",
+      "role": "Effective TCC scope: which AI tools have FDA, Accessibility, Screen Recording, etc.",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.applescript-runtime",
+      "min_version": "0.1.0",
+      "role": "Recent AppleScript activity — AI agents often automate other apps via osascript",
+      "required": false
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.posture-analyzer",
+      "min_version": "0.1.0",
+      "role": "Cross-reference: AI tools whose persistence + TCC combination is unusual",
+      "required": false
     }
   ],
 
   "trust_tier": "first-party",
   "created_at": "2026-05-21",
-  "updated_at": "2026-05-21"
+  "updated_at": "2026-05-27"
 }

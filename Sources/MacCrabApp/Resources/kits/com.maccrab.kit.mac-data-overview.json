@@ -1,0 +1,49 @@
+{
+  "$schema": "https://maccrab.com/rave/schemas/kit.json",
+
+  "id": "com.maccrab.kit.mac-data-overview",
+  "name": "Mac Data Overview",
+  "description": "Broad metadata snapshot of this Mac for baseline / drift detection. Walks launchd persistence, TCC permissions, recently quarantined downloads, KnowledgeC activity, and Biome streams. Plaintext — metadata only, no message or page bodies. Useful as a recurring baseline you can diff against later.",
+  "version": "0.1.0",
+  "maintainer": "peterhanily",
+  "category": "monitoring",
+  "min_maccrab_version": "1.17.0",
+  "encrypted": false,
+
+  "plugins": [
+    {
+      "plugin_id": "com.maccrab.forensics.launchd-lite",
+      "min_version": "0.1.0",
+      "role": "Launch agents + daemons + StartupItems + BAM (background activity monitor)",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.tcc-lite",
+      "min_version": "0.1.0",
+      "role": "Privacy permission grants per service",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.quarantine",
+      "min_version": "0.1.0",
+      "role": "Recent quarantine events (downloads + AirDrop + iMessage attachments)",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.knowledgec",
+      "min_version": "0.1.0",
+      "role": "Activity bundles — which apps + URLs were active across the day",
+      "required": false
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.biome",
+      "min_version": "0.1.0",
+      "role": "Biome streams: app usage, location, focus mode, notification activity",
+      "required": false
+    }
+  ],
+
+  "trust_tier": "first-party",
+  "created_at": "2026-05-27",
+  "updated_at": "2026-05-27"
+}

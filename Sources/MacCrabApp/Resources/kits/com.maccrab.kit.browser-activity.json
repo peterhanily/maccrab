@@ -1,0 +1,37 @@
+{
+  "$schema": "https://maccrab.com/rave/schemas/kit.json",
+
+  "id": "com.maccrab.kit.browser-activity",
+  "name": "Browser Activity",
+  "description": "Where the user has been, what they downloaded, what extensions they have installed. Pulls Safari history + downloads + extensions, recent quarantine events, and KnowledgeC activity bundles to correlate active-app windows with URL visits. Metadata only — no page bodies.",
+  "version": "0.1.0",
+  "maintainer": "peterhanily",
+  "category": "audit",
+  "min_maccrab_version": "1.17.0",
+  "encrypted": false,
+
+  "plugins": [
+    {
+      "plugin_id": "com.maccrab.forensics.safari-lite",
+      "min_version": "0.1.0",
+      "role": "Safari history, downloads, installed extensions",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.quarantine",
+      "min_version": "0.1.0",
+      "role": "Recently quarantined files cross-referenced with Safari download origin",
+      "required": true
+    },
+    {
+      "plugin_id": "com.maccrab.forensics.knowledgec",
+      "min_version": "0.1.0",
+      "role": "Activity bundles from /private/var/db/CoreDuet/Knowledge — what apps were active when",
+      "required": false
+    }
+  ],
+
+  "trust_tier": "first-party",
+  "created_at": "2026-05-27",
+  "updated_at": "2026-05-27"
+}

@@ -229,20 +229,7 @@ struct V2ForensicsScanDetailView: View {
     }
 
     private func friendlyScannerName(_ id: String) -> String {
-        let map: [String: String] = [
-            "com.maccrab.hosts-collector":              "Hosts file baseline",
-            "com.maccrab.launch-agents-collector":      "Launch agents inventory",
-            "com.maccrab.forensics.tcc-lite":           "Privacy permissions",
-            "com.maccrab.forensics.launchd-lite":       "Launch items",
-            "com.maccrab.forensics.applescript-runtime": "AppleScript activity",
-            "com.maccrab.forensics.quarantine":         "Quarantined downloads",
-            "com.maccrab.forensics.posture":            "Security posture",
-        ]
-        return map[id]
-            ?? id.split(separator: ".").last.map {
-                $0.replacingOccurrences(of: "-", with: " ").capitalized
-            }
-            ?? id
+        ScannerDisplay.name(forPluginID: id)
     }
 
     // MARK: - Load

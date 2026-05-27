@@ -24,6 +24,15 @@ public struct Kit: Identifiable, Hashable, Codable, Sendable {
     public let trustTier: TrustTier
     public let createdAt: String
     public let updatedAt: String
+    /// Whether this kit needs an encrypted case. Required for any
+    /// kit that includes a collector emitting content / personalComms
+    /// artifacts (mail, imessage-*, facetime, safari-deep,
+    /// applescript-runtime, etc.) — the store rejects those at
+    /// INSERT into a plaintext case (Pass 2026-D).
+    ///
+    /// Defaults to false when the JSON omits the field (backwards
+    /// compat with rc.4–rc.9 kits).
+    public let encrypted: Bool
 
     public enum Category: String, Codable, Sendable, CaseIterable {
         case incidentResponse = "incident-response"
@@ -82,11 +91,27 @@ public struct Kit: Identifiable, Hashable, Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, description, version, maintainer, category, plugins
+        case id, name, description, version, maintainer, category, plugins, encrypted
         case minMaccrabVersion = "min_maccrab_version"
         case trustTier = "trust_tier"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.description = try c.decode(String.self, forKey: .description)
+        self.version = try c.decode(String.self, forKey: .version)
+        self.maintainer = try c.decode(String.self, forKey: .maintainer)
+        self.category = try c.decode(Category.self, forKey: .category)
+        self.minMaccrabVersion = try c.decode(String.self, forKey: .minMaccrabVersion)
+        self.plugins = try c.decode([PluginRef].self, forKey: .plugins)
+        self.trustTier = try c.decode(TrustTier.self, forKey: .trustTier)
+        self.createdAt = try c.decode(String.self, forKey: .createdAt)
+        self.updatedAt = try c.decode(String.self, forKey: .updatedAt)
+        self.encrypted = try c.decodeIfPresent(Bool.self, forKey: .encrypted) ?? false
     }
 }
 

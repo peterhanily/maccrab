@@ -81,16 +81,15 @@ public enum FindingHeuristics {
         let summary = (a.record.summary ?? "").lowercased()
         let data = a.record.data
 
-        // Posture / anomaly content types come from the v1.15
-        // analyzer (when it ships) — those are real findings.
+        // Posture analyzer findings are real findings, not
+        // heuristics. Promote to attention by default.
         if ct.hasPrefix("posture.") || ct.contains("anomaly") {
             return .attention
         }
 
-        // Launch agent heuristics — if an unsigned binary path
-        // is set, flag it. Same for known-suspicious roots
-        // (e.g. /tmp, ~/Downloads, ~/Library/Caches).
-        if ct.contains("launchd") || ct.contains("launch_agent") || ct.contains("launchagent") {
+        // Launchd persistence: surfaces unsigned binaries +
+        // suspicious paths.
+        if ct.hasPrefix("launchd.") || ct.contains("launch_agent") || ct.contains("launchagent") {
             if case .bool(let unsigned) = data["unsigned"] ?? .null, unsigned == true {
                 return .attention
             }
@@ -102,15 +101,9 @@ public enum FindingHeuristics {
             return .routine
         }
 
-        // Hosts file — entries pointing to private RFC1918 IPs
-        // are sometimes legitimate (corp proxies) but always
-        // worth a glance.
+        // /etc/hosts entries — sometimes legit (corp proxy) but
+        // always worth a look when they're non-loopback.
         if ct.contains("hosts") {
-            if case .string(let ip) = data["ip"] ?? .null, isPrivateIP(ip) {
-                return .notable
-            }
-            // Non-loopback entries get notable since /etc/hosts
-            // shipping with anything beyond localhost is unusual.
             if case .string(let ip) = data["ip"] ?? .null,
                ip != "127.0.0.1" && ip != "::1" && ip != "0.0.0.0" && !ip.isEmpty {
                 return .notable
@@ -118,28 +111,132 @@ public enum FindingHeuristics {
             return .routine
         }
 
-        // TCC permission grants — anything granting an unsigned
-        // app or Terminal.app to a sensitive service is notable.
-        if ct.contains("tcc") {
-            if case .string(let service) = data["service"] ?? .null {
-                if sensitiveServices.contains(service.lowercased()) {
-                    return .notable
-                }
+        // TCC: grants of sensitive services are notable. Grants
+        // to Terminal.app / unsigned apps to FDA = attention.
+        if ct.hasPrefix("tcc.") {
+            let service = stringValue(data["service"]).lowercased()
+            let client  = stringValue(data["client"]).lowercased()
+            let signed  = boolValue(data["client_signed"]) ?? true
+            if !signed, sensitiveServices.contains(service) {
+                return .attention
+            }
+            if client.hasSuffix("/terminal.app") && sensitiveServices.contains(service) {
+                return .attention
+            }
+            if sensitiveServices.contains(service) {
+                return .notable
             }
             return .routine
         }
 
-        // Quarantine downloads — recent quarantine of an
-        // executable from a non-standard origin is notable.
-        if ct.contains("quarantine") {
+        // Quarantine: notable always; attention when origin URL
+        // suggests a credential-theft or supply-chain pattern.
+        if ct.hasPrefix("quarantine.") {
+            let origin = stringValue(data["origin_url"]).lowercased()
+            if origin.contains("npmjs") || origin.contains("pypi") || origin.contains(".onion") {
+                return .attention
+            }
             return .notable
         }
 
-        // Default for everything else.
+        // Safari history / downloads / extensions.
+        if ct.hasPrefix("safari.") {
+            if ct == "safari.history_visit" {
+                let url = stringValue(data["url"]).lowercased()
+                if looksLikePunycode(url) {
+                    return .notable
+                }
+                return .routine
+            }
+            if ct == "safari.download" {
+                let url = stringValue(data["origin_url"]).lowercased()
+                if url.hasSuffix(".dmg") || url.hasSuffix(".pkg") || url.contains("install") {
+                    return .notable
+                }
+                return .routine
+            }
+            if ct == "safari.extension" {
+                if case .bool(let signed) = data["signed"] ?? .null, signed == false {
+                    return .attention
+                }
+                return .routine
+            }
+            return .routine
+        }
+
+        // iMessage — url_mention is the high-signal entry
+        // (phish links shared via SMS forwarding), everything
+        // else is routine.
+        if ct.hasPrefix("imessage.") {
+            if ct == "imessage.url_mention" {
+                return .attention
+            }
+            return .routine
+        }
+
+        // Mail metadata — notable on attachments from unfamiliar
+        // senders, otherwise routine.
+        if ct.hasPrefix("mail.") {
+            if case .bool(let hasAttachment) = data["has_attachment"] ?? .null,
+               hasAttachment == true {
+                return .notable
+            }
+            return .routine
+        }
+
+        // FaceTime + KnowledgeC + Biome — activity inventory,
+        // routine unless explicitly tagged.
+        if ct.hasPrefix("facetime.") || ct.hasPrefix("knowledgec.") || ct.hasPrefix("biome.") {
+            return .routine
+        }
+
+        // Static analysis: codesigning + Mach-O. Unsigned is
+        // attention. Suspicious load commands also attention.
+        if ct.hasPrefix("codesigning.") || ct.hasPrefix("macho.") {
+            if case .bool(let signed) = data["signed"] ?? .null, signed == false {
+                return .attention
+            }
+            if case .bool(let hardened) = data["hardened_runtime"] ?? .null, hardened == false {
+                return .notable
+            }
+            return .routine
+        }
+
+        // Installer payloads.
+        if ct.hasPrefix("dmg.") || ct.hasPrefix("pkg.") {
+            if case .bool(let signed) = data["signed"] ?? .null, signed == false {
+                return .attention
+            }
+            return .notable
+        }
+
+        // AppleScript activity is content-class — every entry
+        // is notable (recent automation invoked another app).
+        if ct.hasPrefix("applescript.") {
+            return .notable
+        }
+
+        // Default fallback for non-classified content types.
         if summary.contains("unsigned") || summary.contains("unfamiliar") {
             return .attention
         }
         return .routine
+    }
+
+    // MARK: - Value helpers
+
+    private static func stringValue(_ v: JSONValue?) -> String {
+        if case .string(let s) = v ?? .null { return s }
+        return ""
+    }
+
+    private static func boolValue(_ v: JSONValue?) -> Bool? {
+        if case .bool(let b) = v ?? .null { return b }
+        return nil
+    }
+
+    private static func looksLikePunycode(_ url: String) -> Bool {
+        url.contains("xn--")
     }
 
     /// Tally severities in a scan's artifact list.

@@ -1,16 +1,19 @@
 // KitRunner.swift
 //
-// Runs a Kit end-to-end on a new scan: creates the case,
-// runs each plugin in the kit on it sequentially, returns the
-// scan id when done. Wired to the "Run" button on each kit
-// card in V2ForensicsScansView.
+// Runs a Kit end-to-end on a new scan: creates the case, runs
+// each plugin in the kit on it sequentially, returns the scan id
+// when done. Wired to the "Run" button on each kit card in
+// V2ForensicsScansView.
 //
-// rc.4 scope: built-in (Tier A in-process) plugins only — the
-// 4 bundled kits all reference plugins MacCrab already ships
-// internally (com.maccrab.hosts-collector,
-// com.maccrab.launch-agents-collector). rc.7 extends to
-// fetch-+-install from rave catalog for kits that reference
-// plugins not yet installed.
+// rc.10 changes vs rc.5:
+//   - Honors kit.encrypted (rc.5 hard-coded plaintext, which
+//     would silently no-op every content-class collector since
+//     the store rejects non-metadata in plaintext cases)
+//   - Per-plugin do/catch so one collector that's missing FDA
+//     doesn't abort the whole kit; failures collected into a
+//     `skipped` list reported in the final State
+//   - Double-run guard: a second call while a kit is already in
+//     flight is a no-op
 
 import Foundation
 import MacCrabForensics
@@ -22,8 +25,16 @@ public final class KitRunner: ObservableObject {
         case idle
         case starting(kitName: String)
         case running(kitName: String, currentPlugin: String, completed: Int, total: Int)
-        case done(scanID: String, kitName: String, tally: SeverityTally)
+        case done(scanID: String, kitName: String, tally: SeverityTally, skipped: [SkippedPlugin])
         case failed(kitName: String, error: String)
+    }
+
+    /// A plugin that didn't contribute artifacts. Surfaced in the
+    /// done banner so the operator understands why a kit they
+    /// expected to be expansive came back with a small tally.
+    public struct SkippedPlugin: Sendable, Equatable {
+        public let pluginID: String
+        public let reason: String
     }
 
     @Published public internal(set) var state: State = .idle
@@ -33,78 +44,92 @@ public final class KitRunner: ObservableObject {
     /// Dismiss the done/failed banner from the view.
     public func reset() { state = .idle }
 
+    /// True while a kit is mid-flight. UI gates the Run button on
+    /// this so the operator can't fire the same kit twice in
+    /// parallel.
+    public var isRunning: Bool {
+        switch state {
+        case .starting, .running: return true
+        default: return false
+        }
+    }
+
     /// Runs every plugin in the kit on a fresh scan. Reports
-    /// progress via `state`. On completion, `state.done(scanID:)`
-    /// is set; caller jumps to the scan detail view.
+    /// progress via `state`. Idempotent in flight — a second call
+    /// while a kit is running is a no-op.
     public func run(_ kit: Kit) async {
+        if isRunning { return }
         state = .starting(kitName: kit.name)
         do {
-            // Bootstrap plugin registry if needed.
             try await MacCrabForensicsBootstrap.registerBuiltins()
 
-            // Create the scan (case) — auto-named from kit + now.
             let mgr = makeCaseManager()
             let scanName = "\(kit.name) — \(Date().formatted(date: .abbreviated, time: .shortened))"
-            // rc.5 — default kit-driven scans to plaintext so the
-            // operator doesn't get Keychain password prompts on
-            // every Run click. Built-in kit collectors only emit
-            // metadata-class artifacts (TCC inventory, launch agent
-            // inventory, /etc/hosts baseline), so the audit Pass
-            // 2026-D restriction is naturally satisfied. Operators
-            // who want encrypted scans (for content-class kits)
-            // can opt in via the future Custom Scan sheet (rc.6).
             let handle = try await mgr.createCase(
                 name: scanName,
                 timeWindow: nil,
                 notes: "Auto-created from kit: \(kit.id)",
-                encrypted: false
+                encrypted: kit.encrypted
             )
             let runner = PluginRunner()
 
-            // Iterate the kit's plugins in declared order.
             let total = kit.plugins.count
-            var findingCount = 0
+            var skipped: [SkippedPlugin] = []
+
             for (idx, pref) in kit.plugins.enumerated() {
-                state = .running(kitName: kit.name, currentPlugin: pref.pluginID, completed: idx, total: total)
+                state = .running(kitName: kit.name,
+                                 currentPlugin: pref.pluginID,
+                                 completed: idx,
+                                 total: total)
                 guard let reg = await PluginRegistry.shared.registration(forID: pref.pluginID) else {
-                    // Plugin not installed; rc.7 will fetch from rave.
-                    // For rc.4: skip with a note.
+                    skipped.append(SkippedPlugin(
+                        pluginID: pref.pluginID,
+                        reason: "not registered in this build"
+                    ))
                     continue
                 }
-                switch reg.manifest.type {
-                case .collector:
-                    let (result, _) = try await runner.runCollector(
-                        id: pref.pluginID,
-                        handle: handle
-                    )
-                    findingCount += result.artifactsCommitted
-                case .analyzer:
-                    let (findings, _) = try await runner.runAnalyzer(
-                        id: pref.pluginID,
-                        handle: handle
-                    )
-                    findingCount += findings.count
-                case .enricher, .fingerprinter:
-                    // Pipeline plumbing — not directly invoked.
-                    continue
+                do {
+                    switch reg.manifest.type {
+                    case .collector:
+                        _ = try await runner.runCollector(
+                            id: pref.pluginID,
+                            handle: handle
+                        )
+                    case .analyzer:
+                        _ = try await runner.runAnalyzer(
+                            id: pref.pluginID,
+                            handle: handle
+                        )
+                    case .enricher, .fingerprinter:
+                        // Pipeline plumbing — not directly invoked.
+                        continue
+                    }
+                } catch {
+                    skipped.append(SkippedPlugin(
+                        pluginID: pref.pluginID,
+                        reason: shortReason(error)
+                    ))
                 }
             }
-            // Compute heuristic tally over what landed in the
-            // scan's store so the done banner can say
-            // "Inventoried 3, 1 needs review" instead of just
-            // counting raw rows.
+
+            // Tally what landed in the store. Use a generous limit
+            // since high-density collectors (mail, knowledgec)
+            // routinely emit thousands of rows.
             let tally: SeverityTally
             do {
                 let rows = try await handle.store.query(ArtifactQuery(
-                    caseID: handle.caseID, limit: 500
+                    caseID: handle.caseID, limit: 5000
                 ))
                 tally = FindingHeuristics.tally(rows)
             } catch {
-                tally = SeverityTally(routine: findingCount, notable: 0, attention: 0, critical: 0)
+                tally = .zero
             }
-            state = .done(scanID: handle.caseID, kitName: kit.name, tally: tally)
+            state = .done(scanID: handle.caseID,
+                          kitName: kit.name,
+                          tally: tally,
+                          skipped: skipped)
         } catch {
-            state = .failed(kitName: kit.name, error: "\(error)")
+            state = .failed(kitName: kit.name, error: shortReason(error))
         }
     }
 
@@ -113,5 +138,17 @@ public final class KitRunner: ObservableObject {
             casesRoot: CaseDirectoryLayout.defaultCasesRoot,
             dekVault: KeychainDEKVault()
         )
+    }
+
+    /// Trim Swift's default error stringification — surface the
+    /// useful sentence to the operator without the type path.
+    private func shortReason(_ error: Error) -> String {
+        let s = "\(error)"
+        // Most TCC-denied / sqlite-locked errors arrive as a
+        // descriptive single sentence already.
+        if let firstLine = s.split(separator: "\n").first {
+            return String(firstLine)
+        }
+        return s
     }
 }

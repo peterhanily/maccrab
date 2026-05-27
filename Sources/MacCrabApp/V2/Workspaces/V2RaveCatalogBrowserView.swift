@@ -433,24 +433,15 @@ struct V2RaveCatalogBrowserView: View {
     }
 
     private func friendlyName(_ id: String) -> String {
-        let map: [String: String] = [
-            "com.maccrab.hosts-collector":         "Hosts File Baseline",
-            "com.maccrab.launch-agents-collector": "Launch Agents Inventory",
-        ]
-        if let n = map[id] { return n }
-        let parts = id.split(separator: ".")
-        guard let last = parts.last else { return id }
-        return last.replacingOccurrences(of: "-", with: " ").capitalized
+        ScannerDisplay.name(forPluginID: id)
     }
 
     private func longDescription(_ e: RaveCatalogEntry) -> String {
-        let map: [String: String] = [
-            "com.maccrab.hosts-collector":
-                "Snapshots /etc/hosts and flags any entries that map external hostnames to private or loopback addresses. Useful as a baseline for detecting later persistence + redirection attempts.",
-            "com.maccrab.launch-agents-collector":
-                "Inventories every launch agent + daemon on this Mac (per-user and system-wide). Tags entries pointing to unsigned binaries or unusual paths (/tmp, hidden home dirs, Caches) as 'needs review'.",
-        ]
-        return map[e.id] ?? "Run this scanner to add it to MacCrab's collection layer. The catalog vetting confirms the binary's signature + provenance chain."
+        // Detail panel text — manifest descriptions live in the
+        // plugin manifests once those land in the catalog; for
+        // now the friendly name is enough until the rave catalog
+        // emits descriptions in its JSON.
+        return "\(friendlyName(e.id)) — \(e.category ?? "scanner") published via the rave catalog. Install via the command shown below to add it to this Mac's scanner registry; from there it'll appear in any kit that references its id."
     }
 
     private func monogram(_ id: String) -> String {
