@@ -524,6 +524,27 @@ public actor ArtifactStore {
         return out
     }
 
+    /// rc.15 — content-type counts for a case, used by the scan
+    /// detail view's sidebar so we don't have to load every
+    /// artifact upfront just to know the grouping. SQL COUNT +
+    /// GROUP BY is sub-millisecond even for 10K+ row cases.
+    public func contentTypeCounts(caseID: String) throws -> [(contentType: String, count: Int)] {
+        guard let db = db else { return [] }
+        let sql = "SELECT content_type, COUNT(*) FROM artifacts WHERE case_id = ? GROUP BY content_type ORDER BY content_type"
+        var stmt: OpaquePointer?
+        let p = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        defer { sqlite3_finalize(stmt) }
+        guard p == SQLITE_OK else { return [] }
+        sqlite3_bind_text(stmt, 1, caseID, -1, SQLITE_TRANSIENT)
+        var out: [(String, Int)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let ct = String(cString: sqlite3_column_text(stmt, 0))
+            let c = Int(sqlite3_column_int64(stmt, 1))
+            out.append((ct, c))
+        }
+        return out
+    }
+
     /// Cheap COUNT(*) for live progress UI — used by the kit
     /// runner's poll loop while a collector is mid-flight to show
     /// "X rows so far". Sub-millisecond on indexed case_id.

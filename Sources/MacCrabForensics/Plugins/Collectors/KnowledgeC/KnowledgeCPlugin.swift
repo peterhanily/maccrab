@@ -27,13 +27,13 @@ public struct KnowledgeCPlugin: Collector {
                 contentType: "knowledgec.event",
                 privacyClass: .metadata,
                 viewerHint: ViewerHint(
-                    viewer: .timeline,
+                    viewer: .chart,
                     fieldRoles: [
                         "observed_at": .timestamp,
                         "stream_name": .title,
-                        "value_string": .subtitle,
                         "bundle_id": .identifier,
-                    ]
+                    ],
+                    chart: ChartHint(chartType: .histogram, bucketField: "observed_at")
                 )
             ),
         ],

@@ -1,17 +1,17 @@
-// V2ForensicsScanDetailView.swift — rc.13 rebuild.
+// V2ForensicsScanDetailView.swift — rc.15 lazy-loading rebuild.
 //
-// Old: flat list of evidence rows, no per-content-type
-// rendering, no exports.
+// Pre-rc.15 the view loaded up to 5000 artifacts upfront and
+// held them in memory the whole time the sheet was open. For
+// large encrypted scans with mail bodies (~100KB each) that
+// could push hundreds of MB of resident memory.
 //
-// New: forensic manifest layout.
-//   - Top: scan metadata + severity tally + Export menu
-//   - Sidebar: content types present (grouped, with counts)
-//   - Main: dispatched viewer for the selected content type
-//     (table / timeline / keyvalue / transcript / layout /
-//     JSON tree fallback)
-//
-// The dispatcher reads the plugin's ViewerHint from the registry
-// at load time (once); subsequent renders are pure SwiftUI.
+// rc.15 strategy:
+//   - Initial load fetches CONTENT-TYPE COUNTS only via a cheap
+//     SQL GROUP BY. The sidebar renders from counts, not data.
+//   - When the operator picks a content type, the artifacts for
+//     THAT type are fetched on demand and cached.
+//   - Export uses a fresh load (not the lazy cache) so the
+//     output is always complete.
 
 import SwiftUI
 import MacCrabForensics
@@ -24,30 +24,30 @@ struct V2ForensicsScanDetailView: View {
     @Binding var isPresented: Bool
 
     @State private var loading = true
-    @State private var artifacts: [CommittedArtifact] = []
     @State private var error: String? = nil
     @State private var unlocked = false
+    @State private var ctCounts: [(contentType: String, count: Int)] = []
+    @State private var loadedArtifacts: [String: [CommittedArtifact]] = [:]
+    @State private var loadingCT: String? = nil
     @State private var hints: [String: ViewerHint?] = [:]
     @State private var selectedContentType: String? = nil
     @State private var exportStatus: ExportStatus = .idle
+    @State private var caseHandle: CaseHandle? = nil
 
     private enum ExportStatus: Equatable {
         case idle
+        case exporting
         case exported(URL)
         case failed(String)
     }
 
-    private var contentTypes: [String] {
-        Array(Set(artifacts.map { $0.record.contentType })).sorted()
+    private var totalRows: Int {
+        ctCounts.reduce(0) { $0 + $1.count }
     }
 
-    private var grouped: [String: [CommittedArtifact]] {
-        Dictionary(grouping: artifacts) { $0.record.contentType }
-    }
-
-    private var visibleArtifacts: [CommittedArtifact] {
-        guard let ct = selectedContentType else { return artifacts }
-        return grouped[ct] ?? []
+    private var selectedArtifacts: [CommittedArtifact] {
+        guard let ct = selectedContentType else { return [] }
+        return loadedArtifacts[ct] ?? []
     }
 
     var body: some View {
@@ -61,7 +61,7 @@ struct V2ForensicsScanDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let err = error {
                 Text(err).foregroundStyle(.red).font(.system(size: 12)).padding(20)
-            } else if artifacts.isEmpty {
+            } else if ctCounts.isEmpty {
                 emptyEvidence.padding(20)
             } else {
                 summaryCard
@@ -78,7 +78,7 @@ struct V2ForensicsScanDetailView: View {
         .frame(width: 980, height: 680)
         .task {
             if encryptionState == .plaintext {
-                await loadEvidence()
+                await initialLoad()
             } else {
                 loading = false
             }
@@ -96,7 +96,7 @@ struct V2ForensicsScanDetailView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if !artifacts.isEmpty {
+            if !ctCounts.isEmpty {
                 exportMenu
             }
             Button("Close") { isPresented = false }
@@ -108,12 +108,12 @@ struct V2ForensicsScanDetailView: View {
     private var exportMenu: some View {
         Menu {
             Button {
-                exportNow(.csv)
+                Task { await exportNow(.csv) }
             } label: {
                 Label("Export as CSV", systemImage: "tablecells")
             }
             Button {
-                exportNow(.json)
+                Task { await exportNow(.json) }
             } label: {
                 Label("Export as JSON", systemImage: "curlybraces")
             }
@@ -131,23 +131,17 @@ struct V2ForensicsScanDetailView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("Export the scan's evidence")
+        .disabled(exportStatus == .exporting)
     }
 
     // MARK: - Summary card
 
     private var summaryCard: some View {
-        let tally = FindingHeuristics.tally(artifacts)
-        return HStack(spacing: 20) {
-            metric("Evidence rows", "\(artifacts.count)")
-            metric("Scanners run", "\(distinctPluginIDs.count)")
-            metric("Content types", "\(contentTypes.count)")
+        HStack(spacing: 20) {
+            metric("Evidence rows", "\(totalRows)")
+            metric("Content types", "\(ctCounts.count)")
             metric("State", encryptionState == .plaintext ? "Plaintext" : "Encrypted")
             Spacer()
-            if !artifacts.isEmpty {
-                Text(tally.bannerSummary)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(tally.attention + tally.critical > 0 ? .orange : .secondary)
-            }
             exportStatusView
         }
         .padding(.horizontal, 20).padding(.vertical, 12)
@@ -165,6 +159,11 @@ struct V2ForensicsScanDetailView: View {
         switch exportStatus {
         case .idle:
             EmptyView()
+        case .exporting:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Exporting…").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
         case .exported(let url):
             HStack(spacing: 4) {
                 Image(systemName: "checkmark.circle.fill")
@@ -186,10 +185,6 @@ struct V2ForensicsScanDetailView: View {
         }
     }
 
-    private var distinctPluginIDs: [String] {
-        Array(Set(artifacts.map { $0.record.pluginID })).sorted()
-    }
-
     // MARK: - Content type sidebar
 
     private var contentTypeSidebar: some View {
@@ -200,20 +195,23 @@ struct V2ForensicsScanDetailView: View {
                     .foregroundStyle(.tertiary)
                     .textCase(.uppercase)
                     .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
-                ForEach(contentTypes, id: \.self) { ct in
-                    sidebarRow(ct)
+                ForEach(ctCounts, id: \.contentType) { item in
+                    sidebarRow(contentType: item.contentType, count: item.count)
                 }
             }
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
     }
 
-    private func sidebarRow(_ ct: String) -> some View {
-        let count = grouped[ct]?.count ?? 0
-        let isSelected = (selectedContentType ?? contentTypes.first) == ct
+    private func sidebarRow(contentType ct: String, count: Int) -> some View {
+        let isSelected = (selectedContentType ?? ctCounts.first?.contentType) == ct
         let kind = hints[ct]??.viewer.rawValue ?? "json"
         return Button {
             selectedContentType = ct
+            // Lazy-fetch on first selection.
+            if loadedArtifacts[ct] == nil {
+                Task { await loadCT(ct) }
+            }
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
@@ -249,20 +247,28 @@ struct V2ForensicsScanDetailView: View {
         case "keyvalue":   return "list.bullet.indent"
         case "transcript": return "text.bubble"
         case "layout":     return "rectangle.grid.1x2"
+        case "chart":      return "chart.bar.fill"
         default:           return "curlybraces"
         }
     }
 
     // MARK: - Viewer area
 
+    @ViewBuilder
     private var viewerArea: some View {
-        let ct = selectedContentType ?? contentTypes.first ?? ""
-        return ArtifactViewerDispatcher(
-            contentType: ct,
-            artifacts: visibleArtifacts,
-            hint: hints[ct] ?? nil
-        )
-        .padding(8)
+        if let ct = selectedContentType ?? ctCounts.first?.contentType {
+            if loadingCT == ct && loadedArtifacts[ct] == nil {
+                ProgressView("Loading \(ScannerDisplay.name(forContentType: ct))…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ArtifactViewerDispatcher(
+                    contentType: ct,
+                    artifacts: selectedArtifacts,
+                    hint: hints[ct] ?? nil
+                )
+                .padding(8)
+            }
+        }
     }
 
     // MARK: - Encrypted / empty
@@ -280,7 +286,7 @@ struct V2ForensicsScanDetailView: View {
             Button("Unlock + show evidence") {
                 Task {
                     unlocked = true
-                    await loadEvidence()
+                    await initialLoad()
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -301,9 +307,11 @@ struct V2ForensicsScanDetailView: View {
             .cornerRadius(8)
     }
 
-    // MARK: - Load + export
+    // MARK: - Loading
 
-    private func loadEvidence() async {
+    /// Initial load: opens the case, fetches counts only, and
+    /// kicks off lazy load for the first content type.
+    private func initialLoad() async {
         loading = true
         defer { loading = false }
         do {
@@ -312,26 +320,63 @@ struct V2ForensicsScanDetailView: View {
                 dekVault: KeychainDEKVault()
             )
             let handle = try await mgr.openCase(id: scanID)
-            let rows = try await handle.store.query(ArtifactQuery(
-                caseID: scanID,
-                limit: 5000
-            ))
-            artifacts = OperatorVisibilityFilter.filter(rows)
-            // Resolve viewer hints for every content type in one pass.
+            caseHandle = handle
+            let counts = try await handle.store.contentTypeCounts(caseID: scanID)
+            // Apply operator-visibility filter to drop dev plugins.
+            ctCounts = counts.filter {
+                OperatorVisibilityFilter.isOperatorVisible(
+                    contentType: $0.contentType,
+                    pluginID: ""
+                )
+            }
             hints = await ViewerHintResolver.resolveAll(
-                contentTypes: Set(artifacts.map { $0.record.contentType })
+                contentTypes: Set(ctCounts.map { $0.contentType })
             )
-            if selectedContentType == nil { selectedContentType = contentTypes.first }
+            if let first = ctCounts.first?.contentType {
+                selectedContentType = first
+                await loadCT(first)
+            }
         } catch {
             self.error = "Could not load evidence: \(error)"
-            artifacts = []
+            ctCounts = []
         }
     }
 
-    private func exportNow(_ format: ArtifactExporter.Format) {
+    /// Fetch the artifacts for a single content type. Cached on
+    /// first hit so re-selecting a sidebar entry is instant.
+    private func loadCT(_ ct: String) async {
+        guard let handle = caseHandle else { return }
+        if loadedArtifacts[ct] != nil { return }
+        loadingCT = ct
+        defer { loadingCT = nil }
         do {
+            let rows = try await handle.store.query(ArtifactQuery(
+                caseID: scanID,
+                contentType: ct,
+                limit: 5000
+            ))
+            loadedArtifacts[ct] = OperatorVisibilityFilter.filter(rows)
+        } catch {
+            loadedArtifacts[ct] = []
+        }
+    }
+
+    /// Export uses a fresh full-case load to guarantee complete
+    /// output (the lazy cache may only hold what the operator
+    /// happens to have visited).
+    private func exportNow(_ format: ArtifactExporter.Format) async {
+        exportStatus = .exporting
+        guard let handle = caseHandle else {
+            exportStatus = .failed("No open case handle.")
+            return
+        }
+        do {
+            let rows = try await handle.store.query(ArtifactQuery(
+                caseID: scanID, limit: 50_000
+            ))
+            let filtered = OperatorVisibilityFilter.filter(rows)
             let url = try ArtifactExporter.export(
-                artifacts: artifacts,
+                artifacts: filtered,
                 scanID: scanID,
                 scanName: scanName,
                 format: format

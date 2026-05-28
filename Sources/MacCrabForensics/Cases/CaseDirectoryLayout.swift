@@ -67,6 +67,28 @@ public struct CaseDirectoryLayout: Sendable {
         caseDirectory.appendingPathComponent("mcp_audit.log", isDirectory: false)
     }
 
+    /// rc.15 — total bytes consumed by everything in this case's
+    /// on-disk directory (case.sqlite + WAL/SHM + vault blobs +
+    /// snapshots + logs). Recursive walk. Returns 0 when the case
+    /// dir is missing. Used by the Past Scans tab to show per-scan
+    /// size so operators can spot scans worth deleting.
+    public func diskBytes() -> Int64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: caseDirectory,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            if vals?.isRegularFile == true, let size = vals?.fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
     /// Resolve the file path for a blob keyed by sha256. Uses a
     /// 2-character prefix dir to keep directory fan-out
     /// manageable.

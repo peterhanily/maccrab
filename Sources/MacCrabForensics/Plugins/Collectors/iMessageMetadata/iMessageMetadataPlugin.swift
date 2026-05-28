@@ -35,14 +35,13 @@ public struct iMessageMetadataPlugin: Collector {
                 contentType: "imessage.handle",
                 privacyClass: .personalComms,
                 viewerHint: ViewerHint(
-                    viewer: .table,
+                    viewer: .chart,
                     fieldRoles: [
                         "handle_id": .title,
                         "service": .subtitle,
-                        "country": .status,
                         "message_count": .count,
                     ],
-                    columns: ["handle_id", "service", "country", "message_count"]
+                    chart: ChartHint(chartType: .bar, groupField: "handle_id")
                 )
             ),
             OutputSpec(

@@ -5,6 +5,7 @@
 
 import SwiftUI
 import MacCrabCore
+import MacCrabForensics
 import ServiceManagement
 import Sparkle
 import os.log
@@ -558,6 +559,8 @@ struct SettingsView: View {
     // MARK: - Forensics
 
     @AppStorage("forensics.catalogBaseURL") private var forensicsCatalogBaseURL: String = ""
+    @AppStorage("forensics.retentionDays") private var forensicsRetentionDays: Int = 0
+    @State private var retentionDeleteResult: String? = nil
     private static let officialForensicsCatalog = "https://maccrab.com/rave/"
 
     private var forensicsTab: some View {
@@ -607,9 +610,76 @@ struct SettingsView: View {
                     }
                     .padding(8)
                 }
+
+                GroupBox(String(localized: "settings.forensicsRetention", defaultValue: "Scan retention")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(String(localized: "settings.forensicsRetentionDesc", defaultValue: "Each scan stays on disk in ~/Library/Application Support/MacCrab/Cases/ until you delete it. Pick a retention age below 0 = never auto-delete. The cleanup runs when you click the button or the next time the dashboard opens."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 8) {
+                            Text(String(localized: "settings.retentionLabel", defaultValue: "Auto-delete scans older than:"))
+                            Picker("", selection: $forensicsRetentionDays) {
+                                Text("Never").tag(0)
+                                Text("7 days").tag(7)
+                                Text("30 days").tag(30)
+                                Text("90 days").tag(90)
+                                Text("180 days").tag(180)
+                                Text("1 year").tag(365)
+                            }
+                            .labelsHidden()
+                            .frame(width: 140)
+                            Spacer()
+                            Button {
+                                runRetentionCleanup()
+                            } label: {
+                                Text(String(localized: "settings.runCleanup", defaultValue: "Run cleanup now"))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(forensicsRetentionDays == 0)
+                        }
+                        if let msg = retentionDeleteResult {
+                            Text(msg).font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(8)
+                }
             }
             .padding(20)
         }
+    }
+
+    /// Walk the Cases dir and delete sub-directories whose
+    /// case.sqlite mtime is older than the retention cutoff.
+    /// Returns a result message for the UI.
+    private func runRetentionCleanup() {
+        let days = forensicsRetentionDays
+        guard days > 0 else { return }
+        let casesRoot = CaseDirectoryLayout.defaultCasesRoot
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        var deleted = 0
+        var freed: Int64 = 0
+        if let entries = try? fm.contentsOfDirectory(at: casesRoot, includingPropertiesForKeys: [URLResourceKey.contentModificationDateKey, URLResourceKey.isDirectoryKey]) {
+            for url in entries {
+                let vals = try? url.resourceValues(forKeys: [URLResourceKey.contentModificationDateKey, URLResourceKey.isDirectoryKey])
+                guard vals?.isDirectory == true else { continue }
+                let manifest = url.appendingPathComponent("manifest.json")
+                let mtime = (try? fm.attributesOfItem(atPath: manifest.path))?[.modificationDate] as? Date ?? .distantFuture
+                if mtime < cutoff {
+                    let layout = CaseDirectoryLayout(casesRoot: casesRoot, caseID: url.lastPathComponent)
+                    freed += layout.diskBytes()
+                    if (try? fm.removeItem(at: url)) != nil {
+                        deleted += 1
+                    }
+                }
+            }
+        }
+        let bcf = ByteCountFormatter()
+        bcf.countStyle = .file
+        retentionDeleteResult = deleted == 0
+            ? "No scans older than \(days) days."
+            : "Deleted \(deleted) scan\(deleted == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."
     }
 
     // MARK: - Daemon

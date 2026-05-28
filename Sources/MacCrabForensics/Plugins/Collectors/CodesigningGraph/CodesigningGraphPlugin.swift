@@ -27,7 +27,19 @@ public struct CodesigningGraphPlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "codesigning.binary", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "codesigning.binary",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .chart,
+                    fieldRoles: [
+                        "path": .title,
+                        "team_id": .identifier,
+                        "signer_type": .status,
+                    ],
+                    chart: ChartHint(chartType: .network, edgeField: "team_id")
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

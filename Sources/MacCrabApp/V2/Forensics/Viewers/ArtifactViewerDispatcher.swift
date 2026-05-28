@@ -25,10 +25,29 @@ struct ArtifactViewerDispatcher: View {
                 case .keyvalue:   ArtifactKeyValueView(artifacts: artifacts, hint: hint)
                 case .transcript: ArtifactTranscriptView(artifacts: artifacts, hint: hint)
                 case .layout:     ArtifactLayoutView(artifacts: artifacts, hint: hint)
+                case .chart:      chartView
                 }
             } else {
                 JSONTreeView(artifacts: artifacts)
             }
+        }
+    }
+
+    /// Sub-dispatch for .chart viewers based on chartHint.chartType.
+    /// Falls back to table when chart hint is missing or malformed
+    /// so the operator still sees their data.
+    @ViewBuilder
+    private var chartView: some View {
+        if let h = hint, let chart = h.chart {
+            switch chart.chartType {
+            case .histogram: ArtifactHistogramView(artifacts: artifacts, hint: h)
+            case .bar:       ArtifactBarChartView(artifacts: artifacts, hint: h)
+            case .network:   ArtifactNetworkView(artifacts: artifacts, hint: h)
+            }
+        } else if let h = hint {
+            ArtifactTableView(artifacts: artifacts, hint: h)
+        } else {
+            JSONTreeView(artifacts: artifacts)
         }
     }
 }

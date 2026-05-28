@@ -30,15 +30,14 @@ public struct SafariLitePlugin: Collector {
                 contentType: "safari.history_visit",
                 privacyClass: .metadata,
                 viewerHint: ViewerHint(
-                    viewer: .timeline,
+                    viewer: .chart,
                     fieldRoles: [
                         "observed_at": .timestamp,
                         "url": .title,
                         "domain": .subtitle,
-                        "title": .body,
                         "visit_count_at_url": .count,
                     ],
-                    groupBy: "domain"
+                    chart: ChartHint(chartType: .bar, groupField: "domain")
                 )
             ),
             OutputSpec(

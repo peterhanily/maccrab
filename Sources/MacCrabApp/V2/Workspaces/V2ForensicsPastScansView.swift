@@ -15,6 +15,7 @@ import MacCrabForensics
 
 struct V2ForensicsPastScansView: View {
     @State private var scans: [CaseManifest] = []
+    @State private var diskSizes: [String: Int64] = [:]
     @State private var loading = true
     @State private var openScanID: String? = nil
     @State private var query: String = ""
@@ -131,6 +132,7 @@ struct V2ForensicsPastScansView: View {
             ForEach(filtered, id: \.id) { scan in
                 ForensicsScanRow(
                     scan: scan,
+                    diskBytes: diskSizes[scan.id],
                     onOpen: { openScanID = scan.id },
                     onDismiss: {
                         HiddenScans.hide(scan.id)
@@ -157,6 +159,19 @@ struct V2ForensicsPastScansView: View {
             )
             let raw = try await mgr.listCases().sorted { $0.createdAt > $1.createdAt }
             scans = OperatorVisibilityFilter.filter(raw)
+            // Disk-size walk is cheap (stat() per file) but still off
+            // the main actor — let Task.detached handle it so the list
+            // appears immediately and sizes populate as they're computed.
+            let casesRoot = CaseDirectoryLayout.defaultCasesRoot
+            let scanIDs = scans.map(\.id)
+            Task.detached {
+                var sizes: [String: Int64] = [:]
+                for id in scanIDs {
+                    let layout = CaseDirectoryLayout(casesRoot: casesRoot, caseID: id)
+                    sizes[id] = layout.diskBytes()
+                }
+                await MainActor.run { diskSizes = sizes }
+            }
         } catch {
             scans = []
         }
@@ -172,6 +187,7 @@ struct V2ForensicsPastScansView: View {
 /// to a sheet presentation or a navigation push.
 struct ForensicsScanRow: View {
     let scan: CaseManifest
+    var diskBytes: Int64? = nil
     let onOpen: () -> Void
     let onDismiss: () -> Void
 
@@ -191,6 +207,14 @@ struct ForensicsScanRow: View {
                                 Image(systemName: "lock.fill")
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
+                            }
+                            if let bytes = diskBytes {
+                                Text("·")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.tertiary)
+                                Text(formatSize(bytes))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(bytes > 50 * 1_024 * 1_024 ? .orange : .secondary)
                             }
                         }
                     }
@@ -236,5 +260,12 @@ struct ForensicsScanRow: View {
         let fmt = RelativeDateTimeFormatter()
         fmt.unitsStyle = .full
         return "Started " + fmt.localizedString(for: d, relativeTo: Date())
+    }
+
+    private func formatSize(_ bytes: Int64) -> String {
+        let bcf = ByteCountFormatter()
+        bcf.countStyle = .file
+        bcf.allowedUnits = [.useKB, .useMB, .useGB]
+        return bcf.string(fromByteCount: bytes)
     }
 }

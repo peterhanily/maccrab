@@ -29,14 +29,13 @@ public struct QuarantinePlugin: Collector {
                 contentType: "quarantine.event",
                 privacyClass: .metadata,
                 viewerHint: ViewerHint(
-                    viewer: .timeline,
+                    viewer: .chart,
                     fieldRoles: [
                         "observed_at": .timestamp,
                         "agent_name": .title,
                         "origin_url": .subtitle,
-                        "data_url": .link,
-                        "type_number": .status,
-                    ]
+                    ],
+                    chart: ChartHint(chartType: .histogram, bucketField: "observed_at", bucket: .day)
                 )
             ),
         ],

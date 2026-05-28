@@ -42,18 +42,38 @@ public struct ViewerHint: Codable, Sendable, Hashable {
     /// Ignored when viewer != .layout.
     public let template: LayoutNode?
 
+    /// For viewer = .chart : the chart sub-shape + the fields it
+    /// reads. Ignored when viewer != .chart.
+    public let chart: ChartHint?
+
     public init(
         viewer: ViewerKind,
         fieldRoles: [String: FieldRole] = [:],
         columns: [String]? = nil,
         groupBy: String? = nil,
-        template: LayoutNode? = nil
+        template: LayoutNode? = nil,
+        chart: ChartHint? = nil
     ) {
         self.viewer = viewer
         self.fieldRoles = fieldRoles
         self.columns = columns
         self.groupBy = groupBy
         self.template = template
+        self.chart = chart
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case viewer, fieldRoles, columns, groupBy, template, chart
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.viewer = try c.decode(ViewerKind.self, forKey: .viewer)
+        self.fieldRoles = try c.decodeIfPresent([String: FieldRole].self, forKey: .fieldRoles) ?? [:]
+        self.columns = try c.decodeIfPresent([String].self, forKey: .columns)
+        self.groupBy = try c.decodeIfPresent(String.self, forKey: .groupBy)
+        self.template = try c.decodeIfPresent(LayoutNode.self, forKey: .template)
+        self.chart = try c.decodeIfPresent(ChartHint.self, forKey: .chart)
     }
 }
 
@@ -89,6 +109,66 @@ public enum ViewerKind: String, Codable, Sendable, CaseIterable {
     /// plugins whose output doesn't fit table/timeline/keyvalue/
     /// transcript naturally.
     case layout
+
+    /// Visualization viewer. Sub-shape (histogram / bar / network)
+    /// declared in the ViewerHint's `chart` field. Falls back to
+    /// table if `chart` is nil.
+    case chart
+}
+
+// MARK: - Chart hint
+
+/// Sub-schema for viewer = .chart. Picks which chart shape to
+/// render and which fields drive it.
+public struct ChartHint: Codable, Sendable, Hashable {
+    public let chartType: ChartType
+
+    /// For histogram: the timestamp field name (host falls back
+    /// to record.observedAt if nil).
+    public let bucketField: String?
+
+    /// For histogram: bucket granularity.
+    public let bucket: HistogramBucket?
+
+    /// For bar: the categorical field name to group by.
+    public let groupField: String?
+
+    /// For network: which artifact-data field carries the edge
+    /// target. The artifact itself becomes a source node; the
+    /// value in edgeField becomes the target node.
+    public let edgeField: String?
+
+    public init(
+        chartType: ChartType,
+        bucketField: String? = nil,
+        bucket: HistogramBucket? = nil,
+        groupField: String? = nil,
+        edgeField: String? = nil
+    ) {
+        self.chartType = chartType
+        self.bucketField = bucketField
+        self.bucket = bucket
+        self.groupField = groupField
+        self.edgeField = edgeField
+    }
+}
+
+public enum ChartType: String, Codable, Sendable, CaseIterable {
+    /// Bar chart of artifact counts per time bucket. Requires
+    /// a timestamp field (defaults to record.observedAt).
+    case histogram
+
+    /// Bar chart of artifact counts per categorical field.
+    /// Top 20 + "Other".
+    case bar
+
+    /// Node-edge graph: each artifact is a node; edges drawn
+    /// from the artifact to the value in `edgeField`.
+    case network
+}
+
+public enum HistogramBucket: String, Codable, Sendable {
+    case minute, hour, day, week, month
 }
 
 /// Semantic role a field plays in the viewer. The plugin
