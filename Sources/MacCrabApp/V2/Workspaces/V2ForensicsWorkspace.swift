@@ -79,10 +79,20 @@ struct V2ForensicsWorkspace: View {
     @ViewBuilder
     private var content: some View {
         switch currentTab {
-        case .forensicsScans:    V2ForensicsScansView()
-        case .forensicsFindings: V2ForensicsFindingsView()
-        case .forensicsCatalog:  V2RaveCatalogBrowserView()
-        default:                 V2ForensicsScansView()
+        case .forensicsScans:
+            V2ForensicsScansView(onShowAllScans: {
+                state.selectedTabs[.forensics] = .forensicsPastScans
+            })
+        case .forensicsPastScans:
+            V2ForensicsPastScansView()
+        case .forensicsFindings:
+            V2ForensicsFindingsView()
+        case .forensicsCatalog:
+            V2RaveCatalogBrowserView()
+        default:
+            V2ForensicsScansView(onShowAllScans: {
+                state.selectedTabs[.forensics] = .forensicsPastScans
+            })
         }
     }
 }

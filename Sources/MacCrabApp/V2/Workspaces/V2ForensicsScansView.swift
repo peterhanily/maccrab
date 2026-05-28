@@ -1,23 +1,27 @@
-// V2ForensicsScansView.swift — rc.9 reordered.
+// V2ForensicsScansView.swift — rc.12 "Run a scan" tab.
 //
-// Layout from top to bottom:
+// Layout top to bottom:
 //   1. Header
-//   2. Active runner banner (if any)
-//   3. Past scans (most recent first) — each row has a per-row
-//      dismiss action that hides it via HiddenScans
-//   4. "Run a new scan" — kit cards
+//   2. FDA banner (only when access is denied)
+//   3. Runner status — running / done / failed
+//   4. Kit picker (the headline action of this tab)
+//   5. Recently run — at most 3 scans, with "See all" link to
+//      the Past scans tab
 //
-// rc.9 changes vs rc.8:
-//   - Past scans surface ABOVE the kit picker (operator sees
-//     what they already did before being asked what to start)
-//   - Per-row dismiss via context menu + hover button
-//   - Single source of truth for kit cards (no duplicate render
-//     in empty-state vs scan-list state)
+// rc.12 split: the full scan archive moved to V2ForensicsPastScansView
+// behind a dedicated tab. This view's job is now strictly forward-
+// looking: pick what to run, see what's running, peek at what just
+// finished.
 
 import SwiftUI
 import MacCrabForensics
 
 struct V2ForensicsScansView: View {
+    /// Optional jump-to-tab callback supplied by V2ForensicsWorkspace.
+    /// Wired to the "See all past scans →" button in the Recently
+    /// run section. When nil the link hides.
+    var onShowAllScans: (() -> Void)? = nil
+
     @StateObject private var runner = KitRunner()
     @State private var scans: [CaseManifest] = []
     @State private var loading = true
@@ -28,6 +32,12 @@ struct V2ForensicsScansView: View {
     @State private var fdaStatus: FullDiskAccessStatus = .unknown
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
     @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
+
+    private static let recentlyRunLimit = 3
+
+    private var recentlyRun: [CaseManifest] {
+        Array(scans.prefix(Self.recentlyRunLimit))
+    }
 
     private var openScan: CaseManifest? {
         guard let id = openScanID else { return nil }
@@ -50,16 +60,14 @@ struct V2ForensicsScansView: View {
                 } else if case .failed(let kitName, let err) = runner.state {
                     failedCard(kitName: kitName, err: err)
                 }
+                runNewScanSection
                 if loading {
                     ProgressView("Loading…")
                         .frame(maxWidth: .infinity)
-                        .padding(40)
-                } else if scans.isEmpty {
-                    emptyState
-                } else {
-                    pastScansSection
+                        .padding(20)
+                } else if !recentlyRun.isEmpty {
+                    recentlyRunSection
                 }
-                runNewScanSection
             }
             .padding(20)
         }
@@ -200,34 +208,34 @@ struct V2ForensicsScansView: View {
         .cornerRadius(8)
     }
 
-    // MARK: - Empty state (no past scans)
+    // MARK: - Recently run (max 3)
 
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("You haven't run a scan yet.")
-                .font(.headline)
-            Text("Pick what kind of scan to run below — each one is shaped for a specific situation.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-        }
-        .padding(.top, 4)
-    }
-
-    // MARK: - Past scans
-
-    private var pastScansSection: some View {
+    private var recentlyRunSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Past scans").font(.headline)
+                Text("Recently run").font(.headline)
                 Spacer()
-                Text("\(scans.count) total")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                if scans.count > Self.recentlyRunLimit, onShowAllScans != nil {
+                    Button {
+                        onShowAllScans?()
+                    } label: {
+                        Text("See all \(scans.count) past scans →")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                }
             }
             VStack(spacing: 0) {
-                ForEach(scans, id: \.id) { scan in
-                    pastScanRow(scan)
-                    if scan.id != scans.last?.id {
+                ForEach(recentlyRun, id: \.id) { scan in
+                    ForensicsScanRow(
+                        scan: scan,
+                        onOpen: { openScanID = scan.id },
+                        onDismiss: {
+                            HiddenScans.hide(scan.id)
+                            Task { await reload() }
+                        }
+                    )
+                    if scan.id != recentlyRun.last?.id {
                         Divider()
                     }
                 }
@@ -237,81 +245,12 @@ struct V2ForensicsScansView: View {
         }
     }
 
-    private func pastScanRow(_ scan: CaseManifest) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Button {
-                openScanID = scan.id
-            } label: {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(scan.name)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.primary)
-                        HStack(spacing: 6) {
-                            Text(timeAgo(scan.createdAt))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                            if scan.encryptionState != .plaintext {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    Spacer()
-                    Text("View")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tint)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Menu {
-                Button {
-                    openScanID = scan.id
-                } label: {
-                    Label("Open", systemImage: "eye")
-                }
-                Divider()
-                Button(role: .destructive) {
-                    HiddenScans.hide(scan.id)
-                    Task { await reload() }
-                } label: {
-                    Label("Dismiss from list", systemImage: "eye.slash")
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 28)
-            .help("Actions")
-        }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .contextMenu {
-            Button {
-                openScanID = scan.id
-            } label: {
-                Label("Open", systemImage: "eye")
-            }
-            Button(role: .destructive) {
-                HiddenScans.hide(scan.id)
-                Task { await reload() }
-            } label: {
-                Label("Dismiss from list", systemImage: "eye.slash")
-            }
-        }
-    }
-
     // MARK: - Run a new scan (kits)
 
     private var runNewScanSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text(scans.isEmpty ? "Start a scan" : "Run a new scan")
+                Text(scans.isEmpty ? "Pick a kit to start a scan" : "Run a new scan")
                     .font(.headline)
                 Spacer()
                 Text("\(kits.count) kit\(kits.count == 1 ? "" : "s")")
@@ -548,12 +487,6 @@ struct V2ForensicsScansView: View {
     }
 
     // MARK: - Helpers
-
-    private func timeAgo(_ d: Date) -> String {
-        let fmt = RelativeDateTimeFormatter()
-        fmt.unitsStyle = .full
-        return "Started " + fmt.localizedString(for: d, relativeTo: Date())
-    }
 
     private func friendlyScannerName(_ id: String) -> String {
         ScannerDisplay.name(forPluginID: id)
