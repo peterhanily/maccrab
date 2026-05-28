@@ -15,27 +15,34 @@ struct JSONTreeView: View {
     @State private var openedID: Int64? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(artifacts.prefix(200), id: \.id) { a in
-                DisclosureGroup(isExpanded: Binding(
-                    get: { openedID == a.id },
-                    set: { openedID = $0 ? a.id : nil }
-                )) {
-                    artifactDetail(a)
-                        .padding(.top, 4)
-                } label: {
-                    artifactSummary(a)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(artifacts.prefix(200), id: \.id) { a in
+                    DisclosureGroup(isExpanded: Binding(
+                        get: { openedID == a.id },
+                        set: { openedID = $0 ? a.id : nil }
+                    )) {
+                        artifactDetail(a)
+                            .padding(.top, 4)
+                    } label: {
+                        artifactSummary(a)
+                    }
+                    .padding(.vertical, 4)
+                    Divider()
                 }
-                .padding(.vertical, 4)
-                Divider()
+                if artifacts.count > 200 {
+                    Text("Showing first 200 of \(artifacts.count) artifacts.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 6)
+                }
             }
-            if artifacts.count > 200 {
-                Text("Showing first 200 of \(artifacts.count) artifacts.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 6)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
     }
 
     private func artifactSummary(_ a: CommittedArtifact) -> some View {

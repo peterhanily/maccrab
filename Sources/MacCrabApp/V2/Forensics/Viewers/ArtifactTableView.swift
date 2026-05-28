@@ -86,7 +86,9 @@ struct ArtifactTableView: View {
                     }
                 }
             }
+            .frame(maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
     }

@@ -27,6 +27,7 @@ struct V2RaveCatalogBrowserView: View {
     @State private var selectedCategory: String? = nil  // nil = All
     @State private var showFeaturedOnly = false
     @State private var copiedID: String? = nil
+    @State private var usingOfficial: Bool = true
 
     private let client = RaveCatalogClient()
 
@@ -50,6 +51,9 @@ struct V2RaveCatalogBrowserView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if !usingOfficial {
+                nonOfficialBanner
+            }
             Divider()
             if loading {
                 loadingView
@@ -72,6 +76,33 @@ struct V2RaveCatalogBrowserView: View {
     }
 
     // MARK: - Header
+
+    private var nonOfficialBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Using a non-official catalog")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Source: \(baseURL.isEmpty ? "(unknown)" : baseURL) · plugins fetched here haven't been vetted by the official rave team. Use only for local development + testing.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button("Settings") {
+                if let url = URL(string: "maccrab://settings/forensics") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .font(.system(size: 11))
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12))
+    }
 
     private var header: some View {
         HStack(spacing: 14) {
@@ -481,6 +512,7 @@ struct V2RaveCatalogBrowserView: View {
         loading = true
         error = nil
         baseURL = await client.baseURL.absoluteString
+        usingOfficial = await client.isUsingOfficialSource
         do {
             entries = try await client.fetchEntries()
             if selectedID == nil { selectedID = entries.first?.id }

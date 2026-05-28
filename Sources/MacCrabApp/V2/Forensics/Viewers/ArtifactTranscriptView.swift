@@ -46,8 +46,10 @@ struct ArtifactTranscriptView: View {
                         .padding(.top, 4)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
     }

@@ -56,8 +56,10 @@ struct ArtifactTimelineView: View {
                         .padding(20)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 10)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
     }
@@ -102,28 +104,50 @@ struct ArtifactTimelineView: View {
             .frame(width: 50)
 
             VStack(alignment: .leading, spacing: 2) {
-                if let tf = titleField {
-                    Text(FieldResolver.resolve(it.artifact, field: tf).displayString())
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(2)
-                } else {
-                    Text(it.artifact.record.summary ?? it.artifact.record.contentType)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(2)
-                }
-                if let sf = subtitleField {
-                    let sv = FieldResolver.resolve(it.artifact, field: sf)
-                    if !sv.isEmpty {
-                        Text(sv.displayString())
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
+                Text(resolvedTitle(it.artifact))
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(2)
+                Text(resolvedSubtitle(it.artifact))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer()
         }
         .padding(.horizontal, 14).padding(.vertical, 6)
+    }
+
+    /// Title rendered in the timeline row. Falls back through:
+    /// (1) hint's title field value, if non-empty; (2) summary,
+    /// if non-empty; (3) friendly content-type label. Avoids the
+    /// "Chrome by itself with no context" failure case.
+    private func resolvedTitle(_ a: CommittedArtifact) -> String {
+        if let tf = titleField {
+            let v = FieldResolver.resolve(a, field: tf)
+            if !v.isEmpty { return v.displayString() }
+        }
+        if let s = a.record.summary, !s.isEmpty { return s }
+        return ScannerDisplay.name(forContentType: a.record.contentType)
+    }
+
+    /// Subtitle. Always renders something so the row's right side
+    /// isn't blank. Order:
+    /// (1) hint's subtitle field value, if non-empty
+    /// (2) friendly content-type label (when title already shows
+    ///     the field value)
+    /// (3) "(no detail)" placeholder
+    private func resolvedSubtitle(_ a: CommittedArtifact) -> String {
+        if let sf = subtitleField {
+            let v = FieldResolver.resolve(a, field: sf)
+            if !v.isEmpty { return v.displayString() }
+        }
+        // If title used the title-role field, surface content-type as
+        // secondary context. If title fell back, use the plugin id.
+        if let tf = titleField {
+            let v = FieldResolver.resolve(a, field: tf)
+            if !v.isEmpty { return ScannerDisplay.name(forContentType: a.record.contentType) }
+        }
+        return ScannerDisplay.name(forPluginID: a.record.pluginID)
     }
 
     private func timeOnly(_ d: Date) -> String {

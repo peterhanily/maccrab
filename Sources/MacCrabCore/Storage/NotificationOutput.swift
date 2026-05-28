@@ -36,6 +36,25 @@ public actor NotificationOutput {
         self.enabled = value
     }
 
+    /// rc.14: clamp every alert's effective notification severity at
+    /// .high unless the operator has explicitly opted into critical
+    /// alerts via Settings. Critical-severity alerts still surface
+    /// as notifications, but the banner renders + filters as .high.
+    /// Applies to rule, sequence, and campaign alerts identically —
+    /// they all flow through this same notify() chokepoint.
+    public var allowCritical: Bool = false
+
+    public func setAllowCritical(_ value: Bool) {
+        self.allowCritical = value
+    }
+
+    /// Compute the severity used for the gate + banner. Drops a
+    /// critical alert to high when allowCritical is off.
+    private func effectiveSeverity(for alert: Alert) -> Severity {
+        if !allowCritical, alert.severity == .critical { return .high }
+        return alert.severity
+    }
+
     /// Maximum notifications per minute (rate limiting).
     private let maxPerMinute: Int
     private var recentTimestamps: [Date] = []
@@ -73,7 +92,13 @@ public actor NotificationOutput {
         // v1.11.0 RC2: hard mute when the user toggled OFF in
         // SettingsView (writes enabled=false to alert_notifications.json).
         guard enabled else { return }
+        // Gate on the alert's actual severity so a min-severity of
+        // "critical" still suppresses high alerts. The clamp below
+        // is presentation-only — a critical alert that survives the
+        // gate gets rendered with the .high emoji + cooler tone
+        // unless the operator opted into critical.
         guard alert.severity >= minimumSeverity else { return }
+        let displaySeverity = effectiveSeverity(for: alert)
 
         // Rate limit
         let now = Date()
@@ -110,8 +135,9 @@ public actor NotificationOutput {
         recentKeys[key] = now
         recentTimestamps.append(now)
 
-        // Build and deliver notification
-        deliverNotification(alert: alert)
+        // Build and deliver notification (use display severity so
+        // a clamped critical alert reads as high in the banner).
+        deliverNotification(alert: alert, displaySeverity: displaySeverity)
     }
 
     /// Evict dedup entries whose individual windows have expired. Amortized
@@ -130,9 +156,9 @@ public actor NotificationOutput {
         )
     }
 
-    private nonisolated func deliverNotification(alert: Alert) {
+    private nonisolated func deliverNotification(alert: Alert, displaySeverity: Severity) {
         let severityEmoji: String
-        switch alert.severity {
+        switch displaySeverity {
         case .critical: severityEmoji = "🔴"
         case .high:     severityEmoji = "🟠"
         case .medium:   severityEmoji = "🟡"

@@ -103,7 +103,8 @@ enum SignalHandlers {
                     let notifConfig = loadAlertNotificationConfig(supportDir: state.supportDir)
                     await state.notifier.setMinimumSeverity(notifConfig.minSeverity)
                     await state.notifier.setEnabled(notifConfig.enabled)
-                    print("[SIGHUP] Alert-notification config reloaded: enabled=\(notifConfig.enabled), minSeverity=\(notifConfig.minSeverity.rawValue)")
+                    await state.notifier.setAllowCritical(notifConfig.allowCritical)
+                    print("[SIGHUP] Alert-notification config reloaded: enabled=\(notifConfig.enabled), minSeverity=\(notifConfig.minSeverity.rawValue), allowCritical=\(notifConfig.allowCritical)")
 
                     let freshConfig = DaemonConfig.load(from: state.supportDir)
                     let old = state.storage

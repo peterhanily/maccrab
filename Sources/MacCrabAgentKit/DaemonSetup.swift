@@ -465,6 +465,7 @@ enum DaemonSetup {
         let notifConfig = loadAlertNotificationConfig(supportDir: supportDir)
         let notifier = NotificationOutput(minimumSeverity: notifConfig.minSeverity)
         await notifier.setEnabled(notifConfig.enabled)
+        await notifier.setAllowCritical(notifConfig.allowCritical)
         let responseEngine = ResponseEngine()
 
         Self.logBootStep(label: "after_response_engine", startedAt: startedAt)
@@ -2043,8 +2044,10 @@ enum DaemonSetup {
 /// inject a config.
 ///
 /// File schema:
-///   { "enabled": true | false, "min_severity": "critical" | "high" | "medium" | "low" | "informational" }
-func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSeverity: Severity) {
+///   { "enabled": true | false,
+///     "min_severity": "critical" | "high" | "medium" | "low" | "informational",
+///     "allow_critical": true | false   (rc.14, default false — caps banners at .high) }
+func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSeverity: Severity, allowCritical: Bool) {
     let systemPath = supportDir + "/alert_notifications.json"
     let userPath = _findUserHomeAlertNotificationConfigPath()
 
@@ -2054,7 +2057,7 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
         (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
     }
 
-    func decode(at path: String) -> (enabled: Bool, minSeverity: Severity)? {
+    func decode(at path: String) -> (enabled: Bool, minSeverity: Severity, allowCritical: Bool)? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
@@ -2070,7 +2073,8 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
             default:              return .high
             }
         }()
-        return (enabled, sev)
+        let allowCritical = json["allow_critical"] as? Bool ?? false
+        return (enabled, sev, allowCritical)
     }
 
     let systemConfig = decode(at: systemPath)
@@ -2078,7 +2082,7 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
 
     switch (systemConfig, userConfig) {
     case (nil, nil):
-        return (true, .high)
+        return (true, .high, false)
     case (let sc?, nil):
         return sc
     case (nil, let uc?):

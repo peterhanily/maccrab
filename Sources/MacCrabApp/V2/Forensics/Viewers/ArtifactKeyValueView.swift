@@ -38,6 +38,7 @@ struct ArtifactKeyValueView: View {
                     .padding(20)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(8)
     }

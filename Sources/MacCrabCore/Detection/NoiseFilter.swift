@@ -90,11 +90,22 @@ public enum NoiseFilter {
         }
 
         // Gate 4 — MacCrab self-activity. Tamper-detection rules on
-        // our own install dirs; sysext XPC events on ourselves.
-        // Cheap: basename match + path prefix check.
+        // our own install dirs; sysext XPC events on ourselves; AND
+        // (rc.14) forensic plugins running from MacCrabApp reading
+        // ~/Library/Messages/chat.db, TCC.db, etc. — those are the
+        // operator-initiated scans, not credential-stealer behavior.
+        //
+        // Pre-rc.14 we kept .critical matches as a "self-compromise
+        // still gets through" backstop. In practice that produced a
+        // constant notification storm whenever the operator ran any
+        // kit — every plugin that reads a privacy-protected DB
+        // tripped at least one .critical rule. Real self-compromise
+        // is caught by the SelfDefense subsystem (binary integrity,
+        // signed-by-team-id checks) not by these event-pattern rules,
+        // so dropping all severities here is safe.
         if isMacCrabSelf(event: event) {
-            matches.removeAll { $0.severity != .critical }
-            if matches.isEmpty { return }
+            matches.removeAll()
+            return
         }
 
         // Gate 3 — trusted browser / Electron helper. Chromium apps

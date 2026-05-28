@@ -49,13 +49,40 @@ public actor RaveCatalogClient {
 
     public init() {}
 
-    /// Default base — maccrab.com/rave/, can be overridden by
-    /// MACCRAB_RAVE_BASE_URL for staging / local-rehearsal use.
+    /// Official production catalog. Anything else is "custom"
+    /// and gets a warning banner in the dashboard.
+    public static let officialBaseURL = URL(string: "https://maccrab.com/rave/")!
+
+    /// rc.14 — Settings-driven catalog override key in UserDefaults.
+    /// SettingsView writes this. Empty string means "use default".
+    public static let userDefaultsBaseURLKey = "forensics.catalogBaseURL"
+
+    /// Source priority: env var > UserDefaults > default.
+    /// Env wins so CI / shell rehearsals don't have to wipe the
+    /// dashboard's persistent setting.
     public var baseURL: URL {
-        let env = ProcessInfo.processInfo.environment["MACCRAB_RAVE_BASE_URL"]
-        let raw = env ?? "https://maccrab.com/rave/"
+        if let env = ProcessInfo.processInfo.environment["MACCRAB_RAVE_BASE_URL"],
+           !env.isEmpty,
+           let url = parse(env) {
+            return url
+        }
+        let defaults = UserDefaults.standard.string(forKey: Self.userDefaultsBaseURLKey) ?? ""
+        if !defaults.isEmpty, let url = parse(defaults) {
+            return url
+        }
+        return Self.officialBaseURL
+    }
+
+    /// Whether the current catalog source is the official one.
+    /// Dashboard surfaces a banner when this is false so the
+    /// operator doesn't confuse a local-dev catalog for production.
+    public var isUsingOfficialSource: Bool {
+        baseURL == Self.officialBaseURL
+    }
+
+    private func parse(_ raw: String) -> URL? {
         let trimmed = raw.hasSuffix("/") ? raw : raw + "/"
-        return URL(string: trimmed) ?? URL(string: "https://maccrab.com/rave/")!
+        return URL(string: trimmed)
     }
 
     /// Fetch + verify + parse the catalog index.

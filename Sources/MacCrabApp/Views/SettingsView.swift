@@ -21,6 +21,7 @@ struct SettingsView: View {
     /// path that doesn't require disabling SIP.
     @ObservedObject var sysextManager: SystemExtensionManager
     @AppStorage("alertNotifications") var alertNotifications: Bool = true
+    @AppStorage("allowCriticalNotifications") var allowCriticalNotifications: Bool = false
     // v1.8.0: default raised to "critical" so a fresh install only
     // notifies on the most serious detections. Existing installs retain
     // whatever value is already in UserDefaults.
@@ -145,6 +146,9 @@ struct SettingsView: View {
 
             notificationsTab
                 .tabItem { Label(String(localized: "settings.notifications", defaultValue: "Notifications"), systemImage: "bell") }
+
+            forensicsTab
+                .tabItem { Label(String(localized: "settings.forensics", defaultValue: "Forensics"), systemImage: "doc.text.magnifyingglass") }
 
             daemonTab
                 .tabItem { Label(String(localized: "settings.daemon", defaultValue: "Detection Engine"), systemImage: "server.rack") }
@@ -441,6 +445,14 @@ struct SettingsView: View {
                             Text(String(localized: "settings.severityHelp", defaultValue: "Only alerts at or above this severity will trigger a macOS notification. Daemon picks up changes on next restart or SIGHUP."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+
+                            Divider().padding(.vertical, 4)
+
+                            Toggle(String(localized: "settings.allowCritical", defaultValue: "Allow critical-level notifications"), isOn: $allowCriticalNotifications)
+                                .onChange(of: allowCriticalNotifications) { _ in scheduleAlertNotificationSync() }
+                            Text(String(localized: "settings.allowCriticalHelp", defaultValue: "By default, MacCrab caps banner notifications at HIGH — critical alerts still fire as notifications but render at the high level so they're less alarming. Turn this on to receive notifications stamped as critical. Applies to single alerts and campaigns."))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
                     .padding(8)
@@ -540,6 +552,63 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
             }
+        }
+    }
+
+    // MARK: - Forensics
+
+    @AppStorage("forensics.catalogBaseURL") private var forensicsCatalogBaseURL: String = ""
+    private static let officialForensicsCatalog = "https://maccrab.com/rave/"
+
+    private var forensicsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                GroupBox(String(localized: "settings.forensicsCatalog", defaultValue: "Plugin catalog source")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(String(localized: "settings.forensicsCatalogDesc", defaultValue: "Where the Forensics Catalog tab fetches its plugin list from. Leave blank to use the official catalog at maccrab.com/rave."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("https://maccrab.com/rave/", text: $forensicsCatalogBaseURL)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                        HStack(spacing: 8) {
+                            Button {
+                                forensicsCatalogBaseURL = ""
+                            } label: {
+                                Text(String(localized: "settings.useOfficial", defaultValue: "Use official"))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Button {
+                                forensicsCatalogBaseURL = "http://localhost:4321/rave/"
+                            } label: {
+                                Text(String(localized: "settings.useLocalhost", defaultValue: "Use localhost:4321"))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Spacer()
+                        }
+                        if !forensicsCatalogBaseURL.isEmpty &&
+                            forensicsCatalogBaseURL != Self.officialForensicsCatalog {
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.system(size: 11))
+                                    .padding(.top, 1)
+                                Text(String(localized: "settings.nonOfficialWarn", defaultValue: "Custom catalog source set. Plugins fetched here haven't been vetted by the official rave team. The Catalog tab will show a warning banner. Use only for local development and testing."))
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                            .padding(.top, 4)
+                        }
+                        Text(String(localized: "settings.catalogReopen", defaultValue: "Reopen the Catalog tab after changing this setting."))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(8)
+                }
+            }
+            .padding(20)
         }
     }
 
@@ -1237,6 +1306,7 @@ struct SettingsView: View {
         let payload: [String: Any] = [
             "enabled": alertNotifications,
             "min_severity": minAlertSeverity,
+            "allow_critical": allowCriticalNotifications,
         ]
         guard let data = try? JSONSerialization.data(
             withJSONObject: payload,
