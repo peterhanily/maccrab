@@ -38,8 +38,32 @@ public struct TCCLitePlugin: Collector {
             ),
         ],
         outputs: [
-            OutputSpec(contentType: "tcc.grant", privacyClass: .metadata),
-            OutputSpec(contentType: "tcc.summary_by_service", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "tcc.grant",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "service": .title,
+                        "client": .path,
+                        "auth_value": .status,
+                        "last_modified": .timestamp,
+                    ],
+                    columns: ["service", "client", "auth_value", "last_modified"]
+                )
+            ),
+            OutputSpec(
+                contentType: "tcc.summary_by_service",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "service": .title,
+                        "granted_count": .count,
+                        "denied_count": .count,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

@@ -24,7 +24,19 @@ public struct BiomePlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "biome.stream", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "biome.stream",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .timeline,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "stream_name": .title,
+                        "value": .subtitle,
+                        "source_app": .identifier,
+                    ]
+                )
+            ),
         ],
         mcpTools: [],
         schemaVersion: 1,

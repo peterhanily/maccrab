@@ -36,8 +36,35 @@ public struct LaunchdLitePlugin: Collector {
             ),
         ],
         outputs: [
-            OutputSpec(contentType: "launchd.entry", privacyClass: .metadata),
-            OutputSpec(contentType: "launchd.bam_entry", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "launchd.entry",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "label": .title,
+                        "program_path": .path,
+                        "domain": .subtitle,
+                        "run_at_load": .status,
+                        "runs_as_root": .severity,
+                        "signing_status": .status,
+                        "team_id": .identifier,
+                    ],
+                    columns: ["label", "domain", "program_path", "run_at_load", "runs_as_root", "signing_status", "team_id"]
+                )
+            ),
+            OutputSpec(
+                contentType: "launchd.bam_entry",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "bundle_id": .identifier,
+                        "path": .path,
+                        "last_active": .timestamp,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

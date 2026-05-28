@@ -1,0 +1,113 @@
+// ArtifactTranscriptView — chat-bubble layout for any content
+// type that naturally reads as a sequence of messages between
+// parties. Used for iMessage threads, Mail message bodies,
+// AppleScript invocation history.
+//
+// Requires .sender + .timestamp + .body field roles. If
+// .body is missing, falls back to artifact.summary. If
+// .sender is a bool (is_from_me), bubbles align right when
+// true and left when false; otherwise grouped by sender value.
+
+import SwiftUI
+import MacCrabForensics
+
+struct ArtifactTranscriptView: View {
+    let artifacts: [CommittedArtifact]
+    let hint: ViewerHint
+
+    private var timestampField: String {
+        FieldResolver.field(forRole: .timestamp, in: hint) ?? "observed_at"
+    }
+    private var senderField: String? {
+        FieldResolver.field(forRole: .sender, in: hint)
+    }
+    private var bodyField: String? {
+        FieldResolver.field(forRole: .body, in: hint)
+    }
+
+    private var sortedArtifacts: [CommittedArtifact] {
+        artifacts.sorted { a, b in
+            let ta = FieldResolver.resolve(a, field: timestampField).asDate ?? a.record.observedAt
+            let tb = FieldResolver.resolve(b, field: timestampField).asDate ?? b.record.observedAt
+            return ta < tb
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                ForEach(sortedArtifacts.prefix(300), id: \.id) { a in
+                    messageBubble(a)
+                }
+                if artifacts.count > 300 {
+                    Text("Showing first 300 of \(artifacts.count). Newest at the bottom.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 4)
+                }
+            }
+            .padding(14)
+        }
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private func messageBubble(_ a: CommittedArtifact) -> some View {
+        let isFromMe = self.isFromMe(a)
+        let sender = self.senderLabel(a)
+        let ts = FieldResolver.resolve(a, field: timestampField).asDate ?? a.record.observedAt
+        let body = self.bodyText(a)
+
+        return HStack {
+            if isFromMe { Spacer(minLength: 60) }
+            VStack(alignment: isFromMe ? .trailing : .leading, spacing: 3) {
+                Text(sender)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(body)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(isFromMe ? Color.accentColor.opacity(0.20) : Color.secondary.opacity(0.15))
+                    .foregroundStyle(.primary)
+                    .cornerRadius(10)
+                    .frame(maxWidth: 480, alignment: isFromMe ? .trailing : .leading)
+                    .textSelection(.enabled)
+                Text(ts.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+            if !isFromMe { Spacer(minLength: 60) }
+        }
+    }
+
+    private func isFromMe(_ a: CommittedArtifact) -> Bool {
+        guard let sf = senderField else { return false }
+        let v = FieldResolver.resolve(a, field: sf)
+        if case .bool(let b) = v { return b }
+        // Common conventions
+        if case .string(let s) = v {
+            let lower = s.lowercased()
+            if lower == "me" || lower == "self" { return true }
+        }
+        return false
+    }
+
+    private func senderLabel(_ a: CommittedArtifact) -> String {
+        guard let sf = senderField else { return "—" }
+        let v = FieldResolver.resolve(a, field: sf)
+        switch v {
+        case .bool(let b): return b ? "Me" : "Them"
+        case .string(let s) where !s.isEmpty: return s
+        case .int(let i): return "Handle \(i)"
+        default: return "—"
+        }
+    }
+
+    private func bodyText(_ a: CommittedArtifact) -> String {
+        if let bf = bodyField {
+            let v = FieldResolver.resolve(a, field: bf)
+            if !v.isEmpty { return v.displayString() }
+        }
+        return a.record.summary ?? a.record.contentType
+    }
+}

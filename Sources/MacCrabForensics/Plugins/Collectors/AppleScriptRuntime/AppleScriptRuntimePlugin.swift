@@ -38,7 +38,20 @@ public struct AppleScriptRuntimePlugin: Collector {
         tccRequirements: [],   // Reads EventStore, which the daemon already populated.
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "applescript.invocation", privacyClass: .content, optInRequired: false),
+            OutputSpec(
+                contentType: "applescript.invocation",
+                privacyClass: .content,
+                optInRequired: false,
+                viewerHint: ViewerHint(
+                    viewer: .transcript,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "source_app": .sender,
+                        "command_snippet": .body,
+                        "target_app": .subtitle,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

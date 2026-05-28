@@ -25,7 +25,20 @@ public struct QuarantinePlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "quarantine.event", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "quarantine.event",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .timeline,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "agent_name": .title,
+                        "origin_url": .subtitle,
+                        "data_url": .link,
+                        "type_number": .status,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

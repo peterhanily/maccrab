@@ -31,10 +31,59 @@ public struct iMessageMetadataPlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "imessage.handle", privacyClass: .personalComms),
-            OutputSpec(contentType: "imessage.thread", privacyClass: .personalComms),
-            OutputSpec(contentType: "imessage.message_meta", privacyClass: .personalComms),
-            OutputSpec(contentType: "imessage.url_mention", privacyClass: .personalComms),
+            OutputSpec(
+                contentType: "imessage.handle",
+                privacyClass: .personalComms,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "handle_id": .title,
+                        "service": .subtitle,
+                        "country": .status,
+                        "message_count": .count,
+                    ],
+                    columns: ["handle_id", "service", "country", "message_count"]
+                )
+            ),
+            OutputSpec(
+                contentType: "imessage.thread",
+                privacyClass: .personalComms,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "chat_identifier": .title,
+                        "display_name": .subtitle,
+                        "is_group": .status,
+                        "message_count": .count,
+                        "last_message_at": .timestamp,
+                    ]
+                )
+            ),
+            OutputSpec(
+                contentType: "imessage.message_meta",
+                privacyClass: .personalComms,
+                viewerHint: ViewerHint(
+                    viewer: .transcript,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "is_from_me": .sender,
+                        "guid": .identifier,
+                    ],
+                    groupBy: "handle_rowid"
+                )
+            ),
+            OutputSpec(
+                contentType: "imessage.url_mention",
+                privacyClass: .personalComms,
+                viewerHint: ViewerHint(
+                    viewer: .timeline,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "url": .title,
+                        "domain": .subtitle,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

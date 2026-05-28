@@ -26,9 +26,48 @@ public struct SafariLitePlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "safari.history_visit", privacyClass: .metadata),
-            OutputSpec(contentType: "safari.download", privacyClass: .metadata),
-            OutputSpec(contentType: "safari.extension", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "safari.history_visit",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .timeline,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "url": .title,
+                        "domain": .subtitle,
+                        "title": .body,
+                        "visit_count_at_url": .count,
+                    ],
+                    groupBy: "domain"
+                )
+            ),
+            OutputSpec(
+                contentType: "safari.download",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .timeline,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "url": .link,
+                        "filename": .title,
+                        "origin_url": .subtitle,
+                    ]
+                )
+            ),
+            OutputSpec(
+                contentType: "safari.extension",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "name": .title,
+                        "bundle_identifier": .identifier,
+                        "version": .subtitle,
+                        "signed": .status,
+                    ],
+                    columns: ["name", "bundle_identifier", "version", "signed"]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

@@ -23,7 +23,19 @@ public struct KnowledgeCPlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "knowledgec.event", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "knowledgec.event",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .timeline,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "stream_name": .title,
+                        "value_string": .subtitle,
+                        "bundle_id": .identifier,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

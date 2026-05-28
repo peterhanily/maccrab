@@ -23,7 +23,22 @@ public struct FaceTimePlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "facetime.call", privacyClass: .personalComms),
+            OutputSpec(
+                contentType: "facetime.call",
+                privacyClass: .personalComms,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "peer_address": .title,
+                        "service_provider": .subtitle,
+                        "originated": .sender,
+                        "duration_seconds": .count,
+                        "answered": .status,
+                    ],
+                    columns: ["observed_at", "peer_address", "originated", "answered", "duration_seconds"]
+                )
+            ),
         ],
         mcpTools: [],
         schemaVersion: 1,

@@ -33,14 +33,36 @@ public struct OutputSpec: Codable, Sendable, Hashable {
     /// upgrade the privacy class above the plugin's default.
     public let optInRequired: Bool
 
+    /// Optional rendering hint for the dashboard. When set, the
+    /// scan detail view dispatches to the named ViewerKind +
+    /// uses the field-role map to pick which fields play which
+    /// role. When nil, the dashboard falls back to a generic JSON
+    /// tree view. Added rc.13 — every existing plugin works
+    /// without setting this. See docs/PLUGIN-VIEWERHINT.md.
+    public let viewerHint: ViewerHint?
+
     public init(
         contentType: String,
         privacyClass: PrivacyClass,
-        optInRequired: Bool = false
+        optInRequired: Bool = false,
+        viewerHint: ViewerHint? = nil
     ) {
         self.contentType = contentType
         self.privacyClass = privacyClass
         self.optInRequired = optInRequired
+        self.viewerHint = viewerHint
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case contentType, privacyClass, optInRequired, viewerHint
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.contentType = try c.decode(String.self, forKey: .contentType)
+        self.privacyClass = try c.decode(PrivacyClass.self, forKey: .privacyClass)
+        self.optInRequired = try c.decodeIfPresent(Bool.self, forKey: .optInRequired) ?? false
+        self.viewerHint = try c.decodeIfPresent(ViewerHint.self, forKey: .viewerHint)
     }
 }
 
