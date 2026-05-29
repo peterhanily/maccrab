@@ -1,5 +1,7 @@
 # Forensics IA Redesign — v1.17 client work, rave-aligned
 
+> **Superseded (2026-05-29):** the three-tab IA below is historical design context. The shipped v1.17 Forensics workspace is **four** tabs — Run a scan / Past scans / Findings / Catalog.
+
 **Status:** plan v2, after operator direction (2026-05-22) + rave Phase 0b-finalization review.
 
 **Target:** v1.17.0 (GA). Multi-RC rollout on a new `release/v1.17` branch. Aliases keep `release/v1.13a` operator scripts working through v1.18.

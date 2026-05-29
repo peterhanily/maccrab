@@ -79,7 +79,7 @@ The *Suppress All Like This* button on an alert's detail panel adds a
 ### Does it work offline / in air-gapped environments?
 
 **Yes.** MacCrab's core detection pipeline needs zero network access. All
-417 rules are compiled at install time. Behavioral scoring, sequence
+481 rules are compiled at install time. Behavioral scoring, sequence
 correlation, campaign detection, and the SQLite store are fully local.
 
 Features that need network:

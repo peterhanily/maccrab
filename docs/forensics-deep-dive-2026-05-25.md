@@ -1,5 +1,7 @@
 # Forensics deep-dive — what I actually built, and how to unfuck it
 
+> **Superseded (2026-05-29):** historical snapshot. The shipped v1.17 Forensics workspace is the four-tab design (Run a scan / Past scans / Findings / Catalog); references to the older IA below are kept for context only.
+
 **Date:** 2026-05-25
 **Author:** me, after shipping three RCs of patches that the operator (rightly) called shit.
 **Goal:** stop patching. Step back. Look at the whole delivery from a customer's perspective. Propose a real fix.

@@ -251,7 +251,8 @@ struct V2ForensicsPastScansView: View {
                     let layout = CaseDirectoryLayout(casesRoot: casesRoot, caseID: id)
                     sizes[id] = layout.diskBytes()
                 }
-                await MainActor.run { diskSizes = sizes }
+                let computed = sizes
+                await MainActor.run { diskSizes = computed }
             }
         } catch {
             scans = []

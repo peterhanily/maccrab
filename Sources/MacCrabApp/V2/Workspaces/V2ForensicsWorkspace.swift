@@ -2,12 +2,13 @@
 // MacCrabApp — v1.17 customer-shaped Forensics workspace per
 // docs/forensics-ia-redesign-plan.md §3.
 //
-// Three tabs collapse the legacy five (Cases / Plugins / Tier B
+// Four tabs collapse the legacy five (Cases / Plugins / Tier B
 // / Artifacts / Findings) into job-shaped surfaces:
 //
-//   Scans      — run / schedule / review a scan on this Mac
-//   Plugins    — what scanners are available; install more
-//   Evidence   — pull artifacts out for export / sharing
+//   Run a scan  — pick a kit and run it on this Mac
+//   Past scans  — the full scan archive, newest first
+//   Findings    — actionable feed across all scans
+//   Catalog     — browse / install forensic plugins
 //
 // The legacy `Investigation` workspace keeps its forensics tabs
 // for v1.17, showing a "Moved to Forensics →" banner. v1.18
