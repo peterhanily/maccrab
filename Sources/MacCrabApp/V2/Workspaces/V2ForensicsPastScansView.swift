@@ -19,6 +19,8 @@ struct V2ForensicsPastScansView: View {
     @State private var loading = true
     @State private var openScanID: String? = nil
     @State private var query: String = ""
+    @State private var pendingDelete: CaseManifest? = nil
+    @State private var deleteResult: String? = nil
 
     private var openScan: CaseManifest? {
         guard let id = openScanID else { return nil }
@@ -35,6 +37,9 @@ struct V2ForensicsPastScansView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                if let msg = deleteResult {
+                    deleteToast(msg)
+                }
                 if loading {
                     ProgressView("Loading…")
                         .frame(maxWidth: .infinity)
@@ -68,6 +73,50 @@ struct V2ForensicsPastScansView: View {
                 )
             }
         }
+        .alert("Delete this scan permanently?",
+               isPresented: Binding(
+                   get: { pendingDelete != nil },
+                   set: { if !$0 { pendingDelete = nil } }
+               ),
+               presenting: pendingDelete) { scan in
+            Button("Delete \(scan.name)", role: .destructive) {
+                deleteScan(scan)
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDelete = nil
+            }
+        } message: { scan in
+            let sizeStr = diskSizes[scan.id].map { bytes -> String in
+                let bcf = ByteCountFormatter()
+                bcf.countStyle = .file
+                return bcf.string(fromByteCount: bytes)
+            } ?? "unknown size"
+            Text("This removes the scan + its evidence database (\(sizeStr)) from disk. You can't undo this. Exported CSV/JSON files are not affected.")
+        }
+    }
+
+    /// Permanently remove the case directory from disk + reload
+    /// the list. Used by the row's Delete action after the user
+    /// confirms in the alert.
+    private func deleteScan(_ scan: CaseManifest) {
+        let layout = CaseDirectoryLayout(
+            casesRoot: CaseDirectoryLayout.defaultCasesRoot,
+            caseID: scan.id
+        )
+        let freed = diskSizes[scan.id] ?? layout.diskBytes()
+        do {
+            try FileManager.default.removeItem(at: layout.caseDirectory)
+            // Also drop any HiddenScans entry — no point keeping
+            // the hide list referring to a dir that's gone.
+            HiddenScans.restore(scan.id)
+            let bcf = ByteCountFormatter()
+            bcf.countStyle = .file
+            deleteResult = "Deleted \(scan.name) · freed \(bcf.string(fromByteCount: freed))."
+        } catch {
+            deleteResult = "Couldn't delete: \(error.localizedDescription)"
+        }
+        pendingDelete = nil
+        Task { await reload() }
     }
 
     // MARK: - Sections
@@ -88,6 +137,26 @@ struct V2ForensicsPastScansView: View {
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    private func deleteToast(_ msg: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: msg.hasPrefix("Deleted") ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(msg.hasPrefix("Deleted") ? .green : .orange)
+                .font(.system(size: 13))
+            Text(msg)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Dismiss") {
+                deleteResult = nil
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11))
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(6)
     }
 
     private var emptyState: some View {
@@ -137,6 +206,9 @@ struct V2ForensicsPastScansView: View {
                     onDismiss: {
                         HiddenScans.hide(scan.id)
                         Task { await reload() }
+                    },
+                    onDeleteRequested: {
+                        pendingDelete = scan
                     }
                 )
                 if scan.id != filtered.last?.id {
@@ -190,6 +262,12 @@ struct ForensicsScanRow: View {
     var diskBytes: Int64? = nil
     let onOpen: () -> Void
     let onDismiss: () -> Void
+    /// Optional permanent-delete callback. When present, the row
+    /// menu adds a destructive "Delete permanently…" entry. The
+    /// confirmation alert lives on the parent view (Past Scans /
+    /// Recently Run), not inside the row, so the row stays a
+    /// pure presentation component.
+    var onDeleteRequested: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -235,6 +313,11 @@ struct ForensicsScanRow: View {
                 Button(role: .destructive, action: onDismiss) {
                     Label("Dismiss from list", systemImage: "eye.slash")
                 }
+                if let onDelete = onDeleteRequested {
+                    Button(role: .destructive, action: onDelete) {
+                        Label("Delete permanently…", systemImage: "trash")
+                    }
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.system(size: 13))
@@ -252,6 +335,11 @@ struct ForensicsScanRow: View {
             }
             Button(role: .destructive, action: onDismiss) {
                 Label("Dismiss from list", systemImage: "eye.slash")
+            }
+            if let onDelete = onDeleteRequested {
+                Button(role: .destructive, action: onDelete) {
+                    Label("Delete permanently…", systemImage: "trash")
+                }
             }
         }
     }

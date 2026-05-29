@@ -232,10 +232,12 @@ struct V2ForensicsScanDetailView: View {
                         .foregroundStyle(.tertiary)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
             .foregroundStyle(isSelected ? Color.accentColor : .primary)
             .cornerRadius(4)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
