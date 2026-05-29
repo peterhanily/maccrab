@@ -911,6 +911,16 @@ public actor RuleEngine {
         case "process.ancestor_depth", "AncestorDepth":
             return String(event.process.ancestors.count)
 
+        case "ProcessAncestors":
+            // Newline-joined ancestor names + executables so a Sigma
+            // `|contains` matches any process in the lineage chain (used by
+            // ai_safety rules that key on an AI-tool ancestor). nil when no
+            // lineage so `|contains` against nil is a clean non-match.
+            guard !event.process.ancestors.isEmpty else { return nil }
+            return event.process.ancestors
+                .flatMap { [$0.name, $0.executable] }
+                .joined(separator: "\n")
+
         case "process.env", "EnvVarsFlat":
             // Flatten the env dict into "KEY1=val1 KEY2=val2" so Sigma's
             // `contains` modifier can match against env fragments.

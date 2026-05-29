@@ -25,7 +25,7 @@ logsource:
 detection:
     selection_config_write:
         FileAction: 'modify'
-        FilePath|endswith:
+        TargetFilename|endswith:
             - '/.claude/settings.json'
             - '/.claude/project.json'
             - '/.claude/local.json'

@@ -23,7 +23,7 @@ detection:
         Image|endswith: '/git'
         CommandLine|contains: 'push'
     selection_sensitive_cwd:
-        CurrentDirectory|contains:
+        WorkingDirectory|contains:
             - '/Documents/'
             - '/Downloads/'
             - '/Desktop/'

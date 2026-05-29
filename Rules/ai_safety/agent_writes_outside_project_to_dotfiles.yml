@@ -25,7 +25,7 @@ detection:
         FileAction:
             - 'modify'
             - 'create'
-        FilePath|endswith:
+        TargetFilename|endswith:
             - '/.zshrc'
             - '/.zprofile'
             - '/.zlogin'

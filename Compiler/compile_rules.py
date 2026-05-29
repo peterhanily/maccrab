@@ -87,6 +87,8 @@ SIGMA_FIELD_MAP = {
     "SourceIp": "network.source.ip",
     "SourcePort": "network.source.port",
     "CodeSigningFlags": "process.code_signature.flags",
+    "SigningID": "process.code_signature.signing_id",
+    "SigningId": "process.code_signature.signing_id",
     # ES-framework-provided platform bit. More reliable than SignerType
     # for filtering Apple binaries because it comes from the kernel event
     # directly and doesn't depend on post-hoc code-signing enrichment
@@ -125,7 +127,7 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     # Extended code-signing fields (issuer chain, cert hashes, ad-hoc flag).
     "SigningCertIssuer", "SigningCertHash", "IsAdhocSigned",
     # Lineage + environment.
-    "AncestorDepth", "EnvVarsFlat",
+    "AncestorDepth", "EnvVarsFlat", "ProcessAncestors",
     # Deception tier: honeyfile access markers set by EventEnricher.
     "IsHoneyfile", "HoneyfileType",
     # EventType is a top-level Event enum (process, file, network, ...) used
@@ -166,6 +168,14 @@ _KNOWN_PASSTHROUGH_FIELDS = {
 # Track fields we've already warned about to avoid spam.
 _warned_fields: set = set()
 
+# Unmapped fields accumulated across the run. A non-empty set fails the build
+# at the end of main() — an unmapped predicate field resolves to nil at
+# runtime, silently disabling the rule (the v1.17 "dead rules" class:
+# FilePath / CurrentDirectory / ProcessAncestors). Add legitimately
+# runtime-resolved fields to SIGMA_FIELD_MAP or _KNOWN_PASSTHROUGH_FIELDS to
+# keep the compiler in sync with RuleEngine.resolveField.
+_unmapped_fields: set = set()
+
 
 def normalize_field(field_name: str) -> str:
     """Map a Sigma field name to its canonical ECS-style dot-path.
@@ -178,11 +188,13 @@ def normalize_field(field_name: str) -> str:
     # Fields already in ECS dot-path form or known passthroughs are fine.
     if "." in field_name or field_name in _KNOWN_PASSTHROUGH_FIELDS:
         return field_name
+    _unmapped_fields.add(field_name)
     if field_name not in _warned_fields:
         _warned_fields.add(field_name)
         print(
-            f"  WARN  Unmapped Sigma field '{field_name}' in rule '{_current_compile_rule_title}' "
-            f"— will be passed through as-is. Add to SIGMA_FIELD_MAP if this is a typo.",
+            f"  ERROR Unmapped Sigma field '{field_name}' in rule '{_current_compile_rule_title}' "
+            f"— resolves to nil at runtime (rule silently disabled). Map it in "
+            f"SIGMA_FIELD_MAP or add to _KNOWN_PASSTHROUGH_FIELDS.",
             file=sys.stderr,
         )
     return field_name
@@ -1153,7 +1165,7 @@ def compile_rule(rule_data: dict, source_file: str):
                 coerced.append(entry)
             else:
                 print(
-                    f"  WARN  {rule_filename}: falsepositives entry is not a string "
+                    f"  WARN  {source_file}: falsepositives entry is not a string "
                     f"(got {type(entry).__name__} = {entry!r}). "
                     f"Likely an unquoted YAML colon — wrap the bullet in single quotes."
                 )
@@ -1161,7 +1173,7 @@ def compile_rule(rule_data: dict, source_file: str):
         falsepositives = coerced
     else:
         print(
-            f"  WARN  {rule_filename}: falsepositives field is not a list "
+            f"  WARN  {source_file}: falsepositives field is not a list "
             f"(got {type(falsepositives).__name__}). Coercing to empty list."
         )
         falsepositives = []
@@ -1558,6 +1570,16 @@ def main():
     print(f"  Rules compiled:    {compiled}")
     print(f"  Rules skipped:     {skipped}")
     print("=" * 50)
+
+    if _unmapped_fields:
+        print(
+            f"\nERROR: {len(_unmapped_fields)} unmapped predicate field(s) would resolve "
+            f"to nil at runtime (silently dead rules): {', '.join(sorted(_unmapped_fields))}.\n"
+            f"Map each in SIGMA_FIELD_MAP or add to _KNOWN_PASSTHROUGH_FIELDS "
+            f"(and ensure RuleEngine.resolveField handles it).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if compiled == 0 and total > 0:
         print("\nNo rules were compiled. Check that rules have logsource.product = 'macos'.")

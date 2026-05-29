@@ -27,12 +27,12 @@ logsource:
 detection:
     selection_skill_install:
         FileAction: 'create'
-        FilePath|contains:
+        TargetFilename|contains:
             - '/.claude/skills/'
             - '/.codex/skills/'
             - '/.cursor/skills/'
             - '/skills/SKILL.md'
-        FilePath|endswith: '/SKILL.md'
+        TargetFilename|endswith: '/SKILL.md'
     selection_payload_markers:
         FileContent|contains:
             - '<INSTRUCTIONS>'
@@ -42,7 +42,7 @@ detection:
             - '![](data:text/html;base64,'
             - '__import__("os")'
     filter_user_homedir_only:
-        FilePath|startswith: '/Users/'
+        TargetFilename|startswith: '/Users/'
     condition: selection_skill_install and selection_payload_markers and filter_user_homedir_only
 falsepositives:
     - User-authored skill that legitimately uses XML-like template markup (rare; review skill provenance)
