@@ -30,8 +30,34 @@ public struct FSEventsPlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "fsevents.log_file", privacyClass: .metadata),
-            OutputSpec(contentType: "fsevents.record", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "fsevents.log_file",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "filename": .title,
+                        "path": .path,
+                        "size_bytes": .count,
+                        "mtime_iso": .timestamp,
+                    ],
+                    columns: ["filename", "path", "size_bytes", "mtime_iso"]
+                )
+            ),
+            OutputSpec(
+                contentType: "fsevents.record",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .timeline,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "path": .title,
+                        "flags_decoded": .subtitle,
+                        "source_log_file": .path,
+                        "event_id": .identifier,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

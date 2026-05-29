@@ -20,6 +20,18 @@ import CSQLCipher
 
 public struct PostureAnalyzer: Analyzer {
 
+    /// Shared viewer hint for every posture.* finding artifact — they
+    /// share one shape (severity + explanation; the finding title is the
+    /// record-level summary). Rendered as a severity-tinted table so the
+    /// operator can scan findings.
+    static let findingHint = ViewerHint(
+        viewer: .table,
+        fieldRoles: [
+            "severity": .severity,
+            "explanation": .body,
+        ]
+    )
+
     public static let manifest = PluginManifest(
         id: "com.maccrab.forensics.posture-analyzer",
         version: "1.0.0",
@@ -30,11 +42,11 @@ public struct PostureAnalyzer: Analyzer {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "posture.unsigned_persistence", privacyClass: .metadata),
-            OutputSpec(contentType: "posture.unfamiliar_team_persistence", privacyClass: .metadata),
-            OutputSpec(contentType: "posture.automation_to_sensitive_target", privacyClass: .metadata),
-            OutputSpec(contentType: "posture.high_privilege_unsigned_combo", privacyClass: .metadata),
-            OutputSpec(contentType: "posture.permissioned_persistence", privacyClass: .metadata),
+            OutputSpec(contentType: "posture.unsigned_persistence", privacyClass: .metadata, viewerHint: Self.findingHint),
+            OutputSpec(contentType: "posture.unfamiliar_team_persistence", privacyClass: .metadata, viewerHint: Self.findingHint),
+            OutputSpec(contentType: "posture.automation_to_sensitive_target", privacyClass: .metadata, viewerHint: Self.findingHint),
+            OutputSpec(contentType: "posture.high_privilege_unsigned_combo", privacyClass: .metadata, viewerHint: Self.findingHint),
+            OutputSpec(contentType: "posture.permissioned_persistence", privacyClass: .metadata, viewerHint: Self.findingHint),
         ],
         mcpTools: [],
         schemaVersion: 1,

@@ -25,7 +25,23 @@ public struct MailBodiesPlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "mail.message_body", privacyClass: .personalComms, optInRequired: true),
+            OutputSpec(
+                contentType: "mail.message_body",
+                privacyClass: .personalComms,
+                optInRequired: true,
+                viewerHint: ViewerHint(
+                    viewer: .transcript,
+                    fieldRoles: [
+                        "observed_at":  .timestamp,
+                        "from":         .sender,
+                        "subject":      .title,
+                        "to":           .subtitle,
+                        "body_preview": .body,
+                        "path":         .path,
+                        "message_id":   .identifier,
+                    ]
+                )
+            ),
         ],
         mcpTools: [],
         schemaVersion: 1,

@@ -5,7 +5,7 @@
 // audit, etc.). Operators don't pick individual scanners —
 // they pick a kit shaped to a job.
 //
-// Schema matches maccrab.com/rave/schemas/kit.json (v0).
+// Schema matches rave.maccrab.com/schemas/kit.json (v0).
 // JSON files ship bundled in MacCrab.app/Contents/Resources/kits/
 // from rc.4. rc.7 fetches them from the rave catalog directly.
 

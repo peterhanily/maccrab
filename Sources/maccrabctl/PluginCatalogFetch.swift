@@ -1,6 +1,6 @@
 // PluginCatalogFetch — HTTP fetch path for `maccrabctl plugin install <plugin-id>`.
 //
-// Resolves a plugin-id against the maccrab.com/rave/ catalog and downloads the
+// Resolves a plugin-id against the rave.maccrab.com catalog and downloads the
 // signed bundle into a temp dir, then delegates to PluginInstaller for the
 // existing verify + install path. The chain is:
 //

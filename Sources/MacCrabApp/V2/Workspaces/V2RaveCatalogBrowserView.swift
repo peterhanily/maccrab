@@ -115,7 +115,7 @@ struct V2RaveCatalogBrowserView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Plugin catalog")
                     .font(.title2).fontWeight(.semibold)
-                Text(baseURL.isEmpty ? "maccrab.com/rave" : baseURL)
+                Text(baseURL.isEmpty ? "rave.maccrab.com" : baseURL)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -413,7 +413,7 @@ struct V2RaveCatalogBrowserView: View {
                 .foregroundStyle(.orange)
             Text("Catalog not reachable")
                 .font(.headline)
-            Text("The rave plugin catalog at \(baseURL.isEmpty ? "maccrab.com/rave" : baseURL) couldn't be fetched. This usually means the catalog is still being built out (Phase 0b → Phase 1) or you're offline.")
+            Text("The rave plugin catalog at \(baseURL.isEmpty ? "rave.maccrab.com" : baseURL) couldn't be fetched. This usually means the catalog is still being built out (Phase 0b → Phase 1) or you're offline.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

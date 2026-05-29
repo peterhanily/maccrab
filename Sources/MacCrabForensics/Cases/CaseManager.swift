@@ -26,6 +26,10 @@ public enum CaseManagerError: Error, CustomStringConvertible {
     case directoryCreateFailed(message: String)
     case dekGenerationFailed
     case caseAlreadyExists(id: String)
+    /// The supplied case id isn't a valid UUID. Refuse to use it in a
+    /// filesystem path — guards against a tampered manifest id steering
+    /// removeItem outside the Cases root via "../" or absolute paths.
+    case invalidCaseID(id: String)
     /// Encryption state mismatch — the manifest says the case is
     /// .plaintext but a DEK was supplied (or vice versa).
     case encryptionStateMismatch(declared: CaseEncryptionState, suppliedDEK: Bool)
@@ -46,6 +50,8 @@ public enum CaseManagerError: Error, CustomStringConvertible {
             return "CaseManager: SecRandomCopyBytes refused to produce a DEK"
         case .caseAlreadyExists(let id):
             return "CaseManager: case '\(id)' already exists"
+        case .invalidCaseID(let id):
+            return "CaseManager: '\(id)' is not a valid case id"
         case .encryptionStateMismatch(let declared, let supplied):
             return "CaseManager: encryption_state=\(declared.rawValue) doesn't match suppliedDEK=\(supplied)"
         }
@@ -262,6 +268,12 @@ public actor CaseManager {
     /// random bytes before unlinking (best-effort on modern
     /// flash storage — the gesture is documented at the CLI level).
     public func deleteCase(id: String, shred: Bool = false) async throws {
+        // Defense-in-depth: case ids are UUIDs minted by createCase.
+        // Reject anything else so a "../" or absolute path in a tampered
+        // manifest id can never steer removeItem outside the Cases root.
+        guard UUID(uuidString: id) != nil else {
+            throw CaseManagerError.invalidCaseID(id: id)
+        }
         let layout = CaseDirectoryLayout(casesRoot: casesRoot, caseID: id)
         guard FileManager.default.fileExists(atPath: layout.caseDirectory.path) else {
             throw CaseManagerError.caseNotFound(id: id)

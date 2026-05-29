@@ -508,6 +508,75 @@ struct MacCrabSelfTests {
                 "Critical self-integrity alerts must survive the self-allowlist")
     }
 
+    @Test("CRITICAL self-tamper survives a MIXED-severity batch (rc.17 Gate 4 regression)")
+    func criticalSelfTamperSurvivesMixedBatch() async throws {
+        // A non-MacCrab process rewriting our compiled_rules fires a
+        // critical tamper rule PLUS a non-critical rule. The critical
+        // MUST survive: pre-rc.17, Gate 4 did a blanket removeAll() and
+        // swallowed it, because the mixed batch skipped the critical-only
+        // fast path that protected the critical-only case.
+        var matches = [
+            RuleMatch(
+                ruleId: "maccrab.self-defense.rules-dir-modified",
+                ruleName: "MacCrab Tamper Detection: Rules Modified",
+                severity: .critical,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            ),
+            RuleMatch(
+                ruleId: "test.file-write",
+                ruleName: "Suspicious File Write",
+                severity: .high,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            )
+        ]
+        let event = attributedFileWrite(
+            path: "/Library/Application Support/MacCrab/compiled_rules/execution/shell_spawned_by_browser.json",
+            processPath: "/private/tmp/dropper",
+            processName: "dropper"
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.count == 1,
+                "critical self-tamper must survive; the non-critical match is dropped")
+        #expect(matches.first?.severity == .critical)
+    }
+
+    @Test("Operator-run MacCrab scan still fully suppresses a mixed batch")
+    func macCrabProcessScanSuppressesMixedBatch() async throws {
+        // When the ACTOR is MacCrab itself (a forensic kit reading a
+        // privacy DB), ALL severities drop — the rc.14 storm fix, left
+        // intact by the rc.17 process-vs-file split.
+        var matches = [
+            RuleMatch(
+                ruleId: "test.tcc-rate",
+                ruleName: "Multiple TCC Permissions Granted Rapidly",
+                severity: .critical,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            ),
+            RuleMatch(
+                ruleId: "test.db-read",
+                ruleName: "Sensitive DB Read",
+                severity: .high,
+                description: "",
+                mitreTechniques: [],
+                tags: []
+            )
+        ]
+        let event = attributedFileWrite(
+            path: "\(NSHomeDirectory())/Library/Messages/chat.db",
+            processPath: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
+            processName: "MacCrab"
+        )
+        NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
+        #expect(matches.isEmpty,
+                "an operator-run MacCrab scan suppresses every severity")
+    }
+
     @Test("Events on non-MacCrab paths still fire normally")
     func unrelatedPathStillFires() async throws {
         var matches = [

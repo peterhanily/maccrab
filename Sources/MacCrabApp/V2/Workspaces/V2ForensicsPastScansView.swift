@@ -99,24 +99,33 @@ struct V2ForensicsPastScansView: View {
     /// the list. Used by the row's Delete action after the user
     /// confirms in the alert.
     private func deleteScan(_ scan: CaseManifest) {
-        let layout = CaseDirectoryLayout(
+        let freed = diskSizes[scan.id] ?? CaseDirectoryLayout(
             casesRoot: CaseDirectoryLayout.defaultCasesRoot,
             caseID: scan.id
-        )
-        let freed = diskSizes[scan.id] ?? layout.diskBytes()
-        do {
-            try FileManager.default.removeItem(at: layout.caseDirectory)
-            // Also drop any HiddenScans entry — no point keeping
-            // the hide list referring to a dir that's gone.
-            HiddenScans.restore(scan.id)
-            let bcf = ByteCountFormatter()
-            bcf.countStyle = .file
-            deleteResult = "Deleted \(scan.name) · freed \(bcf.string(fromByteCount: freed))."
-        } catch {
-            deleteResult = "Couldn't delete: \(error.localizedDescription)"
-        }
+        ).diskBytes()
         pendingDelete = nil
-        Task { await reload() }
+        Task {
+            // Route through CaseManager.deleteCase so the wrapped DEK is
+            // also removed from the keychain (a raw removeItem orphans it
+            // for encrypted scans) and the case id is UUID-validated
+            // before it ever reaches removeItem.
+            let mgr = CaseManager(
+                casesRoot: CaseDirectoryLayout.defaultCasesRoot,
+                dekVault: KeychainDEKVault()
+            )
+            do {
+                try await mgr.deleteCase(id: scan.id)
+                // Also drop any HiddenScans entry — no point keeping
+                // the hide list referring to a dir that's gone.
+                HiddenScans.restore(scan.id)
+                let bcf = ByteCountFormatter()
+                bcf.countStyle = .file
+                deleteResult = "Deleted \(scan.name) · freed \(bcf.string(fromByteCount: freed))."
+            } catch {
+                deleteResult = "Couldn't delete: \(error.localizedDescription)"
+            }
+            await reload()
+        }
     }
 
     // MARK: - Sections

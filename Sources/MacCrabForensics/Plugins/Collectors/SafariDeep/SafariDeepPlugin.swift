@@ -30,8 +30,33 @@ public struct SafariDeepPlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "safari.localstorage", privacyClass: .content, optInRequired: true),
-            OutputSpec(contentType: "safari.indexeddb", privacyClass: .content, optInRequired: true),
+            OutputSpec(
+                contentType: "safari.localstorage",
+                privacyClass: .content,
+                optInRequired: true,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "origin": .title,
+                        "path": .path,
+                        "size_bytes": .count,
+                    ],
+                    columns: ["origin", "size_bytes", "path"]
+                )
+            ),
+            OutputSpec(
+                contentType: "safari.indexeddb",
+                privacyClass: .content,
+                optInRequired: true,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "origin": .title,
+                        "path": .path,
+                    ],
+                    columns: ["origin", "path"]
+                )
+            ),
         ],
         mcpTools: [],
         schemaVersion: 1,

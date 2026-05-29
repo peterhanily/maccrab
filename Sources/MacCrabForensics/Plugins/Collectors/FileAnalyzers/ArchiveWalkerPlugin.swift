@@ -19,7 +19,23 @@ public struct ArchiveWalkerPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "archive.listing", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "archive.listing",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "filename": .title,
+                        "path": .path,
+                        "archive_format": .status,
+                        "entry_line_count": .count,
+                        "size_bytes": .count,
+                        "sha256": .identifier,
+                    ],
+                    columns: ["filename", "archive_format", "entry_line_count", "size_bytes", "path", "sha256"]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

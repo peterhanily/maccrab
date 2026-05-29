@@ -1,5 +1,5 @@
 {
-  "$schema": "https://maccrab.com/rave/schemas/kit.json",
+  "$schema": "https://rave.maccrab.com/schemas/kit.json",
 
   "id": "com.maccrab.kit.ir-quick",
   "name": "IR Quickstart",

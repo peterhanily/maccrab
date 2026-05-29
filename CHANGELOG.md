@@ -3,6 +3,41 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] — 2026-05-29
+
+First public release since v1.12.9. The headline is the on-demand
+Forensics workspace and the on-device forensic-plugin engine behind
+it; the detection engine and dashboard also pick up refinements from
+the v1.13–v1.16 development cycle.
+
+### Added
+
+- **Forensics workspace** — a four-tab workspace (Run a scan, Past
+  scans, Findings, Catalog) for running curated scan kits (incident
+  response, phishing triage, comms forensics, supply-chain audit,
+  browser activity, Mac data overview, and more) and reviewing results.
+- **Forensic-plugin engine** — per-case encrypted evidence stores plus
+  first-party collectors and analyzers: launchd, TCC, Safari, Mail and
+  iMessage metadata, KnowledgeC, quarantine, FaceTime/Biome discovery,
+  and Mach-O / DMG / PKG / Office / PDF / plist / image / archive
+  analyzers.
+- **Evidence viewers** — tables, day-grouped timelines, message
+  transcripts, and charts, selected per artifact type (JSON-tree
+  fallback for anything else).
+- **Export** — save a scan's evidence as CSV or JSON.
+- **Retention and deletion** — auto-delete scans by age, per-scan disk
+  size, and a permanent-delete action.
+- **Full Disk Access guidance** — in-app prompts with a direct link to
+  the right System Settings pane when a scan needs access.
+
+### Changed
+
+- `maccrabctl` gains `case` and `plugin` subcommands for running and
+  managing forensic scans from the command line.
+
+Universal (Apple silicon + Intel), Developer ID signed and notarized.
+Minimum macOS 13.
+
 ## [1.12.9] — 2026-05-19
 
 Single-purpose patch on top of v1.12.7. SwiftUI layout code only

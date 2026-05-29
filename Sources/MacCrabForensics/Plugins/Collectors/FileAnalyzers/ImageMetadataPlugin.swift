@@ -21,7 +21,20 @@ public struct ImageMetadataPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "image.metadata", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "image.metadata",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "path": .path,
+                        "width": .count,
+                        "height": .count,
+                        "dpi": .count,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

@@ -20,8 +20,39 @@ public struct DMGPKGAnalyzerPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "dmg.analysis", privacyClass: .metadata),
-            OutputSpec(contentType: "pkg.analysis", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "dmg.analysis",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "filename": .title,
+                        "path": .path,
+                        "codesign.signer_type": .status,
+                        "codesign.team_id": .identifier,
+                        "sha256": .identifier,
+                        "size_bytes": .count,
+                        "hdiutil_imageinfo_lines": .count,
+                    ]
+                )
+            ),
+            OutputSpec(
+                contentType: "pkg.analysis",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "filename": .title,
+                        "path": .path,
+                        "codesign.signer_type": .status,
+                        "pkg_is_signed": .status,
+                        "pkg_is_notarized": .status,
+                        "codesign.team_id": .identifier,
+                        "sha256": .identifier,
+                        "size_bytes": .count,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

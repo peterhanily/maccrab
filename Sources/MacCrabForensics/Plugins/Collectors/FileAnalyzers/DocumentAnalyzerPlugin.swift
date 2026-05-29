@@ -21,7 +21,25 @@ public struct DocumentAnalyzerPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "document.analysis", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "document.analysis",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "filename": .title,
+                        "path": .path,
+                        "author": .subtitle,
+                        "page_count": .count,
+                        "size_bytes": .count,
+                        "creation_date_iso": .timestamp,
+                        "modification_date_iso": .timestamp,
+                        "has_javascript": .status,
+                        "has_embedded_file": .status,
+                        "sha256": .identifier,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

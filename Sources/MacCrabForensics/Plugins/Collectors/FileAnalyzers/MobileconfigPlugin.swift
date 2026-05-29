@@ -21,7 +21,17 @@ public struct MobileconfigPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "mobileconfig.analysis", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "mobileconfig.analysis",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "path": .path,
+                        "size_bytes": .count,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

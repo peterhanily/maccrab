@@ -80,7 +80,7 @@ func printPluginUsage() {
       list [--filter built-in|installed|all]
                                       List plugins. Default: all.
       info <plugin-id>                Show manifest detail.
-      search "<query>"                Search the rave catalog at maccrab.com/rave/.
+      search "<query>"                Search the rave catalog at rave.maccrab.com.
                                       (Catalog fetcher lands v1.17.0-rc.4.)
       install <bundle-dir>            Install a signed plugin bundle.
         [--trust-on-install]          Trust this publisher for future installs.
@@ -92,7 +92,7 @@ func printPluginUsage() {
                                       downloads the bundle .zip, verifies
                                       artifact_sha256, then delegates to the
                                       local install + verify path.
-        [--catalog-base <url>]        Default: https://maccrab.com/rave/
+        [--catalog-base <url>]        Default: https://rave.maccrab.com/
                                       (or env MACCRAB_RAVE_BASE_URL).
         [--version <semver>]          Pin to a specific version.
       install --local <path>          Sideload an unvetted local bundle.
@@ -199,7 +199,7 @@ func printPluginAliasWarning(_ oldName: String, _ newName: String) {
 
 // MARK: - v1.17 rc.1 store stubs
 //
-// search/update/pin all touch the rave catalog at maccrab.com/rave/,
+// search/update/pin all touch the rave catalog at rave.maccrab.com,
 // which doesn't yet have a publicly served catalog index. These
 // stubs return a clear "lands in rc.4" message so operators
 // (and any scripts) get a documented signal.
@@ -445,7 +445,7 @@ private func pluginInstall(args: [String]) async throws {
     if isLikelyPluginID(first) {
         let base = catalogBase
             ?? ProcessInfo.processInfo.environment["MACCRAB_RAVE_BASE_URL"]
-            ?? "https://maccrab.com/rave/"
+            ?? "https://rave.maccrab.com/"
         let fetcher = try PluginCatalogFetcher(catalogBase: base)
         installed = try await fetcher.installPluginByID(
             pluginID: first,

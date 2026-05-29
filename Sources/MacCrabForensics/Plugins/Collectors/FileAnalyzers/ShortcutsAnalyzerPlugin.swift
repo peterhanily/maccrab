@@ -20,7 +20,20 @@ public struct ShortcutsAnalyzerPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "shortcuts.shortcut", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "shortcuts.shortcut",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "name": .title,
+                        "path": .path,
+                        "size_bytes": .count,
+                        "mtime_iso": .timestamp,
+                    ],
+                    columns: ["name", "path", "size_bytes", "mtime_iso"]
+                )
+            ),
         ],
         mcpTools: [],
         schemaVersion: 1,

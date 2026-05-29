@@ -25,7 +25,25 @@ public struct OfficeDocumentPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "office.document", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "office.document",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "filename": .title,
+                        "path": .path,
+                        "format": .subtitle,
+                        "has_macros": .status,
+                        "creator": .body,
+                        "last_modified_by": .body,
+                        "created_iso": .timestamp,
+                        "modified_iso": .timestamp,
+                        "size_bytes": .count,
+                        "sha256": .identifier,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

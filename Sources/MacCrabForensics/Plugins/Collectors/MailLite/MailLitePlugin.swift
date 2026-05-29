@@ -36,7 +36,21 @@ public struct MailLitePlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "mail.message", privacyClass: .personalComms),
+            OutputSpec(
+                contentType: "mail.message",
+                privacyClass: .personalComms,
+                viewerHint: ViewerHint(
+                    viewer: .table,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "subject": .title,
+                        "sender_address": .subtitle,
+                        "message_id": .identifier,
+                        "is_flagged": .status,
+                    ],
+                    columns: ["observed_at", "sender_address", "subject", "is_read", "is_flagged"]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

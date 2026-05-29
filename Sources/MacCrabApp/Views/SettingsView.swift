@@ -561,17 +561,17 @@ struct SettingsView: View {
     @AppStorage("forensics.catalogBaseURL") private var forensicsCatalogBaseURL: String = ""
     @AppStorage("forensics.retentionDays") private var forensicsRetentionDays: Int = 0
     @State private var retentionDeleteResult: String? = nil
-    private static let officialForensicsCatalog = "https://maccrab.com/rave/"
+    private static let officialForensicsCatalog = "https://rave.maccrab.com/"
 
     private var forensicsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 GroupBox(String(localized: "settings.forensicsCatalog", defaultValue: "Plugin catalog source")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(String(localized: "settings.forensicsCatalogDesc", defaultValue: "Where the Forensics Catalog tab fetches its plugin list from. Leave blank to use the official catalog at maccrab.com/rave."))
+                        Text(String(localized: "settings.forensicsCatalogDesc", defaultValue: "Where the Forensics Catalog tab fetches its plugin list from. Leave blank to use the official catalog at rave.maccrab.com."))
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        TextField("https://maccrab.com/rave/", text: $forensicsCatalogBaseURL)
+                        TextField("https://rave.maccrab.com/", text: $forensicsCatalogBaseURL)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12, design: .monospaced))
                         HStack(spacing: 8) {
@@ -656,30 +656,37 @@ struct SettingsView: View {
         let days = forensicsRetentionDays
         guard days > 0 else { return }
         let casesRoot = CaseDirectoryLayout.defaultCasesRoot
-        let fm = FileManager.default
         let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
-        var deleted = 0
-        var freed: Int64 = 0
-        if let entries = try? fm.contentsOfDirectory(at: casesRoot, includingPropertiesForKeys: [URLResourceKey.contentModificationDateKey, URLResourceKey.isDirectoryKey]) {
-            for url in entries {
-                let vals = try? url.resourceValues(forKeys: [URLResourceKey.contentModificationDateKey, URLResourceKey.isDirectoryKey])
-                guard vals?.isDirectory == true else { continue }
-                let manifest = url.appendingPathComponent("manifest.json")
-                let mtime = (try? fm.attributesOfItem(atPath: manifest.path))?[.modificationDate] as? Date ?? .distantFuture
-                if mtime < cutoff {
-                    let layout = CaseDirectoryLayout(casesRoot: casesRoot, caseID: url.lastPathComponent)
-                    freed += layout.diskBytes()
-                    if (try? fm.removeItem(at: url)) != nil {
-                        deleted += 1
+        Task {
+            let fm = FileManager.default
+            // Route deletes through CaseManager so encrypted scans don't
+            // orphan their keychain DEK (a raw removeItem skips the vault).
+            // deleteCase also UUID-validates the id; a non-case dir would
+            // throw and be skipped, which is the safe direction.
+            let mgr = CaseManager(casesRoot: casesRoot, dekVault: KeychainDEKVault())
+            var deleted = 0
+            var freed: Int64 = 0
+            if let entries = try? fm.contentsOfDirectory(at: casesRoot, includingPropertiesForKeys: [URLResourceKey.isDirectoryKey]) {
+                for url in entries {
+                    let vals = try? url.resourceValues(forKeys: [URLResourceKey.isDirectoryKey])
+                    guard vals?.isDirectory == true else { continue }
+                    let manifest = url.appendingPathComponent("manifest.json")
+                    let mtime = (try? fm.attributesOfItem(atPath: manifest.path))?[.modificationDate] as? Date ?? .distantFuture
+                    if mtime < cutoff {
+                        let bytes = CaseDirectoryLayout(casesRoot: casesRoot, caseID: url.lastPathComponent).diskBytes()
+                        if (try? await mgr.deleteCase(id: url.lastPathComponent)) != nil {
+                            deleted += 1
+                            freed += bytes
+                        }
                     }
                 }
             }
+            let bcf = ByteCountFormatter()
+            bcf.countStyle = .file
+            retentionDeleteResult = deleted == 0
+                ? "No scans older than \(days) days."
+                : "Deleted \(deleted) scan\(deleted == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."
         }
-        let bcf = ByteCountFormatter()
-        bcf.countStyle = .file
-        retentionDeleteResult = deleted == 0
-            ? "No scans older than \(days) days."
-            : "Deleted \(deleted) scan\(deleted == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."
     }
 
     // MARK: - Daemon

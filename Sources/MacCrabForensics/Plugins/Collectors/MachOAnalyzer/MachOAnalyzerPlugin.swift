@@ -41,7 +41,21 @@ public struct MachOAnalyzerPlugin: Collector {
             ),
         ],
         outputs: [
-            OutputSpec(contentType: "macho.analysis", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "macho.analysis",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "path": .path,
+                        "arch": .subtitle,
+                        "codesign.team_id": .identifier,
+                        "codesign.signing_type": .status,
+                        "dylib_count": .count,
+                        "entitlement_count": .count,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

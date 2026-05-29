@@ -1,7 +1,7 @@
 // RaveCatalogClient.swift
 //
 // rc.7 — dashboard-side fetch + Ed25519-verify of the rave
-// plugin catalog at maccrab.com/rave/. Mirrors the maccrabctl
+// plugin catalog at rave.maccrab.com. Mirrors the maccrabctl
 // PluginCatalogFetch path the parallel rave session wired in:
 //   1. GET <base>/catalog.json + .sig
 //   2. Verify against bundled catalog.pub
@@ -51,7 +51,7 @@ public actor RaveCatalogClient {
 
     /// Official production catalog. Anything else is "custom"
     /// and gets a warning banner in the dashboard.
-    public static let officialBaseURL = URL(string: "https://maccrab.com/rave/")!
+    public static let officialBaseURL = URL(string: "https://rave.maccrab.com/")!
 
     /// rc.14 — Settings-driven catalog override key in UserDefaults.
     /// SettingsView writes this. Empty string means "use default".

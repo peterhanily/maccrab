@@ -89,23 +89,31 @@ public enum NoiseFilter {
             if matches.isEmpty { return }
         }
 
-        // Gate 4 — MacCrab self-activity. Tamper-detection rules on
-        // our own install dirs; sysext XPC events on ourselves; AND
-        // (rc.14) forensic plugins running from MacCrabApp reading
-        // ~/Library/Messages/chat.db, TCC.db, etc. — those are the
-        // operator-initiated scans, not credential-stealer behavior.
-        //
-        // Pre-rc.14 we kept .critical matches as a "self-compromise
-        // still gets through" backstop. In practice that produced a
-        // constant notification storm whenever the operator ran any
-        // kit — every plugin that reads a privacy-protected DB
-        // tripped at least one .critical rule. Real self-compromise
-        // is caught by the SelfDefense subsystem (binary integrity,
-        // signed-by-team-id checks) not by these event-pattern rules,
-        // so dropping all severities here is safe.
-        if isMacCrabSelf(event: event) {
+        // Gate 4a — events whose ACTOR is a MacCrab process: (rc.14)
+        // forensic plugins running from MacCrabApp reading
+        // ~/Library/Messages/chat.db, TCC.db, etc. (operator-initiated
+        // scans, not credential-stealer behavior), plus our own sysext
+        // XPC events and the daemon writing its own install dirs. Drop
+        // ALL severities — the notification storm every time the operator
+        // ran a kit was the rc.14 motivation, and genuine self-binary
+        // compromise is caught by the SelfDefense subsystem (binary
+        // integrity, signed-by-team-id), not by these event rules.
+        if isMacCrabProcess(event: event) {
             matches.removeAll()
             return
+        }
+
+        // Gate 4b — a NON-MacCrab process touching a file under our
+        // managed dirs (compiled_rules/, events.db). Benign churn — e.g.
+        // a Homebrew cask postflight rewriting compiled rules — is noise,
+        // so drop non-critical. But a CRITICAL match here is exactly the
+        // self-tamper signal we must not swallow. (rc.17 fix: pre-this,
+        // Gate 4 did a blanket removeAll() and silently dropped that
+        // critical on any mixed-severity batch, since the critical-only
+        // fast path above never fired.)
+        if isMacCrabManagedFile(event: event) {
+            matches.removeAll { $0.severity != .critical }
+            if matches.isEmpty { return }
         }
 
         // Gate 3 — trusted browser / Electron helper. Chromium apps
@@ -136,11 +144,20 @@ public enum NoiseFilter {
     }
 
     /// True when an event's subject is a MacCrab process, a MacCrab file,
-    /// or a file inside a MacCrab managed directory. Matches the three
-    /// known bundle IDs (app + sysext + legacy daemon) and the two data
-    /// dirs (system and user). Public so rule-level allowlists can reuse
-    /// the same definition.
+    /// or a file inside a MacCrab managed directory. Public so rule-level
+    /// allowlists can reuse the same definition. Composed of the two
+    /// finer predicates the noise gates use directly — `isMacCrabProcess`
+    /// (the ACTOR is us) and `isMacCrabManagedFile` (the FILE is under our
+    /// dirs) — which Gate 4 deliberately treats differently (full drop vs
+    /// drop-non-critical) so self-tamper criticals still alert.
     public static func isMacCrabSelf(event: Event) -> Bool {
+        isMacCrabProcess(event: event) || isMacCrabManagedFile(event: event)
+    }
+
+    /// True when the event's ACTOR is one of MacCrab's own processes
+    /// (app, sysext, legacy daemon, CLI, MCP server) — by process name or
+    /// by executable path, including ad-hoc-signed dev builds.
+    public static func isMacCrabProcess(event: Event) -> Bool {
         let name = event.process.name.lowercased()
         if name == "maccrab" ||
            name == "com.maccrab.agent" ||
@@ -158,15 +175,18 @@ public enum NoiseFilter {
            path.hasSuffix("/maccrab-mcp") {
             return true
         }
-        // File-event subjects: filesystem paths under MacCrab's managed
-        // directories. Tamper-detection rules on compiled_rules/ fire on
-        // legitimate cask postflight updates; suppress unless critical.
-        if let filePath = event.file?.path,
-           filePath.hasPrefix("/Library/Application Support/MacCrab/") ||
-           filePath.hasPrefix("\(NSHomeDirectory())/Library/Application Support/MacCrab/") {
-            return true
-        }
         return false
+    }
+
+    /// True when the event's FILE subject is inside one of MacCrab's
+    /// managed directories (system + user Application Support). Actor-
+    /// agnostic by design: a non-MacCrab process writing here is a tamper
+    /// candidate, which is why Gate 4b keeps .critical matches instead of
+    /// dropping the whole batch.
+    public static func isMacCrabManagedFile(event: Event) -> Bool {
+        guard let filePath = event.file?.path else { return false }
+        return filePath.hasPrefix("/Library/Application Support/MacCrab/") ||
+               filePath.hasPrefix("\(NSHomeDirectory())/Library/Application Support/MacCrab/")
     }
 
     /// True when the given executable path is inside a trusted browser or

@@ -23,7 +23,19 @@ public struct PlistAnalyzerPlugin: Collector {
         tccRequirements: [],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "plist.analysis", privacyClass: .metadata),
+            OutputSpec(
+                contentType: "plist.analysis",
+                privacyClass: .metadata,
+                viewerHint: ViewerHint(
+                    viewer: .keyvalue,
+                    fieldRoles: [
+                        "path": .path,
+                        "format": .status,
+                        "size_bytes": .count,
+                        "top_level_key_count": .count,
+                    ]
+                )
+            ),
         ],
         mcpTools: [
             MCPToolDescriptor(

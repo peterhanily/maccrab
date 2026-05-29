@@ -24,7 +24,20 @@ public struct iMessageBodiesPlugin: Collector {
         tccRequirements: [.fullDiskAccess],
         inputs: [],
         outputs: [
-            OutputSpec(contentType: "imessage.message_body", privacyClass: .content, optInRequired: true),
+            OutputSpec(
+                contentType: "imessage.message_body",
+                privacyClass: .content,
+                optInRequired: true,
+                viewerHint: ViewerHint(
+                    viewer: .transcript,
+                    fieldRoles: [
+                        "observed_at": .timestamp,
+                        "is_from_me": .sender,
+                        "text": .body,
+                        "guid": .identifier,
+                    ]
+                )
+            ),
         ],
         mcpTools: [],
         schemaVersion: 1,
