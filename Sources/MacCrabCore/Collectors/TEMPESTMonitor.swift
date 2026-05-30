@@ -266,10 +266,13 @@ public actor TEMPESTMonitor {
 
         do {
             try proc.run()
+            // Drain the pipe BEFORE waiting: SPUSBDataType output can exceed the
+            // OS pipe buffer, so waiting first would deadlock (child blocks on
+            // write, parent blocks in waitUntilExit, neither drains).
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
             guard proc.terminationStatus == 0 else { return [] }
 
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let usbData = json["SPUSBDataType"] as? [[String: Any]] else {
                 return []

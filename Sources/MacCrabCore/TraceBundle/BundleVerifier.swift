@@ -37,6 +37,19 @@ public enum BundleVerifier {
         /// enough to absorb clock drift between the daemon and the verifier.
         public var unifiedLogWindowSeconds: TimeInterval = 300
 
+        /// External trust anchor: the SHA-256 (hex) of the public-key DER we
+        /// expect the bundle to be signed with. When set, the bundled
+        /// `integrity/trace-signing.pub` MUST match this fingerprint, otherwise
+        /// verify fails (exit 3). This closes the self-signed-rewrite gap:
+        /// without a pin, an attacker who rewrites the artifacts can re-sign
+        /// with their own key and update the bundled pubkey + fingerprint, and
+        /// every internal cross-check still passes (the integrity/ dir is
+        /// excluded from the signed Merkle root by design). Sources for the
+        /// anchor are caller-chosen: a TOFU pin store, an install/fleet-pinned
+        /// project key, or an operator-supplied `--expect-key` fingerprint.
+        /// nil → unpinned (TOFU-style self-contained verify, legacy behavior).
+        public var pinnedKeyFingerprint: String? = nil
+
         public init() {}
     }
 
@@ -156,6 +169,24 @@ public enum BundleVerifier {
                 kind: .schemaInvalid(
                     "bundled public key fingerprint (\(computedFingerprint)) does not match chain_head_signature.signing_key_fingerprint (\(signature.signingKeyFingerprint))"
                 )
+            )
+        }
+        // EXTERNAL TRUST ANCHOR (storage-01): the bundled key + fingerprint are
+        // both inside the unsigned integrity/ dir, so the cross-check above only
+        // proves the bundle is self-consistent — NOT that it was signed by a key
+        // we trust. When the caller supplies a pinned fingerprint, require the
+        // bundled key to match it; otherwise a rewrite-and-resign with an
+        // attacker key would still verify. nil pin → legacy self-contained mode.
+        if let pinned = options.pinnedKeyFingerprint, pinned != computedFingerprint {
+            return BundleValidator.Outcome(
+                exitCode: 3,
+                kind: .schemaInvalid(
+                    "untrusted signing key: bundle is signed by \(computedFingerprint) but the pinned trust anchor expects \(pinned)"
+                ),
+                messages: [
+                    "The bundle's signature verifies against its OWN embedded key, but that key is not the trusted one.",
+                    "This is the signature you would see after an attacker rewrote the bundle and re-signed it with their own key.",
+                ]
             )
         }
         // ECDSA P-256 SHA-256 verification via CryptoKit.

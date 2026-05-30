@@ -136,57 +136,75 @@ public actor CaseManager {
             )
         }
 
-        // Write manifest BEFORE we touch the SQLite store. The
-        // manifest is the lightweight ground truth used by
-        // listCases(); if SQLite open fails downstream the
-        // operator still sees the case in the list and can clean
-        // it up.
-        let manifest = CaseManifest(
-            id: caseID,
-            name: name,
-            createdAt: Date(),
-            encryptionState: state
-        )
-        try Self.writeManifest(manifest, to: layout.manifestFile)
+        // Everything after the directory is created must roll back
+        // atomically: a failure partway through (manifest write, DEK
+        // wrap, SQLite open, INSERT, vault init) would otherwise
+        // orphan the case directory on disk and — once the DEK is
+        // stored — a wrapped key in the keychain. On any throw, delete
+        // the DEK (no-op when none was stored) then remove the
+        // directory, mirroring deleteCase()'s ordering, and rethrow
+        // the original error.
+        do {
+            // Write manifest BEFORE we touch the SQLite store. The
+            // manifest is the lightweight ground truth used by
+            // listCases(); if SQLite open fails downstream the
+            // operator still sees the case in the list and can clean
+            // it up.
+            let manifest = CaseManifest(
+                id: caseID,
+                name: name,
+                createdAt: Date(),
+                encryptionState: state
+            )
+            try Self.writeManifest(manifest, to: layout.manifestFile)
 
-        // Generate + wrap DEK (encrypted cases only).
-        var dek: Data? = nil
-        if encrypted {
-            dek = try Self.makeDEK()
-            try await dekVault.store(dek: dek!, for: caseID)
+            // Generate + wrap DEK (encrypted cases only).
+            var dek: Data? = nil
+            if encrypted {
+                dek = try Self.makeDEK()
+                try await dekVault.store(dek: dek!, for: caseID)
+            }
+
+            // Open the SQLCipher store, run the schema migration, and
+            // INSERT the cases row.
+            let store = try await ArtifactStore(
+                path: layout.sqliteFile.path,
+                dek: dek,
+                encryptionState: state
+            )
+            try await store.insertCase(CaseRecord(
+                id: caseID,
+                name: name,
+                createdAt: manifest.createdAt,
+                timeWindowStart: timeWindow?.start,
+                timeWindowEnd: timeWindow?.end,
+                notes: notes,
+                encryptionState: state
+            ))
+
+            let vault: BlobVault?
+            if let dek = dek {
+                vault = try BlobVault(layout: layout, dek: dek)
+            } else {
+                vault = nil
+            }
+
+            return CaseHandle(
+                caseID: caseID,
+                store: store,
+                vault: vault,
+                layout: layout,
+                encryptionState: state
+            )
+        } catch {
+            // Best-effort rollback. delete(for:) is a no-op when no
+            // DEK was stored; removeItem tears down the directory we
+            // created above (caseID is a freshly-minted UUID, so no
+            // traversal exposure).
+            try? await dekVault.delete(for: caseID)
+            try? FileManager.default.removeItem(at: layout.caseDirectory)
+            throw error
         }
-
-        // Open the SQLCipher store, run the schema migration, and
-        // INSERT the cases row.
-        let store = try await ArtifactStore(
-            path: layout.sqliteFile.path,
-            dek: dek,
-            encryptionState: state
-        )
-        try await store.insertCase(CaseRecord(
-            id: caseID,
-            name: name,
-            createdAt: manifest.createdAt,
-            timeWindowStart: timeWindow?.start,
-            timeWindowEnd: timeWindow?.end,
-            notes: notes,
-            encryptionState: state
-        ))
-
-        let vault: BlobVault?
-        if let dek = dek {
-            vault = try BlobVault(layout: layout, dek: dek)
-        } else {
-            vault = nil
-        }
-
-        return CaseHandle(
-            caseID: caseID,
-            store: store,
-            vault: vault,
-            layout: layout,
-            encryptionState: state
-        )
     }
 
     // MARK: - Open

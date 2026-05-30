@@ -205,6 +205,97 @@ struct BundleVerifierTests {
 
         let outcome = await BundleVerifier.verify(at: dir)
         #expect(outcome.exitCode == 3)
+    }    /// storage-01: the full rewrite-and-resign attack. An attacker who
+    /// rewrites an artifact can recompute the Merkle root and re-sign it with
+    /// their OWN key, updating the bundled pubkey + fingerprint to match. Every
+    /// internal cross-check then passes (integrity/ is excluded from the signed
+    /// root by design), so unpinned verify accepts it — that is the gap. With a
+    /// pinned trust anchor (the legitimate key's fingerprint), verify must
+    /// reject it (exit 3).
+    @Test("storage-01: rewrite-and-resign with attacker key — unpinned accepts, pinned rejects")
+    func rewriteAndResignDefeatedByPin() async throws {
+        // Build a legit bundle and capture the legitimate signing key.
+        let (dir, _, goodSubstrate) = try await buildSignedBundle()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let goodFingerprint = try await goodSubstrate.publicKey().fingerprint
+
+        // --- Attacker rewrites an artifact ---
+        let eventsURL = dir.appendingPathComponent("events.jsonl")
+        try #"{"id":"ev-1","ts":1700000000,"injected":true}"#
+            .write(to: eventsURL, atomically: true, encoding: .utf8)
+
+        // --- Attacker recomputes the Merkle root over the tampered files ---
+        let recomputed = try BundleMerkle.compute(forBundleAt: dir)
+
+        // --- Attacker generates their OWN key and re-signs the new root ---
+        let attacker = TrustSubstrate(
+            storage: InMemoryTrustSubstrateStorage(),
+            modeOverride: .filesystemDegraded
+        )
+        let attackerKey = try await attacker.publicKey()
+        let attackerSig = try await attacker.sign(Data(recomputed.merkleRoot.utf8))
+
+        // Overwrite integrity/ to point entirely at the attacker key.
+        try attackerKey.derBytes.write(to: dir.appendingPathComponent("integrity/trace-signing.pub"))
+
+        let chainURL = dir.appendingPathComponent("integrity/hash_chain.json")
+        let oldChain = try canonicalJSONDecoder().decode(
+            HashChainArtifact.self, from: Data(contentsOf: chainURL))
+        let newChain = HashChainArtifact(
+            artifacts: recomputed.artifacts, merkleRoot: recomputed.merkleRoot)
+        _ = oldChain
+        try canonicalJSONEncoder().encode(newChain).write(to: chainURL)
+
+        let sigURL = dir.appendingPathComponent("integrity/chain_head_signature.json")
+        let oldSig = try canonicalJSONDecoder().decode(
+            ChainHeadSignatureArtifact.self, from: Data(contentsOf: sigURL))
+        let newSig = ChainHeadSignatureArtifact(
+            merkleRoot: recomputed.merkleRoot,
+            signatureBase64: attackerSig.base64EncodedString(),
+            signingKeyMode: oldSig.signingKeyMode,
+            signingKeyFingerprint: attackerKey.fingerprint,
+            signedAt: oldSig.signedAt
+        )
+        try canonicalJSONEncoder().encode(newSig).write(to: sigURL)
+
+        // Unpinned verify is FOOLED — this documents the gap the pin closes.
+        let unpinned = await BundleVerifier.verify(at: dir)
+        #expect(unpinned.exitCode == 0,
+                "Expected unpinned verify to accept the resigned bundle (the gap); got \(unpinned.kind)")
+        #expect(attackerKey.fingerprint != goodFingerprint)
+
+        // Pinned to the LEGITIMATE key → rejected with exit 3.
+        var options = BundleVerifier.Options()
+        options.pinnedKeyFingerprint = goodFingerprint
+        let pinned = await BundleVerifier.verify(at: dir, options: options)
+        #expect(pinned.exitCode == 3)
+        #expect(pinned.kindMessage.contains("untrusted signing key"),
+                "Expected untrusted-key message, got: \(pinned.kindMessage)")
+    }
+
+    @Test("storage-01: pin matching the real key still verifies (exit 0)")
+    func pinMatchingRealKeyVerifies() async throws {
+        let (dir, _, substrate) = try await buildSignedBundle()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var options = BundleVerifier.Options()
+        options.pinnedKeyFingerprint = try await substrate.publicKey().fingerprint
+        let outcome = await BundleVerifier.verify(at: dir, options: options)
+        #expect(outcome.exitCode == 0, "Correct pin rejected a clean bundle: \(outcome.kind)")
+    }
+
+    @Test("storage-01: TOFU pin store rejects a key change on second verify")
+    func tofuPinStoreCatchesKeyChange() async throws {
+        let pinFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pins-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: pinFile) }
+        let store = TraceKeyPinStore(fileURL: pinFile)
+
+        #expect(store.pinnedFingerprint(forTraceId: "trace-x") == nil)
+        store.pinIfAbsent(traceId: "trace-x", fingerprint: "aaaa")
+        #expect(store.pinnedFingerprint(forTraceId: "trace-x") == "aaaa")
+        // pin-if-absent must NOT overwrite an existing pin (TOFU guarantee).
+        store.pinIfAbsent(traceId: "trace-x", fingerprint: "bbbb")
+        #expect(store.pinnedFingerprint(forTraceId: "trace-x") == "aaaa")
     }
 
     @Test("UnifiedLog: anchor present → exit 0 with --check-unified-log")

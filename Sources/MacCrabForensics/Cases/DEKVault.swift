@@ -32,8 +32,10 @@ public protocol DEKVault: Sendable {
     /// Throws `DEKVaultError.userCancelled` if the operator
     /// dismisses the prompt; `DEKVaultError.notFound` if the case
     /// has no wrapped DEK on file; `DEKVaultError.lockout` if the
-    /// 5-failed-attempt threshold (plan §10.4) has tripped and
-    /// the operator hasn't called the --force unlock path.
+    /// underlying OS keychain reports its own retry lockout (macOS
+    /// Keychain Services / Secure Enclave throttle passcode and
+    /// biometry retries — MacCrab does not layer an app-side
+    /// attempt counter on top).
     func retrieve(for caseID: String) async throws -> Data
 
     /// Remove the wrapped DEK. Called by CaseManager.deleteCase()
@@ -51,9 +53,10 @@ public enum DEKVaultError: Error, CustomStringConvertible, Equatable {
     /// Operator dismissed the auth prompt.
     case userCancelled
 
-    /// Lockout active per plan §10.4 (5 failed attempts in 5
-    /// minutes). The --force unlock path bypasses by re-auth'ing
-    /// against the login keychain.
+    /// The OS keychain surfaced its own auth-retry lockout. macOS
+    /// throttles passcode/biometry retries at the Secure-Enclave
+    /// level; MacCrab forwards that state rather than counting
+    /// attempts itself. Cleared by the OS retry-cooldown.
     case lockout
 
     /// Underlying keychain / OS call failed for a reason not
@@ -71,7 +74,7 @@ public enum DEKVaultError: Error, CustomStringConvertible, Equatable {
         case .userCancelled:
             return "DEKVault: operator cancelled the auth prompt"
         case .lockout:
-            return "DEKVault: case is in 5-failed-attempt lockout; use --force"
+            return "DEKVault: keychain auth is temporarily locked out; wait for the OS retry cooldown"
         case .osError(let status, let message):
             return "DEKVault: OS error \(status): \(message)"
         case .malformedDEK(let bytes):

@@ -577,6 +577,14 @@ private func pluginVerifyAll() async throws {
     if report.failed.isEmpty && report.verified.isEmpty {
         print("(no plugins installed)")
     }
+    // resolve() stamps a temp verified-binary on disk per plugin.
+    // This is the verify-only path — nothing spawns them — so discard
+    // every one before returning, or each invocation leaks one
+    // executable into NSTemporaryDirectory(). Mirrors
+    // TierBBootstrap.refresh()'s cleanup.
+    for p in report.verified {
+        registry.cleanupVerifiedBinary(p)
+    }
 }
 
 // MARK: - Local helpers (mirrors CaseCommands; kept small)

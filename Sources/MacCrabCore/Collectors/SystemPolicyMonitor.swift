@@ -591,8 +591,11 @@ public actor SystemPolicyMonitor {
             DispatchQueue.global().asyncAfter(deadline: deadline) {
                 if process.isRunning { process.terminate() }
             }
+            // Drain the pipe BEFORE waiting so large command output can't
+            // deadlock (child blocks on write, parent blocks in waitUntilExit).
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             process.waitUntilExit()
-            return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return output
         } catch {
             return ""
         }

@@ -282,15 +282,14 @@ public actor TCCMonitor {
         guard isRunning else { return }
         isRunning = false
 
-        // Tear down dispatch sources
+        // Tear down dispatch sources. Each source's cancel handler closes
+        // its own fd once GCD has stopped delivering events for it — closing
+        // here would create a use-after-close window (the event handler can
+        // still fire between this async cancel request and its completion).
         for source in watchSources {
             source.cancel()
         }
         watchSources.removeAll()
-
-        for fd in watchFileDescriptors {
-            Darwin.close(fd)
-        }
         watchFileDescriptors.removeAll()
 
         continuation?.finish()
@@ -327,7 +326,10 @@ public actor TCCMonitor {
         }
 
         source.setCancelHandler {
-            // File descriptor is closed in stop()
+            // Close the fd here — GCD guarantees the cancel handler runs once,
+            // after the source has fully stopped delivering events, so there
+            // is no use-after-close window.
+            Darwin.close(fd)
         }
 
         source.resume()

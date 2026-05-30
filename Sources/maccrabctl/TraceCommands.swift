@@ -486,7 +486,28 @@ extension MacCrabCtl {
         var options = BundleVerifier.Options()
         options.checkUnifiedLog = checkUnifiedLog
         let anchor: UnifiedLogAnchor? = checkUnifiedLog ? SystemUnifiedLogAnchor() : nil
+
+        // storage-01: anchor the signature to a key we trust, not the one the
+        // bundle ships. TOFU pin store keyed by trace_id — first verify of a
+        // trace_id pins the key it was signed with; a later rewrite-and-resign
+        // (attacker swaps the embedded key) then fails with exit 3.
+        let pinStore = TraceKeyPinStore()
+        let traceId = (try? Data(contentsOf: target.appendingPathComponent("manifest.json")))
+            .flatMap { try? canonicalJSONDecoder().decode(BundleManifest.self, from: $0) }?
+            .traceId
+        if let traceId, let pinned = pinStore.pinnedFingerprint(forTraceId: traceId) {
+            options.pinnedKeyFingerprint = pinned
+        }
+
         let outcome = await BundleVerifier.verify(at: target, unifiedLogAnchor: anchor, options: options)
+
+        // TOFU: on a clean first verify, record the key we just trusted.
+        if outcome.exitCode == 0, let traceId,
+           let sigData = try? Data(contentsOf: target.appendingPathComponent("integrity/chain_head_signature.json")),
+           let sig = try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: sigData) {
+            pinStore.pinIfAbsent(traceId: traceId, fingerprint: sig.signingKeyFingerprint)
+        }
+
         printOutcome(outcome, label: "verify")
         exit(outcome.exitCode)
     }

@@ -14,6 +14,8 @@ private let BIOCSETIF: UInt = 0x8020426c
 private let BIOCSETF: UInt = 0x80104267
 private let BIOCIMMEDIATE: UInt = 0x80044270
 private let BIOCGBLEN: UInt = 0x40044266
+// _IOW('B', 109, struct timeval); timeval is 16 bytes on 64-bit macOS
+private let BIOCSRTIMEOUT: UInt = 0x8010426d
 
 // bpf_insn structure
 private struct bpf_insn {
@@ -228,6 +230,14 @@ public actor DNSCollector {
         // Set immediate mode
         var enable: UInt32 = 1
         ioctl(bpfFd, BIOCIMMEDIATE, &enable)
+
+        // Set a 1s read timeout so a blocking read() returns periodically and
+        // the !Task.isCancelled guard is re-checked even when no DNS packets
+        // match the filter (otherwise read() blocks forever and the capture
+        // Task can't observe cancellation on shutdown). A timeout returns 0,
+        // which falls through to the existing sleep+continue branch below.
+        var readTimeout = timeval(tv_sec: 1, tv_usec: 0)
+        ioctl(bpfFd, BIOCSRTIMEOUT, &readTimeout)
 
         // Get buffer size
         var bufLen: UInt32 = 0
