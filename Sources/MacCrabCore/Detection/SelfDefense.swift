@@ -870,21 +870,30 @@ public actor SelfDefense {
         }
     }
 
-    /// Compute a combined hash of all `.json` files in a directory.
+    /// Compute a combined hash of all `.json` rule files under a
+    /// directory, recursing into subdirectories.
     ///
-    /// Sort order: alphabetical (`FileManager.contentsOfDirectory` +
-    /// `.sorted()`) — preserved from the pre-v1.12.6 implementation so
-    /// hash output remains stable across the migration.
+    /// v1.17: made recursive (`FileManager.enumerator`) so the
+    /// `sequences/` and `graph/` subdirs (multi-step + TraceGraph rules)
+    /// are covered by tamper detection — the prior top-level-only
+    /// `contentsOfDirectory` walk silently omitted them. The
+    /// `auto_generated/` subtree is excluded on purpose: those rules are
+    /// written at runtime by the LLM rule-generation path and legitimately
+    /// change, so hashing them would fire a self-inflicted false-positive
+    /// `.rulesModified` alert.
+    ///
+    /// Sort order: files are hashed in ascending relative-path order.
+    /// `FileManager.enumerator` does not guarantee a stable traversal
+    /// order, so we sort the collected relative paths to keep the combined
+    /// hash deterministic. For a flat (top-level-only) directory a file's
+    /// relative path is just its filename, so the order is identical to
+    /// the previous `contentsOfDirectory().sorted()` and the produced
+    /// digest is byte-identical — no one-time false-positive on installs
+    /// that don't yet have the subdirs populated.
     ///
     /// Combined-hash structure: concatenate per-file SHA-256 hex
     /// digests (no separators), then SHA-256 the UTF-8 bytes of that
-    /// concatenation. This is byte-identical to the previous
-    /// `shasum -a 256 <tempfile-containing-concat>` path because UTF-8
-    /// of ASCII hex characters is the raw byte sequence — feeding the
-    /// same bytes to the same algorithm produces the same digest.
-    /// Critically important: a hash drift here would fire a one-time
-    /// false-positive `.rulesModified` alert on every existing install
-    /// the first time v1.12.6 runs.
+    /// concatenation. Unchanged from the pre-v1.17 implementation.
     ///
     /// Error handling: fails closed on any unreadable file. Returns
     /// `nil` rather than partial-coverage hashes that might silently
@@ -892,13 +901,37 @@ public actor SelfDefense {
     /// `nil` as "couldn't verify this tick" (no alert, no baseline
     /// update); next tick will catch the real state.
     private nonisolated static func directoryHash(at path: String) -> String? {
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: path)
-            .filter({ $0.hasSuffix(".json") })
-            .sorted() else { return nil }
+        let rootURL = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        let rootPath = rootURL.path
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        var relPaths: [String] = []
+        for case let url as URL in enumerator {
+            let isDirectory = (try? url.resourceValues(
+                forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            if isDirectory {
+                // Exclude runtime LLM-generated rules: they legitimately
+                // change, so hashing them would self-FP. skipDescendants
+                // prunes the whole subtree from the walk.
+                if url.lastPathComponent == "auto_generated" {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            guard url.pathExtension == "json" else { continue }
+            let fullPath = url.standardizedFileURL.path
+            guard fullPath.hasPrefix(rootPath + "/") else { continue }
+            relPaths.append(String(fullPath.dropFirst(rootPath.count + 1)))
+        }
+        relPaths.sort()
 
         var combined = ""
-        for file in files {
-            guard let hash = sha256(fileAt: path + "/" + file) else {
+        for rel in relPaths {
+            guard let hash = sha256(fileAt: rootPath + "/" + rel) else {
                 // Fail closed: any unreadable rule file means we
                 // can't produce a trustworthy combined hash this
                 // tick. Return nil so the caller skips alerting +

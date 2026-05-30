@@ -4,8 +4,15 @@
 // Plan reference: §3.7 v1.13a CLI surface.
 
 import Foundation
+import os
 import MacCrabCore
 import MacCrabForensics
+
+/// Audit sink for state-modifying case operations. Mirrors the MCP
+/// server's audit mechanism (maccrab-mcp emits `logger.notice("MCP AUDIT: …")`
+/// at subsystem "com.maccrab.mcp"); the CLI uses the same os.log `.notice`
+/// + "AUDIT" convention under "com.maccrab.ctl". os.log records the timestamp.
+private let caseAuditLogger = Logger(subsystem: "com.maccrab.ctl", category: "case-audit")
 
 enum CaseCommandError: Error, CustomStringConvertible {
     case usage(String)
@@ -248,6 +255,10 @@ private func caseAllowAI(mgr: CaseManager, args: [String]) async throws {
     let id = args[1]
     let handle = try await mgr.openCase(id: id)
     try await handle.store.setAIContentAllowed(caseID: id, allowed: true)
+    // Audit log: highest-privilege privacy transition. Recorded only after
+    // the store write succeeds so a failed UPDATE never yields a false grant
+    // record. Same os.log .notice/"AUDIT" sink the MCP suppress handlers use.
+    caseAuditLogger.notice("CTL AUDIT: case_allow_ai — user=\(NSUserName(), privacy: .public) pid=\(getpid()) case=\(id, privacy: .public)")
     print("AI content access granted for case \(id).")
     print("This case's MCP tools may now expose non-metadata artifacts to AI agents.")
 }

@@ -132,7 +132,7 @@ public enum APIProvider: String, Sendable {
 ///   `MACCRAB_TLS_PINNING=strict` env var is set (opt-in, since pins require
 ///   maintenance to stay valid as providers rotate certificates)
 /// - Reasonable request/resource timeouts to prevent hung connections
-public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Sendable {
+public final class SecureURLSession: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.maccrab", category: "tls")
 
@@ -148,6 +148,15 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
         let envPinning = Foundation.ProcessInfo.processInfo.environment["MACCRAB_TLS_PINNING"] == "strict"
         self.expectedPins = Set(provider.knownSPKIPins)
         self.strictPinning = envPinning && !provider.knownSPKIPins.isEmpty
+        super.init()
+    }
+
+    /// Delegate for generic / shared sessions that have no SPKI pin material
+    /// (user-supplied hosts). Provides the TLS 1.2+ floor and, critically, the
+    /// `willPerformHTTPRedirection` SSRF re-validation on every redirect hop.
+    private override init() {
+        self.expectedPins = []
+        self.strictPinning = false
         super.init()
     }
 
@@ -200,7 +209,11 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.urlCache = nil
-        return URLSession(configuration: config)
+        // Attach a delegate so 3xx redirects are re-validated against the SSRF
+        // policy on every hop. Without this, the default redirect handling
+        // would follow a 302 from a validated public host to 169.254.169.254
+        // / RFC1918, bypassing the initial-URL check.
+        return URLSession(configuration: config, delegate: SecureURLSession(), delegateQueue: nil)
     }()
 
     /// Create a hardened URLSession for user-supplied URLs (webhooks, arbitrary
@@ -235,7 +248,10 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
         config.waitsForConnectivity = false
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
-        return URLSession(configuration: config)
+        // Attach a delegate so 3xx redirects are re-validated against the SSRF
+        // policy on every hop (webhook / stream / notification endpoints are
+        // user-supplied and could redirect into private / metadata space).
+        return URLSession(configuration: config, delegate: SecureURLSession(), delegateQueue: nil)
     }
 
     // MARK: - URLSessionDelegate
@@ -276,6 +292,43 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, @unchecked Se
         }
 
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
+    }
+
+    // MARK: - URLSessionTaskDelegate (redirect SSRF guard)
+
+    /// Re-runs the SSRF host policy on every HTTP redirect hop.
+    ///
+    /// URLSession follows 3xx responses automatically. Without this delegate a
+    /// validated public webhook endpoint could 302 to `169.254.169.254` or an
+    /// RFC1918 host and exfiltrate alert content / tokens, bypassing the
+    /// `WebhookOutput.validate` check applied only to the initial URL. Passing
+    /// `nil` to the completion handler cancels the redirect; the caller then
+    /// receives the 3xx response itself rather than following it.
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let target = request.url else {
+            completionHandler(nil)
+            return
+        }
+        // Honor the same private-network opt-ins the initial-URL validators use,
+        // so intranet-webhook operators (who already set one of these) keep
+        // working through redirects within their own network.
+        let env = Foundation.ProcessInfo.processInfo.environment
+        let allowPrivate = env["MACCRAB_WEBHOOK_ALLOW_PRIVATE"] == "1"
+            || env["MACCRAB_STREAM_ALLOW_PRIVATE"] == "1"
+            || env["MACCRAB_NOTIFICATION_ALLOW_PRIVATE"] == "1"
+        do {
+            try WebhookOutput.validate(url: target, allowPrivate: allowPrivate)
+            completionHandler(request)
+        } catch {
+            logger.error("TLS: redirect to \(target.host ?? "?") blocked by SSRF policy: \(error.localizedDescription)")
+            completionHandler(nil)
+        }
     }
 
     // MARK: - SPKI Hash Extraction

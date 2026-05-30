@@ -1808,9 +1808,12 @@ func handleForensicsSearchArtifacts(_ args: [String: Any]) async -> Any {
         guard let row = try await handle.store.fetchCase(id: caseID) else {
             return ["content": [["type": "text", "text": "case not found"]]]
         }
-        // Apply privacy gate: cap result class at metadata unless
-        // the case has granted AI content access.
-        let ceiling: PrivacyClass = row.aiContentAllowed ? .secret : .metadata
+        // Apply privacy gate: cap result class at metadata unless the
+        // case has granted AI content access, in which case raise the
+        // ceiling only to .content. The grant is `allow-ai --content`
+        // (non-metadata); personalComms / credentialAdjacent / secret
+        // stay blocked from MCP per PluginTypes class semantics.
+        let ceiling: PrivacyClass = row.aiContentAllowed ? .content : .metadata
         let q = ArtifactQuery(
             caseID: caseID,
             contentType: contentType,
@@ -1839,7 +1842,7 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
         guard let row = try await handle.store.fetchCase(id: caseID) else {
             return ["content": [["type": "text", "text": "case not found"]]]
         }
-        let ceiling: PrivacyClass = row.aiContentAllowed ? .secret : .metadata
+        let ceiling: PrivacyClass = row.aiContentAllowed ? .content : .metadata
         // Cheap path: query by case + take the artifact id locally.
         // (A future store-side getByID would be more efficient.)
         let rows = try await handle.store.query(ArtifactQuery(
@@ -1868,7 +1871,7 @@ func handleForensicsTimeline(_ args: [String: Any]) async -> Any {
         guard let row = try await handle.store.fetchCase(id: caseID) else {
             return ["content": [["type": "text", "text": "case not found"]]]
         }
-        let ceiling: PrivacyClass = row.aiContentAllowed ? .secret : .metadata
+        let ceiling: PrivacyClass = row.aiContentAllowed ? .content : .metadata
         let q = ArtifactQuery(
             caseID: caseID,
             privacyClassAtMost: ceiling,
@@ -1896,7 +1899,11 @@ func handleForensicsExplainCase(_ args: [String: Any]) async -> Any {
         // Aggregate artifact counts by content type.
         // Cheap: pull everything and bucket. Future iteration can
         // do this server-side with COUNT GROUP BY.
-        let rows = try await handle.store.query(ArtifactQuery(caseID: caseID, limit: 100_000))
+        // Apply the same privacy ceiling as the read handlers so the
+        // per-content-type counts don't leak the existence of blocked
+        // (personalComms / credentialAdjacent / secret) artifacts.
+        let ceiling: PrivacyClass = row.aiContentAllowed ? .content : .metadata
+        let rows = try await handle.store.query(ArtifactQuery(caseID: caseID, privacyClassAtMost: ceiling, limit: 100_000))
         var byContentType: [String: Int] = [:]
         for r in rows {
             byContentType[r.record.contentType, default: 0] += 1
@@ -2044,7 +2051,15 @@ while let line = readLine(strippingNewline: true) {
         // straight to the agent every call. README documents
         // automatic sanitization for cloud LLM calls — this is the
         // missing half of that promise for MCP responses.
-        sendResponse(id: reqId, result: sanitizeContent(result))
+        //
+        // Exception: forensic artifact reads (forensics.*) are
+        // integrity reads consumed as evidence — their source paths,
+        // summaries and hashes must NOT be scrubbed or chain-of-custody
+        // breaks. The privacy ceiling already bounds what those tools
+        // return (metadata by default; content only with an explicit
+        // `allow-ai --content` grant).
+        let response = toolName.hasPrefix("forensics.") ? result : sanitizeContent(result)
+        sendResponse(id: reqId, result: response)
     default:
         sendError(id: request.id, code: -32601, message: "Method not found: \(request.method)")
     }

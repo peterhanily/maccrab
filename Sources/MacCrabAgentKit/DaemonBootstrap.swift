@@ -57,8 +57,8 @@ public enum DaemonBootstrap {
         let startTime = Date()
         let timerHandles = DaemonTimers.start(
             state: state,
-            eventCount: { _sharedEventCount },
-            alertCount: { _sharedAlertCount },
+            eventCount: { UInt64(_sharedEventCount.get()) },
+            alertCount: { UInt64(_sharedAlertCount.get()) },
             startTime: startTime
         )
 
@@ -79,8 +79,8 @@ public enum DaemonBootstrap {
         await EventLoop.run(
             state: handles.state,
             eventStream: stream,
-            eventCount: &_sharedEventCount,
-            alertCount: &_sharedAlertCount
+            eventCount: _sharedEventCount,
+            alertCount: _sharedAlertCount
         )
     }
 
@@ -116,5 +116,10 @@ public enum DaemonBootstrap {
 // close over them. Moving them into DaemonHandles would require inout
 // semantics the dispatch sources can't express — simpler to keep them
 // here and document their purpose.
-nonisolated(unsafe) var _sharedEventCount: UInt64 = 0
-nonisolated(unsafe) var _sharedAlertCount: UInt64 = 0
+// v1.17 DEPS-01: previously `nonisolated(unsafe) var ...: UInt64`, which
+// raced — written from EventLoop's async processing thread while the
+// dispatch-source heartbeat timers read them from another thread.
+// LockedCounter (NSLock-backed, used elsewhere in this module) makes the
+// shared read/write safe. The timer read closures convert Int -> UInt64.
+let _sharedEventCount = LockedCounter()
+let _sharedAlertCount = LockedCounter()

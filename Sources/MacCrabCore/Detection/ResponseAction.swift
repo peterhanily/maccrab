@@ -360,6 +360,8 @@ public actor ResponseEngine {
             return false
         }
 
+        let capturedStart = Self.processStartTime(pid: pid)
+
         // Wait up to 3 seconds for the process to exit
         for _ in 0..<6 {
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
@@ -370,9 +372,22 @@ public actor ResponseEngine {
             }
         }
 
+        guard SafePIDValidator.isSafeToKill(pid: pid) else { return false }
+        if let capturedStart, Self.processStartTime(pid: pid) != capturedStart {
+            logger.warning("Refusing SIGKILL: PID recycled during wait")
+            return false
+        }
+
         // Process still alive after 3 seconds — force kill
         let killResult = kill(pid, SIGKILL)
         return killResult == 0
+    }
+
+    static func processStartTime(pid: Int32) -> UInt64? {
+        var info = proc_bsdinfo()
+        let sz = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sz) == sz else { return nil }
+        return UInt64(info.pbi_start_tvsec) &* 1_000_000 &+ UInt64(info.pbi_start_tvusec)
     }
 
     // MARK: Quarantine File

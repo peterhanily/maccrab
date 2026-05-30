@@ -224,6 +224,39 @@ struct ArtifactStoreCommitQueryTests {
         #expect(rows.first?.record.data["tick"] == .integer(1))
         #expect(rows.first?.record.data["label"] == .string("alpha"))
     }
+    // Regression guard for the MCP forensics-01 fix: the granted MCP
+    // read ceiling is .content, NOT .secret. A query capped at
+    // privacyClassAtMost: .content must return metadata + content but
+    // exclude personalComms, credentialAdjacent, and secret — so a
+    // single `allow-ai --content` grant can never expose those classes
+    // to an AI agent.
+    @Test("privacyClassAtMost .content excludes personalComms/credentialAdjacent/secret")
+    func contentCeilingExcludesHigherClasses() async throws {
+        // Encrypted store so non-metadata classes pass the Pass 2026-D
+        // INSERT invariant.
+        let (store, caseID) = try await openStore()
+        let classes: [PrivacyClass] = [.metadata, .content, .personalComms, .credentialAdjacent, .secret]
+        for (i, cls) in classes.enumerated() {
+            try await store.commit(ArtifactRecord(
+                caseID: caseID,
+                pluginID: "com.maccrab.forensics.fixture",
+                pluginVersion: "1.0.0",
+                schemaVersion: 1,
+                contentType: "fixture.class.\(cls.rawValue)",
+                sha256: String(i).padding(toLength: 64, withPad: "0", startingAt: 0),
+                observedAt: Date(),
+                privacyClass: cls
+            ))
+        }
+        let rows = try await store.query(
+            ArtifactQuery(caseID: caseID, privacyClassAtMost: .content, limit: 100)
+        )
+        let returned = Set(rows.map { $0.record.privacyClass })
+        #expect(returned == [.metadata, .content])
+        #expect(!returned.contains(.personalComms))
+        #expect(!returned.contains(.credentialAdjacent))
+        #expect(!returned.contains(.secret))
+    }
 
     @Test("query orders by observed_at DESC")
     func queryOrderDesc() async throws {

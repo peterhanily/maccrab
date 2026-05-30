@@ -5,9 +5,9 @@ import os.log
 /// The main event processing loop. Processes each event through
 /// enrichment, AI guard, detection layers, and alert output.
 enum EventLoop {
-    static func run(state: DaemonState, eventStream: AsyncStream<Event>, eventCount: inout UInt64, alertCount: inout UInt64) async {
+    static func run(state: DaemonState, eventStream: AsyncStream<Event>, eventCount: LockedCounter, alertCount: LockedCounter) async {
         for await event in eventStream {
-            eventCount += 1
+            eventCount.increment()
 
             // v1.7.9: per-collector counter increment.
             //
@@ -1562,7 +1562,7 @@ enum EventLoop {
                         continue
                     }
 
-                    alertCount += 1
+                    alertCount.increment()
 
                     // Feedback-driven severity auto-tuning: rules the user
                     // repeatedly dismisses get downgraded one level (critical
