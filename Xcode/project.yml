@@ -87,6 +87,13 @@ targets:
         SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400
         SUAutomaticallyUpdate: false
+        # maccrab:// deep-link scheme (APPCORE-01). Lets `open maccrab://...`
+        # and in-app bookmarks route to MacCrab.app; handled by the scene
+        # .onOpenURL → V2DashboardState.goto(url:) pipeline.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.maccrab.app.deeplink
+            CFBundleURLSchemes:
+              - maccrab
     entitlements:
       path: Resources/MacCrabApp.entitlements
       properties:

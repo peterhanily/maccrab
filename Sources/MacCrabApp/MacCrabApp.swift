@@ -136,6 +136,22 @@ struct MacCrabApp: App {
                     @unknown default: break
                     }
                 }
+                // maccrab:// deep links (APPCORE-01). The OS delivers the
+                // URL here; V2 owns its navigation state via @StateObject,
+                // so we cross the module boundary via NotificationCenter —
+                // same bridge pattern as maccrab.openAlert. Bring the
+                // dashboard window forward (LSUIElement menubar app) then
+                // hand the URL to V2DashboardShell, which calls
+                // state.goto(url:). Unknown/malformed links are handled
+                // safely there (error toast, no crash).
+                .onOpenURL { url in
+                    NSApp.activate(ignoringOtherApps: true)
+                    NotificationCenter.default.post(
+                        name: Notification.Name("maccrab.openURL"),
+                        object: nil,
+                        userInfo: ["url": url]
+                    )
+                }
         }
         .commands {
             // Replace the default "About MacCrab" with a panel that

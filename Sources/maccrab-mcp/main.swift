@@ -1623,7 +1623,26 @@ func handleVerifyBundle(_ args: [String: Any]) async -> Any {
             return ["content": [["type": "text", "text": "Failed to extract bundle archive: \(error.localizedDescription)"]]]
         }
     }
-    let outcome = await BundleVerifier.verify(at: bundleDir)
+    // storage-01 parity: wire the same TOFU pin store maccrabctl uses so an
+    // agent verifying a bundle via MCP also gets pin-on-first / reject-on-
+    // key-change. Pinned by trace_id; first verify of an unseen trace_id is
+    // trusted, a later rewrite-and-resign with a swapped key then fails.
+    // The pin store lives next to the trace data this server already reads.
+    var options = BundleVerifier.Options()
+    let pinStore = TraceKeyPinStore(directory: dataDir)
+    let traceId = (try? Data(contentsOf: bundleDir.appendingPathComponent("manifest.json")))
+        .flatMap { try? canonicalJSONDecoder().decode(BundleManifest.self, from: $0) }?
+        .traceId
+    if let traceId, let pinned = pinStore.pinnedFingerprint(forTraceId: traceId) {
+        options.pinnedKeyFingerprint = pinned
+    }
+    let outcome = await BundleVerifier.verify(at: bundleDir, options: options)
+    // TOFU: on a clean first verify, record the key we just trusted.
+    if outcome.exitCode == 0, let traceId,
+       let sigData = try? Data(contentsOf: bundleDir.appendingPathComponent("integrity/chain_head_signature.json")),
+       let sig = try? canonicalJSONDecoder().decode(ChainHeadSignatureArtifact.self, from: sigData) {
+        pinStore.pinIfAbsent(traceId: traceId, fingerprint: sig.signingKeyFingerprint)
+    }
     if let tmpDir { try? FileManager.default.removeItem(at: tmpDir) }
     var lines = ["Bundle verification — exit \(outcome.exitCode)"]
     lines.append("═══════════════════════════════════")
@@ -1850,10 +1869,30 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
             privacyClassAtMost: ceiling,
             limit: 10_000
         ))
-        guard let found = rows.first(where: { $0.id == Int64(artifactID) }) else {
-            return ["content": [["type": "text", "text": "artifact not found in case (or blocked by privacy gate)"]]]
+        if let found = rows.first(where: { $0.id == Int64(artifactID) }) {
+            return ["content": [["type": "text", "text": jsonStringify(encodeArtifact(found))]]]
         }
-        return ["content": [["type": "text", "text": jsonStringify(encodeArtifact(found))]]]
+        // Miss under the current ceiling. Disambiguate genuinely-absent
+        // vs blocked-by-privacy: an unfiltered (privacyClassAtMost: nil)
+        // lookup, scoped to the same case + bound, sees every class. If
+        // the id exists there it is above the ceiling — name the case,
+        // its privacy class, and the operator grant via the structured
+        // aiContentBlockedError. The Wave-3 ceiling query above is
+        // untouched, so visible artifacts are unaffected.
+        let unfiltered = try await handle.store.query(ArtifactQuery(
+            caseID: caseID,
+            privacyClassAtMost: nil,
+            limit: 10_000
+        ))
+        if let blocked = unfiltered.first(where: { $0.id == Int64(artifactID) }) {
+            return aiContentBlockedError(
+                caseID: row.id,
+                caseName: row.name,
+                tool: "forensics.get_artifact",
+                classRaw: blocked.record.privacyClass.rawValue
+            )
+        }
+        return ["content": [["type": "text", "text": "artifact not found in case"]]]
     } catch {
         return ["content": [["type": "text", "text": "get_artifact failed: \(error)"]]]
     }

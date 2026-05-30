@@ -149,6 +149,15 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, URLSessionTas
         self.expectedPins = Set(provider.knownSPKIPins)
         self.strictPinning = envPinning && !provider.knownSPKIPins.isEmpty
         super.init()
+        // Honesty: an operator who sets MACCRAB_TLS_PINNING=strict expects every
+        // outbound API connection to be pinned. For a provider that ships no pins
+        // (e.g. .osv) strict mode resolves to false above and pinning becomes a
+        // silent no-op. Say so explicitly rather than pretend pinning is active.
+        // .ollama is excluded — it targets localhost, where there is no MITM
+        // surface and pinning genuinely does not apply.
+        if envPinning && expectedPins.isEmpty && provider != .ollama {
+            logger.warning("TLS: MACCRAB_TLS_PINNING=strict requested but no SPKI pins are configured for \(provider.rawValue) — pinning is a NO-OP for this host (OS trust store only)")
+        }
     }
 
     /// Delegate for generic / shared sessions that have no SPKI pin material
@@ -323,7 +332,14 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, URLSessionTas
             || env["MACCRAB_STREAM_ALLOW_PRIVATE"] == "1"
             || env["MACCRAB_NOTIFICATION_ALLOW_PRIVATE"] == "1"
         do {
-            try WebhookOutput.validate(url: target, allowPrivate: allowPrivate)
+            // resolve=true closes the IP-literal-only gap: a 302 to a DNS name
+            // that resolves into RFC1918 / link-local / metadata space is
+            // rejected. Bounded by an internal resolution timeout and fails
+            // closed on resolve failure. The willPerformHTTPRedirection
+            // callback is delivered on the session's delegate queue (not the
+            // main thread), so the brief blocking resolve here does not stall
+            // the UI or the detection loop.
+            try WebhookOutput.validate(url: target, allowPrivate: allowPrivate, resolve: true)
             completionHandler(request)
         } catch {
             logger.error("TLS: redirect to \(target.host ?? "?") blocked by SSRF policy: \(error.localizedDescription)")

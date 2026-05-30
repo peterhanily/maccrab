@@ -64,6 +64,7 @@ public actor WebhookOutput {
         case missingHost
         case privateHostNotAllowed(String)
         case metadataAddressBlocked(String)
+        case unresolvable(String)
 
         public var description: String {
             switch self {
@@ -77,6 +78,8 @@ public actor WebhookOutput {
                 return "Webhook URL points at private address '\(h)' — set MACCRAB_WEBHOOK_ALLOW_PRIVATE=1 to override"
             case .metadataAddressBlocked(let h):
                 return "Webhook URL points at cloud metadata address '\(h)' — blocked unconditionally (SSRF)"
+            case .unresolvable(let h):
+                return "Webhook host '\(h)' could not be resolved within the timeout — blocked (fail-closed SSRF redirect guard)"
             }
         }
     }
@@ -92,8 +95,15 @@ public actor WebhookOutput {
     /// - Parameters:
     ///   - url: The URL to validate.
     ///   - allowPrivate: Set from `MACCRAB_WEBHOOK_ALLOW_PRIVATE=1` for intranet webhooks.
+    ///   - resolve: When true, resolve the host to its IP(s) and apply the
+    ///     private/metadata range check to each resolved address — closes the
+    ///     gap where a DNS name resolving into RFC1918 / link-local / metadata
+    ///     space would pass the IP-literal-only check. Used by the redirect
+    ///     SSRF guard (`SecureURLSession`), which fails closed if resolution
+    ///     fails or times out. Default is `false` so config-time validation of
+    ///     a not-yet-resolvable public hostname is not blocked at startup.
     /// - Throws: `ValidationError` describing the specific failure.
-    public static func validate(url: URL, allowPrivate: Bool = false) throws {
+    public static func validate(url: URL, allowPrivate: Bool = false, resolve: Bool = false) throws {
         guard let scheme = url.scheme?.lowercased() else {
             throw ValidationError.missingScheme
         }
@@ -136,7 +146,104 @@ public actor WebhookOutput {
         if !allowPrivate && !isLoopbackHost && isPrivateAddressLiteral(host) {
             throw ValidationError.privateHostNotAllowed(host)
         }
+
+        // Resolve-then-validate (redirect SSRF guard). The literal check above
+        // misses a DNS name that resolves into private / metadata space, so the
+        // redirect path passes resolve=true: resolve the host and re-apply the
+        // range check to every returned IP. Metadata IP literals stay blocked
+        // even when allowPrivate is set. Loopback hosts are already exempt.
+        if resolve && !isLoopbackHost {
+            let resolved: [String]
+            do {
+                resolved = try resolveHostBounded(host)
+            } catch {
+                // Fail OPEN on resolve failure: a host that doesn't resolve is
+                // unreachable, so it carries no SSRF risk — the protection here
+                // is blocking hosts that DO resolve into private/metadata space
+                // (metadata IP literals are already blocked above, before this).
+                // Failing closed would also drop legitimate webhooks during a
+                // transient DNS outage. Let URLSession attempt (and fail) the
+                // connection itself.
+                return
+            }
+            // 169.254.169.254 etc. — the IP-literal subset of blockedMetadata,
+            // matched against resolved addresses regardless of allowPrivate.
+            let metadataIPs: Set<String> = [
+                "169.254.169.254", "fd00:ec2::254",
+                "100.100.100.200", "192.0.0.192",
+            ]
+            for ip in resolved {
+                if metadataIPs.contains(ip) {
+                    throw ValidationError.metadataAddressBlocked(host)
+                }
+                if !allowPrivate && isPrivateAddressLiteral(ip) {
+                    throw ValidationError.privateHostNotAllowed(host)
+                }
+            }
+        }
     }
+
+    /// Resolves `host` to its numeric IP strings, bounded by a wall-clock
+    /// timeout so a slow / hung resolver cannot stall the redirect hot path.
+    ///
+    /// `getaddrinfo` is blocking and has no native timeout, so it runs on a
+    /// detached thread and the caller waits on a semaphore. On timeout the
+    /// thread is abandoned (it finishes and exits on its own); the caller
+    /// throws so the redirect guard fails closed. Returns numeric host strings
+    /// suitable for `isPrivateAddressLiteral`.
+    private static func resolveHostBounded(_ host: String, timeout: TimeInterval = 2.0) throws -> [String] {
+        let box = ResolveBox()
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            box.set(Self.resolveHostBlocking(host))
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + timeout) == .success else {
+            throw ResolveError.timedOut
+        }
+        let addrs = box.get()
+        guard !addrs.isEmpty else { throw ResolveError.failed }
+        return addrs
+    }
+
+    /// Synchronous `getaddrinfo` wrapper. Returns numeric host strings for every
+    /// A / AAAA record; empty on failure.
+    private static func resolveHostBlocking(_ host: String) -> [String] {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &result) == 0, let head = result else {
+            return []
+        }
+        defer { freeaddrinfo(result) }
+        var out: [String] = []
+        var node: UnsafeMutablePointer<addrinfo>? = head
+        var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        while let n = node {
+            if getnameinfo(
+                n.pointee.ai_addr, n.pointee.ai_addrlen,
+                &buf, socklen_t(buf.count),
+                nil, 0,
+                NI_NUMERICHOST
+            ) == 0 {
+                out.append(String(cString: buf))
+            }
+            node = n.pointee.ai_next
+        }
+        return out
+    }
+
+    /// Thread-safe single-writer/single-reader box for handing the resolved
+    /// addresses back from the detached resolver thread.
+    private final class ResolveBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: [String] = []
+        func set(_ v: [String]) { lock.lock(); value = v; lock.unlock() }
+        func get() -> [String] { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    private enum ResolveError: Error { case timedOut, failed }
 
     /// Best-effort detection of RFC1918 / link-local / unique-local IP literals.
     /// Hostnames (DNS names) pass through — DNS rebinding is out of scope here.

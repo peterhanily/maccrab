@@ -100,6 +100,14 @@ struct V2DashboardShell: View {
                 workspace: .alerts, tab: .alertsOpen, entityId: id
             ))
         }
+        // maccrab:// deep links (APPCORE-01). MacCrabApp.swift's scene
+        // .onOpenURL posts the OS-delivered URL here. goto(url:) parses it
+        // via V2DeepLink and navigates; unknown/malformed links surface an
+        // error toast without crashing.
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("maccrab.openURL"))) { note in
+            guard let url = note.userInfo?["url"] as? URL else { return }
+            state.goto(url: url)
+        }
     }
 
     @ViewBuilder

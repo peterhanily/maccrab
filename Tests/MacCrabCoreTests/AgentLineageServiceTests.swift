@@ -104,6 +104,40 @@ struct AgentLineageTimelineTests {
                                      until: t0.addingTimeInterval(6))
         #expect(inside.count == 4, "Seconds 3,4,5,6 inclusive → 4 events")
     }
+    // APPCORE-03 regression: AppState.refreshAgentLineage() now performs
+    // the Data-read + JSON decode inside a Task.detached and hops back to
+    // @MainActor to publish. This pins the exact off-main call path —
+    // readSnapshot is invoked from a detached task and its result (a
+    // Sendable LineageSnapshot) must cross the actor boundary intact.
+    @Test("readSnapshot crosses the actor boundary intact when called off-main (APPCORE-03)")
+    func readSnapshotOffMainRoundTrip() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let session = AgentSessionSnapshot(
+            aiPid: 4242,
+            toolType: .claudeCode,
+            projectDir: "/proj",
+            startTime: now,
+            events: [
+                AgentEvent(timestamp: now.addingTimeInterval(1), kind: .fileRead(path: "/proj/a.ts")),
+                AgentEvent(timestamp: now.addingTimeInterval(2), kind: .network(host: "api.anthropic.com", port: 443)),
+            ]
+        )
+        let snap = AgentLineageService.LineageSnapshot(writtenAt: now, sessions: [session])
+        let path = NSTemporaryDirectory() + "maccrab-lineage-offmain-\(UUID().uuidString).json"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try JSONEncoder().encode(snap).write(to: URL(fileURLWithPath: path))
+
+        // Read it back exactly the way refreshAgentLineage now does:
+        // off the calling actor, returning a Sendable value to await.
+        let loaded = await Task.detached(priority: .userInitiated) {
+            AgentLineageService.readSnapshot(at: path)
+        }.value
+
+        #expect(loaded != nil)
+        #expect(loaded?.sessions.count == 1)
+        #expect(loaded?.sessions.first?.aiPid == 4242)
+        #expect(loaded?.sessions.first?.events.count == 2)
+    }
 }
 
 @Suite("AgentLineageService: capacity limits")

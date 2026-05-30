@@ -480,13 +480,22 @@ final class AppState: ObservableObject {
     /// every 30 s on the heartbeat tick. We `stat()` first and skip
     /// the decode entirely when the mtime hasn't advanced — cheap
     /// path for the common case.
-    func refreshAgentLineage() {
+    func refreshAgentLineage() async {
         let path = dataDir + "/agent_lineage.json"
         let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         if let mtime, let last = lastLineageMtime, mtime <= last {
             return
         }
-        guard let snapshot = AgentLineageService.readSnapshot(at: path) else {
+        // APPCORE-03: the Data(contentsOf:) + JSON decode here can be up
+        // to ~38 MB at the writer's caps. Keep the mtime gate and the
+        // @Published publish on @MainActor; run only the read+decode
+        // off-main (returns a Sendable LineageSnapshot?), mirroring
+        // warmUpStoresOffMain. No @Published var is touched off-actor.
+        let path_ = path
+        let snapshot = await Task.detached(priority: .userInitiated) {
+            AgentLineageService.readSnapshot(at: path_)
+        }.value
+        guard let snapshot else {
             // Silently keep the previous list — flickering to "no
             // sessions" between polls is worse than slightly-stale data.
             return
@@ -507,7 +516,7 @@ final class AppState: ObservableObject {
     /// Gated by mtime: the daemon-side feed updater runs on a 4-hour
     /// cadence so the file rarely changes, and decoding a 100K-hash
     /// set on every 10 s poll would burn UI thread time for nothing.
-    func refreshThreatIntelStats() {
+    func refreshThreatIntelStats() async {
         let cacheDir = dataDir + "/threat_intel"
         let cachePath = cacheDir + "/feed_cache.json"
         let mtime = (try? FileManager.default.attributesOfItem(atPath: cachePath)[.modificationDate]) as? Date
@@ -515,7 +524,15 @@ final class AppState: ObservableObject {
             return
         }
 
-        guard let iocs = ThreatIntelFeed.cachedIOCs(at: cacheDir) else {
+        // APPCORE-03: cachedIOCs decodes the full IOC cache (a ~100K-hash
+        // set per the gating comment above). Keep the mtime gate and the
+        // @Published publish on @MainActor; run only the read+decode
+        // off-main (returns a Sendable IOCSet?), mirroring
+        // warmUpStoresOffMain. No @Published var is touched off-actor.
+        let cacheDir_ = cacheDir
+        guard let iocs = await Task.detached(priority: .userInitiated, operation: {
+            ThreatIntelFeed.cachedIOCs(at: cacheDir_)
+        }).value else {
             // Daemon not running, file not yet written, or cache empty —
             // leave the previous values so the UI doesn't flicker to
             // zero between polls.
@@ -565,7 +582,7 @@ final class AppState: ObservableObject {
         // give it headroom, but we also keep polling on the regular
         // 10s pollTimer so a slow refresh resolves on its own.
         try? await Task.sleep(nanoseconds: 6 * 1_000_000_000)
-        refreshThreatIntelStats()
+        await refreshThreatIntelStats()
     }
 
     /// Run a shell command and return its exit status. Used for the
@@ -628,11 +645,50 @@ final class AppState: ObservableObject {
         if let v = json["mistral_model"] as? String { cfg.mistralModel = v }
         if let v = json["gemini_api_key"] as? String { cfg.geminiAPIKey = v }
         if let v = json["gemini_model"] as? String { cfg.geminiModel = v }
+        // Off-by-default operator opt-in for the multi-round agentic
+        // campaign investigator (multiplies LLM cost/latency).
+        if let v = json["agentic_investigation_enabled"] as? Bool { cfg.agenticInvestigationEnabled = v }
 
         let svc = await LLMService.makeFromConfig(cfg)
         llmService = svc
         triageService = svc.map { TriageService(llm: $0) }
+        // Build the agentic investigator only when both a backend is
+        // available AND the operator opted in. Stays nil otherwise so
+        // `investigateCampaign` cleanly no-ops.
+        agenticInvestigator = (svc != nil && cfg.agenticInvestigationEnabled)
+            ? svc.map { AgenticInvestigator(llm: $0) }
+            : nil
         return svc
+    }
+
+    /// Operator-initiated multi-round agentic investigation of a
+    /// detected campaign. Gated behind `agentic_investigation_enabled`
+    /// (default OFF) — no-ops with a cleared placeholder when the flag
+    /// is unset, no backend is configured, or the loop yields no report.
+    /// Result lands in `campaignInvestigations[campaign.id]` for the
+    /// campaign-detail UI. Advisory only; the report's recommendations
+    /// are never auto-executed.
+    func investigateCampaign(_ campaign: CampaignDetector.Campaign) async {
+        // Mark "investigating"
+        campaignInvestigations[campaign.id] = .some(nil)
+
+        guard await ensureLLMService() != nil, let investigator = agenticInvestigator else {
+            campaignInvestigations[campaign.id] = .none
+            return
+        }
+
+        // Wire describe_rule against the dashboard's already-loaded rule
+        // set. The other two fetchers keep their safe no-op defaults —
+        // the dashboard holds no live event-store actor to query.
+        let loadedRules = rules
+        let fetchers = InvestigationContextFetchers(
+            describeRule: { ruleId in
+                loadedRules.first { $0.id == ruleId }?.title
+            }
+        )
+
+        let report = await investigator.investigate(campaign: campaign, fetchers: fetchers)
+        campaignInvestigations[campaign.id] = .some(report)
     }
 
     /// Ask the user-side TriageService for a disposition recommendation
@@ -825,8 +881,18 @@ final class AppState: ObservableObject {
 
     private var llmService: LLMService?
     private var triageService: TriageService?
+    /// Built lazily by `ensureLLMService` ONLY when the operator has
+    /// opted in via `agentic_investigation_enabled` in llm_config.json.
+    /// nil otherwise — `investigateCampaign` no-ops when nil.
+    private var agenticInvestigator: AgenticInvestigator?
     private var lastLLMConfigCheckedAt: Date = .distantPast
     private let llmConfigCheckInterval: TimeInterval = 30  // seconds
+
+    /// In-flight / completed InvestigationReport per campaign, keyed by
+    /// campaign ID, surfaced inline in the campaign-detail UI. `nil`
+    /// value = "still investigating" placeholder; entry absent = "not
+    /// yet requested".
+    @Published var campaignInvestigations: [String: InvestigationReport?] = [:]
 
     /// In-flight TriageRecommendation per alert, surfaced inline in
     /// `AlertDetailView`. Keyed by alert ID. `nil` value = "still
@@ -1785,8 +1851,8 @@ final class AppState: ObservableObject {
         refreshStorageHealth()
         refreshHeartbeat()
         refreshRuleTamper()
-        refreshThreatIntelStats()
-        refreshAgentLineage()
+        await refreshThreatIntelStats()
+        await refreshAgentLineage()
         refreshMCPBaselines()
         refreshRuleTelemetry()
         refreshTCCSnapshot()

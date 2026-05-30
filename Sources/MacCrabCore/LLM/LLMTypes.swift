@@ -48,13 +48,21 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
     /// Enable/disable the LLM subsystem entirely.
     public var enabled: Bool = true
 
+    /// Off-by-default gate for the multi-round AgenticInvestigator loop.
+    /// When false (the default) campaign investigation uses only the
+    /// existing single-shot investigation summary. When true, the
+    /// dashboard will auto-run the bounded agentic loop (multiple LLM
+    /// round-trips per campaign) — operator opt-in because it multiplies
+    /// LLM cost/latency. Advisory-only regardless of this flag.
+    public var agenticInvestigationEnabled: Bool = false
+
     public init() {}
 
     // Exclude API keys from Codable serialization to prevent credential leaks
     private enum CodingKeys: String, CodingKey {
         case provider, ollamaURL, ollamaModel, claudeModel
         case openaiURL, openaiModel, mistralModel, geminiModel
-        case sanitizeForCloud, enabled
+        case sanitizeForCloud, enabled, agenticInvestigationEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -69,6 +77,7 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
         geminiModel = try c.decodeIfPresent(String.self, forKey: .geminiModel) ?? "gemini-2.0-flash"
         sanitizeForCloud = try c.decodeIfPresent(Bool.self, forKey: .sanitizeForCloud) ?? true
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        agenticInvestigationEnabled = try c.decodeIfPresent(Bool.self, forKey: .agenticInvestigationEnabled) ?? false
     }
 
     // MARK: - Safe string descriptions

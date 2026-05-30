@@ -257,6 +257,50 @@ struct ArtifactStoreCommitQueryTests {
         #expect(!returned.contains(.credentialAdjacent))
         #expect(!returned.contains(.secret))
     }
+    // Regression guard for cli-mcp-02: get_artifact's miss path must be
+    // able to distinguish "genuinely absent" from "present but above the
+    // ceiling". That disambiguation rests entirely on the store: a row
+    // above the ceiling is excluded under a capped query but visible
+    // under an unfiltered (privacyClassAtMost: nil) query. If this ever
+    // regressed (e.g. nil started filtering), the MCP handler could no
+    // longer surface aiContentBlockedError vs a true not-found.
+    @Test("unfiltered query finds a higher-class artifact that the ceiling hides")
+    func unfilteredLookupRevealsBlockedArtifact() async throws {
+        let (store, caseID) = try await openStore()
+        // Commit a single secret-class artifact. The default MCP ceiling
+        // (no grant) is .metadata, which must exclude it.
+        let secretID = try await store.commit(ArtifactRecord(
+            caseID: caseID,
+            pluginID: "com.maccrab.forensics.fixture",
+            pluginVersion: "1.0.0",
+            schemaVersion: 1,
+            contentType: "fixture.secret",
+            sha256: String(repeating: "a", count: 64),
+            observedAt: Date(),
+            privacyClass: .secret
+        ))
+        #expect(secretID > 0)
+
+        // Capped at the metadata ceiling: the id is invisible (the
+        // handler's first query misses).
+        let ceilingRows = try await store.query(
+            ArtifactQuery(caseID: caseID, privacyClassAtMost: .metadata, limit: 10_000)
+        )
+        #expect(!ceilingRows.contains(where: { $0.id == secretID }))
+
+        // Unfiltered: the id is present, and its class is reported as
+        // .secret — exactly what the handler passes to aiContentBlockedError.
+        let unfiltered = try await store.query(
+            ArtifactQuery(caseID: caseID, privacyClassAtMost: nil, limit: 10_000)
+        )
+        let blocked = unfiltered.first(where: { $0.id == secretID })
+        #expect(blocked != nil)
+        #expect(blocked?.record.privacyClass == .secret)
+
+        // A nonexistent id is absent in BOTH queries — the genuine
+        // not-found case the handler must keep distinct.
+        #expect(!unfiltered.contains(where: { $0.id == secretID + 999_999 }))
+    }
 
     @Test("query orders by observed_at DESC")
     func queryOrderDesc() async throws {

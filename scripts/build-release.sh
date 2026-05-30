@@ -338,6 +338,17 @@ cat > "$APP/Contents/Info.plist" << PLIST
     <key>SUEnableAutomaticChecks</key><true/>
     <key>SUScheduledCheckInterval</key><integer>86400</integer>
     <key>SUAutomaticallyUpdate</key><false/>
+    <!-- maccrab:// deep-link scheme (APPCORE-01). Routes `open maccrab://...`
+         and in-app bookmarks to MacCrab.app via the scene .onOpenURL →
+         V2DashboardState.goto(url:) pipeline. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>com.maccrab.app.deeplink</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>maccrab</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

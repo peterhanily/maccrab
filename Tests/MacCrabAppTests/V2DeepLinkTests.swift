@@ -169,4 +169,29 @@ struct V2DeepLinkTests {
         #expect(dest.workspace == .investigation)
         #expect(dest.tab == .investigationTraceGraph)
     }
+    // APPCORE-01: the scene .onOpenURL bridge hands OS-delivered URLs to
+    // V2DashboardState.goto(url:). Pin that a valid link navigates and a
+    // malformed link raises an error toast without crashing or moving the
+    // workspace — the safe-handling contract the new wiring relies on.
+    @Test("goto(url:) navigates on a valid maccrab:// deep link")
+    @MainActor
+    func testGotoURLNavigatesValidLink() throws {
+        let state = V2DashboardState()
+        let url = try #require(URL(string: "maccrab://alerts/alertsopen?entity=alt-001"))
+        state.goto(url: url)
+        #expect(state.currentWorkspace == .alerts)
+        #expect(state.selectedTabs[.alerts] == .alertsOpen)
+        #expect(state.toast?.kind != .error)
+    }
+
+    @Test("goto(url:) shows an error toast and does not navigate on a malformed link")
+    @MainActor
+    func testGotoURLMalformedLinkIsSafe() throws {
+        let state = V2DashboardState()
+        let before = state.currentWorkspace
+        let url = try #require(URL(string: "maccrab://bogus/zzz"))
+        state.goto(url: url)
+        #expect(state.currentWorkspace == before)
+        #expect(state.toast?.kind == .error)
+    }
 }
