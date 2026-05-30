@@ -28,11 +28,15 @@ let package = Package(
         .executable(name: "MacCrabAgent", targets: ["MacCrabAgent"]),
     ],
     dependencies: [
-        // Test-only dep. Pinned to an exact revision rather than a branch
-        // so CI can't be broken by an upstream push to release/6.2.
+        // Test-only dep. Pinned to an exact tagged release rather than a
+        // branch or bare revision so CI can't be broken by an upstream push
+        // to release/6.2 — and so the manifest names a verifiable release.
+        // 6.2.4 is the swift-6.2.4-RELEASE tag, == revision
+        // 5ee435b15ad40ec1f644b5eb9d247f263ccd2170 (recorded in
+        // Package.resolved). Bump deliberately, not implicitly.
         .package(
             url: "https://github.com/swiftlang/swift-testing.git",
-            revision: "5ee435b15ad40ec1f644b5eb9d247f263ccd2170"
+            exact: "6.2.4"
         ),
         // Sparkle 2: auto-update framework for MacCrabApp only. Release
         // builds poll https://maccrab.com/appcast.xml and install signed

@@ -27,14 +27,15 @@ make lint-rules                # Rule linting
 
 ## Architecture
 
-MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026), the detection engine ships as a native Endpoint Security **System Extension** activated from inside `MacCrab.app`. Seven SPM targets:
+MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026), the detection engine ships as a native Endpoint Security **System Extension** activated from inside `MacCrab.app`. Eight SPM targets:
 
 - **MacCrabCore** (`Sources/MacCrabCore/`) -- Shared library: detection engines, collectors, enrichment, storage, prevention
 - **MacCrabAgentKit** (`Sources/MacCrabAgentKit/`) -- Shared daemon bootstrap wrapping the event loop, monitors, timers, and signal handlers. Linked by both the sysext and the legacy standalone daemon
 - **MacCrabAgent** (`Sources/MacCrabAgent/`) -- System Extension executable. Wrapped into `com.maccrab.agent.systemextension` bundle by `scripts/build-release.sh` and activated via `OSSystemExtensionRequest`. Ships in release DMGs
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
+- **MacCrabForensics** (`Sources/MacCrabForensics/`) -- Mac Context Plugin Platform: forensic case/collector/plugin library. Linked by `maccrabctl`, `MacCrabApp`, and `maccrab-mcp`; intentionally not linked by the sysext or `maccrabd`
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 25 tools for AI agent integration (v1.10 trace tools + 8 v1.12.0 supply-chain / intent tools)
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 34 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics.*` plugin tools)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -112,6 +113,7 @@ Known passthrough fields (resolved via RuleEngine enrichments): `SignerType`, `P
 | SystemPolicyMonitor | SIP, XProtect, MDM, auth plugins | 300s |
 | BrowserExtensionMonitor | Chrome/Firefox/Brave/Edge/Arc extensions | Startup |
 | MCPMonitor | MCP server configs across AI tools | Startup |
+| GitSecurityMonitor | Git credential-helper abuse, SSH-agent hijack, malicious git hooks | Real-time |
 | TEMPESTMonitor | Van Eck phreaking: SDR devices + display anomalies | 60s |
 
 ## EDR/RMM Tool Detection
@@ -185,7 +187,7 @@ All LLM features degrade gracefully when no backend is configured. Cloud APIs ge
 
 **Safety**: Circuit breaker (3 failures → 5min cooldown), rate limiting (5s min interval), response size cap (50KB), SQL mutation prevention, prompt injection mitigation.
 
-**Files:** `Sources/MacCrabCore/LLM/` (11 files — backend protocol, 5 providers, service orchestrator, cache, sanitizer, prompts)
+**Files:** `Sources/MacCrabCore/LLM/` (16 files — backend protocol, 5 providers, service orchestrator, consensus + triage services, investigators, cache, sanitizer, prompts, shared types)
 
 ## MCP Server (AI Agent Integration)
 
@@ -193,7 +195,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed (25):**
+**Tools exposed (34):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools and the `forensics.*` plugin tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -224,12 +226,20 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 ## Dashboard (MacCrabApp)
 
-15-view SwiftUI menubar app organized into 4 groups:
+SwiftUI menubar app whose dashboard is the V2 workspace shell (`Sources/MacCrabApp/V2/`): `V2RootView` mounts `V2DashboardShell` (sidebar + top bar + workspace area) with a command bar / palette and a UIMode density toggle (Basic / Standard / Advanced).
 
-- **Monitor**: Overview, Alerts (multi-select, bulk suppress, inline actions), Campaigns (expandable with guidance + contributing alerts), Events, Rules
-- **Protection**: Prevention, AI Guard, Browser Extensions
-- **Intelligence**: Threat Intel, Package Freshness, AI Analysis, Integrations
-- **System**: Permissions (TCC), ES Health, Docs
+Ten workspaces (`V2Workspace` enum):
+
+- **Overview** — at-a-glance system posture and shortcuts
+- **Alerts** — triage and route findings (multi-select, bulk suppress, inline actions)
+- **Events** — live event stream with filter / search / drill-in
+- **Investigation** — trace graph + AI analysis
+- **Forensics** — scan this Mac, browse plugins, export evidence
+- **Detection** — rules, AI Guard, browser extensions, MCP
+- **Prevention** — DNS sinkhole, network blocker, persistence guard, response actions
+- **Intelligence** — IOC context, feeds, packages, integrations
+- **System** — platform health, permissions (TCC), trust, settings
+- **Docs** — in-app documentation
 
 Key UX features:
 - Auto-refresh via configurable poll timer (default 5s)
@@ -253,12 +263,20 @@ Optional `daemon_config.json` in the support directory overrides defaults:
   "usb_poll_interval": 10,
   "clipboard_poll_interval": 3,
   "rootkit_poll_interval": 120,
-  "max_database_size_mb": 500,
-  "retention_days": 30
+  "storage": {
+    "events_hot_tier_minutes": 30,
+    "events_max_size_mb": 200,
+    "events_size_cap_interval_minutes": 60,
+    "aggregate_days": 90,
+    "alerts_retention_days": 365,
+    "alerts_max_size_mb": 100,
+    "campaigns_retention_days": 365,
+    "campaigns_max_size_mb": 50
+  }
 }
 ```
 
-All keys are optional — missing keys use defaults from `DaemonConfig.swift`.
+All keys are optional — missing keys use defaults from `DaemonConfig.swift`. Since v1.8 the per-tier retention/size knobs live under `storage{}`; the legacy v1.7 top-level keys (`retention_days`, `max_database_size_mb`) still decode and are folded onto the storage block at load time.
 
 ## Data Locations
 

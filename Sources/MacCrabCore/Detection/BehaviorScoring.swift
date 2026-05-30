@@ -281,10 +281,11 @@ public actor BehaviorScoring {
         let key = ProcessKey(pid: pid, path: path)
 
         // Initialize or get existing score
+        var addedNewKey = false
         if processScores[key] == nil {
             processScores[key] = ProcessScore()
             insertionOrder.append(key)
-            evictIfNeeded()
+            addedNewKey = true
         }
 
         // Apply time decay to existing score
@@ -337,6 +338,15 @@ public actor BehaviorScoring {
         }
 
         processScores[key] = entry
+
+        // Evict AFTER the new entry's score is applied. Evicting in the
+        // new-key block above (before the indicator weight lands) would make
+        // a brand-new process the lowest-scored entry (rawScore 0) and
+        // self-evict it the instant the table hit the cap — freezing the
+        // table at its first `maxTrackedProcesses` entries and silently
+        // dropping every later process, including a high-score attacker.
+        // With the score applied first, the genuinely-lowest entry is evicted.
+        if addedNewKey { evictIfNeeded() }
         let score = entry
 
         // Check threshold
@@ -463,10 +473,30 @@ public actor BehaviorScoring {
     }
 
     private func evictIfNeeded() {
-        while processScores.count > maxTrackedProcesses, let oldest = insertionOrder.first {
-            processScores.removeValue(forKey: oldest)
-            alerted.remove(oldest)
-            insertionOrder.removeFirst()
+        // Evict the entry with the LOWEST decayed score, not the oldest-inserted
+        // one. A long-lived, high-score process (e.g. a slow-burn attacker) must
+        // survive churn from transient benign processes — FIFO eviction would
+        // silently drop the strongest detection signal we have. Among equal
+        // scores we fall back to insertion order (oldest first) for a stable,
+        // deterministic choice. Eviction only runs above the cap (cold path),
+        // so the O(n) scan is not on the per-event hot path.
+        while processScores.count > maxTrackedProcesses {
+            var victim: ProcessKey?
+            var lowest = Double.greatestFiniteMagnitude
+            for key in insertionOrder {
+                guard let score = processScores[key] else { continue }
+                let decayed = decayedScore(score)
+                if decayed < lowest {
+                    lowest = decayed
+                    victim = key
+                }
+            }
+            guard let evict = victim else { break }
+            processScores.removeValue(forKey: evict)
+            alerted.remove(evict)
+            if let idx = insertionOrder.firstIndex(of: evict) {
+                insertionOrder.remove(at: idx)
+            }
         }
     }
 }

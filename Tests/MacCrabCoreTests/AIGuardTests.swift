@@ -311,4 +311,47 @@ struct AIBehaviorScoringTests {
         let weight = BehaviorScoring.weights["prompt_injection_compound"] ?? 0
         #expect(weight >= 10.0, "Compound injection should have weight >= 10.0")
     }
+}// MARK: - Behavioral Scoring Eviction
+
+@Suite("AI Guard: Behavioral Scoring Eviction")
+struct BehaviorScoringEvictionTests {
+
+    // A high-score process must survive eviction even when the tracking table
+    // overflows with transient zero/low-score processes. Regression guard for
+    // the FIFO->lowest-decayed-score eviction change (detection-03): the old
+    // FIFO logic would evict the early-inserted attacker first.
+    @Test("High-score process survives eviction; low-score transient is dropped")
+    func highScoreSurvivesEviction() async {
+        let cap = 8
+        // Long half-life so scores don't decay to zero during the test, keeping
+        // the assertion about retained signal deterministic.
+        let scorer = BehaviorScoring(
+            alertThreshold: 100.0,      // high so transient inserts never alert
+            criticalThreshold: 200.0,
+            decayHalfLife: 100_000,
+            maxTrackedProcesses: cap
+        )
+
+        // Insert one heavily-scored "attacker" process FIRST (oldest insertion).
+        let attackerPid: Int32 = 1
+        let attackerPath = "/tmp/attacker"
+        let heavy = BehaviorScoring.Indicator(name: "sigma_rule_match_critical", weight: 50.0)
+        await scorer.addIndicator(heavy, forProcess: attackerPid, path: attackerPath)
+        #expect(await scorer.score(forPid: attackerPid, path: attackerPath) > 0)
+
+        // Flood the table with many distinct transient processes, each carrying
+        // a single tiny indicator. This forces eviction well past the cap.
+        let light = BehaviorScoring.Indicator(name: "sigma_rule_match_low", weight: 0.5)
+        for i in 0..<(cap * 4) {
+            let pid = Int32(1000 + i)
+            await scorer.addIndicator(light, forProcess: pid, path: "/tmp/transient_\(i)")
+        }
+
+        // The high-score attacker must still be tracked (lowest-score eviction),
+        // whereas the earliest transient (pid 1000) must have been evicted.
+        #expect(await scorer.score(forPid: attackerPid, path: attackerPath) > 40.0,
+                "High-score attacker must survive eviction churn (decay-tolerant)")
+        #expect(await scorer.score(forPid: 1000, path: "/tmp/transient_0") == 0,
+                "An early low-score transient should have been evicted")
+    }
 }
