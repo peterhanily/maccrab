@@ -453,41 +453,68 @@ enum EventLoop {
             }
 
             // === Notarization check for executed binaries ===
+            //
+            // PERF (v1.17): spctl --assess is expensive (forks a process). It must
+            // NEVER be awaited on the event pump. Cache-first inline: warm-cache execs
+            // (and all system binaries) resolve synchronously with zero fork. On a cold
+            // miss, the authoritative check — which warms the LRU cache for next time
+            // and preserves the 5-concurrent rate limiter inside the actor — runs in a
+            // detached Task off the hot path, where it also drives the behavior
+            // indicator + sandbox prevention. The `notarization.status` enrichment is
+            // display-only (nothing in detection reads it; rules use
+            // codeSignature.isNotarized from the EventEnricher), so a first-seen event
+            // simply omitting it until the cache warms is acceptable.
             if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
-                let notarResult = await state.notarizationChecker.check(binaryPath: enrichedEvent.process.executable)
-                enrichedEvent.enrichments["notarization.status"] = notarResult.status.rawValue
-                if let source = notarResult.source {
-                    enrichedEvent.enrichments["notarization.source"] = source
+                if let cached = await state.notarizationChecker.cachedResult(binaryPath: enrichedEvent.process.executable) {
+                    enrichedEvent.enrichments["notarization.status"] = cached.status.rawValue
+                    if let source = cached.source {
+                        enrichedEvent.enrichments["notarization.source"] = source
+                    }
                 }
-                if notarResult.status == .notNotarized && enrichedEvent.process.codeSignature?.signerType != .apple {
-                    await state.behaviorScoring.addIndicator(
+
+                // Capture only Sendable values — never the non-Sendable DaemonState.
+                let execPath = enrichedEvent.process.executable
+                let procPid = enrichedEvent.process.pid
+                let procName = enrichedEvent.process.name
+                let eventId = enrichedEvent.id.uuidString
+                let isAppleSigned = enrichedEvent.process.codeSignature?.signerType == .apple
+                let preventionEnabled = state.preventionEnabled
+                let notarizationChecker = state.notarizationChecker
+                let behaviorScoring = state.behaviorScoring
+                let sandboxAnalyzer = state.sandboxAnalyzer
+                let alertSink = state.alertSink
+                let notifier = state.notifier
+                let detachedEvent = enrichedEvent
+                Task.detached(priority: .utility) {
+                    let notarResult = await notarizationChecker.check(binaryPath: execPath)
+                    guard notarResult.status == .notNotarized && !isAppleSigned else { return }
+                    await behaviorScoring.addIndicator(
                         named: "not_notarized",
-                        detail: enrichedEvent.process.executable,
-                        forProcess: enrichedEvent.process.pid,
-                        path: enrichedEvent.process.executable
+                        detail: execPath,
+                        forProcess: procPid,
+                        path: execPath
                     )
 
                     // === Prevention: sandbox-analyze unnotarized binaries from Downloads/tmp ===
-                    if state.preventionEnabled {
-                        let execPath = enrichedEvent.process.executable
+                    if preventionEnabled {
                         if execPath.contains("/Downloads/") || execPath.contains("/tmp/") || execPath.contains("/Users/Shared/") {
-                            if let analysis = await state.sandboxAnalyzer.analyze(binaryPath: execPath) {
+                            if let analysis = await sandboxAnalyzer.analyze(binaryPath: execPath) {
                                 if analysis.isSuspicious {
                                     let alert = Alert(
                                         ruleId: "maccrab.prevention.sandbox-suspicious",
                                         ruleTitle: "Sandbox Analysis: Suspicious Behavior Detected",
                                         severity: .critical,
-                                        eventId: enrichedEvent.id.uuidString,
+                                        eventId: eventId,
                                         processPath: execPath,
-                                        processName: enrichedEvent.process.name,
+                                        processName: procName,
                                         description: "Unnotarized binary from \(execPath) attempted blocked operations in sandbox: \(analysis.blockedOperations.prefix(3).joined(separator: "; "))",
                                         mitreTactics: "attack.execution",
                                         mitreTechniques: "attack.t1204",
                                         suppressed: false
                                     )
                                     do {
-                                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
-                                            await state.notifier.notify(alert: alert)
+                                        if try await alertSink.submit(alert: alert, event: detachedEvent) {
+                                            await notifier.notify(alert: alert)
                                         }
                                     } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                                 }

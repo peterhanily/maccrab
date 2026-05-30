@@ -142,6 +142,33 @@ public actor NotarizationChecker {
         return result
     }
 
+    /// Synchronous, fork-free cache lookup for the hot enrichment path.
+    ///
+    /// Returns a result WITHOUT ever invoking `spctl`:
+    /// - System-prefix binaries resolve inline (cheap, no I/O).
+    /// - Otherwise returns the LRU-cached result if present, else nil.
+    ///
+    /// Does not mutate the cache or hit/miss counters — those belong to the
+    /// authoritative `check(binaryPath:)` path which warms the cache off the
+    /// event pump. Callers that get nil should treat notarization as
+    /// not-yet-known and let an async `check` enrich it for next time.
+    public func cachedResult(binaryPath: String) -> NotarizationResult? {
+        if let entry = cache[binaryPath] {
+            return entry.result
+        }
+        for prefix in Self.systemPrefixes {
+            if binaryPath.hasPrefix(prefix) {
+                return NotarizationResult(
+                    path: binaryPath,
+                    status: .notarized,
+                    source: "Apple",
+                    isFromDownloads: false
+                )
+            }
+        }
+        return nil
+    }
+
     /// Return cache statistics.
     public func stats() -> (hits: Int, misses: Int, hitRate: Double, cacheSize: Int) {
         let total = cacheHits + cacheMisses

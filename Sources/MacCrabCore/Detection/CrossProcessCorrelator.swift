@@ -78,6 +78,13 @@ public actor CrossProcessCorrelator {
     /// Maximum number of distinct artifacts tracked per map before eviction.
     private let maxArtifactsPerMap: Int = 10_000
 
+    /// Maximum number of events retained per artifact key. Bounds the per-key
+    /// list so one hot key (e.g. a shared log file hammered by many worker
+    /// PIDs) can't grow unbounded and turn the per-call correlation scan into
+    /// O(n^2). Well above the largest real-world single-key chain observed in
+    /// the field (~140 events), so detection behavior is unchanged.
+    private let maxEventsPerKey: Int = 512
+
     // MARK: - State
 
     /// File path -> ordered list of events touching that path.
@@ -391,7 +398,7 @@ public actor CrossProcessCorrelator {
             action: action
         )
 
-        fileArtifacts[path, default: []].append(event)
+        appendArtifact(to: &fileArtifacts, key: path, event: event)
         purgeIfNeeded()
 
         return evaluateFileChain(path: path)
@@ -422,13 +429,13 @@ public actor CrossProcessCorrelator {
         )
 
         let ipKey = "\(destinationIP):\(destinationPort)"
-        networkArtifacts[ipKey, default: []].append(event)
+        appendArtifact(to: &networkArtifacts, key: ipKey, event: event)
 
         var chain = evaluateNetworkChain(key: ipKey, artifactType: "network")
 
         // Also track by domain if provided.
         if let domain = destinationDomain, !domain.isEmpty {
-            domainArtifacts[domain, default: []].append(event)
+            appendArtifact(to: &domainArtifacts, key: domain, event: event)
             if chain == nil {
                 chain = evaluateNetworkChain(key: domain, artifactType: "domain")
             }
@@ -976,6 +983,25 @@ public actor CrossProcessCorrelator {
             }
         }
         return result
+    }
+
+    /// Append an event to an artifact key's list, evicting the oldest events
+    /// within that key if the list exceeds `maxEventsPerKey`. "Oldest" is by
+    /// event timestamp (same semantics as `evictIfOverLimit`), so this is
+    /// robust to out-of-order timestamps. Trimming only runs on the over-cap
+    /// path, so it's amortized O(1) per append and bounds the per-call
+    /// correlation scan that iterates the full per-key list.
+    private func appendArtifact(
+        to map: inout [String: [ChainEvent]],
+        key: String,
+        event: ChainEvent
+    ) {
+        map[key, default: []].append(event)
+        guard let list = map[key], list.count > maxEventsPerKey else { return }
+        let trimmed = list
+            .sorted { $0.timestamp < $1.timestamp }
+            .suffix(maxEventsPerKey)
+        map[key] = Array(trimmed)
     }
 
     /// Evict the oldest artifacts if the map exceeds `maxArtifactsPerMap`.

@@ -531,6 +531,36 @@ struct CrossProcessCorrelatorTests {
         let countAfter = await correlator.trackedFileCount
         #expect(countAfter == 0, "Stale event should be purged, but \(countAfter) files remain")
     }
+    @Test("Per-key event list is capped so one hot key cannot grow unbounded")
+    func perKeyListIsCapped() async {
+        // Wide correlation window so nothing is purged for being stale; the
+        // only thing that should bound the list is the per-key cap.
+        let correlator = CrossProcessCorrelator(correlationWindow: 100_000, minChainLength: 2)
+        let hotPath = "/Users/phanily/Documents/shared-data.bin"
+        // Near-now timestamps so nothing is stale-purged; only the per-key
+        // cap should bound the list.
+        let base = Date().addingTimeInterval(-30)
+
+        // Hammer a single key far past the per-key cap (512). Vary PID so the
+        // chain gates don't short-circuit, and keep timestamps in-window.
+        for i in 0..<3_000 {
+            await correlator.recordFileEvent(
+                path: hotPath,
+                action: i % 2 == 0 ? "write" : "execute",
+                pid: Int32(1_000 + i),
+                processName: "worker\(i)",
+                processPath: "/usr/bin/worker\(i)",
+                timestamp: base.addingTimeInterval(Double(i) * 0.01)
+            )
+        }
+
+        // Still exactly one tracked key, but its list must be bounded.
+        let keys = await correlator.trackedFileCount
+        #expect(keys == 1, "Expected a single hot key, got \(keys)")
+
+        let total = await correlator.totalEventCount
+        #expect(total <= 512, "Per-key list must be capped at 512, but stored \(total) events")
+    }
 
     // MARK: - Noise-reduction regressions (v1.3.10)
 
