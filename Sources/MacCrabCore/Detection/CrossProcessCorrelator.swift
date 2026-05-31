@@ -273,9 +273,12 @@ public actor CrossProcessCorrelator {
         // fans coreutils across this tree, producing 3-process chains
         // against our own files. Was scoped to compiled_rules/ only, which
         // missed the parent dir (DB/WAL/cache/keys/inbox writes). Self-FP.
+        // Matched as one fully-slashed segment: covers the system path
+        // (/Library/Application Support/MacCrab/…) AND the user dev path
+        // (/Users/<u>/Library/Application Support/MacCrab/…) without matching a
+        // bare "MacCrab", a sibling "MacCrabExtra", or an attacker-made dir (the
+        // earlier no-leading-/no-trailing-slash variants did all three).
         "/Library/Application Support/MacCrab/",
-        "/Library/Application Support/MacCrab",
-        "Library/Application Support/MacCrab/",
     ]
 
     /// Network destinations that are never interesting.

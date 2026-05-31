@@ -19,18 +19,38 @@ public actor NetworkBlocker {
 
     public init() {}
 
+    /// Drop IPs that must never be blocked — loopback, RFC1918/link-local, the
+    /// current default gateway, and critical resolvers (Apple, Cloudflare,
+    /// Google, Quad9, …) — and reject malformed entries, so a poisoned threat
+    /// feed or a single false positive can't sever the host's own connectivity.
+    /// Mirrors the gate ManualResponse/ResponseAction already apply.
+    private func safeSubset(_ ips: Set<String>) -> Set<String> {
+        var safe = Set<String>()
+        var rejected = 0
+        for ip in ips {
+            if let reason = SafeBlockableIP.reasonToReject(ip: ip) {
+                rejected += 1
+                logger.warning("Refusing to block \(ip, privacy: .public): \(reason, privacy: .public)")
+            } else {
+                safe.insert(ip)
+            }
+        }
+        if rejected > 0 { logger.notice("NetworkBlocker rejected \(rejected) unsafe/invalid IP(s)") }
+        return safe
+    }
+
     /// Enable network blocking with initial IPs from threat intel.
     public func enable(ips: Set<String>) {
-        blockedIPs = ips
+        blockedIPs = safeSubset(ips)
         isEnabled = true
         writeAnchorFile()
         reloadPF()
-        logger.info("Network blocker enabled: \(ips.count) IPs blocked")
+        logger.info("Network blocker enabled: \(self.blockedIPs.count) IPs blocked")
     }
 
     /// Add IPs to the block table.
     public func addIPs(_ ips: Set<String>) {
-        let newIPs = ips.subtracting(blockedIPs)
+        let newIPs = safeSubset(ips).subtracting(blockedIPs)
         guard !newIPs.isEmpty else { return }
         blockedIPs.formUnion(newIPs)
         if isEnabled {
@@ -42,6 +62,10 @@ public actor NetworkBlocker {
 
     /// Block a single IP immediately.
     public func blockIP(_ ip: String) {
+        if let reason = SafeBlockableIP.reasonToReject(ip: ip) {
+            logger.warning("Refusing to block \(ip, privacy: .public): \(reason, privacy: .public)")
+            return
+        }
         blockedIPs.insert(ip)
         if isEnabled {
             writeAnchorFile()

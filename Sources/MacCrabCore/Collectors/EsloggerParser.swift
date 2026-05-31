@@ -212,7 +212,7 @@ public enum EsloggerParser {
             workingDirectory: "",
             userId: uid,
             userName: "",
-            groupId: UInt32(int(processDict, "group_id")),
+            groupId: uint32(processDict, "group_id"),
             startTime: startTime,
             codeSignature: codeSignature,
             ancestors: ancestors,
@@ -566,18 +566,32 @@ public enum EsloggerParser {
     }
 
     /// Safe integer access; returns 0 if missing or wrong type.
+    /// NON-trapping by design: eslogger JSON is attacker-influenceable, and
+    /// Int(NaN/±inf/out-of-range Double) would SIGTRAP and crash the collector.
     private static func int(_ d: [String: Any], _ key: String) -> Int {
         if let v = d[key] as? Int { return v }
-        if let v = d[key] as? Double { return Int(v) }
+        if let v = d[key] as? Double {
+            guard v.isFinite else { return 0 }
+            if v >= Double(Int.max) { return Int.max }
+            if v <= Double(Int.min) { return Int.min }
+            return Int(v)
+        }
         if let v = d[key] as? NSNumber { return v.intValue }
         return 0
     }
 
     /// Safe UInt32 access; returns 0 if missing or wrong type.
+    /// NON-trapping: UInt32(negative) or UInt32(out-of-range/NaN Double) traps.
     private static func uint32(_ d: [String: Any], _ key: String) -> UInt32 {
         if let v = d[key] as? UInt32 { return v }
-        if let v = d[key] as? Int { return UInt32(v) }
-        if let v = d[key] as? Double { return UInt32(v) }
+        if let v = d[key] as? Int {
+            if v < 0 { return 0 }
+            return v > Int(UInt32.max) ? UInt32.max : UInt32(v)
+        }
+        if let v = d[key] as? Double {
+            guard v.isFinite, v >= 0 else { return 0 }
+            return v >= Double(UInt32.max) ? UInt32.max : UInt32(v)
+        }
         if let v = d[key] as? NSNumber { return v.uint32Value }
         return 0
     }

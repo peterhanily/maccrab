@@ -277,10 +277,12 @@ enum RuleBundleInstaller {
     /// root. Called when the unprivileged copy fails — which is the
     /// expected path for Sparkle in-place upgrades and drag-replace
     /// installs (the cask postflight covers the brew install path).
-    /// Quoting follows osascript conventions: single-quoted inside the
-    /// shell command, double-quoted around the script argument; src/dst
-    /// paths are built-in constants and bundle paths (no user input),
-    /// so command injection isn't reachable here.
+    /// Quoting is done in two layers: each path is shell-single-quoted via
+    /// `shq` (so a quote in the path can't break out or inject), and the whole
+    /// command is then escaped for AppleScript's double-quoted `do shell
+    /// script` string. `src` is the .app's on-disk install path, which the
+    /// user DOES control (drag-install to e.g. /Volumes/Tom's Disk/), so the
+    /// shell-level escaping is load-bearing, not cosmetic.
     private static func copyRulesWithElevation(from src: String, to dst: String) -> Bool {
         let parent = (dst as NSString).deletingLastPathComponent
         // Single-line shell command: AppleScript's `do shell script`
@@ -307,8 +309,16 @@ enum RuleBundleInstaller {
         // sentinel — and if a step fails before the cleanup, the 90 s
         // TTL still bounds the suppression window.
         let sentinel = parent + "/.maccrab_self_update_in_progress"
-        let shell = "touch '\(sentinel)' && chown root:admin '\(sentinel)' && chmod 0644 '\(sentinel)' && mkdir -p '\(parent)' && rm -rf '\(dst)' && cp -R '\(src)' '\(dst)' && chown -R root:admin '\(dst)' && chmod -R u=rwX,go=rX '\(dst)'; rm -f '\(sentinel)'"
-        let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
+        // Shell-single-quote each interpolated path: wrap in '...' and turn any
+        // embedded ' into '\'' so a quote in the path can't break out / inject.
+        func shq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let shell = "touch \(shq(sentinel)) && chown root:admin \(shq(sentinel)) && chmod 0644 \(shq(sentinel)) && mkdir -p \(shq(parent)) && rm -rf \(shq(dst)) && cp -R \(shq(src)) \(shq(dst)) && chown -R root:admin \(shq(dst)) && chmod -R u=rwX,go=rX \(shq(dst)); rm -f \(shq(sentinel))"
+        // AppleScript's double-quoted `do shell script` string treats backslash
+        // as an escape, and shq introduces backslashes ('\''), so escape `\`
+        // FIRST and then `"`.
+        let escaped = shell
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
         let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to update its detection rules.\""
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")

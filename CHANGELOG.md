@@ -31,11 +31,30 @@ bugs in v1.17.0.
   classified correctly and no longer fire as unsigned network extensions;
   MacCrab's own maintenance operations no longer trip self-tamper /
   cross-process alerts; and normal JS bundler builds no longer match the
-  "fetched-then-executed" rule. Several over-eager rules were also
-  recalibrated off CRITICAL so the existing suppression layer applies.
+  "fetched-then-executed" rule.
+- **Recalibrated the CRITICAL alert tier.** CRITICAL is now reserved for
+  detections we're confident are intrinsically malicious — known-malware
+  IOCs, ransomware/disk-wipe, SIP/Gatekeeper/AMFI/XProtect disable, exact
+  reverse-shell syntax, honeypot trips, and the full credential→persistence→C2
+  campaign. Heuristic, dual-use, and capability-presence detections (and the
+  weaker campaign/beacon signals) are now HIGH: still recorded and shown in
+  the dashboard, but no longer forcing a banner. The self-protection
+  "tamper" detection in particular no longer raises a false CRITICAL during
+  MacCrab's own install / update / reload — genuine tampering is still caught
+  by the always-on self-defense layer (integrity hashing + file monitor).
 - Searching the rules for an alert whose ID comes from a built-in engine
   (AI Guard, campaign correlation, behavioral scoring, threat intel) now
   shows an explanation instead of an empty list — those aren't Sigma rules.
+- **Uninstall now removes your user data with `--yes`.** Run under `sudo`,
+  the script resolved `$HOME` to `/var/root`, so `~/Library/Application
+  Support/MacCrab` (including forensic Cases/) was silently left behind on a
+  full wipe. It now resolves the invoking user's home correctly and also
+  clears the out-of-tree tamper forensic logs.
+- **Hardening.** The privileged rule-sync no longer breaks (or could be
+  abused) when MacCrab.app is installed under a path containing a quote;
+  automatic network blocking can no longer block loopback / gateway / DNS /
+  Apple infrastructure from a bad feed entry; and the non-root collector no
+  longer crashes on malformed system telemetry.
 
 ### Changed
 

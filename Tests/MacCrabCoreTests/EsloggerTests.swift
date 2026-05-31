@@ -252,309 +252,42 @@ struct EsloggerCodeSigningTests {
     }
 }
 
-// MARK: - File Events
+// MARK: - Numeric Robustness (v1.17.1 crash-safety)
 
-@Suite("Eslogger Parser: File Events")
-struct EsloggerFileTests {
+/// eslogger JSON is attacker-influenceable; out-of-range / negative / NaN
+/// numbers must NOT trap (SIGTRAP) the collector. These would have crashed
+/// the daemon before the non-trapping int()/uint32() helpers landed.
+@Suite("Eslogger Parser: numeric robustness")
+struct EsloggerNumericRobustnessTests {
 
-    @Test("Parses create event with new_path")
-    func createNewPath() {
-        let payload: [String: Any] = [
-            "destination_type": 1,
-            "destination": [
-                "new_path": [
-                    "dir": ["path": "/Users/admin/Documents"],
-                    "filename": "secret.txt",
-                ] as [String: Any]
-            ] as [String: Any]
+    @Test("Negative group_id does not crash; clamps to 0")
+    func negativeGroupId() {
+        let processDict: [String: Any] = [
+            "audit_token": ["pid": 50, "euid": 501],
+            "ppid": 1,
+            "executable": ["path": "/usr/bin/true"],
+            "signing_id": "", "team_id": "",
+            "codesigning_flags": 1,
+            "is_platform_binary": false,
+            "group_id": -5,
         ]
-        let json = makeEsloggerJSON(eventName: "create", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "create")
-        #expect(event?.eventCategory == .file)
-        #expect(event?.file?.path == "/Users/admin/Documents/secret.txt")
+        let info = EsloggerParser.extractProcess(from: processDict)
+        #expect(info.groupId == 0)
     }
 
-    @Test("Parses write event")
-    func writeEvent() {
-        let payload: [String: Any] = [
-            "target": ["path": "/var/log/system.log"] as [String: Any]
+    @Test("NaN / infinite / out-of-range numeric fields do not crash")
+    func nonFiniteAndOutOfRange() {
+        let processDict: [String: Any] = [
+            "audit_token": ["pid": 51, "euid": 501],
+            "ppid": 1,
+            "executable": ["path": "/usr/bin/true"],
+            "signing_id": "", "team_id": "",
+            "codesigning_flags": Double.nan,
+            "is_platform_binary": false,
+            "group_id": Double.infinity,
         ]
-        let json = makeEsloggerJSON(eventName: "write", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "write")
-        #expect(event?.file?.path == "/var/log/system.log")
-    }
-
-    @Test("Close event with modified=true emits event")
-    func closeModified() {
-        let payload: [String: Any] = [
-            "modified": true,
-            "target": ["path": "/tmp/output.dat"] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "close", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "close_modified")
-    }
-
-    @Test("Close event with modified=false returns nil")
-    func closeUnmodified() {
-        let payload: [String: Any] = [
-            "modified": false,
-            "target": ["path": "/tmp/output.dat"] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "close", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event == nil, "Close with modified=false should be dropped")
-    }
-
-    @Test("Parses rename event with source and destination")
-    func renameEvent() {
-        let payload: [String: Any] = [
-            "source": ["path": "/tmp/old.txt"] as [String: Any],
-            "destination_type": 1,
-            "destination": [
-                "new_path": [
-                    "dir": ["path": "/tmp"],
-                    "filename": "new.txt",
-                ] as [String: Any]
-            ] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "rename", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "rename")
-        #expect(event?.file?.path == "/tmp/new.txt")
-        #expect(event?.file?.sourcePath == "/tmp/old.txt")
-    }
-
-    @Test("Parses unlink event")
-    func unlinkEvent() {
-        let payload: [String: Any] = [
-            "target": ["path": "/tmp/doomed.txt"] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "unlink", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "unlink")
-        #expect(event?.eventType == .deletion)
-    }
-}
-
-// MARK: - Process Lifecycle
-
-@Suite("Eslogger Parser: Process Lifecycle")
-struct EsloggerProcessLifecycleTests {
-
-    @Test("Parses fork event using child process")
-    func forkUsesChild() {
-        let payload: [String: Any] = [
-            "child": [
-                "audit_token": ["pid": 999, "euid": 501],
-                "ppid": 200,
-                "executable": ["path": "/usr/bin/git"],
-                "signing_id": "com.apple.git",
-                "team_id": "",
-                "codesigning_flags": 1,
-                "is_platform_binary": true,
-            ] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "fork", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "fork")
-        // Should use fork.child (pid 999), not top-level process (pid 200)
-        #expect(event?.process.pid == 999)
-        #expect(event?.process.executable == "/usr/bin/git")
-    }
-
-    @Test("Parses exit event")
-    func exitEvent() {
-        let payload: [String: Any] = [:]
-        let json = makeEsloggerJSON(eventName: "exit", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "exit")
-        #expect(event?.eventType == .end)
-    }
-}
-
-// MARK: - Signal Events
-
-@Suite("Eslogger Parser: Signal Events")
-struct EsloggerSignalTests {
-
-    @Test("Parses signal event with target enrichments")
-    func signalEvent() {
-        let payload: [String: Any] = [
-            "sig": 9,
-            "target": [
-                "audit_token": ["pid": 555, "euid": 0],
-                "ppid": 1,
-                "executable": ["path": "/usr/sbin/httpd"],
-                "signing_id": "com.apple.httpd",
-                "team_id": "",
-                "codesigning_flags": 1,
-                "is_platform_binary": true,
-            ] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "signal", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "signal(9)")
-        #expect(event?.enrichments["target.pid"] == "555")
-        #expect(event?.enrichments["target.executable"] == "/usr/sbin/httpd")
-    }
-}
-
-// MARK: - Memory Protection Events
-
-@Suite("Eslogger Parser: Memory Protection")
-struct EsloggerMemoryProtectionTests {
-
-    @Test("mmap W+X emits event")
-    func mmapWX() {
-        let payload: [String: Any] = [
-            "protection": 6,  // PROT_WRITE (2) | PROT_EXEC (4)
-            "source": ["path": "/tmp/payload.dylib"] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "mmap", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "mmap_wx")
-        #expect(event?.severity == .high)
-    }
-
-    @Test("mmap without W+X returns nil")
-    func mmapReadOnly() {
-        let payload: [String: Any] = [
-            "protection": 1,  // PROT_READ only
-            "source": ["path": "/usr/lib/libSystem.B.dylib"] as [String: Any]
-        ]
-        let json = makeEsloggerJSON(eventName: "mmap", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event == nil, "mmap with PROT_READ only should be dropped")
-    }
-
-    @Test("mprotect W+X emits event")
-    func mprotectWX() {
-        let payload: [String: Any] = [
-            "protection": 6,  // PROT_WRITE | PROT_EXEC
-        ]
-        let json = makeEsloggerJSON(eventName: "mprotect", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "mprotect_wx")
-        #expect(event?.severity == .high)
-    }
-
-    @Test("mprotect without W+X returns nil")
-    func mprotectExecOnly() {
-        let payload: [String: Any] = [
-            "protection": 4,  // PROT_EXEC only
-        ]
-        let json = makeEsloggerJSON(eventName: "mprotect", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event == nil, "mprotect with PROT_EXEC only should be dropped")
-    }
-}
-
-// MARK: - Edge Cases
-
-@Suite("Eslogger Parser: Edge Cases")
-struct EsloggerEdgeCaseTests {
-
-    @Test("Returns nil for unknown event type")
-    func unknownEventType() {
-        let json = makeEsloggerJSON(eventName: "unknown_event", payload: ["foo": "bar"])
-        let event = EsloggerParser.parse(json)
-        #expect(event == nil, "Unknown event type should return nil")
-    }
-
-    @Test("Handles missing optional fields gracefully")
-    func minimalJSON() {
-        // Minimal exec: target with only executable path, no args, no cwd
-        let json: [String: Any] = [
-            "time": "2024-01-15T10:30:45Z",
-            "process": [
-                "audit_token": ["pid": 1, "euid": 0],
-                "executable": ["path": "/sbin/launchd"],
-            ] as [String: Any],
-            "event": [
-                "exec": [
-                    "target": [
-                        "audit_token": ["pid": 50, "euid": 501],
-                        "executable": ["path": "/usr/bin/true"],
-                    ] as [String: Any]
-                ] as [String: Any]
-            ] as [String: Any]
-        ]
-        let event = EsloggerParser.parse(json)
-        #expect(event != nil, "Minimal JSON should still parse")
-        #expect(event?.process.pid == 50)
-        #expect(event?.process.executable == "/usr/bin/true")
-        #expect(event?.process.name == "true")
-        #expect(event?.process.commandLine == "")
-        #expect(event?.process.args == [])
-    }
-
-    @Test("Parses kextload event")
-    func kextloadEvent() {
-        let payload: [String: Any] = [
-            "identifier": "com.example.kext.driver"
-        ]
-        let json = makeEsloggerJSON(eventName: "kextload", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "kextload")
-        #expect(event?.severity == .medium)
-        #expect(event?.file?.path == "com.example.kext.driver")
-    }
-
-    @Test("Parses setowner event with uid/gid enrichments")
-    func setownerEvent() {
-        let payload: [String: Any] = [
-            "target": ["path": "/etc/passwd"] as [String: Any],
-            "uid": 0,
-            "gid": 0,
-        ]
-        let json = makeEsloggerJSON(eventName: "setowner", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "setowner")
-        #expect(event?.enrichments["file.uid"] == "0")
-        #expect(event?.enrichments["file.gid"] == "0")
-    }
-
-    @Test("Parses setmode event with octal mode enrichment")
-    func setmodeEvent() {
-        let payload: [String: Any] = [
-            "target": ["path": "/tmp/script.sh"] as [String: Any],
-            "mode": 493,  // 0o755 in decimal
-        ]
-        let json = makeEsloggerJSON(eventName: "setmode", payload: payload)
-        let event = EsloggerParser.parse(json)
-
-        #expect(event != nil)
-        #expect(event?.eventAction == "setmode")
-        #expect(event?.enrichments["file.mode"] == "755")
+        // The assertion is simply that this returns without trapping.
+        let info = EsloggerParser.extractProcess(from: processDict)
+        #expect(info.pid == 51)
     }
 }

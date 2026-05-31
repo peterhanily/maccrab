@@ -11,7 +11,8 @@
 set -euo pipefail
 
 SUPPORT_DIR="/Library/Application Support/MacCrab"
-USER_SUPPORT_DIR="$HOME/Library/Application Support/MacCrab"
+# USER_SUPPORT_DIR is resolved AFTER SUDO_HOME below — under sudo, $HOME is
+# /var/root, so a $HOME-based path here would silently skip the real user's data.
 PREFIX="${PREFIX:-/usr/local}"
 APP_PATH="/Applications/MacCrab.app"
 TEAM_ID="79S425CW99"
@@ -97,6 +98,10 @@ done
 # cleaner and easier to audit.
 SUDO_HOME="${SUDO_USER:+$(dscl . -read /Users/"$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')}"
 USER_LAUNCH_AGENT_DIR="${SUDO_HOME:-$HOME}/Library/LaunchAgents"
+# Now that SUDO_HOME is known, resolve the invoking user's data dir from
+# SUDO_HOME (NOT $HOME, which is /var/root under sudo). Holds forensic Cases/,
+# llm_config.json, user_overrides, and the non-root dev daemon's events.db.
+USER_SUPPORT_DIR="${SUDO_HOME:-$HOME}/Library/Application Support/MacCrab"
 for variant in "com.maccrab.app.plist" "${TEAM_ID}.com.maccrab.app.plist"; do
     plist="$USER_LAUNCH_AGENT_DIR/$variant"
     if [ -f "$plist" ]; then
@@ -157,6 +162,10 @@ if [ "$REMOVE_DATA" = true ]; then
         info "Removing $USER_SUPPORT_DIR..."
         rm -rf "$USER_SUPPORT_DIR"
     fi
+    # SelfDefense writes tamper forensic logs OUTSIDE the data dirs.
+    info "Removing tamper forensic logs..."
+    rm -f "/var/log/maccrab_tamper.log" 2>/dev/null || true
+    rm -f "${SUDO_HOME:-$HOME}/.maccrab_tamper.log" 2>/dev/null || true
     # Keychain-stored API keys live in the user's keychain under
     # service "com.maccrab.secrets". Account names are the rawValues
     # of `SecretsStore.SecretKey` enum (`Sources/MacCrabCore/Storage/

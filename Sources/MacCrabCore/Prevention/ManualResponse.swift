@@ -210,6 +210,10 @@ public enum ManualResponse {
         // accumulate (pfctl -f replaces the whole anchor each time).
         var ips = (try? String(contentsOfFile: blockedListPath, encoding: .utf8))
             .map { $0.split(separator: "\n").map(String.init) } ?? []
+        // v1.17.1: re-validate persisted entries before re-applying them to PF —
+        // a tampered/stale list must not re-inject a malformed or now-protected
+        // IP (gateway/DNS). The freshly-passed `trimmed` was already gated above.
+        ips = ips.filter { isValidIP($0) && SafeBlockableIP.reasonToReject(ip: $0) == nil }
         if !ips.contains(trimmed) {
             ips.append(trimmed)
             let dir = (blockedListPath as NSString).deletingLastPathComponent
