@@ -18,14 +18,32 @@ struct JSONTreeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(artifacts.prefix(200), id: \.id) { a in
-                    DisclosureGroup(isExpanded: Binding(
-                        get: { openedID == a.id },
-                        set: { openedID = $0 ? a.id : nil }
-                    )) {
-                        artifactDetail(a)
-                            .padding(.top, 4)
-                    } label: {
-                        artifactSummary(a)
+                    // Custom disclosure: the whole summary row toggles,
+                    // not just the triangle. SwiftUI's DisclosureGroup
+                    // only flips on a click of the chevron itself, which
+                    // operators found fiddly — the full block should work.
+                    let isOpen = openedID == a.id
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                openedID = isOpen ? nil : a.id
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 10)
+                                artifactSummary(a)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if isOpen {
+                            artifactDetail(a)
+                                .padding(.top, 4)
+                                .padding(.leading, 16)
+                        }
                     }
                     .padding(.vertical, 4)
                     Divider()

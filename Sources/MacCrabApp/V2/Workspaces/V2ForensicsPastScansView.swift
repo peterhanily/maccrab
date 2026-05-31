@@ -21,6 +21,12 @@ struct V2ForensicsPastScansView: View {
     @State private var query: String = ""
     @State private var pendingDelete: CaseManifest? = nil
     @State private var deleteResult: String? = nil
+    // Bulk-delete: a selection mode operators toggle from the header.
+    // While on, rows show a checkbox and the row click toggles
+    // selection instead of opening the scan.
+    @State private var selectionMode = false
+    @State private var selectedIDs: Set<String> = []
+    @State private var pendingBulkDelete = false
 
     private var openScan: CaseManifest? {
         guard let id = openScanID else { return nil }
@@ -47,6 +53,9 @@ struct V2ForensicsPastScansView: View {
                 } else if scans.isEmpty {
                     emptyState
                 } else {
+                    if selectionMode {
+                        bulkBar
+                    }
                     if scans.count > 4 {
                         searchField
                     }
@@ -93,6 +102,22 @@ struct V2ForensicsPastScansView: View {
             } ?? "unknown size"
             Text("This removes the scan + its evidence database (\(sizeStr)) from disk. You can't undo this. Exported CSV/JSON files are not affected.")
         }
+        .alert("Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s") permanently?",
+               isPresented: $pendingBulkDelete) {
+            Button("Delete \(selectedIDs.count) scan\(selectedIDs.count == 1 ? "" : "s")", role: .destructive) {
+                bulkDelete()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            let total = selectedIDs.reduce(Int64(0)) { $0 + (diskSizes[$1] ?? 0) }
+            Text("This removes the selected scans + their evidence databases (\(formattedBytes(total))) from disk. You can't undo this. Exported CSV/JSON files are not affected.")
+        }
+    }
+
+    private func formattedBytes(_ bytes: Int64) -> String {
+        let bcf = ByteCountFormatter()
+        bcf.countStyle = .file
+        return bcf.string(fromByteCount: bytes)
     }
 
     /// Permanently remove the case directory from disk + reload
@@ -128,6 +153,56 @@ struct V2ForensicsPastScansView: View {
         }
     }
 
+    private func toggleSelection(_ id: String) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
+    }
+
+    /// Delete every selected scan. Routes each through
+    /// `CaseManager.deleteCase` (same as the single-row path) so the
+    /// wrapped DEK is removed from the keychain and the id is
+    /// UUID-validated before any removeItem. Reports a combined result.
+    private func bulkDelete() {
+        let ids = Array(selectedIDs)
+        pendingBulkDelete = false
+        Task {
+            let mgr = CaseManager(
+                casesRoot: CaseDirectoryLayout.defaultCasesRoot,
+                dekVault: KeychainDEKVault()
+            )
+            var freed: Int64 = 0
+            var ok = 0
+            var failed = 0
+            for id in ids {
+                let bytes = diskSizes[id] ?? CaseDirectoryLayout(
+                    casesRoot: CaseDirectoryLayout.defaultCasesRoot,
+                    caseID: id
+                ).diskBytes()
+                do {
+                    try await mgr.deleteCase(id: id)
+                    HiddenScans.restore(id)
+                    freed += bytes
+                    ok += 1
+                } catch {
+                    failed += 1
+                }
+            }
+            let bcf = ByteCountFormatter()
+            bcf.countStyle = .file
+            if failed == 0 {
+                deleteResult = "Deleted \(ok) scan\(ok == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."
+            } else {
+                deleteResult = "Deleted \(ok), \(failed) failed · freed \(bcf.string(fromByteCount: freed))."
+            }
+            selectedIDs = []
+            selectionMode = false
+            await reload()
+        }
+    }
+
     // MARK: - Sections
 
     private var header: some View {
@@ -135,17 +210,61 @@ struct V2ForensicsPastScansView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Past scans")
                     .font(.title2).fontWeight(.semibold)
-                Text("Every scan run on this Mac, newest first. Click a scan to open it.")
+                Text(selectionMode
+                     ? "Select scans, then Delete selected. Click a row to toggle."
+                     : "Every scan run on this Mac, newest first. Click a scan to open it.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if !scans.isEmpty {
-                Text("\(scans.count) total")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                if selectionMode {
+                    Button("Cancel") {
+                        selectionMode = false
+                        selectedIDs = []
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12))
+                } else {
+                    Button("Select") { selectionMode = true }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 12))
+                    Text("\(scans.count) total")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
+    }
+
+    /// Bulk action bar shown while in selection mode: select-all toggle,
+    /// live selected count, and the destructive delete trigger.
+    private var bulkBar: some View {
+        HStack(spacing: 12) {
+            Button(selectedIDs.count == filtered.count && !filtered.isEmpty ? "Deselect all" : "Select all") {
+                if selectedIDs.count == filtered.count {
+                    selectedIDs = []
+                } else {
+                    selectedIDs = Set(filtered.map(\.id))
+                }
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 12))
+            Spacer()
+            Text("\(selectedIDs.count) selected")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Button(role: .destructive) {
+                pendingBulkDelete = true
+            } label: {
+                Label("Delete selected", systemImage: "trash")
+                    .font(.system(size: 12))
+            }
+            .disabled(selectedIDs.isEmpty)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(6)
     }
 
     private func deleteToast(_ msg: String) -> some View {
@@ -211,6 +330,9 @@ struct V2ForensicsPastScansView: View {
                 ForensicsScanRow(
                     scan: scan,
                     diskBytes: diskSizes[scan.id],
+                    selectionMode: selectionMode,
+                    isSelected: selectedIDs.contains(scan.id),
+                    onToggleSelection: { toggleSelection(scan.id) },
                     onOpen: { openScanID = scan.id },
                     onDismiss: {
                         HiddenScans.hide(scan.id)
@@ -270,6 +392,12 @@ struct V2ForensicsPastScansView: View {
 struct ForensicsScanRow: View {
     let scan: CaseManifest
     var diskBytes: Int64? = nil
+    /// When true the row renders a leading checkbox and the primary
+    /// click toggles selection instead of opening the scan. Defaults
+    /// off so the Recently-run caller is unchanged.
+    var selectionMode: Bool = false
+    var isSelected: Bool = false
+    var onToggleSelection: (() -> Void)? = nil
     let onOpen: () -> Void
     let onDismiss: () -> Void
     /// Optional permanent-delete callback. When present, the row
@@ -281,7 +409,13 @@ struct ForensicsScanRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Button(action: onOpen) {
+            if selectionMode {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .padding(.top, 1)
+            }
+            Button(action: selectionMode ? { onToggleSelection?() } : onOpen) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(scan.name)
@@ -307,14 +441,17 @@ struct ForensicsScanRow: View {
                         }
                     }
                     Spacer()
-                    Text("View")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tint)
+                    if !selectionMode {
+                        Text("View")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tint)
+                    }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
+            if !selectionMode {
             Menu {
                 Button(action: onOpen) {
                     Label("Open", systemImage: "eye")
@@ -337,6 +474,7 @@ struct ForensicsScanRow: View {
             .menuIndicator(.hidden)
             .frame(width: 28)
             .help("Actions")
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
         .contextMenu {

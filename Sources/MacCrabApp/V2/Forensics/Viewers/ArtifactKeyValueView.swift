@@ -196,14 +196,7 @@ struct ArtifactKeyValueView: View {
     }
 
     private func rawJSONSection(_ a: CommittedArtifact) -> some View {
-        DisclosureGroup {
-            JSONNodeView(value: .object(a.record.data), depth: 1)
-                .padding(.top, 4)
-        } label: {
-            Text("Raw data JSON")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-        }
+        RawJSONDisclosure(value: .object(a.record.data))
     }
 
     private func rowTitle(_ a: CommittedArtifact) -> String {
@@ -226,5 +219,40 @@ struct ArtifactKeyValueView: View {
     private func humanFieldName(_ f: String) -> String {
         let s = f.replacingOccurrences(of: "_", with: " ")
         return s.prefix(1).uppercased() + s.dropFirst()
+    }
+}
+
+/// Full-block-clickable "Raw data JSON" disclosure. SwiftUI's
+/// `DisclosureGroup` only toggles when the chevron itself is clicked;
+/// operators expect the whole header row to expand/collapse, so this
+/// drives the open state from a Button spanning the entire row.
+private struct RawJSONDisclosure: View {
+    let value: JSONValue
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                    Text("Raw data JSON")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                JSONNodeView(value: value, depth: 1)
+                    .padding(.top, 4)
+                    .padding(.leading, 16)
+            }
+        }
     }
 }
