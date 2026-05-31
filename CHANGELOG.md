@@ -23,6 +23,19 @@ bugs in v1.17.0.
   its privileged inbox instead of an ineffective cross-user signal.
 - **Rule search** returns results immediately instead of briefly showing
   an empty list while the rule index finishes loading.
+- **Far fewer false-positive alerts.** A quality pass cut the dominant
+  noise sources that fired on normal developer/system activity:
+  Developer-ID-signed CLI tools (Homebrew/npm/pip/cargo — `uv`, `node`,
+  `python`, `esbuild`, etc.) no longer trip the "not notarized" rule;
+  Apple's own platform binaries (e.g. `/usr/libexec/nehelper`) are now
+  classified correctly and no longer fire as unsigned network extensions;
+  MacCrab's own maintenance operations no longer trip self-tamper /
+  cross-process alerts; and normal JS bundler builds no longer match the
+  "fetched-then-executed" rule. Several over-eager rules were also
+  recalibrated off CRITICAL so the existing suppression layer applies.
+- Searching the rules for an alert whose ID comes from a built-in engine
+  (AI Guard, campaign correlation, behavioral scoring, threat intel) now
+  shows an explanation instead of an empty list — those aren't Sigma rules.
 
 ### Changed
 
