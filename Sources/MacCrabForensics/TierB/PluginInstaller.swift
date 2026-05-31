@@ -220,7 +220,8 @@ public actor PluginInstaller {
         if let r = pluginsRoot {
             self.pluginsRoot = r
         } else {
-            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
             self.pluginsRoot = support
                 .appendingPathComponent("MacCrab")
                 .appendingPathComponent("plugins")
