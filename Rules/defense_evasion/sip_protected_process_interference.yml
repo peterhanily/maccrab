@@ -36,4 +36,4 @@ detection:
     condition: selection_kill and selection_target and not filter_system
 falsepositives:
     - System administrators investigating stuck security processes
-level: critical
+level: high

@@ -27,4 +27,4 @@ detection:
 falsepositives:
     - Legitimate privacy management tools
     - MDM agents
-level: critical
+level: high

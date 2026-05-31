@@ -106,4 +106,4 @@ falsepositives:
     - Legitimate debugging tools
     - Application crash reporters
     - Documentation / source-code grep / man lookups (filtered)
-level: critical
+level: medium

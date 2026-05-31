@@ -71,4 +71,4 @@ falsepositives:
     - A legitimate package whose declared build chain genuinely needs Bun and downloads it via curl during install — extremely rare; allowlist by package name once verified
     - A monorepo bootstrap script run interactively but proxied through an npm-script wrapper whose parent appears to descend from npm
     - Self-update flows for tools that bundle a Bun snapshot for portability (allowlist by tool path once observed)
-level: critical
+level: high

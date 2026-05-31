@@ -70,4 +70,4 @@ detection:
 falsepositives:
     - A local GitHub Actions emulator (act, dagger) running with OIDC enabled — parent will be `/act` or `/dagger`; extend filter_known_ci with the runner basename
     - Custom dev-portal tooling that legitimately uses OIDC trusted publishing from a service account on a Mac runner — allowlist by parent Image
-level: critical
+level: high

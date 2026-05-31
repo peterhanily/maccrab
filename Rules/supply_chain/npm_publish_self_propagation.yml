@@ -61,4 +61,4 @@ falsepositives:
     - Local release scripts wrapped in make/just/rake that spawn npm publish (parent will be /make /just /rake — investigate before suppressing)
     - npm registry mirror sync tooling running as a daemon
     - CI agents not in the filter list above — extend filter_known_ci with the local runner basename
-level: critical
+level: high

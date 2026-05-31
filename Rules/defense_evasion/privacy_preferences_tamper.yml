@@ -27,4 +27,4 @@ detection:
 falsepositives:
     - MDM profile installation modifying privacy settings
     - System migration tools
-level: critical
+level: high

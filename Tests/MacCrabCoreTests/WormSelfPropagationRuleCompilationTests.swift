@@ -114,35 +114,21 @@ struct WormSelfPropagationRuleCompilationTests {
     @Test("Critical-severity worm rules are tagged as critical")
     func criticalRulesAreCritical() throws {
         ensureRulesCompiled()
+        // v1.17.1 critical-tier recalibration: CRITICAL is reserved for
+        // intrinsic-malice / known-IOC rules with tight filters. Heuristic
+        // "self-propagation / non-interactive-parent / hostname-egress" worm
+        // rules were downgraded to HIGH (they still record + can drive
+        // sequence/campaign correlation) because their single-event form has
+        // plausible benign triggers (CI wrappers, make/just release tasks,
+        // routine registry/github egress). What stays CRITICAL from this
+        // corpus is the unforgeable stuff: an attacker-unique wiper literal,
+        // a precise IOC-filename drop under an install lineage, and MacCrab's
+        // own honey/canary trips (which nothing legitimate touches).
         let mustBeCritical = [
-            "github_user_repos_post_from_non_git",
-            "npm_publish_self_propagation",
-            "pypi_twine_upload_from_non_interactive",
-            "dead_mans_switch_literal_scanner",
-            // Second-wave critical rules
-            "pip_wheel_drops_javascript_runtime_files",
-            "webhook_exfil_url_in_install_content",
-            "registry_oidc_token_exchange_from_non_interactive",
-            // v1.12.0 RC3 (Det-H1): `package_install_drops_github_workflow`
-            // dropped from must-be-critical list. The rule was downgraded
-            // to high because critical-severity fired on every legit
-            // project scaffold (create-react-app, vite, cookiecutter)
-            // dropping .github/workflows/*.yml — the scaffold pattern is
-            // structurally indistinguishable from the worm-scrape
-            // signature. Re-classify as critical once we can detect
-            // scaffold context (no prior .git, fresh cwd).
-            // Wave 3/4 critical rules
-            "mass_unlink_from_package_lineage",
-            // v1.17.1: `maccrab_tamper_attempt` is intentionally NOT critical.
-            // rm/launchctl/pkill of MacCrab paths via a shell is identical in
-            // shape to MacCrab's own install/update/reload (and the OS's
-            // privileged sysext de/activation), and those break the MacCrab
-            // lineage, so the rule can't be made low-FP. Demoted to HIGH (so
-            // NoiseFilter's Apple-binary gate suppresses it); SelfDefense is
-            // the authoritative tamper detector. See the rule's header comment.
-            // Wave 5 — innovative research
-            "honeyprompt_canary_package_install",
-            "canary_skill_or_rules_read",
+            "dead_mans_switch_literal_scanner",       // 51-char attacker-unique literal
+            "pip_wheel_drops_javascript_runtime_files", // 6 exact Lightning/Shai-Hulud IOC filenames
+            "honeyprompt_canary_package_install",     // MacCrab-invented canary package names
+            "canary_skill_or_rules_read",             // reads under MacCrab's own decoys/
         ]
         for slug in mustBeCritical {
             let path = "\(compiledDir)/\(slug).json"

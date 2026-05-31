@@ -56,4 +56,4 @@ detection:
 falsepositives:
     - Local release scripts wrapped in make/just/poetry that spawn twine upload — investigate parent before suppressing
     - Self-hosted CI agent not in filter_known_ci — extend the filter
-level: critical
+level: high

@@ -33,4 +33,4 @@ detection:
 falsepositives:
     - Security researchers examining TCC state
     - MDM tools managing permissions
-level: critical
+level: high

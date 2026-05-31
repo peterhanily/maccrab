@@ -70,4 +70,4 @@ falsepositives:
     - A user explicitly running `claude mcp add` or `cursor mcp install` while a node-rooted shell is the descendant — handled by filter_user_install_via_cli, but if the CLI form differs in future releases extend the filter
     - An AI-tool installer package whose published purpose is to register an MCP server during install — rare; allowlist by package name once observed
     - Org-managed dotfile sync (chezmoi, yadm) replaying an MCP config snapshot during package-manager-rooted setup
-level: critical
+level: high

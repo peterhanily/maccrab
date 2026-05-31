@@ -43,4 +43,4 @@ detection:
 falsepositives:
     - Legitimate Office add-ins with shell integration
     - Office automation workflows
-level: critical
+level: high

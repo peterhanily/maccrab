@@ -47,4 +47,4 @@ detection:
 falsepositives:
     - Homebrew cask installations that create LaunchAgents for background services
     - Node.js service managers (pm2) creating LaunchAgents
-level: critical
+level: high

@@ -26,4 +26,4 @@ detection:
     condition: selection and selection_type and not filter_apple
 falsepositives:
     - Enterprise directory integration plugins (e.g., Centrify, JAMF AD binding)
-level: critical
+level: high

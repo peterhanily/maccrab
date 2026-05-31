@@ -76,4 +76,4 @@ trigger: all
 falsepositives:
     - Microsoft Office macros that legitimately invoke shell commands (e.g., AppleScript for document workflows)
     - PDF forms that launch external applications via registered URI handlers
-level: critical
+level: high

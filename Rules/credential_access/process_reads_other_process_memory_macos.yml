@@ -110,4 +110,4 @@ falsepositives:
     - Rule depends on ES event subscription for `task_for_pid` / `mach_vm_read` / `proc_pidinfo` which is NOT active in the current build (ESCollector.swift v1.12.6 subscribes only to EXEC/FORK/EXIT/CREATE/WRITE/CLOSE/RENAME/UNLINK/SIGNAL/KEXTLOAD/MMAP/MPROTECT/SETOWNER/SETMODE — verify before tagging stable). Until those events are wired, this rule fires only on processes whose argv mentions the API names as literals (text tools and dev IDEs already filtered), which is a weak signal. Track ES subscription expansion as a v1.13 dependency.
     - A security researcher reverse-engineering Mach APIs from an interactive shell — investigator parents are usually shell-rooted; investigate process lineage
     - Apple's own diagnostic tooling (leaks/heap/vmmap/sample) — covered by filter_debuggers, but Apple-signed builds also clear via filter_apple_signed
-level: critical
+level: medium

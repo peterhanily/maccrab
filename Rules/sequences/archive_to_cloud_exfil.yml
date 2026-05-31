@@ -86,4 +86,4 @@ falsepositives:
     - Authorized backup scripts that archive home directories and upload to cloud storage
     - Developer workflows that package projects and push to artifact storage
     - IT-managed backup solutions (Time Machine alternatives, Backblaze B2 agents)
-level: critical
+level: high

@@ -90,4 +90,4 @@ falsepositives:
     - Anthropic's CLI legitimately installing built-in skills / commands during a `claude mcp add` flow; filter_claude_writers covers the `/claude` writer
     - A trusted dotfile manager (chezmoi, yadm, stow) syncing project-tracked `.claude/commands/*.sh` into place — these descend from the dotfile-manager binary, not from a package manager, so they won't satisfy selection_lineage
     - A user running `npx some-claude-skill-installer` intentionally to install community skills — review the package provenance; allowlist via project boundary if trusted
-level: critical
+level: high

@@ -23,7 +23,12 @@ logsource:
 detection:
     selection_known_names:
         Image|endswith:
-            - '/patch'
+            # NOTE: bare '/patch' removed (v1.17.1) — it matched GNU `patch`
+            # (common in builds) and fired this CRITICAL rule falsely. The
+            # Patcher-2017 ransomware binary is '/Patcher'; the EvilQuest
+            # '/patch' masquerade is still caught by selection_evilquest_patterns
+            # (which AND-gates it with a com.apple.questd/patch.app/evilquest
+            # command line).
             - '/Patcher'
             - '/finder_update'
             - '/MacRansom'

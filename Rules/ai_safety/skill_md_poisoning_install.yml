@@ -47,4 +47,4 @@ detection:
 falsepositives:
     - User-authored skill that legitimately uses XML-like template markup (rare; review skill provenance)
     - Skill manifests checked in by trusted org with documented eval semantics
-level: critical
+level: high

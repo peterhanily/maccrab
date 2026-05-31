@@ -51,4 +51,4 @@ detection:
 falsepositives:
     - Security testing of MCP server implementations
     - Prompt injection research
-level: critical
+level: high

@@ -28,4 +28,4 @@ detection:
 falsepositives:
     - IT administrators managing profiles
     - Legitimate profile rotation during enrollment changes
-level: critical
+level: high

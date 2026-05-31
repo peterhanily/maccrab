@@ -57,7 +57,7 @@ steps:
           condition: selection or selection_copy_exec
 
 trigger: all
-level: critical
+level: high
 falsepositives:
     - Developers running scripts from USB drives during testing
     - IT technicians deploying software from removable media

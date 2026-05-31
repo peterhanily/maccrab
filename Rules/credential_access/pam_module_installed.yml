@@ -40,4 +40,4 @@ detection:
 falsepositives:
     - System updates modifying PAM configuration
     - Enterprise security tools adding auth modules
-level: critical
+level: high

@@ -39,4 +39,4 @@ detection:
 falsepositives:
     - Legitimate Tcl extensions loaded from system paths
     - Audio unit validation by Xcode (auval)
-level: critical
+level: high

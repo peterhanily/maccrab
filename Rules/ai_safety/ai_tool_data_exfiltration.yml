@@ -98,4 +98,4 @@ falsepositives:
     - Uploading to private artifact registries
     - CI/CD webhook notifications
     - Legitimate API calls to internal services
-level: critical
+level: high

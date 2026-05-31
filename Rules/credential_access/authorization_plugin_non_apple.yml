@@ -27,4 +27,4 @@ detection:
 falsepositives:
     - Enterprise SSO plugins (Kerberos, smart card)
     - Corporate VPN authentication plugins
-level: critical
+level: high

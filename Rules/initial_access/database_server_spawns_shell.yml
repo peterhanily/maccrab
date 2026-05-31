@@ -48,4 +48,4 @@ falsepositives:
     - MySQL UDF (User Defined Function) libraries that invoke system commands
     - Database backup scripts launched via scheduler (pg_dump, mysqldump)
     - PostgreSQL extensions that call external programs
-level: critical
+level: high

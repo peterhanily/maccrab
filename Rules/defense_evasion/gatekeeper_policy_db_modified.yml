@@ -36,4 +36,4 @@ detection:
     condition: selection and not filter_system and not filter_apple
 falsepositives:
     - System updates applying new Gatekeeper policy
-level: critical
+level: high

@@ -48,4 +48,4 @@ falsepositives:
     - Administrators using sudo to install LaunchDaemons for VPN clients, backup agents, or developer services
     - MDM or provisioning scripts running under sudo that deploy system-level persistence
     - Kernel extension or auth plugin installs for legitimate security or hardware vendors (e.g., smartcard drivers)
-level: critical
+level: high

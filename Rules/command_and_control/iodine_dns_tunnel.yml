@@ -27,4 +27,4 @@ detection:
 falsepositives:
     - Security researchers and penetration testers
     - Network tunneling for legitimate connectivity
-level: critical
+level: high

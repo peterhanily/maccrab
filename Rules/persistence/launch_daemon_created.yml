@@ -22,4 +22,4 @@ detection:
     condition: selection and not filter_apple
 falsepositives:
     - Legitimate software installation requiring root persistence
-level: critical
+level: high

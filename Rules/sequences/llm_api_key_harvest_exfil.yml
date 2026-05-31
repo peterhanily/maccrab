@@ -81,4 +81,4 @@ falsepositives:
     - Security audit tools that enumerate installed AI software and then report
       to a corporate SIEM (legitimate destinations would be internal)
     - Developer scripts that read their own config and then authenticate to AI APIs
-level: critical
+level: high

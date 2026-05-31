@@ -51,4 +51,4 @@ detection:
 falsepositives:
     - Trusted project setup script that uses curl in a hook (review provenance)
     - Org-authored hook configurations checked into version control
-level: critical
+level: high

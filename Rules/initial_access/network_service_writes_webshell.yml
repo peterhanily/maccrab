@@ -56,4 +56,4 @@ falsepositives:
     - CMS auto-update mechanisms writing plugin files
     - Web applications with legitimate file upload features writing to web directories
     - Development servers with hot-reload writing compiled assets
-level: critical
+level: high

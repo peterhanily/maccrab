@@ -50,4 +50,4 @@ falsepositives:
     - CGI scripts legitimately executed by the web server
     - Server-side includes that invoke shell commands
     - Web-based administration panels that execute system commands
-level: critical
+level: high

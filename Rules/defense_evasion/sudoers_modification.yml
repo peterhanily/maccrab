@@ -31,4 +31,4 @@ detection:
 falsepositives:
     - Legitimate system administration via visudo
     - MDM or configuration management tools adjusting sudo policies
-level: critical
+level: high

@@ -82,4 +82,4 @@ trigger: all
 falsepositives:
     - First-time installs of frameworks like Puppeteer or Electron that download
       platform binaries and then write shell configuration during setup
-level: critical
+level: high

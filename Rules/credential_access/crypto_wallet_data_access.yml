@@ -100,4 +100,4 @@ falsepositives:
     - User-invoked grep/find/du across Library directories during disk-cleanup
     - Cloud sync agents (iCloud, Dropbox, Google Drive) if user has sync set on Library — narrow filter via user complaint, never default-allowlist a sync agent for wallet data
     - Custom backup scripts not on the filter list — add via maccrabctl suppress
-level: critical
+level: high

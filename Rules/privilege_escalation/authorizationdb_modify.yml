@@ -32,4 +32,4 @@ detection:
 falsepositives:
     - Enterprise management tools configuring authorization rules
     - System provisioning scripts
-level: critical
+level: high

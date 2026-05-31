@@ -60,4 +60,4 @@ trigger: all
 falsepositives:
     - Legitimate accessibility tools with event taps that also persist via LaunchAgent
       (e.g., keystroke expanders, mouse utilities — these are Apple or Developer-ID signed)
-level: critical
+level: medium

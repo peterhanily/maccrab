@@ -37,4 +37,4 @@ detection:
 falsepositives:
     - MDM solutions managing privacy permissions
     - Enterprise configuration tools
-level: critical
+level: high

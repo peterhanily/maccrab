@@ -92,4 +92,4 @@ falsepositives:
     - Renovate / dependabot / a GitHub-aware bot that legitimately polls api.github.com under a launchd-spawned schedule and was last spawned during a recent install (rare; the single-event rule's filter for /Renovate / /dependabot already exempts the bot binary, but the sequence rule may still fire on the first poll inside the 180s window)
     - GitHub Desktop or Tower triggering an authenticated `/user` lookup shortly after the user manually ran `npm install` in a different shell — review the process ancestry to confirm the spawn-then-poll lineage is real
     - CI runners polling for trigger events that overlap a fresh install — usually descend from /runner / /Runner.Listener; allowlist by lineage
-level: critical
+level: high

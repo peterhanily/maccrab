@@ -35,4 +35,4 @@ detection:
     condition: selection_file and selection_not_nested and selection_process
 falsepositives:
     - None expected - ~/init.json is not a standard macOS or VS Code configuration file
-level: critical
+level: high

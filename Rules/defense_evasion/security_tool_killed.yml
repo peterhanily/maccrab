@@ -59,4 +59,4 @@ detection:
     condition: selection_kill and selection_target and not (filter_nonfatal_signal or filter_maccrab_self)
 falsepositives:
     - System administrators intentionally stopping security tools for maintenance
-level: critical
+level: high
