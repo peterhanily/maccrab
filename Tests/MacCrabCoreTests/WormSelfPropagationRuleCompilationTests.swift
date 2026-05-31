@@ -133,7 +133,13 @@ struct WormSelfPropagationRuleCompilationTests {
             // scaffold context (no prior .git, fresh cwd).
             // Wave 3/4 critical rules
             "mass_unlink_from_package_lineage",
-            "maccrab_tamper_attempt",
+            // v1.17.1: `maccrab_tamper_attempt` is intentionally NOT critical.
+            // rm/launchctl/pkill of MacCrab paths via a shell is identical in
+            // shape to MacCrab's own install/update/reload (and the OS's
+            // privileged sysext de/activation), and those break the MacCrab
+            // lineage, so the rule can't be made low-FP. Demoted to HIGH (so
+            // NoiseFilter's Apple-binary gate suppresses it); SelfDefense is
+            // the authoritative tamper detector. See the rule's header comment.
             // Wave 5 — innovative research
             "honeyprompt_canary_package_install",
             "canary_skill_or_rules_read",

@@ -8,10 +8,13 @@ description: >
     EDR-disable-then-fire-payload pattern used by macOS.SearchAwesome
     against competing LaunchAgents (2024), Atomic Stealer's attempt
     to disable Little Snitch, and the general worm prerequisite of
-    eliminating telemetry before the destructive payload runs. This
-    rule must clear with critical severity even when v1.12.0 is
-    detection-only — a tamper alert is the canary that the next
-    alert may never arrive.
+    eliminating telemetry before the destructive payload runs.
+    Authoritative tamper detection is handled by the SelfDefense
+    subsystem (binary-integrity hashing + signal interception + a
+    direct file monitor on MacCrab's own components); this rule is a
+    supplementary, recorded-but-not-alerted heuristic, because
+    rm/launchctl/pkill of MacCrab paths via a shell is structurally
+    indistinguishable from MacCrab's own install / update / reload.
 author: MacCrab Community
 date: 2026/05/14
 references:
@@ -135,11 +138,18 @@ falsepositives:
     - Sparkle auto-update replacing the .app bundle as part of an in-place upgrade; filter_installer covers Sparkle's path
     - Internal tests / dev rebuilds in the project directory; should be allowlisted by parent path matching the project tree
     - MacCrab's OWN maintenance via an intermediary shell (MacCrab -> osascript/sh -> rm/launchctl/pkill) — now excluded by filter_maccrab_ancestry, which matches MacCrab anywhere in the lineage rather than only as the direct parent
-# v1.17.1: stays CRITICAL on purpose. The actor is always an Apple system
-# binary (/bin/rm, /usr/bin/pkill, /bin/launchctl), so NoiseFilter Gate 7
-# drops any NON-critical match for this rule — i.e. at HIGH a genuine
-# `launchctl bootout`/`pkill -9` of MacCrab would be silently suppressed.
-# Critical is what lets a real tamper survive Gate 7 and reach the alert sink,
-# campaign detector, and notifier. The self-FP that previously motivated a
-# downgrade is now handled at the source by filter_maccrab_ancestry.
-level: critical
+# v1.17.1 (final): demoted CRITICAL -> HIGH. This process_creation heuristic
+# fires on rm/launchctl/pkill of MacCrab paths via a shell — identical in shape
+# to MacCrab's OWN install / update / reload / build and to the OS's privileged
+# sysext (de)activation. Those legitimate operations routinely break the
+# MacCrab lineage (osascript-admin / sysextd reparent the privileged shell off
+# MacCrab), so filter_maccrab_ancestry below cannot exclude them, and the rule
+# produced the bulk of false criticals on a dev Mac (rm/launchctl run by root
+# during activation). We cannot make it "absolutely sure", so it no longer
+# alerts: at HIGH, with the actor always an Apple system binary, NoiseFilter
+# Gate 7 suppresses it. AUTHORITATIVE tamper detection is the SelfDefense
+# subsystem (integrity hashing + signal interception + direct file monitor on
+# MacCrab's own files/plist), which observes real tampering instead of guessing
+# from a shell command line. The filters below are retained for the rare
+# non-Apple-actor case and for forensic hunting.
+level: high
