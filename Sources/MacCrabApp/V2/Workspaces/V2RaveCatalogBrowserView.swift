@@ -407,7 +407,7 @@ struct V2RaveCatalogBrowserView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            Text("In-dashboard install lands in v1.18. Run this in Terminal to install today.")
+            Text("In-dashboard install is coming. Run this in Terminal to install today.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
@@ -432,7 +432,7 @@ struct V2RaveCatalogBrowserView: View {
                 .foregroundStyle(.orange)
             Text("Catalog not reachable")
                 .font(.headline)
-            Text("The rave plugin catalog at \(baseURL.isEmpty ? "rave.maccrab.com" : baseURL) couldn't be fetched. This usually means the catalog is still being built out (Phase 0b → Phase 1) or you're offline.")
+            Text("The rave plugin catalog at \(baseURL.isEmpty ? "rave.maccrab.com" : baseURL) couldn't be fetched. This usually means the catalog is still being built out, or you're offline.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

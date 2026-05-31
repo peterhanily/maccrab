@@ -10,10 +10,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-VERSION="${1:-}"
+VERSION=""
+SKIP_PRERELEASE=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-prerelease-check) SKIP_PRERELEASE=1 ;;
+        -*) echo "Unknown flag: $arg"; exit 1 ;;
+        *) [ -z "$VERSION" ] && VERSION="$arg" ;;
+    esac
+done
 
 if [ -z "$VERSION" ]; then
-    echo "Usage: $0 <version>"
+    echo "Usage: $0 <version> [--skip-prerelease-check]"
     echo "Example: $0 1.1.0"
     exit 1
 fi
@@ -74,10 +82,14 @@ fi
 # pipeline refuses to ship out-of-sync versions, stale notes, or broken
 # localizations. Warnings still proceed; hard errors abort.
 echo "Step 0/6: Pre-release check..."
-"$SCRIPT_DIR/prerelease-check.sh" "$VERSION" || {
-    echo "Pre-release check failed — fix the errors above or run with --skip-prerelease-check to override (not recommended)"
-    exit 1
-}
+if [ "$SKIP_PRERELEASE" = "1" ]; then
+    echo "  (skipped via --skip-prerelease-check)"
+else
+    "$SCRIPT_DIR/prerelease-check.sh" "$VERSION" || {
+        echo "Pre-release check failed — fix the errors above or run with --skip-prerelease-check to override (not recommended)"
+        exit 1
+    }
+fi
 
 # Step 0b: Architectural-invariants audit (v1.6.19). Catches the
 # wire-the-orphans bug class and AlertSink-bypass regressions BEFORE

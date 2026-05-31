@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.17.0] — 2026-05-29
+## [1.17.0] — 2026-05-31
 
 First public release since v1.12.9. The headline is the on-demand
 Forensics workspace and the on-device forensic-plugin engine behind
@@ -26,7 +26,7 @@ the v1.13–v1.16 development cycle.
   fallback for anything else).
 - **Export** — save a scan's evidence as CSV or JSON.
 - **Retention and deletion** — auto-delete scans by age, per-scan disk
-  size, and a permanent-delete action.
+  size, multi-select bulk delete, and a permanent-delete action.
 - **Full Disk Access guidance** — in-app prompts with a direct link to
   the right System Settings pane when a scan needs access.
 
@@ -34,6 +34,17 @@ the v1.13–v1.16 development cycle.
 
 - `maccrabctl` gains `case` and `plugin` subcommands for running and
   managing forensic scans from the command line.
+
+### Fixed
+
+- **Threat-intel feeds** — a line-ending (CRLF) bug made the abuse.ch
+  feeds (URLhaus, MalwareBazaar, Feodo Tracker) parse zero records, so
+  indicator counts never refreshed. Feeds now parse correctly, report
+  honestly when a fetch fails or is stale, and the Intelligence
+  workspace surfaces recent indicator matches.
+- **Critical notifications** — criticals always notify at their true
+  severity; the confusing "Allow critical notifications" toggle was
+  removed (older config files still load).
 
 Universal (Apple silicon + Intel), Developer ID signed and notarized.
 Minimum macOS 13.

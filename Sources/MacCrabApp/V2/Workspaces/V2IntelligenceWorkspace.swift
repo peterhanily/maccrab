@@ -96,7 +96,7 @@ public struct V2IntelligenceWorkspace: View {
             // `maccrab.threat-intel.` prefix part A writes them under.
             // Reuses the provider's existing off-MainActor decode path.
             let allAlerts = await state.provider.alerts(limit: 200)
-            let matchRows = allAlerts.filter { $0.ruleId.hasPrefix(Self.iocMatchRulePrefix) }
+            let matchRows = allAlerts.filter { $0.ruleId.hasPrefix(Self.iocMatchRulePrefix) || $0.ruleId == "maccrab.dns.threat-intel-match" }
             await MainActor.run { self.matches = matchRows }
 
             async let p = state.provider.packages()
@@ -214,7 +214,7 @@ public struct V2IntelligenceWorkspace: View {
                     Text("Managed feeds")
                         .font(V2Theme.sectionTitle())
                         .foregroundStyle(V2Theme.primaryText)
-                    Text("Built-in: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, fetched every 4 hours, see the table below for status. To bring in commercial feeds, drop the IOCs into the threat_intel folder above; native VirusTotal / GreyNoise / OTX integrations are on the v1.11 roadmap (filed at github.com/peterhanily/maccrab/issues — comment with the feed you need most).")
+                    Text("Built-in: abuse.ch (URLhaus, MalwareBazaar, Feodo Tracker) — keyless, fetched every 4 hours, see the table below for status. To bring in commercial feeds, drop the IOCs into the threat_intel folder above; native VirusTotal / GreyNoise / OTX integrations are planned (vote at github.com/peterhanily/maccrab/issues — comment with the feed you need most).")
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -391,7 +391,7 @@ public struct V2IntelligenceWorkspace: View {
         .buttonStyle(.plain)
         .help(feed.isBuiltIn
               ? "Built-in. Click for details."
-              : "Coming in v1.11. Click to save your API key now.")
+              : "Planned. Click to save your API key now.")
         .sheet(item: $feedSheet) { selected in
             V2FeedConfigSheet(
                 feed: selected,
@@ -556,7 +556,7 @@ public struct V2IntelligenceWorkspace: View {
         case "ip-match":     return "IP"
         case "domain-match": return "Domain"
         case "url-match":    return "URL"
-        case "dns-match":    return "DNS"
+        case "dns-match", "maccrab.dns.threat-intel-match": return "DNS"
         default:             return suffix
         }
     }
@@ -980,7 +980,7 @@ public struct V2IntelligenceWorkspace: View {
                     // markdown-style `**bold**` instead — SwiftUI Text
                     // initialized from LocalizedStringKey renders
                     // `**…**` as bold natively.
-                    Text("Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Per-sink health checks land in v1.12.x; for now status reflects 'configured' / 'running' / 'installed'.")
+                    Text("Two surfaces: **Detected security tools** (other macOS security software MacCrab observed on this machine — Objective-See suite, Little Snitch, commercial EDR, etc.) and **Configured output sinks** (alert destinations you wired into `daemon_config.json` / `notifications.json` — Splunk, Slack, S3, etc.). Per-sink health checks are planned; for now status reflects 'configured' / 'running' / 'installed'.")
                         .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 .padding(16)
@@ -1180,7 +1180,7 @@ public struct V2FeedConfigSheet: View {
             if feed.isBuiltIn {
                 V2StatusChip("Built-in · always-on", kind: .healthy, icon: "checkmark.seal")
             } else {
-                V2StatusChip("Coming in v1.11 · accepting API keys now", kind: .info, icon: "clock")
+                V2StatusChip("Planned · accepting API keys now", kind: .info, icon: "clock")
             }
 
             Text(feed.description)
@@ -1215,7 +1215,7 @@ public struct V2FeedConfigSheet: View {
                             .foregroundStyle(V2Theme.critical)
                     }
                     if saved {
-                        Text("Saved to Keychain. The v1.11 integration will pick it up automatically when it ships.")
+                        Text("Saved to Keychain. The integration will pick it up automatically when it ships.")
                             .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.healthy)
                     }

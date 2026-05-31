@@ -216,11 +216,12 @@ struct MacCrabCtl {
         case "debug":
             await dispatchDebug(args: Array(args.dropFirst(2)))
         case "intel":
-            // Threat-intel maintenance subcommands. Today's only verb
-            // is `refresh`, which sends SIGHUP to the running daemon
-            // (handled by SignalHandlers.swift) — that triggers an
-            // immediate `ThreatIntelFeed.refreshNow` and a rule reload
-            // as a side effect. Used by the dashboard's Refresh button.
+            // Threat-intel maintenance subcommands (refresh / matches /
+            // status). `refresh` drops a refresh-intel request into the
+            // privileged inbox the System Extension polls (authorized by
+            // file-owner uid), with a same-uid maccrabd SIGUSR1 fallback;
+            // the daemon then runs ThreatIntelFeed.refreshNow. Used by
+            // the dashboard's Refresh button.
             let sub = args.dropFirst(2).first ?? "refresh"
             switch sub {
             case "refresh":
@@ -277,7 +278,7 @@ struct MacCrabCtl {
                 listIntelStatus()
             case "help", "-h", "--help":
                 print("usage: maccrabctl intel <subcommand>")
-                print("  refresh              trigger an immediate feed fetch (SIGUSR1)")
+                print("  refresh              trigger an immediate feed fetch")
                 print("  matches [--hours N]  list recent IOC-feed matches (default 24h)")
                 print("  status               feed freshness / last pull per feed")
             default:
