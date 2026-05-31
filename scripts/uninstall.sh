@@ -42,8 +42,22 @@ fi
 # Must run BEFORE the .app is removed, otherwise sysextd's ledger keeps
 # a "pending" entry forever (visible via `systemextensionsctl list`)
 # since the bundle it references gets deleted out from under it.
+# An ACTIVE Endpoint Security sysext can't be reliably torn down by
+# `systemextensionsctl uninstall` from a shell — OSSystemExtensionRequest
+# deactivation must be submitted by the SIGNED APP running as the console
+# user (and it shows a system approval modal, often completing only after
+# a reboot). So when the bundle is still present, ask the app to do it via
+# the maccrab://deactivate deep link; keep systemextensionsctl as fallback.
+if [ -d "$APP_PATH" ] && [ -n "${SUDO_USER:-}" ]; then
+    info "Asking MacCrab to deactivate its system extension (the reliable path)..."
+    info "  → Approve the macOS prompt in System Settings > General > Login Items & Extensions."
+    sudo -u "$SUDO_USER" open "maccrab://deactivate" 2>/dev/null \
+        || warn "Couldn't open the app — falling back to systemextensionsctl."
+    # Brief pause so the request reaches sysextd before we kill the app.
+    sleep 3
+fi
 if command -v systemextensionsctl >/dev/null 2>&1; then
-    info "Deactivating system extension..."
+    info "Deactivating system extension (fallback)..."
     # Best-effort: this can fail if the extension was never activated
     # (manual maccrabd-only install, or sysextd already cleaned it up).
     systemextensionsctl uninstall "$TEAM_ID" "$SYSEXT_ID" 2>/dev/null \
@@ -97,9 +111,26 @@ rm -f "$PREFIX/bin/maccrabctl" "$PREFIX/bin/maccrab-mcp" "$PREFIX/bin/maccrabd"
 rm -f "/opt/homebrew/bin/maccrabctl" "/opt/homebrew/bin/maccrab-mcp" "/opt/homebrew/bin/maccrabd"
 
 # ─── Step 6: MacCrab.app ─────────────────────────────────────────────
+# Note: with the v1.17 notification rearchitecture, removing the app
+# alone stops ALL notification banners regardless of sysext state — the
+# app (not the daemon) is the only notification poster now. The sysext
+# teardown below is for ledger hygiene + stopping detection.
 if [ -d "$APP_PATH" ]; then
     info "Removing $APP_PATH..."
     rm -rf "$APP_PATH"
+fi
+
+# ─── Step 7: Verify system-extension teardown ────────────────────────
+# sysext removal is async and frequently completes only after a reboot
+# ("terminated waiting to uninstall on reboot"). Give the operator
+# ground truth instead of best-effort silence.
+if command -v systemextensionsctl >/dev/null 2>&1; then
+    if systemextensionsctl list 2>/dev/null | grep -q "$SYSEXT_ID"; then
+        warn "System extension still present — likely pending removal on reboot."
+        warn "  → Reboot to finish, then confirm with: systemextensionsctl list"
+    else
+        info "System extension fully removed."
+    fi
 fi
 
 # ─── Step 7: Optional — data directory + keychain ────────────────────

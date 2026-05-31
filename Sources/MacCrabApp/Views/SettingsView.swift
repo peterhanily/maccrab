@@ -4,6 +4,8 @@
 // Application settings view accessible via Cmd+, or the status bar menu.
 
 import SwiftUI
+import AppKit
+import UserNotifications
 import MacCrabCore
 import MacCrabForensics
 import ServiceManagement
@@ -53,6 +55,11 @@ struct SettingsView: View {
     @AppStorage("storage.campaignsMaxSizeMB")    private var campaignsMaxSizeMB: Int = 50
 
     @AppStorage("retentionWindowDays") private var retentionWindowDays: Int = 30
+    /// v1.17 (issue #2): true when the OS has denied notification
+    /// authorization for MacCrab. Banners now come from the app via
+    /// UNUserNotificationCenter, so a denial silences them — surface it
+    /// in the notifications tab with a jump to System Settings.
+    @State private var notificationsOSDenied: Bool = false
     @State private var retentionConfirmShown: Bool = false
     /// v1.9.0 (audit UX-H6): in-app confirmation before submitting
     /// the deactivation request to the OS. macOS shows its own modal
@@ -410,6 +417,32 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 20) {
                 GroupBox(String(localized: "settings.macosNotifications", defaultValue: "macOS Notifications")) {
                     VStack(alignment: .leading, spacing: 12) {
+                        if notificationsOSDenied {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(String(localized: "settings.notificationsDenied",
+                                                defaultValue: "Notifications are turned off for MacCrab in System Settings."))
+                                        .font(.system(size: 12, weight: .medium))
+                                    Text(String(localized: "settings.notificationsDeniedHint",
+                                                defaultValue: "MacCrab can't show alert banners until you allow notifications. Detections are still recorded and visible in the dashboard."))
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                    Button(String(localized: "settings.openNotificationSettings",
+                                                  defaultValue: "Open System Settings → Notifications")) {
+                                        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+                                            NSWorkspace.shared.open(url)
+                                        }
+                                    }
+                                    .font(.system(size: 11))
+                                }
+                                Spacer()
+                            }
+                            .padding(8)
+                            .background(Color.orange.opacity(0.1))
+                            .cornerRadius(6)
+                        }
                         Toggle(String(localized: "settings.showNotifications", defaultValue: "Show notifications for detection alerts"), isOn: $alertNotifications)
                             // v1.11.0 (audit functionality HIGH): persist
                             // changes to ~/Library/Application Support/MacCrab/
@@ -426,6 +459,13 @@ struct SettingsView: View {
                             // (each SIGHUP runs an expensive retroactive
                             // scan + storage reload).
                             .onChange(of: alertNotifications) { _ in scheduleAlertNotificationSync() }
+                            .task {
+                                // Reflect the OS-level authorization (banners
+                                // are posted by the app via UNUserNotificationCenter).
+                                let status = await UNUserNotificationCenter.current()
+                                    .notificationSettings().authorizationStatus
+                                notificationsOSDenied = (status == .denied)
+                            }
 
                         if alertNotifications {
                             HStack {

@@ -146,6 +146,18 @@ struct MacCrabApp: App {
                 // safely there (error toast, no crash).
                 .onOpenURL { url in
                     NSApp.activate(ignoringOtherApps: true)
+                    // v1.17 (issue #2): uninstall-assist. OSSystemExtensionRequest
+                    // deactivation must be submitted by the signed app running as
+                    // the console user — scripts/uninstall.sh (sudo bash) can't do
+                    // it. The uninstaller opens maccrab://deactivate; we submit the
+                    // request here. It's async + shows a system approval modal and
+                    // may resolve only after a reboot, so we do NOT force-quit —
+                    // the user reads the status/reboot guidance and the uninstaller
+                    // verifies via `systemextensionsctl list`.
+                    if url.host == "deactivate" {
+                        sysextManager.deactivate()
+                        return
+                    }
                     NotificationCenter.default.post(
                         name: Notification.Name("maccrab.openURL"),
                         object: nil,
