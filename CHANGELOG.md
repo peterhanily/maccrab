@@ -3,6 +3,36 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.1] — 2026-05-31
+
+Fast-follow fixing notifications (GitHub issue #2) and two operator-reported
+bugs in v1.17.0.
+
+### Fixed
+
+- **Notifications are attributed to MacCrab and stop on uninstall.** They
+  were posted via `osascript` and showed up under macOS "System Events"
+  (so there was no "MacCrab" entry to turn off), and a lingering system
+  extension could keep firing them after an uninstall. Delivery now comes
+  from the signed app via `UNUserNotificationCenter`: banners appear as
+  **MacCrab** with a controllable entry in System Settings > Notifications,
+  and stop when the app is removed. If notification permission is denied,
+  the Notifications settings tab now says so and links to System Settings.
+- **Reload rules** no longer reports "Daemon not running" when the engine
+  is alive — the dashboard now reaches the root system extension through
+  its privileged inbox instead of an ineffective cross-user signal.
+- **Rule search** returns results immediately instead of briefly showing
+  an empty list while the rule index finishes loading.
+
+### Changed
+
+- OS notification banners are now delivered by the MacCrab app while it's
+  running (it's a normally-always-on menu-bar app). Detections are always
+  recorded to the dashboard regardless.
+
+Universal (Apple silicon + Intel), Developer ID signed and notarized.
+Minimum macOS 13.
+
 ## [1.17.0] — 2026-05-31
 
 First public release since v1.12.9. The headline is the on-demand
