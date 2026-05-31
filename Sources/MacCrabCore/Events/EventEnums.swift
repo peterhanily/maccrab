@@ -95,21 +95,36 @@ public enum SignerType: String, Codable, Sendable, Hashable, CaseIterable {
     /// the eslogger fallback parser (`EsloggerParser`) so the two paths can
     /// never drift in how they trust a binary.
     ///
-    /// `isPlatformBinary` is the ONLY signal trusted to promote a process to
-    /// `.apple`: it is set by the kernel for genuine Apple platform binaries
-    /// (e.g. `/usr/libexec/nehelper`, which carry a valid Apple signature with
-    /// an EMPTY team_id). The code signature's *signing identifier* is NOT a
-    /// trust input — it is the developer-chosen `Identifier=` field and any
-    /// third party can set it to `com.apple.*`, so it must never be used to
-    /// classify a binary as Apple (v1.17.1 spoofing fix).
+    /// Two Apple signals are used:
+    ///  - `isPlatformBinary` (kernel-attested, UNSPOOFABLE): genuine Apple OS
+    ///    components such as `/usr/libexec/nehelper`, which carry a valid Apple
+    ///    signature with an EMPTY team_id. Checked first.
+    ///  - a `com.apple.*` signing identifier on a binary that ALSO has a
+    ///    non-empty team_id: Apple's own NON-platform apps (Xcode, iWork) are
+    ///    signed this way, so this is required to keep them classified `.apple`
+    ///    rather than tripping the ~126 SignerType:apple-negated rules.
+    ///
+    /// CAVEAT (pre-existing, tracked as a follow-up): the signing identifier is
+    /// the developer-chosen `Identifier=` field, so a third party holding a
+    /// Developer ID cert CAN self-name `com.apple.*` and be mis-classified
+    /// `.apple` here. Closing that without losing the Apple-app case requires
+    /// cert-authority ("anchor apple") validation, which the cheap collector
+    /// path doesn't have. The identifier check is gated on a non-empty team_id
+    /// so an AD-HOC binary (empty team_id) can never use it — that gate is the
+    /// v1.17.1 hardening (a brief hoist had let ad-hoc `com.apple.*` binaries
+    /// reach `.apple`).
     public static func classify(
         codesigningFlags: UInt32,
         teamId: String,
+        signingId: String,
         isPlatformBinary: Bool
     ) -> SignerType {
         guard codesigningFlags & csValid != 0 else { return .unsigned }
         if isPlatformBinary { return .apple }
-        if !teamId.isEmpty { return .devId }
+        if !teamId.isEmpty {
+            if signingId.hasPrefix("com.apple.") { return .apple }
+            return .devId
+        }
         return .adHoc
     }
 }

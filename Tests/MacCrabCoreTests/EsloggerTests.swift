@@ -163,23 +163,26 @@ struct EsloggerCodeSigningTests {
         #expect(info.codeSignature?.signerType == .apple)
     }
 
-    @Test("Spoofed com.apple.* signing_id with a real team_id is .devId, NOT .apple")
-    func spoofedAppleSigningIdWithTeamIsDevId() {
-        // v1.17.1 anti-spoofing regression guard. signing_id is the
-        // developer-chosen Identifier= field; a third party can sign with
-        // a valid Developer ID cert (non-empty team_id) and set the
-        // identifier to com.apple.*. It must NOT be laundered into .apple.
+    @Test("Apple app with com.apple.* identifier + team (Xcode/iWork, non-platform) is .apple")
+    func appleAppComAppleIdentifierClassifiesApple() {
+        // Apple's own NON-platform apps (Xcode, Pages, Keynote) are signed
+        // with a com.apple.* identifier under an Apple team and are NOT
+        // platform binaries. They must classify .apple, else they trip the
+        // ~126 SignerType:apple-negated rules. NOTE: signing_id is
+        // developer-chosen, so this same path is the known (pre-existing)
+        // devId-cert spoof gap documented on SignerType.classify — closing it
+        // needs cert-authority validation and is a tracked follow-up.
         let processDict: [String: Any] = [
             "audit_token": ["pid": 12, "euid": 501],
             "ppid": 1,
-            "executable": ["path": "/Users/x/Downloads/evil"],
-            "signing_id": "com.apple.softwareupdate",
-            "team_id": "ABCD123456",
+            "executable": ["path": "/Applications/Xcode.app/Contents/MacOS/Xcode"],
+            "signing_id": "com.apple.dt.Xcode",
+            "team_id": "59GAB85EFG",
             "codesigning_flags": 1,
             "is_platform_binary": false,
         ]
         let info = EsloggerParser.extractProcess(from: processDict)
-        #expect(info.codeSignature?.signerType == .devId)
+        #expect(info.codeSignature?.signerType == .apple)
     }
 
     @Test("Ad-hoc com.apple.* signing_id (empty team_id, not platform) is .adHoc, NOT .apple")

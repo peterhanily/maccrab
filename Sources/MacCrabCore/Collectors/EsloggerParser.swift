@@ -153,14 +153,15 @@ public enum EsloggerParser {
         let isPlatformBinary = bool(processDict, "is_platform_binary")
 
         // v1.17.1: classify via the shared SignerType.classify so this
-        // fallback path stays in parity with ESHelpers. Previously the Apple
-        // check was nested inside `!teamId.isEmpty`, so Apple PLATFORM
-        // binaries (empty team_id) were mis-tagged .adHoc here; and the old
-        // signing_id prefix check was spoofable. is_platform_binary is the
-        // only Apple signal now.
+        // fallback path stays in parity with ESHelpers. Previously Apple
+        // PLATFORM binaries (empty team_id) were mis-tagged .adHoc here
+        // because the Apple check was nested inside `!teamId.isEmpty`; the
+        // hoisted is_platform_binary check fixes that. See SignerType.classify
+        // for the full trust model.
         let signerType = SignerType.classify(
             codesigningFlags: flags,
             teamId: teamId,
+            signingId: signingId,
             isPlatformBinary: isPlatformBinary
         )
 

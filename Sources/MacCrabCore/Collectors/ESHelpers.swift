@@ -59,12 +59,12 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
     let teamId = esStringToSwift(p.team_id)
 
     // v1.17.1: classify via the shared SignerType.classify so the ES and
-    // eslogger paths can't drift. is_platform_binary (kernel-attested) is the
-    // only Apple signal — the signing_id is attacker-controllable and must
-    // not promote a binary to .apple.
+    // eslogger paths can't drift. See SignerType.classify for the trust model
+    // (kernel platform-binary + team-gated com.apple.* identifier).
     let signerType = SignerType.classify(
         codesigningFlags: p.codesigning_flags,
         teamId: teamId,
+        signingId: signingId,
         isPlatformBinary: p.is_platform_binary
     )
 

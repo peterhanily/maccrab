@@ -48,8 +48,6 @@ detection:
     # match; the home-relative trees use |contains because the rule can't know
     # $HOME. An unsigned drop into node_modules is still caught by
     # node_modules_spawns_binary / package_drops_native_binary_in_pure_js_pkg.
-    # (Removed the bare '/TemporaryDirectory.' token — it matched arbitrary
-    # attacker paths like ~/Downloads/TemporaryDirectory.x/payload.)
     filter_devtools_system:
         Image|startswith:
             - '/opt/homebrew/'
@@ -63,9 +61,16 @@ detection:
             - '/.venv/'
             - '/site-packages/'
             - '/.local/bin/'
+            - '/.local/share/uv/'    # uv-managed CPython interpreters
+            - '/.local/pipx/'        # pipx app virtualenvs
             - '/.pyenv/'
             - '/.rbenv/'
             - '/.build/'
+            # SwiftPM compiles + RUNS the Package.swift manifest as a Mach-O
+            # from a scratch dir under macOS TMPDIR's .../T/. Anchored on '/T/'
+            # so an attacker path (~/Downloads/TemporaryDirectory.x/payload,
+            # no '/T/' parent) still fires.
+            - '/T/TemporaryDirectory.'
     filter_xcode:
         Image|startswith:
             - '/Applications/Xcode'
