@@ -1193,6 +1193,7 @@ enum DaemonTimers {
                 let deleteAlertReqs = files.filter { $0.hasPrefix("delete-alert-") && $0.hasSuffix(".json") }
                 let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
                 let refreshIntelReqs = files.filter { $0.hasPrefix("refresh-intel-") && $0.hasSuffix(".json") }
+                let reloadRulesReqs = files.filter { $0.hasPrefix("reload-rules-") && $0.hasSuffix(".json") }
                 let flushRequests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
@@ -1200,6 +1201,7 @@ enum DaemonTimers {
                 await handleDeleteAlertRequests(deleteAlertReqs, inboxDir: inboxDir, state: state)
                 await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
                 await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
+                await handleReloadRulesRequests(reloadRulesReqs, inboxDir: inboxDir, state: state)
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
             }
         }
@@ -1375,6 +1377,37 @@ enum DaemonTimers {
         print("[inbox] refresh-intel: \(names.count) request(s) — running ThreatIntelFeed.refreshNow (coalesced)")
         await state.threatIntel.refreshNow()
         print("[inbox] refresh-intel: refreshNow complete")
+    }
+
+    /// Handle `reload-rules-<token>.json` requests. The app can't pkill
+    /// the root sysext cross-uid (and a sandboxed app can't spawn pkill
+    /// at all), so the dashboard's Reload button drops a request here
+    /// instead. We reuse the existing SIGHUP rule-reload path in-process
+    /// by raising SIGHUP to ourselves — no logic duplication: the
+    /// SignalHandlers SIGHUP DispatchSource does the full single /
+    /// sequence / graph reload + suppression refresh. Coalesced: many
+    /// requests in one tick raise a single SIGHUP.
+    private static func handleReloadRulesRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        var anyAuthorized = false
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] reload-rules \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "reload-rules", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            anyAuthorized = true
+            auditLogInbox(state: state, prefix: "reload-rules", id: "-", uid: uid, result: "ok")
+        }
+        guard anyAuthorized else { return }
+        print("[inbox] reload-rules: \(names.count) request(s) — raising SIGHUP to self")
+        kill(getpid(), SIGHUP)
     }
 
     private static func handleSuppressCampaignRequests(

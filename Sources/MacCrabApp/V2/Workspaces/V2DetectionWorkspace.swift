@@ -80,7 +80,18 @@ public struct V2DetectionWorkspace: View {
             let haystack = self.rulesHaystack
             let result: [V2MockRule] = await Task.detached(priority: .userInitiated) {
                 if q.isEmpty { return snapshot }
-                return snapshot.filter { (haystack[$0.id] ?? "").contains(q) }
+                // Fall back to an inline field concat when the precomputed
+                // haystack hasn't been built yet (it's populated late in the
+                // rules-load task, after extensions()/mcpServers()). Without
+                // this fallback an early search runs against an empty haystack
+                // and returns zero matches until the next ~5s refresh tick —
+                // i.e. the filter looks broken. Mirrors the haystack formula.
+                return snapshot.filter { rule in
+                    let h = haystack[rule.id]
+                        ?? (rule.id + " " + rule.title + " " + rule.category + " "
+                            + rule.mitre.joined(separator: " ")).lowercased()
+                    return h.contains(q)
+                }
             }.value
             await MainActor.run {
                 self.debouncedRuleQuery = q
