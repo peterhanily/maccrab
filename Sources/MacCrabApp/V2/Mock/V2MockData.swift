@@ -250,6 +250,11 @@ public struct V2MockFeed: Identifiable, Sendable, Hashable {
     public let lastFetch: Date
     public let status: V2StatusLevel
     public let staleness: TimeInterval
+    /// Most recent feed-update failure reason, if any (e.g.
+    /// "HTTP 503" or "0 records parsed (empty feed)"). nil when the
+    /// feed's last attempt succeeded. Surfaced so a frozen IOC count
+    /// reads as a visible error instead of a silent stall.
+    public var lastError: String? = nil
 }
 
 // MARK: - Browser extension

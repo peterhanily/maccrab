@@ -196,6 +196,64 @@ extension MacCrabCtl {
         }
     }
 
+    /// IOC-feed matches: alerts whose ruleId carries the
+    /// `maccrab.threat-intel.` prefix part A writes them under. Reads
+    /// the alert store directly (read-only — no daemon signal needed).
+    static func listIntelMatches(hours: Double) async {
+        let prefix = "maccrab.threat-intel."
+        do {
+            let store = try AlertStore(directory: maccrabDataDir())
+            let since = Date().addingTimeInterval(-hours * 3600)
+            let raw = try await store.alerts(since: since, limit: 500)
+            let matches = raw.filter {
+                $0.ruleId.hasPrefix(prefix) || $0.ruleId == "maccrab.dns.threat-intel-match"
+            }
+            if matches.isEmpty {
+                print("No IOC matches in the last \(Int(hours))h.")
+                return
+            }
+            print("\(matches.count) IOC match(es) — last \(Int(hours))h")
+            print("══════════════════════════════════════════════════════════════")
+            for m in matches {
+                let type: String = {
+                    let s = m.ruleId.hasPrefix(prefix) ? String(m.ruleId.dropFirst(prefix.count)) : m.ruleId
+                    switch s {
+                    case "hash-match":   return "hash"
+                    case "ip-match":     return "ip"
+                    case "domain-match": return "domain"
+                    case "url-match":    return "url"
+                    case "dns-match":    return "dns"
+                    default:             return s
+                    }
+                }()
+                print("\(m.severity.coloredLabel) \(formatDate(m.timestamp)) [\(type)] \(m.ruleTitle)")
+                if let d = m.description, !d.isEmpty { print("   \(d)") }
+                print("   Process: \(m.processName ?? "?") (\(m.processPath ?? "?"))")
+                print()
+            }
+        } catch {
+            print("Error reading IOC matches: \(error)"); exit(1)
+        }
+    }
+
+    /// Threat-intel feed freshness: entry counts + last pull per feed,
+    /// read from the on-disk feed cache (same source the dashboard uses).
+    static func listIntelStatus() {
+        guard let iocs = ThreatIntelFeed.cachedIOCs(at: (maccrabDataDir() as NSString).appendingPathComponent("threat_intel")) else {
+            print("No threat-intel cache found. Run 'maccrabctl intel refresh' to fetch feeds.")
+            return
+        }
+        print("Threat-intel feeds — \(iocs.hashes.count) hashes · \(iocs.ips.count) IPs · \(iocs.domains.count) domains · \(iocs.urls.count) URLs")
+        print("══════════════════════════════════════════════════════════════")
+        let now = Date()
+        for (name, last) in iocs.perFeedLastUpdate.sorted(by: { $0.key < $1.key }) {
+            let age = now.timeIntervalSince(last)
+            let stale = age > 6 * 60 * 60
+            let label = stale ? "STALE" : "fresh"
+            print("  [\(label)] \(name) — last pull \(formatDate(last)) (\(Int(age / 60))m ago)")
+        }
+    }
+
     static func watchAlerts() async {
         // LOCALIZE: "Watching for new alerts... (Ctrl+C to stop)"
         print("Watching for new alerts... (Ctrl+C to stop)")

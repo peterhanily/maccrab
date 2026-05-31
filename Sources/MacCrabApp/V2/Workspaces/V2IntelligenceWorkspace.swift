@@ -8,6 +8,10 @@ import MacCrabCore
 public struct V2IntelligenceWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @State private var feeds: [V2MockFeed] = []
+    /// Last time any feed actually pulled fresh records — surfaced in
+    /// the summary row so the operator can SEE the feeds working
+    /// rather than guessing from a frozen IOC count.
+    @State private var lastSuccessfulPull: Date? = nil
     @State private var packages: [V2MockPackage] = []
     @State private var selectedPackage: V2MockPackage?
     @State private var packageScanInProgress: Bool = false
@@ -20,6 +24,11 @@ public struct V2IntelligenceWorkspace: View {
     /// managed-feeds card showed read-only chips that the user
     /// couldn't click to configure / enable / supply API keys.
     @State private var feedSheet: V2FeedConfig? = nil
+    /// Recent IOC-match alerts (part A records each match as an Alert
+    /// whose ruleId starts with `maccrab.threat-intel.`). Drives the
+    /// "Matches (24h)" metric and the IOC-matches table. Loaded from
+    /// the alert store via the provider on every workspace tick.
+    @State private var matches: [V2MockAlert] = []
 
     public init(state: V2DashboardState) { self.state = state }
 
@@ -74,10 +83,21 @@ public struct V2IntelligenceWorkspace: View {
             // that lets PackageScanner's 5-min cache warm before the
             // refreshTick bump fires the next task body.
             let dataDirHint = (state.provider as? V2LiveDataProvider)?.dataDir
-            let feedsResult = await Task.detached(priority: .userInitiated) {
-                V2LiveDataProvider.loadFeedsFromCache(preferring: dataDirHint)
+            let (feedsResult, pullResult) = await Task.detached(priority: .userInitiated) {
+                (V2LiveDataProvider.loadFeedsFromCache(preferring: dataDirHint),
+                 V2LiveDataProvider.lastSuccessfulPull(preferring: dataDirHint))
             }.value
-            await MainActor.run { self.feeds = feedsResult }
+            await MainActor.run {
+                self.feeds = feedsResult
+                self.lastSuccessfulPull = pullResult
+            }
+
+            // IOC matches: alerts whose ruleId carries the
+            // `maccrab.threat-intel.` prefix part A writes them under.
+            // Reuses the provider's existing off-MainActor decode path.
+            let allAlerts = await state.provider.alerts(limit: 200)
+            let matchRows = allAlerts.filter { $0.ruleId.hasPrefix(Self.iocMatchRulePrefix) }
+            await MainActor.run { self.matches = matchRows }
 
             async let p = state.provider.packages()
             async let i = state.provider.integrations()
@@ -113,6 +133,7 @@ public struct V2IntelligenceWorkspace: View {
                 apiKeysHelpCard
                 feedsSummaryRow
                 feedsTable
+                matchesTable
             }
             .padding(16)
         }
@@ -406,6 +427,22 @@ public struct V2IntelligenceWorkspace: View {
         ))
     }
 
+    /// "Last successful pull" presentation. Reads the cache-backed
+    /// `lastSuccessfulPull`: nil → never pulled (only the bundled set
+    /// is live); >12h → warn the operator the feeds may be wedged.
+    private var lastPullValue: String {
+        guard let pull = lastSuccessfulPull else { return "never" }
+        return V2TimeFormat.relative(pull)
+    }
+    private var lastPullTrend: String {
+        guard let pull = lastSuccessfulPull else { return "bundled only" }
+        return -pull.timeIntervalSinceNow > 12 * 60 * 60 ? "check feeds" : "fresh intel"
+    }
+    private var lastPullTrendKind: V2ChipKind {
+        guard let pull = lastSuccessfulPull else { return .warning }
+        return -pull.timeIntervalSinceNow > 12 * 60 * 60 ? .warning : .healthy
+    }
+
     private var feedsSummaryRow: some View {
         let totalIOCs = feeds.reduce(0) { $0 + $1.entries }
         let staleCount = feeds.filter { $0.staleness > 60 * 60 }.count
@@ -423,10 +460,10 @@ public struct V2IntelligenceWorkspace: View {
                        trend: feeds.isEmpty ? "—" : "across \(feeds.count) feeds",
                        trendKind: .info,
                        icon: "shield.checkerboard", iconColor: V2Theme.dataAccent)
-            metricCard(title: "Matches (24h)", value: "—",
-                       trend: "intel matches",
-                       trendKind: .neutral,
-                       icon: "burst.fill", iconColor: V2Theme.dataAccent)
+            metricCard(title: "Last pull", value: lastPullValue,
+                       trend: lastPullTrend,
+                       trendKind: lastPullTrendKind,
+                       icon: "arrow.down.circle", iconColor: V2Theme.dataAccent)
             metricCard(title: "Stale > 1h", value: "\(staleCount)",
                        trend: staleCount == 0 ? "all fresh" : "review feeds",
                        trendKind: staleCount == 0 ? .healthy : .warning,
@@ -440,15 +477,15 @@ public struct V2IntelligenceWorkspace: View {
                 Text("Threat intel feeds").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
                 V2ActionButton("Refresh now", icon: "arrow.clockwise", style: .secondary,
-                               tooltip: "Signal the daemon (SIGHUP) to fetch URLhaus / MalwareBazaar / Feodo immediately") {
+                               tooltip: "Queue a refresh for the engine to fetch URLhaus / MalwareBazaar / Feodo") {
                     Task {
                         let ok = await state.provider.refreshThreatIntel()
                         await MainActor.run {
                             if ok {
                                 state.showToast(V2Toast(
                                     kind: .info,
-                                    title: "Refresh signaled",
-                                    detail: "Feeds will update within ~5 seconds"
+                                    title: "Refresh queued",
+                                    detail: "Feeds will update within ~10 seconds"
                                 ))
                             } else {
                                 state.showToast(V2Toast(
@@ -482,16 +519,91 @@ public struct V2IntelligenceWorkspace: View {
                         V2TableCellText(V2TimeFormat.relative(f.lastFetch), primary: false)
                     },
                     V2DataColumn(id: "status", title: "Status", width: .fixed(110)) { f in
-                        V2StatusChip(
-                            f.staleness > 60 * 60 ? "Stale" : "Healthy",
-                            kind: f.staleness > 60 * 60 ? .warning : .healthy
-                        )
+                        let label = f.lastError != nil ? "Failing"
+                            : (f.staleness > 60 * 60 ? "Stale" : "Healthy")
+                        let kind: V2ChipKind = (f.lastError != nil || f.staleness > 60 * 60)
+                            ? .warning : .healthy
+                        V2StatusChip(label, kind: kind)
+                    },
+                    V2DataColumn(id: "error", title: "Last error", width: .flexible(min: 160)) { f in
+                        V2TableCellText(f.lastError ?? "—", primary: false)
                     },
                 ],
                 items: feeds,
                 selection: .constant(nil)
             )
             .frame(minHeight: 280)
+        }
+    }
+
+    /// ruleId prefix part A writes IOC-match alerts under. The match
+    /// type (Hash / IP / Domain / URL / DNS) is the suffix after this.
+    static let iocMatchRulePrefix = "maccrab.threat-intel."
+
+    /// Count of IOC matches in the last 24h — drives the metric card.
+    private var matches24hCount: Int {
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        return matches.filter { $0.timestamp >= cutoff }.count
+    }
+
+    /// Map a `maccrab.threat-intel.<suffix>` ruleId to a short IOC type.
+    private func iocType(forRuleId ruleId: String) -> String {
+        let suffix = ruleId.hasPrefix(Self.iocMatchRulePrefix)
+            ? String(ruleId.dropFirst(Self.iocMatchRulePrefix.count))
+            : ruleId
+        switch suffix {
+        case "hash-match":   return "Hash"
+        case "ip-match":     return "IP"
+        case "domain-match": return "Domain"
+        case "url-match":    return "URL"
+        case "dns-match":    return "DNS"
+        default:             return suffix
+        }
+    }
+
+    /// Table of recent IOC matches: what the indicator hit (ruleTitle),
+    /// its type, the indicator + source/family (description), the
+    /// process it touched, and when. Reads from `matches`, populated
+    /// in the workspace `.task` from the alert store.
+    private var matchesTable: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("IOC matches").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Spacer()
+                Text(matches.isEmpty ? "none in window" : "\(matches.count) in last 7d")
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+            }
+            if matches.isEmpty {
+                Text("No threat-intel feed matches recorded. When a process touches a known-bad hash, IP, domain or URL from the loaded feeds, the hit appears here.")
+                    .font(V2Theme.body())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .v2Panel()
+            } else {
+                V2DataTable(
+                    columns: [
+                        V2DataColumn(id: "hit", title: "What it hit", width: .flexible(min: 200)) { m in
+                            V2TableCellText(m.title)
+                        },
+                        V2DataColumn(id: "type", title: "Type", width: .fixed(90)) { m in
+                            V2StatusChip(iocType(forRuleId: m.ruleId), kind: .data)
+                        },
+                        V2DataColumn(id: "indicator", title: "Indicator / source", width: .flexible(min: 220)) { m in
+                            V2TableCellText(m.description, primary: false, mono: true, lineLimit: 2)
+                        },
+                        V2DataColumn(id: "process", title: "Process", width: .fixed(180)) { m in
+                            V2TableCellText(m.process, primary: false)
+                        },
+                        V2DataColumn(id: "when", title: "When", width: .fixed(120)) { m in
+                            V2TableCellText(V2TimeFormat.relative(m.timestamp), primary: false)
+                        },
+                    ],
+                    items: matches,
+                    selection: .constant(nil)
+                )
+                .frame(minHeight: 220)
+            }
         }
     }
 

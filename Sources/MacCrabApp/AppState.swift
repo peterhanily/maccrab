@@ -555,7 +555,10 @@ final class AppState: ObservableObject {
     /// Pure derived state; no extra DB query needed.
     var threatIntelMatches: [AlertViewModel] {
         dashboardAlerts.filter { alert in
-            alert.ruleId == "maccrab.threat-intel.hash-match"
+            // Part A writes all IOC matches under the
+            // `maccrab.threat-intel.` prefix; keep the legacy DNS id
+            // for pre-existing alerts that used the old naming.
+            alert.ruleId.hasPrefix("maccrab.threat-intel.")
                 || alert.ruleId == "maccrab.dns.threat-intel-match"
         }
     }
@@ -567,10 +570,14 @@ final class AppState: ObservableObject {
     /// invalidates the mtime gate so the next poll picks up the new
     /// snapshot regardless of timestamps.
     func refreshThreatIntelNow() async {
-        // SIGUSR1 to both candidate process names — pkill is silent
-        // when the named process doesn't exist, so this is safe to
-        // run in either dev or release context.
-        _ = runShell(["/usr/bin/pkill", "-USR1", "-f", "com.maccrab.agent"])
+        // v1.17: drop a `refresh-intel` request into the root daemon's
+        // inbox (the file-IPC channel the sysext polls every 5s). The
+        // pkill -USR1 below fails EPERM against a uid-0 sysext, so the
+        // inbox request is the real release-path trigger; pkill stays
+        // ONLY as the same-uid `maccrabd` dev fallback.
+        _ = V2LiveDataProvider.writeInboxRefreshRequest(inboxDir: dataDir + "/inbox")
+        // SIGUSR1 to the dev daemon — pkill is silent when the named
+        // process doesn't exist, so this is safe in either context.
         _ = runShell(["/usr/bin/pkill", "-USR1", "-x", "maccrabd"])
 
         // Drop the mtime gate so the next refresh re-decodes even if

@@ -73,8 +73,15 @@ public actor ThreatIntelFeed {
     private var domainRecords: [String: IOCRecord] = [:]
     private var urlRecords: [String: IOCRecord] = [:]
 
-    /// When feeds were last updated.
+    /// When a feed refresh was last *attempted* (success or not).
     private var lastUpdate: Date?
+
+    /// When at least one feed last parsed ≥1 record on a refresh —
+    /// i.e. the last time we actually pulled fresh intel rather than
+    /// just running the timer. Distinct from `lastUpdate` so the
+    /// dashboard can show "last successful pull 12 min ago" even when
+    /// the most recent attempt hit empty/200 bodies and was rejected.
+    private var lastSuccessfulPull: Date?
 
     /// Per-feed last-success timestamps so the dashboard can show
     /// "URLhaus updated 12 min ago, MalwareBazaar updated 4 h ago".
@@ -358,6 +365,11 @@ public actor ThreatIntelFeed {
         public let domains: [IOCRecord]
         public let urls: [IOCRecord]
         public let lastUpdate: Date?
+        /// Last time ANY feed actually parsed ≥1 record. Lets the
+        /// dashboard show a truthful "last successful pull" even when
+        /// the most recent attempt was an empty/200 body that we
+        /// rejected (so `lastUpdate` advanced but no intel changed).
+        public let lastSuccessfulPull: Date?
         /// Per-feed health: keyed by feed name, tuple of last success
         /// + last error timestamp + reason. Lets the dashboard say
         /// "URLhaus failed: 503 at HH:MM" instead of just stalling.
@@ -374,6 +386,7 @@ public actor ThreatIntelFeed {
             domains: cache.domains,
             urls: cache.urls,
             lastUpdate: cache.lastUpdate,
+            lastSuccessfulPull: cache.lastSuccessfulPull,
             perFeedLastUpdate: cache.perFeedLastUpdate ?? [:],
             perFeedLastError: cache.perFeedLastError ?? [:]
         )
@@ -616,10 +629,13 @@ public actor ThreatIntelFeed {
     private func updateAllFeeds() async {
         logger.info("Updating threat intelligence feeds…")
         var totalNew = 0
+        var anySuccess = false
 
-        totalNew += await updateFeodoTracker()
-        totalNew += await updateURLhaus()
-        totalNew += await updateMalwareBazaar()
+        let feodo = await updateFeodoTracker()
+        let urlhaus = await updateURLhaus()
+        let bazaar = await updateMalwareBazaar()
+        totalNew += feodo.added + urlhaus.added + bazaar.added
+        anySuccess = feodo.success || urlhaus.success || bazaar.success
 
         // After every refresh: drop records older than maxAge, then
         // hard-cap each category by lastSeenInFeed (drop the oldest).
@@ -629,6 +645,11 @@ public actor ThreatIntelFeed {
         enforceCaps()
 
         lastUpdate = Date()
+        // Only advance the "last successful pull" marker when at least
+        // one feed actually parsed records. A cycle where every feed
+        // returned an empty/200 body keeps the prior good marker so the
+        // operator sees the real freshness, not a freshly-stamped lie.
+        if anySuccess { lastSuccessfulPull = Date() }
         saveCache()
 
         let totalCount = hashRecords.count + ipRecords.count + domainRecords.count + urlRecords.count
@@ -643,12 +664,17 @@ public actor ThreatIntelFeed {
     /// Switched from `ipblocklist_recommended.txt` (~30-300 entries)
     /// to `ipblocklist.csv` (full active C2 set, typically 1k-5k entries).
     /// CSV columns: first_seen,dst_ip,dst_port,c2_status,last_online,malware
-    private func updateFeodoTracker() async -> Int {
+    private func updateFeodoTracker() async -> (added: Int, success: Bool) {
         let url = "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
-        guard let lines = await fetchLines(url: url, feedName: "Feodo") else { return 0 }
+        // fetchLines records its own error (HTTP non-2xx / exception)
+        // and returns nil — leave the prior good cache + marker intact.
+        guard let lines = await fetchLines(url: url, feedName: "Feodo") else {
+            return (0, false)
+        }
 
         let now = Date()
         var added = 0
+        var parsed = 0
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
@@ -659,6 +685,7 @@ public actor ThreatIntelFeed {
             let family = cols[5].isEmpty ? nil : cols[5]
             guard !ip.isEmpty, !ip.contains(",") else { continue }
 
+            parsed += 1
             let isNew = ipRecords[ip] == nil
             ipRecords[ip] = IOCRecord(
                 value: ip, source: "Feodo",
@@ -667,20 +694,31 @@ public actor ThreatIntelFeed {
             )
             if isNew { added += 1 }
         }
+        // A 200 with an empty / unparseable body parses ZERO records.
+        // Treat that as a failure: do NOT stamp the success marker (so
+        // we don't freeze the count at the bundled set and report a
+        // fake "just updated") and surface the reason on the dashboard.
+        guard parsed > 0 else {
+            recordFeedError("Feodo", reason: "0 records parsed (empty feed)")
+            return (0, false)
+        }
         perFeedLastUpdate["Feodo"] = now
         perFeedLastError["Feodo"] = nil
         logger.info("Feodo Tracker: \(added) new C2 IPs (total \(self.ipRecords.count))")
-        return added
+        return (added, true)
     }
 
     /// URLhaus — full CSV of online URLs with threat + malware family + tags.
     /// CSV columns: id,dateadded,url,url_status,last_online,threat,tags,urlhaus_link,reporter
-    private func updateURLhaus() async -> Int {
+    private func updateURLhaus() async -> (added: Int, success: Bool) {
         let url = "https://urlhaus.abuse.ch/downloads/csv_online/"
-        guard let lines = await fetchLines(url: url, feedName: "URLhaus") else { return 0 }
+        guard let lines = await fetchLines(url: url, feedName: "URLhaus") else {
+            return (0, false)
+        }
 
         let now = Date()
         var added = 0
+        var parsed = 0
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
@@ -692,6 +730,7 @@ public actor ThreatIntelFeed {
             let tags = cols[6].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             guard !urlValue.isEmpty else { continue }
 
+            parsed += 1
             let urlRec = IOCRecord(
                 value: urlValue, source: "URLhaus",
                 firstSeen: firstSeen, lastSeenInFeed: now,
@@ -723,21 +762,28 @@ public actor ThreatIntelFeed {
                 domainRecords[host] = dRec
             }
         }
+        guard parsed > 0 else {
+            recordFeedError("URLhaus", reason: "0 records parsed (empty feed)")
+            return (0, false)
+        }
         perFeedLastUpdate["URLhaus"] = now
         perFeedLastError["URLhaus"] = nil
         logger.info("URLhaus: \(added) new entries (total \(self.urlRecords.count) urls, \(self.domainRecords.count) domains)")
-        return added
+        return (added, true)
     }
 
     /// MalwareBazaar — full CSV of recent samples with file_type + signature + tags.
     /// CSV columns: first_seen_utc,sha256_hash,md5_hash,sha1_hash,reporter,file_name,
     ///              file_type_guess,mime_type,signature,clamav,vtpercent,imphash,…,tags
-    private func updateMalwareBazaar() async -> Int {
+    private func updateMalwareBazaar() async -> (added: Int, success: Bool) {
         let url = "https://bazaar.abuse.ch/export/csv/recent/"
-        guard let lines = await fetchLines(url: url, feedName: "MalwareBazaar") else { return 0 }
+        guard let lines = await fetchLines(url: url, feedName: "MalwareBazaar") else {
+            return (0, false)
+        }
 
         let now = Date()
         var added = 0
+        var parsed = 0
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
@@ -755,6 +801,7 @@ public actor ThreatIntelFeed {
 
             guard hash.count == 64, hash.allSatisfy({ $0.isHexDigit }) else { continue }
 
+            parsed += 1
             let isNew = hashRecords[hash] == nil
             hashRecords[hash] = IOCRecord(
                 value: hash, source: "MalwareBazaar",
@@ -764,10 +811,14 @@ public actor ThreatIntelFeed {
             )
             if isNew { added += 1 }
         }
+        guard parsed > 0 else {
+            recordFeedError("MalwareBazaar", reason: "0 records parsed (empty feed)")
+            return (0, false)
+        }
         perFeedLastUpdate["MalwareBazaar"] = now
         perFeedLastError["MalwareBazaar"] = nil
         logger.info("MalwareBazaar: \(added) new hashes (total \(self.hashRecords.count))")
-        return added
+        return (added, true)
     }
 
     // MARK: - Cap + age eviction
@@ -923,6 +974,7 @@ public actor ThreatIntelFeed {
             domains: Array(domainRecords.values),
             urls: Array(urlRecords.values),
             lastUpdate: lastUpdate,
+            lastSuccessfulPull: lastSuccessfulPull,
             perFeedLastUpdate: perFeedLastUpdate,
             perFeedLastError: perFeedLastError
         )
@@ -947,6 +999,7 @@ public actor ThreatIntelFeed {
         for r in cache.domains  { domainRecords[r.value] = r }
         for r in cache.urls     { urlRecords[r.value]    = r }
         lastUpdate = cache.lastUpdate
+        lastSuccessfulPull = cache.lastSuccessfulPull
         perFeedLastUpdate = cache.perFeedLastUpdate ?? [:]
         perFeedLastError = cache.perFeedLastError ?? [:]
 
@@ -1023,6 +1076,7 @@ public actor ThreatIntelFeed {
         let domains: [IOCRecord]
         let urls: [IOCRecord]
         let lastUpdate: Date?
+        let lastSuccessfulPull: Date?
         let perFeedLastUpdate: [String: Date]?
         let perFeedLastError: [String: FeedError]?
     }

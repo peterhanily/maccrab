@@ -224,30 +224,31 @@ struct MacCrabCtl {
             let sub = args.dropFirst(2).first ?? "refresh"
             switch sub {
             case "refresh":
-                // v1.12.5 fix: `-f` is mandatory. The sysext's process
-                // basename (Darwin's 15-char p_comm) is the bundle
-                // executable name; pkill without `-f` matches against
-                // that and never sees the bundle identifier. Every
-                // other call site in the codebase uses `-f` —
-                // AppState.swift:556 sends SIGUSR1 the same way. The
-                // signal also has to be SIGUSR1, not SIGHUP: the daemon
-                // wires SIGUSR1 to ThreatIntelFeed.refreshNow + a rule
-                // reload, while SIGHUP is reserved for the rule-reload
-                // mtime watcher channel. Sending SIGHUP via pkill from
-                // a user-context process to a uid-0 sysext also returns
-                // EPERM — confirms the user-visible "exit 1" we saw on
-                // v1.12.4.
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-                proc.arguments = ["-USR1", "-f", "com.maccrab.agent"]
-                proc.standardOutput = FileHandle.nullDevice
-                proc.standardError = FileHandle.nullDevice
-                try? proc.run()
-                proc.waitUntilExit()
-                if proc.terminationStatus == 0 {
-                    print("Refresh requested (SIGUSR1). Daemon will fetch URLhaus / MalwareBazaar / Feodo within ~5s.")
+                // v1.17 fix: drop a `refresh-intel` request into the root
+                // daemon's inbox (the file-IPC channel the sysext already
+                // polls every 5s) instead of `pkill -USR1`. A user-context
+                // process cannot signal a uid-0 sysext — pkill -USR1
+                // returned EPERM and refreshNow() never fired. The inbox
+                // dir is mode 1777 and the daemon authorizes the request
+                // by its file owner uid (console user / root).
+                let inboxDir = maccrabDataDir() + "/inbox"
+                let fm = FileManager.default
+                if !fm.fileExists(atPath: inboxDir) {
+                    try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+                }
+                let path = inboxDir + "/refresh-intel-\(UUID().uuidString).json"
+                let payload: [String: Any] = [
+                    "queuedAt": ISO8601DateFormatter().string(from: Date()),
+                    "source": "maccrabctl"
+                ]
+                let wrote = (try? JSONSerialization.data(withJSONObject: payload))
+                    .map { (try? $0.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil } ?? false
+                if wrote {
+                    print("Refresh queued. The engine will fetch URLhaus / MalwareBazaar / Feodo within ~10s.")
                 } else {
-                    // Try the dev daemon name as fallback.
+                    // Could not write the inbox request (engine never run,
+                    // or no permission). Fall back to the dev daemon
+                    // SIGUSR1 path (same-uid, so no EPERM there).
                     let dev = Process()
                     dev.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
                     dev.arguments = ["-USR1", "-x", "maccrabd"]
@@ -258,24 +259,30 @@ struct MacCrabCtl {
                     if dev.terminationStatus == 0 {
                         print("Refresh requested (SIGUSR1) on dev daemon.")
                     } else {
-                        // v1.12.5 UX fix: pkill returns 1 for both
-                        // "process not found" AND EPERM (user-context
-                        // process can't signal uid-0 sysext). Either
-                        // way the right operator action is "open
-                        // MacCrab and confirm the sysext is active",
-                        // not "the command failed". Print an
-                        // informational message and exit 0 — the
-                        // dashboard's tick will surface the actual
-                        // health via the next ThreatIntel poll.
-                        print("Could not signal the daemon (it may not be running, or this shell lacks permission to signal a system extension).")
+                        print("Could not queue a refresh (the engine may not be running, or this shell can't write its inbox).")
                         print("Tip: open MacCrab.app → Intelligence → Threat Intel to confirm feed status, or trigger refresh from the dashboard's Refresh button.")
                     }
                 }
+            case "matches":
+                // Recent IOC-feed matches. Part A records each match as
+                // an Alert whose ruleId starts with `maccrab.threat-intel.`
+                // — read them via the alert store (read-only; no signal).
+                var hours: Double = 24
+                let mArgs = Array(args.dropFirst(3))
+                if let h = mArgs.firstIndex(of: "--hours"), h + 1 < mArgs.count, let n = Double(mArgs[h + 1]) {
+                    hours = n
+                }
+                await listIntelMatches(hours: hours)
+            case "status":
+                listIntelStatus()
             case "help", "-h", "--help":
-                print("usage: maccrabctl intel refresh    — trigger SIGHUP for feed refresh")
+                print("usage: maccrabctl intel <subcommand>")
+                print("  refresh              trigger an immediate feed fetch (SIGUSR1)")
+                print("  matches [--hours N]  list recent IOC-feed matches (default 24h)")
+                print("  status               feed freshness / last pull per feed")
             default:
                 print("Unknown intel subcommand: \(sub)")
-                print("usage: maccrabctl intel refresh")
+                print("usage: maccrabctl intel refresh | matches [--hours N] | status")
                 exit(1)
             }
         case "case":

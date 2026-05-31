@@ -565,6 +565,14 @@ enum MonitorTasks {
 
                 // Check against threat intel
                 if await state.threatIntel.isDomainMalicious(dnsQuery.queryName) {
+                    // v1.17: carry the matched IOC's source/family/first-seen.
+                    let record = await state.threatIntel.recordForDomain(dnsQuery.queryName)
+                    let (desc, hint) = EventLoop.iocMatchStrings(
+                        record: record,
+                        value: dnsQuery.queryName,
+                        type: "domain",
+                        hit: "DNS query for"
+                    )
                     let alert = Alert(
                         ruleId: "maccrab.dns.threat-intel-match",
                         ruleTitle: "DNS Query to Known Malicious Domain",
@@ -572,10 +580,11 @@ enum MonitorTasks {
                         eventId: UUID().uuidString,
                         processPath: nil,
                         processName: "mDNSResponder",
-                        description: "DNS query for known-malicious domain: \(dnsQuery.queryName)",
+                        description: desc,
                         mitreTactics: "attack.command_and_control",
                         mitreTechniques: "attack.t1071.004",
-                        suppressed: false
+                        suppressed: false,
+                        remediationHint: hint
                     )
                     do {
                         if try await state.alertSink.submit(alert: alert) {

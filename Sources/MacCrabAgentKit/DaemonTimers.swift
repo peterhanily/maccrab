@@ -1192,12 +1192,14 @@ enum DaemonTimers {
                 let unsuppressAlertReqs = files.filter { $0.hasPrefix("unsuppress-alert-") && $0.hasSuffix(".json") }
                 let deleteAlertReqs = files.filter { $0.hasPrefix("delete-alert-") && $0.hasSuffix(".json") }
                 let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
+                let refreshIntelReqs = files.filter { $0.hasPrefix("refresh-intel-") && $0.hasSuffix(".json") }
                 let flushRequests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
                 await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
                 await handleDeleteAlertRequests(deleteAlertReqs, inboxDir: inboxDir, state: state)
                 await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
+                await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
             }
         }
@@ -1339,6 +1341,40 @@ enum DaemonTimers {
                 auditLogInbox(state: state, prefix: "delete-alert", id: id, uid: uid, result: "failed:\(error)")
             }
         }
+    }
+
+    /// v1.17: threat-intel refresh over the inbox channel. The
+    /// dashboard "Refresh now" button and `maccrabctl intel refresh`
+    /// used to `pkill -USR1` the sysext, which fails EPERM (user →
+    /// uid-0 sysext) and never fired refreshNow(). Now they drop a
+    /// `refresh-intel-<token>.json` here. Unlike the alert verbs this
+    /// request is parameterless (no `id`) — we authorize by file owner
+    /// uid and ignore the body. Multiple files in one tick COALESCE:
+    /// refreshNow() runs once regardless of how many landed, so rapid
+    /// re-clicking can't stack redundant URLhaus/MalwareBazaar/Feodo
+    /// fetches. Every file is removed each tick so it can't re-trigger.
+    private static func handleRefreshIntelRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        var anyAuthorized = false
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] refresh-intel \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "refresh-intel", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            anyAuthorized = true
+            auditLogInbox(state: state, prefix: "refresh-intel", id: "-", uid: uid, result: "ok")
+        }
+        guard anyAuthorized else { return }
+        print("[inbox] refresh-intel: \(names.count) request(s) — running ThreatIntelFeed.refreshNow (coalesced)")
+        await state.threatIntel.refreshNow()
+        print("[inbox] refresh-intel: refreshNow complete")
     }
 
     private static func handleSuppressCampaignRequests(

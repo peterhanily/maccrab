@@ -5,6 +5,41 @@ import os.log
 /// The main event processing loop. Processes each event through
 /// enrichment, AI guard, detection layers, and alert output.
 enum EventLoop {
+    /// v1.17: shared formatter for threat-intel IOC-match alerts.
+    /// Builds a human description plus a machine-parseable remediation
+    /// hint (type=/source=/family= prefixes) from the matched IOCRecord.
+    /// Tolerates `record == nil` (a feed refresh can evict the entry
+    /// between the isXMalicious check and this lookup) — falls back to
+    /// the raw indicator value + type.
+    static func iocMatchStrings(
+        record: ThreatIntelFeed.IOCRecord?,
+        value: String,
+        type: String,
+        hit: String
+    ) -> (description: String, remediation: String) {
+        guard let record else {
+            return (
+                "\(hit) \(value) matches a known-malicious \(type) from threat intelligence",
+                "Threat-intel match (type=\(type)). Investigate the process and block the indicator."
+            )
+        }
+        var desc = "\(hit) \(value) matches \(record.source) IOC"
+        if let fam = record.malwareFamily, !fam.isEmpty { desc += ", family \(fam)" }
+        if let first = record.firstSeen { desc += ", first seen \(iocDateFormatter.string(from: first))" }
+        var hint = "Threat-intel match (type=\(type), source=\(record.source)"
+        if let fam = record.malwareFamily, !fam.isEmpty { hint += ", family=\(fam)" }
+        if !record.tags.isEmpty { hint += ", tags=\(record.tags.joined(separator: ","))" }
+        hint += "). Investigate the process and block the indicator."
+        return (desc, hint)
+    }
+
+    private static let iocDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
     static func run(state: DaemonState, eventStream: AsyncStream<Event>, eventCount: LockedCounter, alertCount: LockedCounter) async {
         for await event in eventStream {
             eventCount.increment()
@@ -771,6 +806,32 @@ enum EventLoop {
             // Check process hash, network IPs, and domains against known-bad IOCs
             if let net = enrichedEvent.network {
                 if await state.threatIntel.isIPMalicious(net.destinationIp) {
+                    // v1.17: durable structured alert (was indicator-only).
+                    let record = await state.threatIntel.recordForIP(net.destinationIp)
+                    let (desc, hint) = iocMatchStrings(
+                        record: record,
+                        value: net.destinationIp,
+                        type: "ip",
+                        hit: "Outbound connection to"
+                    )
+                    let alert = Alert(
+                        ruleId: "maccrab.threat-intel.ip-match",
+                        ruleTitle: "Connection to Known Malicious IP",
+                        severity: .critical,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: enrichedEvent.process.executable,
+                        processName: enrichedEvent.process.name,
+                        description: desc,
+                        mitreTactics: "attack.command_and_control",
+                        mitreTechniques: "attack.t1071",
+                        suppressed: false,
+                        remediationHint: hint
+                    )
+                    do {
+                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.behaviorScoring.addIndicator(
                         named: "known_malicious_ip",
                         detail: net.destinationIp,
@@ -779,6 +840,32 @@ enum EventLoop {
                     )
                 }
                 if let host = net.destinationHostname, await state.threatIntel.isDomainMalicious(host) {
+                    // v1.17: durable structured alert (was indicator-only).
+                    let record = await state.threatIntel.recordForDomain(host)
+                    let (desc, hint) = iocMatchStrings(
+                        record: record,
+                        value: host,
+                        type: "domain",
+                        hit: "Outbound connection to"
+                    )
+                    let alert = Alert(
+                        ruleId: "maccrab.threat-intel.domain-match",
+                        ruleTitle: "Connection to Known Malicious Domain",
+                        severity: .critical,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: enrichedEvent.process.executable,
+                        processName: enrichedEvent.process.name,
+                        description: desc,
+                        mitreTactics: "attack.command_and_control",
+                        mitreTechniques: "attack.t1071.001",
+                        suppressed: false,
+                        remediationHint: hint
+                    )
+                    do {
+                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                     await state.behaviorScoring.addIndicator(
                         named: "known_malicious_domain",
                         detail: host,
@@ -791,6 +878,14 @@ enum EventLoop {
             // === CDHash threat intel matching (from eslogger) ===
             if let cdhash = enrichedEvent.enrichments["process.cdhash"],
                await state.threatIntel.isHashMalicious(cdhash) {
+                // v1.17: carry the matched IOC's source/family/first-seen.
+                let record = await state.threatIntel.recordForHash(cdhash)
+                let (desc, hint) = iocMatchStrings(
+                    record: record,
+                    value: cdhash,
+                    type: "hash",
+                    hit: "Process binary CDHash"
+                )
                 let alert = Alert(
                     ruleId: "maccrab.threat-intel.hash-match",
                     ruleTitle: "Known Malicious Binary (CDHash Match)",
@@ -798,10 +893,11 @@ enum EventLoop {
                     eventId: enrichedEvent.id.uuidString,
                     processPath: enrichedEvent.process.executable,
                     processName: enrichedEvent.process.name,
-                    description: "Process binary CDHash \(cdhash) matches known-malicious hash from threat intelligence feed",
+                    description: desc,
                     mitreTactics: "attack.execution",
                     mitreTechniques: "attack.t1204",
-                    suppressed: false
+                    suppressed: false,
+                    remediationHint: hint
                 )
                 do {
                     if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {

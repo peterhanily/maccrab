@@ -418,15 +418,35 @@ public final class V2LiveDataProvider: V2DataProvider {
                 default:         return totalHashes + totalIPs + totalDomains + totalURLs
                 }
             }()
-            let status: V2StatusLevel = staleness > 6 * 60 * 60 ? .warning : .info
+            // Surface the per-feed last-error reason (HTTP non-2xx,
+            // exception, or a 200 with 0 parsed records). When a feed
+            // last failed it reads as .warning even if its prior
+            // successful fetch is still inside the 6h window — a frozen
+            // count must look like a problem, not "healthy".
+            let lastError = iocs.perFeedLastError[name]?.reason
+            let status: V2StatusLevel = (staleness > 6 * 60 * 60 || lastError != nil)
+                ? .warning : .info
             rows.append(V2MockFeed(
                 id: "feed-\(name)",
                 name: name, kind: kind,
                 entries: entries, lastFetch: lastUpdate,
-                status: status, staleness: staleness
+                status: status, staleness: staleness,
+                lastError: lastError
             ))
         }
         return rows
+    }
+
+    /// Last time ANY threat-intel feed actually pulled fresh records,
+    /// read from the same cache the feed rows come from. nil when no
+    /// cache exists or no successful pull has happened yet. Lets the
+    /// Intelligence workspace show a top-level "last successful pull"
+    /// line so the operator can SEE the feeds working.
+    nonisolated public static func lastSuccessfulPull(preferring preferred: String? = nil) -> Date? {
+        let dirs = candidateThreatIntelCacheDirs(preferring: preferred)
+        return dirs.lazy
+            .compactMap { ThreatIntelFeed.cachedIOCs(at: $0) }
+            .first?.lastSuccessfulPull
     }
 
     /// Canonical threat-intel cache directory candidates, in priority
@@ -1102,22 +1122,62 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
     }
 
-    /// Trigger a one-shot refresh of all threat-intel feeds. Shells out
-    /// to `maccrabctl intel refresh` which signals the daemon's
-    /// ThreatIntelFeed actor. We don't talk to the actor directly from
-    /// the dashboard because the actor lives in the sysext process.
+    /// Trigger a one-shot refresh of all threat-intel feeds by dropping
+    /// a `refresh-intel` request into the root daemon's inbox channel
+    /// (the same file-IPC path alert suppress/delete use). The pre-v1.17
+    /// path shelled out to `maccrabctl intel refresh` which `pkill
+    /// -USR1`'d the sysext — that fails EPERM (user → uid-0 sysext), so
+    /// refreshNow() never fired yet the UI still showed success. Now we
+    /// write the request the daemon already polls, and report success
+    /// ONLY if the file was actually written.
     public func refreshThreatIntel() async -> Bool {
-        // `runMaccrabctl` does `Process.run() + waitUntilExit()` which
-        // blocks main for 50-300 ms. Detach so the user's click
-        // doesn't beachball.
-        let result = await Task.detached(priority: .userInitiated) {
-            V2LiveDataProvider.runMaccrabctl(arguments: ["intel", "refresh"])
+        guard let dir = dataDir else {
+            lastErrorDescription = "intel refresh: no data directory (daemon not yet run)"
+            return false
+        }
+        let inboxDir = dir + "/inbox"
+        // File write is small + atomic; detach so the click never
+        // beachballs even if the inbox dir needs creating.
+        let ok = await Task.detached(priority: .userInitiated) {
+            V2LiveDataProvider.writeInboxRefreshRequest(inboxDir: inboxDir)
         }.value
-        if result.exitCode != 0 {
-            lastErrorDescription = "intel refresh: \(result.stderr.split(separator: "\n").first.map(String.init) ?? "exit \(result.exitCode)")"
+        if !ok {
+            lastErrorDescription = "intel refresh: could not queue request in \(inboxDir) (is the engine running?)"
             return false
         }
         return true
+    }
+
+    /// Drop a parameterless `refresh-intel-<token>.json` into the
+    /// daemon's inbox. Static + pure so it's unit-testable against a
+    /// temp dir without a DB-backed provider. The daemon coalesces
+    /// multiple files into a single refreshNow(), so the filename uses
+    /// a random token (no need to de-dup by id like the alert verbs).
+    nonisolated static func writeInboxRefreshRequest(inboxDir: String) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: inboxDir) {
+            // Typically the sysext already created this at boot (mode
+            // 1777). On a fresh install whose sysext hasn't booted, this
+            // create succeeds in dev but fails under <Library/Application
+            // Support> without elevation — in which case we honestly
+            // report failure rather than a fake success.
+            try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+        }
+        let token = UUID().uuidString
+        let path = inboxDir + "/refresh-intel-\(token).json"
+        let payload: [String: Any] = [
+            "queuedAt": ISO8601DateFormatter().string(from: Date()),
+            "source": "MacCrabApp"
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return false
+        }
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Read live suppression entries from `<dataDir>/suppressions.json`.
