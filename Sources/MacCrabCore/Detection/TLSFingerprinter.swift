@@ -226,14 +226,18 @@ public actor TLSFingerprinter {
 
                 // Low variance = regular beacon (< 20% of average, between 5s and 5min)
                 if stdDev < avgInterval * 0.2 && avgInterval > 5 && avgInterval < 300 {
-                    logger.critical("Beacon detected: \(processName) → \(destinationIP):443 every \(String(format: "%.1f", avgInterval))s")
+                    logger.warning("Beacon detected: \(processName) → \(destinationIP):443 every \(String(format: "%.1f", avgInterval))s")
                     return TLSAlert(
                         alertType: .beaconDetected,
                         processName: processName, processPath: processPath,
                         destinationIP: destinationIP, destinationPort: destinationPort,
                         detail: "Regular beacon detected: \(String(format: "%.1f", avgInterval))s interval "
                             + "(±\(String(format: "%.1f", stdDev))s) over \(history.count) connections",
-                        severity: .critical
+                        // v1.17.1: a fixed-interval connection is a heuristic —
+                        // legit polling (update checks, telemetry, IDE/LSP sync,
+                        // MDM check-in, cloud sync) looks identical. HIGH, not
+                        // CRITICAL; correlate before escalating.
+                        severity: .high
                     )
                 }
             }

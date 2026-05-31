@@ -386,13 +386,17 @@ public actor CampaignDetector {
     ]
 
     /// High-value 2-tactic combinations that always trigger a kill chain.
+    /// v1.17.1: 2 tactics is weak corroboration — credential_access + C2 is
+    /// also the shape of a benign AI agent reading a .env then making a network
+    /// call — so these are HIGH, not CRITICAL. CRITICAL is reserved for the
+    /// 3-tactic credential+persistence+C2 chain (see checkKillChain).
     private static let twoTacticCombinations: [Set<String>: (title: String, severity: Severity)] = [
         Set(["initial_access", "persistence"]):
             ("Malware Installation Chain", .high),
         Set(["credential_access", "command_and_control"]):
-            ("Full Kill Chain", .critical),
+            ("Partial Kill Chain (credential-access → C2)", .high),
         Set(["persistence", "command_and_control"]):
-            ("Full Kill Chain", .critical),
+            ("Partial Kill Chain (persistence → C2)", .high),
         Set(["initial_access", "execution"]):
             ("Malware Installation Chain", .high),
     ]
@@ -542,14 +546,19 @@ public actor CampaignDetector {
             let hasC2 = allTactics.contains("command_and_control")
 
             if hasCredentialAccess && hasPersistence && hasC2 {
+                // The one campaign shape we're "absolutely sure" on: credential
+                // theft + persistence + C2 together is a real intrusion.
                 title = "Full Kill Chain"
                 severity = .critical
             } else if hasInitialAccess && hasExecution && hasPersistence {
                 title = "Malware Installation Chain"
                 severity = .high
             } else {
+                // v1.17.1: a generic N-tactic mix that isn't the specific
+                // credential+persistence+C2 chain is corroboration, not
+                // certainty — HIGH, not CRITICAL.
                 title = "Multi-Stage Attack"
-                severity = .critical
+                severity = .high
             }
 
             let description = "Detected \(allTactics.count) tactics: \(allTactics.sorted().joined(separator: ", ")) across \(recentAlerts.count) alerts within \(Int(campaignWindow))s"
