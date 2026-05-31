@@ -133,21 +133,49 @@ final class AlertNotifier: NSObject {
     // MARK: - Config (alert_notifications.json → gate)
 
     /// Mirror the daemon's decode (DaemonSetup.loadAlertNotificationConfig):
-    /// {enabled: Bool=true, min_severity: String=critical}.
+    /// {enabled: Bool=true, min_severity: String=critical}. Crucially,
+    /// probe BOTH the system path (/Library, where alerts.db lives) and
+    /// the user-home path (~/Library, where SettingsView writes because
+    /// the app can't write the root-owned /Library copy) and pick the
+    /// most-recently-modified — otherwise a min_severity change made in
+    /// Settings (user path) never reaches the notifier.
     private func reloadConfig() {
-        guard let dataDir else { return }
-        let path = dataDir + "/alert_notifications.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
-        gate.enabled = json["enabled"] as? Bool ?? true
-        let raw = (json["min_severity"] as? String ?? "critical").lowercased()
-        switch raw {
-        case "high":          gate.minimumSeverity = .high
-        case "medium":        gate.minimumSeverity = .medium
-        case "low":           gate.minimumSeverity = .low
-        case "informational": gate.minimumSeverity = .informational
-        default:              gate.minimumSeverity = .critical
+        let fm = FileManager.default
+        let systemPath = "/Library/Application Support/MacCrab/alert_notifications.json"
+        let userPath = (fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("MacCrab/alert_notifications.json").path)
+            ?? (NSHomeDirectory() + "/Library/Application Support/MacCrab/alert_notifications.json")
+
+        func parse(_ path: String) -> (enabled: Bool, sev: MacCrabCore.Severity, mtime: Date)? {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return nil }
+            let enabled = json["enabled"] as? Bool ?? true
+            let raw = (json["min_severity"] as? String ?? "critical").lowercased()
+            let sev: MacCrabCore.Severity
+            switch raw {
+            case "high":          sev = .high
+            case "medium":        sev = .medium
+            case "low":           sev = .low
+            case "informational": sev = .informational
+            default:              sev = .critical
+            }
+            let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date ?? .distantPast
+            return (enabled, sev, mtime)
+        }
+
+        let sys = parse(systemPath)
+        let usr = parse(userPath)
+        let chosen: (enabled: Bool, sev: MacCrabCore.Severity)?
+        switch (sys, usr) {
+        case (nil, nil):           chosen = nil
+        case (let s?, nil):        chosen = (s.enabled, s.sev)
+        case (nil, let u?):        chosen = (u.enabled, u.sev)
+        case (let s?, let u?):     chosen = u.mtime > s.mtime ? (u.enabled, u.sev) : (s.enabled, s.sev)
+        }
+        if let chosen {
+            gate.enabled = chosen.enabled
+            gate.minimumSeverity = chosen.sev
         }
     }
 
