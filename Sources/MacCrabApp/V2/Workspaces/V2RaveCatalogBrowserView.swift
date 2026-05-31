@@ -17,6 +17,7 @@
 // monogram icon + the description that is in the manifest.
 
 import SwiftUI
+import Foundation
 
 struct V2RaveCatalogBrowserView: View {
     @State private var entries: [RaveCatalogEntry] = []
@@ -30,6 +31,14 @@ struct V2RaveCatalogBrowserView: View {
     @State private var usingOfficial: Bool = true
 
     private let client = RaveCatalogClient()
+
+    /// First-release gate. The Rave catalog backend exists and is
+    /// signed, but it isn't publicly launched yet — so for v1.17 the
+    /// in-app tab shows an intentional "coming soon" instead of fetching
+    /// (which would either expose an unlaunched catalog or, when the
+    /// endpoint is gated, show an error-toned "not reachable" panel).
+    /// Flip to `false` in the release that launches the catalog.
+    private static let catalogComingSoon = true
 
     private var categories: [String] {
         let set = Set(entries.compactMap { $0.category })
@@ -49,6 +58,17 @@ struct V2RaveCatalogBrowserView: View {
     }
 
     var body: some View {
+        Group {
+            if Self.catalogComingSoon {
+                ComingSoonCatalogView()
+            } else {
+                liveCatalog
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var liveCatalog: some View {
         VStack(spacing: 0) {
             header
             if !usingOfficial {
@@ -71,7 +91,6 @@ struct V2RaveCatalogBrowserView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { await reload() }
     }
 
@@ -564,5 +583,140 @@ struct FlowLayout: Layout {
             x += size.width + spacing
             lineHeight = max(lineHeight, size.height)
         }
+    }
+}
+
+// MARK: - Coming soon (first-release catalog gate)
+
+/// One cell of the pixel crab — (x, y, w, h) in a 16-wide grid, same
+/// scheme the maccrab.com favicon / og-image crab is drawn with.
+private struct RaveCrabPixel { let x, y, w, h: CGFloat; let color: Color }
+
+private let raveCrabOrange = Color(red: 1.0,  green: 0.369, blue: 0.227) // #ff5e3a
+private let raveNeonCyan   = Color(red: 0.18, green: 0.90,  blue: 1.0)   // #2ee6ff
+private let raveNeonPink   = Color(red: 1.0,  green: 0.24,  blue: 0.65)  // #ff3ea5
+private let raveNeonGold   = Color(red: 1.0,  green: 0.82,  blue: 0.23)  // #ffd23a
+private let raveFrameDark  = Color(red: 0.04, green: 0.04,  blue: 0.05)  // #0a0a0b
+
+/// The maccrab pixel crab body — kept identical to the maccrab.com
+/// artwork so it reads as the same character, just dressed for the rave.
+private let raveCrabBody: [RaveCrabPixel] = [
+    RaveCrabPixel(x: 1, y: 1, w: 3, h: 3, color: raveCrabOrange),
+    RaveCrabPixel(x: 0, y: 2, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 4, y: 2, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 2, y: 4, w: 2, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 12, y: 1, w: 3, h: 3, color: raveCrabOrange),
+    RaveCrabPixel(x: 11, y: 2, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 15, y: 2, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 12, y: 4, w: 2, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 6, y: 4, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 9, y: 4, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 4, y: 5, w: 8, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 3, y: 6, w: 10, h: 3, color: raveCrabOrange),
+    RaveCrabPixel(x: 4, y: 9, w: 8, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 2, y: 10, w: 1, h: 2, color: raveCrabOrange),
+    RaveCrabPixel(x: 5, y: 10, w: 1, h: 2, color: raveCrabOrange),
+    RaveCrabPixel(x: 10, y: 10, w: 1, h: 2, color: raveCrabOrange),
+    RaveCrabPixel(x: 13, y: 10, w: 1, h: 2, color: raveCrabOrange),
+    RaveCrabPixel(x: 1, y: 12, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 4, y: 12, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 11, y: 12, w: 1, h: 1, color: raveCrabOrange),
+    RaveCrabPixel(x: 14, y: 12, w: 1, h: 1, color: raveCrabOrange),
+]
+
+/// Neon rave shades over the crab's eyes (replaces the plain pixels).
+private let raveCrabShades: [RaveCrabPixel] = [
+    RaveCrabPixel(x: 4,  y: 6, w: 1, h: 1, color: raveFrameDark),
+    RaveCrabPixel(x: 5,  y: 6, w: 2, h: 1, color: raveNeonCyan),
+    RaveCrabPixel(x: 7,  y: 6, w: 2, h: 1, color: raveFrameDark),
+    RaveCrabPixel(x: 9,  y: 6, w: 2, h: 1, color: raveNeonPink),
+    RaveCrabPixel(x: 11, y: 6, w: 1, h: 1, color: raveFrameDark),
+]
+
+/// Pixel-art crab in the maccrab.com style, wearing neon rave shades,
+/// dancing (vertical bob) under twinkling lights with a pulsing glow.
+/// Drawn natively so it stays crisp at any size and needs no asset.
+private struct RaveCrabView: View {
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            Canvas { ctx, size in
+                let cols: CGFloat = 16, rows: CGFloat = 13
+                let s = min(size.width / cols, size.height / rows)
+                let originX = (size.width - cols * s) / 2
+                let originY = (size.height - rows * s) / 2
+                let bob = CGFloat(sin(t * 2.4)) * s * 0.5   // dance
+
+                // Soft orange glow behind the crab (pulsing).
+                let glowR = cols * s * 0.55
+                let cx = originX + cols * s / 2
+                let cy = originY + rows * s / 2 + bob
+                let glowPulse = 0.5 + 0.5 * sin(t * 1.7)
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: cx - glowR, y: cy - glowR, width: glowR * 2, height: glowR * 2)),
+                    with: .radialGradient(
+                        Gradient(colors: [raveCrabOrange.opacity(0.28 * (0.6 + 0.4 * glowPulse)),
+                                          raveCrabOrange.opacity(0)]),
+                        center: CGPoint(x: cx, y: cy), startRadius: 0, endRadius: glowR))
+
+                func draw(_ pixels: [RaveCrabPixel], dy: CGFloat) {
+                    for p in pixels {
+                        let r = CGRect(x: originX + p.x * s, y: originY + p.y * s + dy,
+                                       width: p.w * s, height: p.h * s)
+                        ctx.fill(Path(r), with: .color(p.color))
+                    }
+                }
+                draw(raveCrabBody, dy: bob)
+                draw(raveCrabShades, dy: bob)
+
+                // Twinkling rave lights (fixed — they're the room, not the crab).
+                let lights: [(x: CGFloat, y: CGFloat, color: Color, phase: Double)] = [
+                    (8, 0, raveNeonGold, 0.0), (1, 1, raveNeonCyan, 1.3), (14, 1, raveNeonPink, 2.1),
+                    (3, 0, raveNeonPink, 0.7), (13, 0, raveNeonCyan, 1.9),
+                ]
+                for l in lights {
+                    let tw = 0.35 + 0.65 * (0.5 + 0.5 * sin(t * 4 + l.phase))
+                    ctx.fill(Path(CGRect(x: originX + l.x * s, y: originY + l.y * s, width: s, height: s)),
+                             with: .color(l.color.opacity(tw)))
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// First-release stand-in for the catalog tab: an intentional, branded
+/// "coming soon" in the maccrab.com dark/orange palette, instead of an
+/// error-toned "catalog not reachable" panel.
+private struct ComingSoonCatalogView: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.04, green: 0.04, blue: 0.043),
+                         Color(red: 0.10, green: 0.055, blue: 0.031)],
+                startPoint: .topLeading, endPoint: .bottomTrailing)
+
+            VStack(spacing: 18) {
+                RaveCrabView()
+                    .frame(width: 180, height: 150)
+                VStack(spacing: 8) {
+                    Text("Rave catalog")
+                        .font(.system(size: 12, weight: .semibold))
+                        .tracking(2)
+                        .foregroundStyle(raveCrabOrange)
+                    Text("Coming soon")
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(Color(red: 0.957, green: 0.957, blue: 0.961)) // #f4f4f5
+                    Text("A signed, vetted catalog of forensic plugins you'll browse and install right from MacCrab. We're polishing it for launch — your existing scanners and kits keep working in the meantime.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color(red: 0.63, green: 0.63, blue: 0.67)) // #a1a1aa
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .frame(maxWidth: 430)
+                }
+            }
+            .padding(40)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
