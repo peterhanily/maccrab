@@ -36,24 +36,12 @@ public actor NotificationOutput {
         self.enabled = value
     }
 
-    /// rc.14: clamp every alert's effective notification severity at
-    /// .high unless the operator has explicitly opted into critical
-    /// alerts via Settings. Critical-severity alerts still surface
-    /// as notifications, but the banner renders + filters as .high.
-    /// Applies to rule, sequence, and campaign alerts identically —
-    /// they all flow through this same notify() chokepoint.
-    public var allowCritical: Bool = false
-
-    public func setAllowCritical(_ value: Bool) {
-        self.allowCritical = value
-    }
-
-    /// Compute the severity used for the gate + banner. Drops a
-    /// critical alert to high when allowCritical is off.
-    private func effectiveSeverity(for alert: Alert) -> Severity {
-        if !allowCritical, alert.severity == .critical { return .high }
-        return alert.severity
-    }
+    // v1.17: critical alerts always notify at their true severity. The
+    // earlier rc.14 `allowCritical` clamp (which down-rendered criticals
+    // to .high unless a Settings toggle was on) was removed — it was a
+    // presentation-only control that read like a firing gate and confused
+    // operators. The `>= minimumSeverity` gate in notify() is now the only
+    // notification filter; banners use the alert's real severity.
 
     /// Maximum notifications per minute (rate limiting).
     private let maxPerMinute: Int
@@ -82,7 +70,7 @@ public actor NotificationOutput {
         self.minimumSeverity = value
     }
 
-    public init(minimumSeverity: Severity = .high, maxPerMinute: Int = 10) {
+    public init(minimumSeverity: Severity = .critical, maxPerMinute: Int = 10) {
         self.minimumSeverity = minimumSeverity
         self.maxPerMinute = maxPerMinute
     }
@@ -92,13 +80,11 @@ public actor NotificationOutput {
         // v1.11.0 RC2: hard mute when the user toggled OFF in
         // SettingsView (writes enabled=false to alert_notifications.json).
         guard enabled else { return }
-        // Gate on the alert's actual severity so a min-severity of
-        // "critical" still suppresses high alerts. The clamp below
-        // is presentation-only — a critical alert that survives the
-        // gate gets rendered with the .high emoji + cooler tone
-        // unless the operator opted into critical.
+        // Gate on the alert's severity: a min-severity of "critical"
+        // suppresses high/medium/low; "high" lets high+critical through;
+        // etc. Banners render at the alert's true severity.
         guard alert.severity >= minimumSeverity else { return }
-        let displaySeverity = effectiveSeverity(for: alert)
+        let displaySeverity = alert.severity
 
         // Rate limit
         let now = Date()

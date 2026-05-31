@@ -465,7 +465,6 @@ enum DaemonSetup {
         let notifConfig = loadAlertNotificationConfig(supportDir: supportDir)
         let notifier = NotificationOutput(minimumSeverity: notifConfig.minSeverity)
         await notifier.setEnabled(notifConfig.enabled)
-        await notifier.setAllowCritical(notifConfig.allowCritical)
         let responseEngine = ResponseEngine()
 
         Self.logBootStep(label: "after_response_engine", startedAt: startedAt)
@@ -2045,9 +2044,10 @@ enum DaemonSetup {
 ///
 /// File schema:
 ///   { "enabled": true | false,
-///     "min_severity": "critical" | "high" | "medium" | "low" | "informational",
-///     "allow_critical": true | false   (rc.14, default false — caps banners at .high) }
-func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSeverity: Severity, allowCritical: Bool) {
+///     "min_severity": "critical" | "high" | "medium" | "low" | "informational" }
+/// (The pre-v1.17 "allow_critical" key is ignored if present — criticals
+/// always notify at critical severity now.)
+func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSeverity: Severity) {
     let systemPath = supportDir + "/alert_notifications.json"
     let userPath = _findUserHomeAlertNotificationConfigPath()
 
@@ -2057,12 +2057,12 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
         (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
     }
 
-    func decode(at path: String) -> (enabled: Bool, minSeverity: Severity, allowCritical: Bool)? {
+    func decode(at path: String) -> (enabled: Bool, minSeverity: Severity)? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         let enabled = json["enabled"] as? Bool ?? true
-        let raw = (json["min_severity"] as? String ?? "high").lowercased()
+        let raw = (json["min_severity"] as? String ?? "critical").lowercased()
         let sev: Severity = {
             switch raw {
             case "critical":      return .critical
@@ -2070,11 +2070,10 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
             case "medium":        return .medium
             case "low":           return .low
             case "informational": return .informational
-            default:              return .high
+            default:              return .critical
             }
         }()
-        let allowCritical = json["allow_critical"] as? Bool ?? false
-        return (enabled, sev, allowCritical)
+        return (enabled, sev)
     }
 
     let systemConfig = decode(at: systemPath)
@@ -2082,7 +2081,7 @@ func loadAlertNotificationConfig(supportDir: String) -> (enabled: Bool, minSever
 
     switch (systemConfig, userConfig) {
     case (nil, nil):
-        return (true, .high, false)
+        return (true, .critical)
     case (let sc?, nil):
         return sc
     case (nil, let uc?):

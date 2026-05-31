@@ -22,7 +22,6 @@ struct SettingsView: View {
     /// path that doesn't require disabling SIP.
     @ObservedObject var sysextManager: SystemExtensionManager
     @AppStorage("alertNotifications") var alertNotifications: Bool = true
-    @AppStorage("allowCriticalNotifications") var allowCriticalNotifications: Bool = false
     // v1.8.0: default raised to "critical" so a fresh install only
     // notifies on the most serious detections. Existing installs retain
     // whatever value is already in UserDefaults.
@@ -444,14 +443,6 @@ struct SettingsView: View {
                             }
 
                             Text(String(localized: "settings.severityHelp", defaultValue: "Only alerts at or above this severity will trigger a macOS notification. Daemon picks up changes on next restart or SIGHUP."))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            Divider().padding(.vertical, 4)
-
-                            Toggle(String(localized: "settings.allowCritical", defaultValue: "Allow critical-level notifications"), isOn: $allowCriticalNotifications)
-                                .onChange(of: allowCriticalNotifications) { _ in scheduleAlertNotificationSync() }
-                            Text(String(localized: "settings.allowCriticalHelp", defaultValue: "By default, MacCrab caps banner notifications at HIGH — critical alerts still fire as notifications but render at the high level so they're less alarming. Turn this on to receive notifications stamped as critical. Applies to single alerts and campaigns."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -1383,7 +1374,6 @@ struct SettingsView: View {
         let payload: [String: Any] = [
             "enabled": alertNotifications,
             "min_severity": minAlertSeverity,
-            "allow_critical": allowCriticalNotifications,
         ]
         guard let data = try? JSONSerialization.data(
             withJSONObject: payload,
