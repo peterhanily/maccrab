@@ -97,6 +97,14 @@ final class AlertNotifier: NSObject {
         let status = await center.notificationSettings().authorizationStatus
         authorizationDenied = (status == .denied)
 
+        // Auth still pending (prompt not yet answered): DON'T consume these
+        // alerts. Returning without advancing the cursor means they re-process
+        // on a later tick once the user grants — otherwise alerts that fire in
+        // the few seconds before the prompt is answered are silently lost.
+        // (Denied is treated as determined: we process + fall back to the
+        // in-app popover so a user who said "no" isn't stuck retrying forever.)
+        if status == .notDetermined { return }
+
         for alert in fresh {
             switch gate.evaluate(alert: alert) {
             case .deliver(let title, let body, let sound),

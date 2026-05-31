@@ -362,6 +362,9 @@ public struct V2DetectionWorkspace: View {
             VStack(alignment: .leading, spacing: 16) {
                 rulesStatsRow
                 rulesSearchBar
+                if builtInDetectionSearchUnmatched {
+                    builtInDetectionNote
+                }
                 rulesTable
             }
             .padding(16)
@@ -469,6 +472,41 @@ public struct V2DetectionWorkspace: View {
                 ))
             }
         }
+    }
+
+    /// True when the operator searched a rule id that looks like one of
+    /// MacCrab's built-in (non-Sigma) detection engines and nothing in the
+    /// Sigma rules list matched. Alerts deep-link their ruleId into this
+    /// search box, so an AI-Guard / campaign / behavioral / threat-intel
+    /// alert lands the operator on an empty table — explain why.
+    private var builtInDetectionSearchUnmatched: Bool {
+        let q = debouncedRuleQuery.lowercased()
+        guard !q.isEmpty else { return false }
+        let items = q.isEmpty ? rules : filteredRules
+        guard items.isEmpty else { return false }
+        let builtIn = ["maccrab.ai-guard", "maccrab.campaign", "maccrab.behavior",
+                       "maccrab.threat-intel", "maccrab.intent", "maccrab.anomaly",
+                       "maccrab.dns", "maccrab.score", "maccrab.lateral"]
+        return builtIn.contains { q.hasPrefix($0) || q.contains($0) }
+    }
+
+    private var builtInDetectionNote: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(V2Theme.mutedText)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("No editable rule matches “\(debouncedRuleQuery)”.")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Alerts with IDs like maccrab.ai-guard.*, maccrab.campaign.*, maccrab.behavior.* or maccrab.threat-intel.* come from MacCrab's built-in detection engines (AI Guard, campaign correlation, behavioral scoring, threat intel) — not Sigma YAML rules, so there's nothing to edit or tune here.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(V2Theme.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
     }
 
     private var rulesTable: some View {
