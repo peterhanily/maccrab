@@ -308,6 +308,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// who glance at the menubar immediately know protection is off.
     private var statusBarHealthTimer: Timer?
 
+    /// v1.17 (issue #2): posts MacCrab-attributed OS banners via
+    /// UNUserNotificationCenter, driven by the process-lifetime
+    /// statusBarHealthTimer below (works while the dashboard window is
+    /// closed). Replaces the daemon's osascript/System-Events path.
+    private var alertNotifier: AlertNotifier?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.activate(ignoringOtherApps: true)
         // Create the status bar item immediately — don't wait for window onAppear
@@ -329,13 +335,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appState.onCriticalAlert = { [weak self] alert in
             self?.showAlertPopover(alert: alert)
         }
+        // v1.17 (issue #2): OS banners are now posted by the app via
+        // UNUserNotificationCenter (attributed to MacCrab, controllable
+        // in System Settings, and gone on uninstall) rather than the
+        // daemon's osascript → "System Events". Falls back to the in-app
+        // popover when notification authorization is denied/undetermined.
+        let notifier = AlertNotifier()
+        notifier.onFallback = { [weak self] alert in
+            guard let self, let vm = self.appState?.alertToViewModel(alert) else { return }
+            self.showAlertPopover(alert: vm)
+        }
+        self.alertNotifier = notifier
+        Task { await notifier.requestAuthorization() }
         // Start the statusbar health poller. Uses a 5s cadence so the
         // icon updates quickly after the first refresh() but doesn't
         // fight the 10s AppState poll. Fires immediately on setup so a
-        // degraded cold-start state is visible without waiting.
+        // degraded cold-start state is visible without waiting. This is
+        // a process-lifetime timer (NOT scenePhase-gated), so it also
+        // drives the notifier's poll while the dashboard window is closed.
         statusBarHealthTimer?.invalidate()
         statusBarHealthTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.updateStatusBarIcon()
+            Task { await self?.alertNotifier?.tick() }
         }
         updateStatusBarIcon()
     }

@@ -1,13 +1,13 @@
 // NotificationOutput.swift
 // MacCrabCore
 //
-// Sends macOS native notifications for security alerts. The daemon
-// runs without a UI bundle, so neither NSUserNotificationCenter
-// (deprecated) nor UNUserNotificationCenter (requires the bundle's
-// notification entitlement) is reachable. Implementation shells out
-// to `osascript -e 'display notification …'` instead. Cheap for the
-// notification rate we run at; trades feature surface (custom
-// actions, attachments, identifiers) for working-without-bundle.
+// Daemon-side notification gate. Historically this delivered macOS
+// banners by shelling out to `osascript -e 'display notification …'`
+// (the daemon has no UI bundle, so UNUserNotificationCenter is
+// unreachable from here). As of v1.17 (GitHub issue #2) DELIVERY moved
+// to the signed app (MacCrabApp/AlertNotifier via UNUserNotificationCenter)
+// so banners are attributed to MacCrab and stop on uninstall; this type
+// now only runs the shared NotificationGate for diagnostic logging.
 
 import Foundation
 import os.log
@@ -45,38 +45,25 @@ public actor NotificationOutput {
         self.gate = NotificationGate(minimumSeverity: minimumSeverity, maxPerMinute: maxPerMinute)
     }
 
-    /// Send a notification for an alert if it passes the shared gate.
+    /// Evaluate an alert against the notification gate.
+    ///
+    /// v1.17 (GitHub issue #2): the daemon no longer DELIVERS OS
+    /// notifications. Delivery moved to the signed app
+    /// (MacCrabApp/AlertNotifier, UNUserNotificationCenter) so banners
+    /// are attributed to MacCrab — controllable in System Settings and
+    /// gone on uninstall — instead of the old `osascript → System Events`
+    /// path, which mis-attributed banners and let them outlive an
+    /// uninstall. The osascript spawn (and its AppleScript-injection
+    /// surface) is removed entirely. We still run the gate so the
+    /// would-notify decision is visible in the daemon log for diagnostics.
     public func notify(alert: Alert) {
         switch gate.evaluate(alert: alert) {
-        case .deliver(let title, let body, let sound):
-            Self.sendOsascriptNotification(title: title, body: body, sound: sound)
-        case .stormSummary(let title, let body, let sound):
+        case .deliver:
+            logger.debug("alert passes notification gate (delivered by app): \(alert.ruleId, privacy: .public)")
+        case .stormSummary:
             logger.warning("Notification rate limit reached — \(self.gate.suppressedByRateLimit) alerts suppressed")
-            Self.sendOsascriptNotification(title: title, body: body, sound: sound)
         case .drop:
             break
         }
-    }
-
-    /// Deliver a notification via osascript. This works without an app bundle
-    /// or UNUserNotificationCenter entitlements. After the notification,
-    /// activates MacCrab.app so clicking it opens the dashboard.
-    private nonisolated static func sendOsascriptNotification(title: String, body: String, sound: String) {
-        let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
-        let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-            tell application "System Events"
-                display notification "\(escapedBody)" \
-                with title "\(escapedTitle)" \
-                sound name "\(sound)"
-            end tell
-            """
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
     }
 }

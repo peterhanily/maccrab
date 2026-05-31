@@ -2515,7 +2515,10 @@ final class AppState: ObservableObject {
 
     // MARK: Private — Data Mapping
 
-    private func alertToViewModel(_ a: Alert) -> AlertViewModel {
+    /// internal (not private) so AppDelegate can convert a
+    /// MacCrabCore.Alert to the popover's view model in the
+    /// notification deny-fallback path.
+    func alertToViewModel(_ a: Alert) -> AlertViewModel {
         AlertViewModel(
             id: a.id,
             timestamp: a.timestamp,
