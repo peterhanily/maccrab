@@ -337,7 +337,16 @@ enum EventLoop {
                             let alert = Alert(
                                 ruleId: "maccrab.ai-guard.credential-access",
                                 ruleTitle: "🦀 AI Tool Accessed \(credType.rawValue)",
-                                severity: .critical,
+                                // v1.17.1: was .critical, which bypassed every
+                                // NoiseFilter gate AND forced an OS notification.
+                                // It fired falsely on benign cp/rm (whole-AI-subtree
+                                // attribution), MacCrab's own honeyfiles, and web
+                                // source files (unanchored substring match). Dropped
+                                // to .high so suppression applies. Follow-up: rewrite
+                                // CredentialFence.checkAccess to use the anchored
+                                // EventLoop.isCredentialShapedPath + honeyfile/self
+                                // exclusion, and tighten AIProcessTracker.isAIChild.
+                                severity: .high,
                                 eventId: enrichedEvent.id.uuidString,
                                 processPath: aiProc.executable,
                                 processName: aiProc.name,

@@ -267,11 +267,15 @@ public actor CrossProcessCorrelator {
         // build-release.sh writes /private/tmp/maccrab-release-<ts>/
         // and codesign/productbuild/cp fan out across it. Self-FP.
         "/private/tmp/maccrab-release-",
-        // v1.12.6: MacCrab's own compiled-rules directory. The install
-        // pipeline (sysextd, the daemon's own writer, and maccrabctl)
-        // touch this path during rule reload, producing a 3-process
-        // chain against our own JSON files. Self-FP.
-        "/Library/Application Support/MacCrab/compiled_rules/",
+        // v1.17.1: MacCrab's entire support root, both system + user-home
+        // dev-daemon copies. The install / uninstall / rule-reload pipeline
+        // (sysextd, the daemon's writer, maccrabctl, chown/cp/rm/touch)
+        // fans coreutils across this tree, producing 3-process chains
+        // against our own files. Was scoped to compiled_rules/ only, which
+        // missed the parent dir (DB/WAL/cache/keys/inbox writes). Self-FP.
+        "/Library/Application Support/MacCrab/",
+        "/Library/Application Support/MacCrab",
+        "Library/Application Support/MacCrab/",
     ]
 
     /// Network destinations that are never interesting.

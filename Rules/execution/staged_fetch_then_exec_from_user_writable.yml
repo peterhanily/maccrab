@@ -46,13 +46,15 @@ detection:
     # workflow). Restrict parents to actual downloaders or runtime
     # interpreters — those are the credible "fetched-then-executed"
     # signature.
+    # v1.17.1 FP fix: dropped /node, /python, /python3 as direct parents.
+    # They made the normal node->node->esbuild (and python->python) bundler
+    # pattern under node_modules fire with NO curl/wget anywhere — ~25% of
+    # HIGH-tier noise. The credible "fetched-then-executed" parent is an
+    # actual downloader; keep only those.
     selection_lineage:
         ParentImage|endswith:
             - '/curl'
             - '/wget'
-            - '/node'
-            - '/python'
-            - '/python3'
         GrandparentImage|endswith:
             - '/npm'
             - '/npx'

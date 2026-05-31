@@ -120,4 +120,10 @@ falsepositives:
     - The user running `brew uninstall maccrab` or `make uninstall` from an interactive shell — investigate parent shell + correlate with explicit dashboard "Uninstall" action
     - Sparkle auto-update replacing the .app bundle as part of an in-place upgrade; filter_installer covers Sparkle's path
     - Internal tests / dev rebuilds in the project directory; should be allowlisted by parent path matching the project tree
-level: critical
+    - MacCrab's OWN maintenance via an intermediary shell (MacCrab -> /bin/bash -> rm/launchctl/pkill) — the parent-only self-exclusion misses the /bin/bash hop; needs a full-ancestry first-party (team-id 79S425CW99) exclusion (tracked as follow-up)
+# v1.17.1: was CRITICAL, which bypassed NoiseFilter suppression AND forced
+# an OS notification — and it fired 100% false on MacCrab's own bash-spawned
+# rm/launchctl/pkill (the /bin/bash hop defeats the parent-only self-filter).
+# Dropped to HIGH so suppression applies until the full-ancestry self-
+# exclusion lands.
+level: high

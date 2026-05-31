@@ -133,7 +133,13 @@ struct WormSelfPropagationRuleCompilationTests {
             // scaffold context (no prior .git, fresh cwd).
             // Wave 3/4 critical rules
             "mass_unlink_from_package_lineage",
-            "maccrab_tamper_attempt",
+            // v1.17.1 (FP audit): `maccrab_tamper_attempt` dropped from the
+            // must-be-critical list. It fired 100% false on MacCrab's OWN
+            // bash-spawned rm/launchctl/pkill (the /bin/bash hop defeats the
+            // parent-only self-exclusion), and CRITICAL bypassed the
+            // NoiseFilter self-suppression layer AND forced a notification.
+            // Downgraded to HIGH; re-classify once the full-ancestry team-id
+            // self-exclusion lands.
             // Wave 5 — innovative research
             "honeyprompt_canary_package_install",
             "canary_skill_or_rules_read",

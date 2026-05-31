@@ -32,11 +32,38 @@ detection:
             - '/sbin/'
     filter_apple_signed:
         SignerType: 'apple'
+    # v1.17.1 FP fix: a valid Developer-ID (or App Store) signature already
+    # cleared Gatekeeper at first launch. Absence of a STAPLED notarization
+    # ticket is normal for CLI tools (Homebrew/npm/pip/cargo) and is not by
+    # itself malware — this rule was ~40-46% of all alert volume.
+    filter_devid_signed:
+        SignerType:
+            - 'devId'
+            - 'appStore'
+    # v1.17.1 FP fix: developer toolchain / package-manager / build-scratch
+    # trees (uv, node, python, esbuild, ruff, gh, and MacCrab's own SwiftPM
+    # *-manifest tools under build/temp dirs). These are routinely
+    # signed-but-unstapled or ad-hoc and dominated the false positives.
+    filter_devtools:
+        Image|contains:
+            - '/opt/homebrew/'
+            - '/usr/local/Cellar/'
+            - '/usr/local/bin/'
+            - '/.nvm/'
+            - '/.cargo/bin/'
+            - '/node_modules/'
+            - '/.venv/'
+            - '/site-packages/'
+            - '/.local/'
+            - '/.pyenv/'
+            - '/.rbenv/'
+            - '/.build/'
+            - '/TemporaryDirectory.'
     filter_xcode:
         Image|startswith:
             - '/Applications/Xcode'
             - '/Library/Developer/'
-    condition: selection and not filter_system and not filter_apple_signed and not filter_xcode
+    condition: selection and not filter_system and not filter_apple_signed and not filter_devid_signed and not filter_devtools and not filter_xcode
 falsepositives:
     - Locally compiled development binaries
     - Open source tools installed via Homebrew (some may lack notarization)

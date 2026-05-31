@@ -65,10 +65,16 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
 
     let signerType: SignerType = {
         if p.codesigning_flags & UInt32(CS_VALID) != 0 {
+            // v1.17.1 FP fix: Apple PLATFORM binaries (e.g.
+            // /usr/libexec/nehelper, nesessionmanager) carry a valid Apple
+            // signature with an EMPTY team_id. The Apple markers were nested
+            // inside `if !teamId.isEmpty`, so those binaries fell through to
+            // .adHoc and tripped every SignerType-negated rule (incl. the
+            // CRITICAL Unsigned-Network-Extension FP). Check Apple FIRST.
+            if teamId == "apple" || signingId.hasPrefix("com.apple.") || p.is_platform_binary {
+                return .apple
+            }
             if !teamId.isEmpty {
-                if teamId == "apple" || signingId.hasPrefix("com.apple.") {
-                    return .apple
-                }
                 return .devId
             }
             return .adHoc

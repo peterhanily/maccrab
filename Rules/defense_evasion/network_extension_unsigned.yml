@@ -22,9 +22,12 @@ logsource:
     product: macos
 detection:
     selection:
+        # v1.17.1 FP fix: dropped the bare 'NetworkExtension' substring —
+        # it matched Apple's own framework paths, so /usr/libexec/nehelper
+        # and nesessionmanager (Apple platform binaries) tripped this rule.
+        # The credible signal is installing a provider .appex / provider class.
         TargetFilename|contains:
             - '.appex/Contents/Info.plist'
-            - 'NetworkExtension'
         FileAction:
             - 'create'
             - 'write'
@@ -40,11 +43,23 @@ detection:
             - 'appStore'
             - 'devId'
     filter_system:
+        # v1.17.1 FP fix: added the platform binary dirs. Apple daemons live
+        # under /usr/libexec, /usr/sbin, /sbin — they were missing here, so a
+        # SignerType mis-classification (ESHelpers Apple-detection bug) left
+        # Apple's own nehelper/nesessionmanager firing this at CRITICAL.
         Image|startswith:
             - '/System/'
             - '/Applications/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/sbin/'
+            - '/usr/bin/'
+            - '/bin/'
     condition: (selection or selection_provider) and not filter_signed and not filter_system
 falsepositives:
     - In-house enterprise VPN clients deployed via MDM with internal signing
     - Open-source security research tools running unsigned
-level: critical
+# v1.17.1: was CRITICAL, which bypassed the NoiseFilter suppression layer
+# AND forced an OS notification. Dropped to HIGH so suppression applies; an
+# unsigned NE provider is serious but this selector is FP-prone.
+level: high
