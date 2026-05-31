@@ -895,13 +895,27 @@ public actor ThreatIntelFeed {
                 return nil
             }
             let text = String(data: data, encoding: .utf8) ?? ""
-            return text.split(separator: "\n").map(String.init)
+            return Self.splitFeedLines(text)
         } catch {
             if let feedName {
                 await self.recordFeedError(feedName, reason: error.localizedDescription)
             }
             return nil
         }
+    }
+
+    /// Split a feed body into lines on ANY Unicode newline.
+    ///
+    /// The abuse.ch feeds (URLhaus, MalwareBazaar, Feodo) ship CRLF
+    /// line endings. Swift treats "\r\n" as a SINGLE extended grapheme
+    /// cluster, so `split(separator: "\n")` finds no standalone "\n"
+    /// Character and returns the entire body as ONE line — which begins
+    /// with a "#" comment and parses to ZERO records, silently breaking
+    /// every CRLF feed. Splitting on `isNewline` handles CRLF / LF / CR
+    /// (and U+2028/U+2029) uniformly and consumes the "\r\n" pair as a
+    /// single separator, so callers never see a trailing "\r".
+    static func splitFeedLines(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0.isNewline }).map(String.init)
     }
 
     private func recordFeedError(_ feed: String, reason: String) {

@@ -244,7 +244,10 @@ struct ThreatIntelFeedCachedStatsTests {
             ips: ["1.1.1.1", "2.2.2.2"],
             domains: ["bad.example", "evil.test", "phish.example", "c2.test"]
         )
-        await feed.refreshNow()  // forces cache write via internal saveCache
+        // Persist WITHOUT a network fetch. refreshNow() pulls the live
+        // abuse.ch feeds, which (since the v1.17 CRLF parse fix) add
+        // thousands of real IOCs and clobber the exact-count assertions.
+        await feed.persistCacheNow()
 
         let stats = ThreatIntelFeed.cachedStats(at: dir)
         #expect(stats != nil)
@@ -279,7 +282,7 @@ struct ThreatIntelFeedCachedStatsTests {
             ips: ["1.1.1.1"],
             domains: ["evil.example", "phish.test"]
         )
-        await feed.refreshNow()
+        await feed.persistCacheNow()  // no network fetch (see above)
 
         let iocs = ThreatIntelFeed.cachedIOCs(at: dir)
         #expect(iocs != nil)
