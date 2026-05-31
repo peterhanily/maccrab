@@ -337,15 +337,22 @@ enum EventLoop {
                             let alert = Alert(
                                 ruleId: "maccrab.ai-guard.credential-access",
                                 ruleTitle: "🦀 AI Tool Accessed \(credType.rawValue)",
-                                // v1.17.1: was .critical, which bypassed every
-                                // NoiseFilter gate AND forced an OS notification.
-                                // It fired falsely on benign cp/rm (whole-AI-subtree
-                                // attribution), MacCrab's own honeyfiles, and web
-                                // source files (unanchored substring match). Dropped
-                                // to .high so suppression applies. Follow-up: rewrite
-                                // CredentialFence.checkAccess to use the anchored
-                                // EventLoop.isCredentialShapedPath + honeyfile/self
-                                // exclusion, and tighten AIProcessTracker.isAIChild.
+                                // v1.17.1: was .critical. This is a DIRECT
+                                // emission (alertSink.submit) and never passes
+                                // through NoiseFilter (see AlertSink) — so the
+                                // only effect of the change is the notification
+                                // floor: NotificationGate defaults to .critical,
+                                // so at .high the spurious banner is dropped
+                                // while the alert is still recorded to the DB.
+                                // It fired falsely on benign cp/rm (whole-AI-
+                                // subtree attribution), MacCrab's own honeyfiles,
+                                // and web source files (unanchored substring
+                                // match) — that FP SOURCE lives in
+                                // CredentialFence.checkAccess and is unchanged by
+                                // the severity edit. Follow-up: anchored
+                                // EventLoop.isCredentialShapedPath matcher +
+                                // honeyfile/self exclusion + tighter
+                                // AIProcessTracker.isAIChild.
                                 severity: .high,
                                 eventId: enrichedEvent.id.uuidString,
                                 processPath: aiProc.executable,

@@ -17,8 +17,6 @@ public enum EsloggerParser {
 
     private static let logger = Logger(subsystem: "com.maccrab", category: "eslogger-parser")
 
-    /// CS_VALID from <sys/codesign.h>, mirrors ESHelpers.
-    private static let CS_VALID: UInt32 = 0x00000001
 
     // MARK: - Main Entry Point
 
@@ -154,18 +152,17 @@ public enum EsloggerParser {
         let flags = uint32(processDict, "codesigning_flags")
         let isPlatformBinary = bool(processDict, "is_platform_binary")
 
-        let signerType: SignerType = {
-            if flags & CS_VALID != 0 {
-                if !teamId.isEmpty {
-                    if teamId == "apple" || signingId.hasPrefix("com.apple.") {
-                        return .apple
-                    }
-                    return .devId
-                }
-                return .adHoc
-            }
-            return .unsigned
-        }()
+        // v1.17.1: classify via the shared SignerType.classify so this
+        // fallback path stays in parity with ESHelpers. Previously the Apple
+        // check was nested inside `!teamId.isEmpty`, so Apple PLATFORM
+        // binaries (empty team_id) were mis-tagged .adHoc here; and the old
+        // signing_id prefix check was spoofable. is_platform_binary is the
+        // only Apple signal now.
+        let signerType = SignerType.classify(
+            codesigningFlags: flags,
+            teamId: teamId,
+            isPlatformBinary: isPlatformBinary
+        )
 
         // CDHash — enables threat intel binary hash matching
         let cdhash = str(processDict, "cdhash")

@@ -86,6 +86,20 @@ detection:
             - '/MacCrabAgent'
             - '/maccrabd'
             - '/maccrabctl'
+    # v1.17.1 fix: full-ancestry self-exclusion. filter_maccrab_self /
+    # filter_maccrab_parent are parent-only and miss MacCrab's own maintenance
+    # when it goes through a shell hop (MacCrab -> osascript/sh -> rm/launchctl
+    # /pkill). ProcessAncestors is the lineage-resolved chain of ancestor
+    # names+executables, so this matches MacCrab ANYWHERE in the lineage, not
+    # just as the direct parent. A genuine third-party tamper has no MacCrab
+    # ancestor and still fires (and survives NoiseFilter Gate 7 at critical).
+    filter_maccrab_ancestry:
+        ProcessAncestors|contains:
+            - 'MacCrab.app/Contents/'
+            - 'com.maccrab.agent'
+            - '/MacCrabAgent'
+            - '/maccrabd'
+            - '/maccrabctl'
     filter_installer:
         Image|endswith:
             - '/installer'
@@ -115,15 +129,17 @@ detection:
             - '/Homebrew/'
             - '/Cellar/maccrab/'
             - 'Caskroom/maccrab/'
-    condition: (selection_kill_tool or selection_unload_path or selection_destruct_path) and not filter_maccrab_self and not filter_maccrab_parent and not filter_installer and not filter_upgrade_installer and not filter_brew_lineage
+    condition: (selection_kill_tool or selection_unload_path or selection_destruct_path) and not filter_maccrab_self and not filter_maccrab_parent and not filter_maccrab_ancestry and not filter_installer and not filter_upgrade_installer and not filter_brew_lineage
 falsepositives:
     - The user running `brew uninstall maccrab` or `make uninstall` from an interactive shell — investigate parent shell + correlate with explicit dashboard "Uninstall" action
     - Sparkle auto-update replacing the .app bundle as part of an in-place upgrade; filter_installer covers Sparkle's path
     - Internal tests / dev rebuilds in the project directory; should be allowlisted by parent path matching the project tree
-    - MacCrab's OWN maintenance via an intermediary shell (MacCrab -> /bin/bash -> rm/launchctl/pkill) — the parent-only self-exclusion misses the /bin/bash hop; needs a full-ancestry first-party (team-id 79S425CW99) exclusion (tracked as follow-up)
-# v1.17.1: was CRITICAL, which bypassed NoiseFilter suppression AND forced
-# an OS notification — and it fired 100% false on MacCrab's own bash-spawned
-# rm/launchctl/pkill (the /bin/bash hop defeats the parent-only self-filter).
-# Dropped to HIGH so suppression applies until the full-ancestry self-
-# exclusion lands.
-level: high
+    - MacCrab's OWN maintenance via an intermediary shell (MacCrab -> osascript/sh -> rm/launchctl/pkill) — now excluded by filter_maccrab_ancestry, which matches MacCrab anywhere in the lineage rather than only as the direct parent
+# v1.17.1: stays CRITICAL on purpose. The actor is always an Apple system
+# binary (/bin/rm, /usr/bin/pkill, /bin/launchctl), so NoiseFilter Gate 7
+# drops any NON-critical match for this rule — i.e. at HIGH a genuine
+# `launchctl bootout`/`pkill -9` of MacCrab would be silently suppressed.
+# Critical is what lets a real tamper survive Gate 7 and reach the alert sink,
+# campaign detector, and notifier. The self-FP that previously motivated a
+# downgrade is now handled at the source by filter_maccrab_ancestry.
+level: critical

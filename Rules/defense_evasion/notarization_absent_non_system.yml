@@ -42,28 +42,35 @@ detection:
             - 'appStore'
     # v1.17.1 FP fix: developer toolchain / package-manager / build-scratch
     # trees (uv, node, python, esbuild, ruff, gh, and MacCrab's own SwiftPM
-    # *-manifest tools under build/temp dirs). These are routinely
-    # signed-but-unstapled or ad-hoc and dominated the false positives.
-    filter_devtools:
-        Image|contains:
+    # build artifacts). These are routinely signed-but-unstapled or ad-hoc and
+    # dominated the false positives. Absolute system prefixes are anchored with
+    # |startswith so a crafted subpath (e.g. /tmp/usr/local/bin/evil) can't
+    # match; the home-relative trees use |contains because the rule can't know
+    # $HOME. An unsigned drop into node_modules is still caught by
+    # node_modules_spawns_binary / package_drops_native_binary_in_pure_js_pkg.
+    # (Removed the bare '/TemporaryDirectory.' token — it matched arbitrary
+    # attacker paths like ~/Downloads/TemporaryDirectory.x/payload.)
+    filter_devtools_system:
+        Image|startswith:
             - '/opt/homebrew/'
             - '/usr/local/Cellar/'
             - '/usr/local/bin/'
+    filter_devtools_user:
+        Image|contains:
             - '/.nvm/'
             - '/.cargo/bin/'
             - '/node_modules/'
             - '/.venv/'
             - '/site-packages/'
-            - '/.local/'
+            - '/.local/bin/'
             - '/.pyenv/'
             - '/.rbenv/'
             - '/.build/'
-            - '/TemporaryDirectory.'
     filter_xcode:
         Image|startswith:
             - '/Applications/Xcode'
             - '/Library/Developer/'
-    condition: selection and not filter_system and not filter_apple_signed and not filter_devid_signed and not filter_devtools and not filter_xcode
+    condition: selection and not filter_system and not filter_apple_signed and not filter_devid_signed and not filter_devtools_system and not filter_devtools_user and not filter_xcode
 falsepositives:
     - Locally compiled development binaries
     - Open source tools installed via Homebrew (some may lack notarization)

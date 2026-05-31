@@ -130,7 +130,8 @@ struct EsloggerCodeSigningTests {
 
     @Test("Apple-signed binary detected correctly")
     func appleSigned() {
-        // CS_VALID + team_id "apple" + signing_id "com.apple.ls" → .apple
+        // CS_VALID + is_platform_binary (kernel-attested) → .apple. This is
+        // the ONLY signal trusted for .apple; team_id / signing_id are not.
         let processDict: [String: Any] = [
             "audit_token": ["pid": 10, "euid": 0],
             "ppid": 1,
@@ -142,6 +143,60 @@ struct EsloggerCodeSigningTests {
         ]
         let info = EsloggerParser.extractProcess(from: processDict)
         #expect(info.codeSignature?.signerType == .apple)
+    }
+
+    @Test("Apple PLATFORM binary with empty team_id classifies as .apple")
+    func applePlatformBinaryEmptyTeam() {
+        // /usr/libexec/nehelper-style: valid Apple signature, EMPTY team_id,
+        // kernel platform-binary flag set. Must be .apple (regression: this
+        // class was previously mis-tagged .adHoc on the eslogger path).
+        let processDict: [String: Any] = [
+            "audit_token": ["pid": 11, "euid": 0],
+            "ppid": 1,
+            "executable": ["path": "/usr/libexec/nehelper"],
+            "signing_id": "com.apple.nehelper",
+            "team_id": "",
+            "codesigning_flags": 570522385,
+            "is_platform_binary": true,
+        ]
+        let info = EsloggerParser.extractProcess(from: processDict)
+        #expect(info.codeSignature?.signerType == .apple)
+    }
+
+    @Test("Spoofed com.apple.* signing_id with a real team_id is .devId, NOT .apple")
+    func spoofedAppleSigningIdWithTeamIsDevId() {
+        // v1.17.1 anti-spoofing regression guard. signing_id is the
+        // developer-chosen Identifier= field; a third party can sign with
+        // a valid Developer ID cert (non-empty team_id) and set the
+        // identifier to com.apple.*. It must NOT be laundered into .apple.
+        let processDict: [String: Any] = [
+            "audit_token": ["pid": 12, "euid": 501],
+            "ppid": 1,
+            "executable": ["path": "/Users/x/Downloads/evil"],
+            "signing_id": "com.apple.softwareupdate",
+            "team_id": "ABCD123456",
+            "codesigning_flags": 1,
+            "is_platform_binary": false,
+        ]
+        let info = EsloggerParser.extractProcess(from: processDict)
+        #expect(info.codeSignature?.signerType == .devId)
+    }
+
+    @Test("Ad-hoc com.apple.* signing_id (empty team_id, not platform) is .adHoc, NOT .apple")
+    func spoofedAppleSigningIdAdHocIsAdHoc() {
+        // Same spoof via an ad-hoc signature (empty team_id, no platform
+        // flag). The hoisted Apple check must not promote this to .apple.
+        let processDict: [String: Any] = [
+            "audit_token": ["pid": 13, "euid": 501],
+            "ppid": 1,
+            "executable": ["path": "/tmp/evil"],
+            "signing_id": "com.apple.totally.legit",
+            "team_id": "",
+            "codesigning_flags": 1,
+            "is_platform_binary": false,
+        ]
+        let info = EsloggerParser.extractProcess(from: processDict)
+        #expect(info.codeSignature?.signerType == .adHoc)
     }
 
     @Test("Developer ID detected with team_id")

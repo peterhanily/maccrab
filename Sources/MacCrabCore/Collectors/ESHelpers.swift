@@ -8,11 +8,6 @@ import Foundation
 import EndpointSecurity
 import Darwin.POSIX
 
-// MARK: - Codesigning Flag Constants
-
-/// CS_VALID from <sys/codesign.h>, not exposed to Swift.
-private let CS_VALID: UInt32 = 0x00000001
-
 // MARK: - String Conversion
 
 /// Convert an `es_string_token_t` (pointer + length) into a Swift `String`.
@@ -63,24 +58,15 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
     let signingId = esStringToSwift(p.signing_id)
     let teamId = esStringToSwift(p.team_id)
 
-    let signerType: SignerType = {
-        if p.codesigning_flags & UInt32(CS_VALID) != 0 {
-            // v1.17.1 FP fix: Apple PLATFORM binaries (e.g.
-            // /usr/libexec/nehelper, nesessionmanager) carry a valid Apple
-            // signature with an EMPTY team_id. The Apple markers were nested
-            // inside `if !teamId.isEmpty`, so those binaries fell through to
-            // .adHoc and tripped every SignerType-negated rule (incl. the
-            // CRITICAL Unsigned-Network-Extension FP). Check Apple FIRST.
-            if teamId == "apple" || signingId.hasPrefix("com.apple.") || p.is_platform_binary {
-                return .apple
-            }
-            if !teamId.isEmpty {
-                return .devId
-            }
-            return .adHoc
-        }
-        return .unsigned
-    }()
+    // v1.17.1: classify via the shared SignerType.classify so the ES and
+    // eslogger paths can't drift. is_platform_binary (kernel-attested) is the
+    // only Apple signal — the signing_id is attacker-controllable and must
+    // not promote a binary to .apple.
+    let signerType = SignerType.classify(
+        codesigningFlags: p.codesigning_flags,
+        teamId: teamId,
+        isPlatformBinary: p.is_platform_binary
+    )
 
     let codeSignature = CodeSignatureInfo(
         signerType: signerType,
