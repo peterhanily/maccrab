@@ -511,10 +511,14 @@ enum EventLoop {
             // miss, the authoritative check — which warms the LRU cache for next time
             // and preserves the 5-concurrent rate limiter inside the actor — runs in a
             // detached Task off the hot path, where it also drives the behavior
-            // indicator + sandbox prevention. The `notarization.status` enrichment is
-            // display-only (nothing in detection reads it; rules use
-            // codeSignature.isNotarized from the EventEnricher), so a first-seen event
-            // simply omitting it until the cache warms is acceptable.
+            // indicator + sandbox prevention AND emits the revoked-cert alert on
+            // first exec (see below). v1.17.2: the `notarization.status`
+            // enrichment IS now read by detection — the RuleEngine
+            // NotarizationStatus resolver prefers it (carries 'revoked'), and
+            // Rules/defense_evasion/developer_cert_revoked.yml keys on it. On a
+            // cold first-seen exec the enrichment is absent, so the YAML rule
+            // can't fire yet; the detached check below covers that first exec
+            // for the security-critical 'revoked' case specifically.
             if enrichedEvent.eventCategory == .process && enrichedEvent.eventAction == "exec" {
                 if let cached = await state.notarizationChecker.cachedResult(binaryPath: enrichedEvent.process.executable) {
                     enrichedEvent.enrichments["notarization.status"] = cached.status.rawValue
@@ -538,6 +542,38 @@ enum EventLoop {
                 let detachedEvent = enrichedEvent
                 Task.detached(priority: .utility) {
                     let notarResult = await notarizationChecker.check(binaryPath: execPath)
+
+                    // v1.17.2: a REVOKED Developer-ID cert (spctl 'revoked') is
+                    // near-certainly malicious (AMOS/Atomic Stealer post-takedown).
+                    // The developer_cert_revoked YAML rule keys on the enriched
+                    // notarization.status, but that enrichment is only present on
+                    // the SYNCHRONOUS hot path once the spctl cache is warm — on a
+                    // binary's FIRST execution (the moment that matters) the cache
+                    // is cold and the rule can't fire. This detached check is the
+                    // authoritative spctl assessment, so emit the critical alert
+                    // here directly on first exec. Independent of preventionEnabled
+                    // (it's detection, not prevention).
+                    if notarResult.status == .revoked {
+                        let alert = Alert(
+                            ruleId: "maccrab.notarization.cert-revoked",
+                            ruleTitle: "Execution of Binary With Revoked Developer Certificate",
+                            severity: .critical,
+                            eventId: eventId,
+                            processPath: execPath,
+                            processName: procName,
+                            description: "\(execPath) is signed with a Developer ID certificate that Apple has REVOKED — it would not clear Gatekeeper on a fresh launch. Apple revokes Developer ID certs when the signed software is confirmed malicious.",
+                            mitreTactics: "attack.defense_evasion",
+                            mitreTechniques: "attack.t1553.001",
+                            suppressed: false
+                        )
+                        do {
+                            if try await alertSink.submit(alert: alert, event: detachedEvent) {
+                                await notifier.notify(alert: alert)
+                            }
+                        } catch { await StorageErrorTracker.shared.recordAlertError(error) }
+                        return
+                    }
+
                     guard notarResult.status == .notNotarized && !isAppleSigned else { return }
                     await behaviorScoring.addIndicator(
                         named: "not_notarized",

@@ -73,16 +73,22 @@ detection:
     # BlueNoroff shape. Dropping these parents outright (to kill the signed
     # node->node->esbuild bundler FP) also blinded us to an unsigned payload
     # dropped to ~/Library/Caches by a node/python parent with no C2 callback.
-    # Re-add them, but gate on the EXEC'd binary being not-notarized so signed
-    # bundlers (esbuild/swc, which are notarized) stay excluded while an
-    # unsigned dropper still fires.
+    # Re-add them, gated on the EXEC'd binary's SIGNER so signed bundlers
+    # (esbuild/swc — devId) stay excluded while an unsigned/ad-hoc dropper
+    # fires. v1.17.2: gate on SignerType, NOT NotarizationStatus — the collector
+    # sets SignerType at exec time, whereas isNotarized defaults false until the
+    # async spctl cache warms, so a NotarizationStatus:'not_notarized' gate fired
+    # OPEN on every cold-cache exec (re-introducing the esbuild FP it was meant
+    # to exclude). unsigned/adHoc is the credible native-loader payload shape.
     selection_lineage_interp:
         ParentImage|endswith:
             - '/node'
             - '/python'
             - '/python3'
             - '/bun'
-        NotarizationStatus: 'not_notarized'
+        SignerType:
+            - 'unsigned'
+            - 'adHoc'
     filter_known_tool_caches:
         Image|contains:
             - '/Cypress/Cache/'

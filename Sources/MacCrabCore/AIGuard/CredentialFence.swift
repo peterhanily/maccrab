@@ -79,8 +79,14 @@ public struct CredentialFence: Sendable {
     /// (v1.17.2) so a credential file is matched precisely without snagging
     /// look-alike source files (`.env.example`, `Cookies.tsx`, `config.ts`).
     public static let defaultPaths: [SensitivePath] = [
-        // SSH — id_rsa / id_ed25519 / id_ecdsa share the `id_` filename prefix.
-        SensitivePath("id_", type: .sshKey, kind: .filenamePrefix),
+        // SSH private keys — anchored to the ~/.ssh/ dir (a bare `id_` filename
+        // prefix matched any file named id_* anywhere, e.g. id_token.ts). The
+        // public-key sibling id_*.pub is excluded in checkAccess (not a secret).
+        SensitivePath("/.ssh/id_rsa", type: .sshKey, kind: .pathFragment),
+        SensitivePath("/.ssh/id_ed25519", type: .sshKey, kind: .pathFragment),
+        SensitivePath("/.ssh/id_ecdsa", type: .sshKey, kind: .pathFragment),
+        SensitivePath("/.ssh/id_dsa", type: .sshKey, kind: .pathFragment),
+        SensitivePath("/.ssh/config", type: .sshKey, kind: .pathFragment),
         SensitivePath("/.ssh/known_hosts", type: .sshKey, kind: .pathFragment),
 
         // GPG
@@ -187,6 +193,10 @@ public struct CredentialFence: Sendable {
                 return nil
             }
         }
+
+        // SSH PUBLIC keys (id_rsa.pub etc.) are not secrets — reading them is
+        // benign and must not trip the SSH-key match below.
+        if filename.hasSuffix(".pub") { return nil }
 
         for sensitive in allPaths {
             let pattern = sensitive.pattern.lowercased()

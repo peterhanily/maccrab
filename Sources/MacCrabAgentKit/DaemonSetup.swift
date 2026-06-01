@@ -260,9 +260,14 @@ enum DaemonSetup {
                 return false
             }
             if let posix = (attrs[.posixPermissions] as? NSNumber)?.intValue {
-                // Check world-writable bit (o+w = 0o002)
-                if posix & 0o002 != 0 {
-                    logger.warning("Rules directory \(path) is world-writable (mode \(String(posix, radix: 8))). Skipping.")
+                // v1.17.2: reject GROUP- or world-writable (g+w|o+w = 0o022).
+                // Detection rules govern what the EDR catches; a group-writable
+                // rules dir (e.g. root:admin 0775) lets any admin-group member
+                // drop a rule override that disables detection WITHOUT root —
+                // a privilege-boundary hole. Rule dirs must be writable only by
+                // their owner.
+                if posix & 0o022 != 0 {
+                    logger.warning("Rules directory \(path) is group/world-writable (mode \(String(posix, radix: 8))). Refusing to load rules to prevent non-root rule tampering.")
                     return false
                 }
             }
@@ -1429,7 +1434,15 @@ enum DaemonSetup {
         // live reload without admin per save.
         let userOverridesDir = supportDir + "/user_rules"
         let userOverridesURL = URL(fileURLWithPath: userOverridesDir)
-        if fm.fileExists(atPath: userOverridesDir) {
+        // v1.17.2 security: gate the override overlay on the SAME secure-dir
+        // check as the primary rules path. The overlay can DISABLE detection
+        // (lower severity / turn rules off), so loading it from a group- or
+        // world-writable or symlinked dir would let a non-root admin tamper
+        // with what the root sysext detects. isSecureDirectory now also rejects
+        // group-writable, so a legacy root:admin 0775 user_rules dir is refused
+        // here — re-create it root-owned 0755 (follow-up: route override writes
+        // through the privileged inbox IPC instead of a shared-writable dir).
+        if fm.fileExists(atPath: userOverridesDir), isSecureDirectory(userOverridesDir) {
             do {
                 let userCount = try await ruleEngine.loadRules(from: userOverridesURL)
                 if userCount > 0 {
@@ -1478,7 +1491,14 @@ enum DaemonSetup {
                 do {
                     let baseCount = try await ruleEngine.reloadRules(from: liveCompiledRulesURL)
                     var total = baseCount
-                    if FileManager.default.fileExists(atPath: userOverridesDirForWatcher) {
+                    // v1.17.2 security: same gate as the initial load — only
+                    // overlay overrides from a non-symlinked, root/owner-owned,
+                    // non-group/world-writable dir. Inlined because the
+                    // isSecureDirectory closure isn't in this detached Task's
+                    // scope. An override that can be written by a non-root admin
+                    // could silently disable detection.
+                    if FileManager.default.fileExists(atPath: userOverridesDirForWatcher),
+                       isOverlayDirSecure(userOverridesDirForWatcher) {
                         if let overlayed = try? await ruleEngine.loadRules(from: URL(fileURLWithPath: userOverridesDirForWatcher)) {
                             total += overlayed
                         }
@@ -2158,4 +2178,26 @@ func reapOrphanUserDomainDBs(logger: os.Logger) {
             }
         }
     }
+}
+
+/// Secure-directory check for the user_rules override overlay, usable from
+/// detached Tasks (the per-setup `isSecureDirectory` closure isn't in their
+/// scope). Rejects symlinks and any group- or world-writable dir; requires
+/// owner uid 0 or the current uid. Mirrors the inline gate in `start()`.
+/// A rule-override overlay can DISABLE detection, so it must not be writable
+/// by a non-root admin. Top-level free function (like the orphan reaper above)
+/// so detached Tasks can call it without capturing the per-setup closure.
+func isOverlayDirSecure(_ path: String) -> Bool {
+    let fm = FileManager.default
+    let url = URL(fileURLWithPath: path)
+    if let rv = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]), rv.isSymbolicLink == true {
+        return false
+    }
+    guard let attrs = try? fm.attributesOfItem(atPath: path) else { return false }
+    let ownerUID = (attrs[.ownerAccountID] as? NSNumber)?.uint32Value ?? UInt32.max
+    guard ownerUID == 0 || ownerUID == getuid() else { return false }
+    if let posix = (attrs[.posixPermissions] as? NSNumber)?.intValue, posix & 0o022 != 0 {
+        return false
+    }
+    return true
 }

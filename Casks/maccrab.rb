@@ -64,6 +64,9 @@ cask "maccrab" do
     system_command "/bin/mkdir",
                    args: ["-p", "/Library/Application Support/MacCrab/compiled_rules/sequences"],
                    sudo: true
+    system_command "/bin/mkdir",
+                   args: ["-p", "/Library/Application Support/MacCrab/compiled_rules/graph"],
+                   sudo: true
     # v1.10.0 audit fix: cross-UID IPC drop point for the dashboard's
     # "Reduce events.db now" button. 1777 = sticky+world-write.
     system_command "/bin/mkdir",
@@ -77,6 +80,13 @@ cask "maccrab" do
     end
     Dir.glob("#{staged_path}/compiled_rules/sequences/*.json").each do |f|
       system_command "/bin/cp", args: [f, "/Library/Application Support/MacCrab/compiled_rules/sequences/"], sudo: true
+    end
+    # Graph rules (v1.12.0). manifest.json hashes these too, so omitting them
+    # makes the app's manifest verification fail → re-sync admin prompt + false
+    # tamper banner, AND leaves all 6 graph rules uninstalled (TraceGraph
+    # detection disabled on brew installs).
+    Dir.glob("#{staged_path}/compiled_rules/graph/*.json").each do |f|
+      system_command "/bin/cp", args: [f, "/Library/Application Support/MacCrab/compiled_rules/graph/"], sudo: true
     end
     # Copy the .bundle_version marker + manifest.json alongside the rules.
     # Without them the app's RuleBundleInstaller reads installedVersion="" on

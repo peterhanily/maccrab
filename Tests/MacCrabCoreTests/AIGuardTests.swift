@@ -117,6 +117,19 @@ struct CredentialFenceTests {
         let fence = CredentialFence()
         #expect(fence.checkAccess(filePath: "/Users/user/.ssh/id_rsa") == .sshKey)
         #expect(fence.checkAccess(filePath: "/Users/user/.ssh/id_ed25519") == .sshKey)
+        #expect(fence.checkAccess(filePath: "/Users/user/.ssh/config") == .sshKey)
+    }
+
+    @Test("SSH matcher is anchored to .ssh/ and excludes .pub (v1.17.2 regression guard)")
+    func sshKeyAnchoredAndPublicExcluded() {
+        let fence = CredentialFence()
+        // A bare `id_` filename prefix used to flag any id_* file anywhere.
+        #expect(fence.checkAccess(filePath: "/Users/user/project/src/id_token.ts") == nil)
+        #expect(fence.checkAccess(filePath: "/Users/user/app/id_generator.go") == nil)
+        // Public keys are not secrets.
+        #expect(fence.checkAccess(filePath: "/Users/user/.ssh/id_rsa.pub") == nil)
+        // The real private key still fires.
+        #expect(fence.checkAccess(filePath: "/Users/user/.ssh/id_rsa") == .sshKey)
     }
 
     @Test("Detects AWS credential access")

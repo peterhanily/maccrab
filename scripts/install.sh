@@ -85,7 +85,7 @@ fi
 
 # ─── Step 2: Support dir + rules ─────────────────────────────────────
 info "Creating $SUPPORT_DIR..."
-mkdir -p "$SUPPORT_DIR"/{compiled_rules/sequences,logs,inbox}
+mkdir -p "$SUPPORT_DIR"/{compiled_rules/sequences,compiled_rules/graph,logs,inbox}
 chmod 755 "$SUPPORT_DIR"
 # v1.10.0 audit fix: inbox/ is the cross-UID IPC drop point for the
 # dashboard's "Reduce events.db now" button. Sticky bit (1777) lets
@@ -98,6 +98,9 @@ if [ -d "$PROJECT_DIR/compiled_rules" ] && [ "$(find "$PROJECT_DIR/compiled_rule
     info "Installing pre-compiled detection rules..."
     cp -f "$PROJECT_DIR/compiled_rules/"*.json "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
     cp -f "$PROJECT_DIR/compiled_rules/sequences/"*.json "$SUPPORT_DIR/compiled_rules/sequences/" 2>/dev/null || true
+    # Graph rules (v1.12.0) — manifest.json hashes these too, so they must be
+    # installed or the app's manifest check fails (re-sync prompt + false tamper).
+    cp -f "$PROJECT_DIR/compiled_rules/graph/"*.json "$SUPPORT_DIR/compiled_rules/graph/" 2>/dev/null || true
     # Also copy the .bundle_version marker + manifest.json. Without these,
     # RuleBundleInstaller.syncIfNeeded() in the app reads installedVersion=""
     # on first launch, decides the rules are stale, and re-syncs WITH an admin
