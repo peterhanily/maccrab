@@ -351,21 +351,43 @@ public actor SelfDefense {
             (SIGQUIT, "SIGQUIT"),
         ]
 
+        // Capture the grace deadline into a Sendable local. The signal-source
+        // closure runs on a global queue and can't synchronously read the
+        // actor-isolated `startupTime`; start() sets startupTime before
+        // calling us, so this snapshot is valid for the whole process life.
+        let graceDeadline = (startupTime ?? Date()).addingTimeInterval(startupGracePeriod)
+
         for (sig, name) in signals {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .global())
             source.setEventHandler { [weak self] in
                 guard let self else { return }
-                let event = TamperEvent(
-                    type: .signalReceived,
-                    description: "MacCrab daemon received \(name) signal. Possible attempt to terminate security monitoring.",
-                    severity: .high
-                )
-                Task { await self.handleTamperEvent(event) }
 
-                // Log before exiting
-                self.logger.critical("TAMPER: Received \(name) — logging before exit")
+                // v1.17.1 FP fix: gate the tamper ALERT the same way the file
+                // monitor paths are (sentinel + startup grace). launchd/the
+                // updater/`pkill -HUP`-adjacent stop signals MacCrab itself on
+                // every legitimate stop, upgrade, and reload — firing a HIGH
+                // "received SIGTERM" tamper event each time. A self-update
+                // sentinel within its TTL, or the first `startupGracePeriod`
+                // seconds (sysext (de)activation churn), is benign. The
+                // graceful-exit behaviour below is UNCONDITIONAL — only the
+                // alert is suppressed.
+                let withinGrace = Date() < graceDeadline
+                let benignSelfSignal = Self.isSelfUpdateInProgress() || withinGrace
 
-                // For SIGTERM, allow graceful shutdown after logging
+                if benignSelfSignal {
+                    self.logger.notice("Received \(name) during self-update/startup grace — graceful stop, no tamper alert")
+                } else {
+                    let event = TamperEvent(
+                        type: .signalReceived,
+                        description: "MacCrab daemon received \(name) signal. Possible attempt to terminate security monitoring.",
+                        severity: .high
+                    )
+                    Task { await self.handleTamperEvent(event) }
+                    self.logger.critical("TAMPER: Received \(name) — logging before exit")
+                }
+
+                // For SIGTERM/SIGINT, allow graceful shutdown after logging —
+                // unconditional, regardless of whether we alerted.
                 if sig == SIGTERM || sig == SIGINT {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                         exit(0)
