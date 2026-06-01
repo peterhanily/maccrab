@@ -349,20 +349,19 @@ enum RuleBundleInstaller {
         }
     }
 
-    /// Ask the detection engine to reload its rules without a full
-    /// restart. Sysext runs as root (com.maccrab.agent) so this needs
-    /// the sysext process to have a SIGHUP handler — which it does, per
-    /// CLAUDE.md. Best-effort; if the process isn't running or pkill
-    /// fails, the rules take effect on next sysext start anyway.
+    /// Ask the detection engine to reload its rules without a full restart.
+    ///
+    /// v1.17.1 fix: the release engine is the System Extension running as
+    /// **root**, and this app runs as the console user — so `pkill -HUP
+    /// com.maccrab.agent` EPERMs (cross-uid signal) and the SIGHUP never
+    /// lands. The sync then wrote new rules to disk but the running sysext
+    /// kept evaluating the OLD in-memory ruleset until its next restart —
+    /// which is exactly why a fresh install/upgrade emitted alerts at the
+    /// previous build's severities. Delegate to V2DaemonControl, whose
+    /// PRIMARY path drops an authorized request into the privileged inbox the
+    /// sysext polls (it SIGHUPs itself on receipt); `pkill -HUP maccrabd`
+    /// stays only as the same-uid dev-daemon fallback.
     private static func sighupDetectionEngine() {
-        for target in ["com.maccrab.agent", "maccrabd"] {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            p.arguments = ["-HUP", target]
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            _ = try? p.run()
-            p.waitUntilExit()
-        }
+        _ = V2DaemonControl.reloadDetectionRules()
     }
 }
