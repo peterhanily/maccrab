@@ -1390,6 +1390,7 @@ public final class V2LiveDataProvider: V2DataProvider {
             workingDirectory: a.workingDirectory ?? "",
             processSHA256: a.processSha256 ?? "",
             hostName: a.hostName ?? "",
+            triggeringEventsJson: a.triggeringEventsJson ?? "",
             timestamp: a.timestamp,
             mitre: mitre,
             category: (a.mitreTactics ?? "uncategorised").components(separatedBy: ",").first ?? "—",

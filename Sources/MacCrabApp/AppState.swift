@@ -2531,7 +2531,8 @@ final class AppState: ObservableObject {
             mitreTechniques: a.mitreTechniques ?? "",
             suppressed: a.suppressed,
             eventId: a.eventId,
-            llmInvestigation: a.llmInvestigation
+            llmInvestigation: a.llmInvestigation,
+            triggeringEventsJson: a.triggeringEventsJson
         )
     }
 

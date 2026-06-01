@@ -985,6 +985,27 @@ struct V2AlertsWorkspace: View {
             // Remediation / D3FEND sections above. Returns in v1.11
             // alongside the metadata_json schema column and the
             // inline mutation UI to populate it.
+            // v1.17.2: the EXACT triggering event(s), snapshotted onto the
+            // alert at creation (AlertStore schema v6). Unlike "Surrounding
+            // events", this survives events.db pruning — so even a months-old
+            // alert still shows what actually fired. Only shown when present.
+            if !alert.triggeringEventsJson.isEmpty,
+               !triggeringEventSummaries(from: alert.triggeringEventsJson).isEmpty {
+                let snapshot = alert.triggeringEventsJson
+                V2InspectorSection("Triggering event") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(triggeringEventSummaries(from: snapshot).enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(V2Theme.meta())
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Text("Captured at alert time — preserved even after the live event is pruned.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(V2Theme.mutedText)
+                    }
+                }
+            }
             V2InspectorSection("Surrounding events (±2 min)") {
                 surroundingEventsList(for: alert)
             }
@@ -1059,6 +1080,34 @@ struct V2AlertsWorkspace: View {
 
     /// List up to 8 events from AppState.events whose timestamp is
     /// within ±2 minutes of the alert. AppState already polls a
+    /// Parse the v6 triggering-event snapshot (a JSON array of event
+    /// raw_json objects) into human-readable one-line summaries for the
+    /// inspector. Pure value transform — no DB round-trip. Tolerant of
+    /// malformed/partial JSON (returns [] so the section simply hides).
+    private func triggeringEventSummaries(from json: String) -> [String] {
+        guard let data = json.data(using: .utf8),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+        else { return [] }
+        return arr.compactMap { obj -> String? in
+            // Omitted-oversize marker (see EventSnapshot.encode).
+            if let snap = obj["snapshot"] as? String, snap == "omitted" {
+                return "event omitted (exceeded size cap)"
+            }
+            let action = (obj["eventAction"] as? String) ?? (obj["eventType"] as? String) ?? "event"
+            let proc = (obj["process"] as? [String: Any])
+            let name = (proc?["name"] as? String) ?? "—"
+            var parts = ["\(action): \(name)"]
+            if let cmd = proc?["commandLine"] as? String, !cmd.isEmpty { parts.append(cmd) }
+            if let file = (obj["file"] as? [String: Any])?["path"] as? String, !file.isEmpty { parts.append("file: \(file)") }
+            if let net = obj["network"] as? [String: Any],
+               let ip = net["destinationIp"] as? String {
+                let port = (net["destinationPort"] as? Int).map { ":\($0)" } ?? ""
+                parts.append("→ \(ip)\(port)")
+            }
+            return parts.joined(separator: "  ·  ")
+        }
+    }
+
     /// recent window of events from EventStore, so this is a free
     /// in-memory filter — no extra DB round-trip.
     @ViewBuilder

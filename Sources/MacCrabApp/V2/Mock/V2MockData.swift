@@ -91,6 +91,10 @@ public struct V2MockAlert: Identifiable, Sendable, Hashable {
     public var workingDirectory: String = ""
     public var processSHA256: String = ""
     public var hostName: String = ""
+    // v1.17.2: JSON array of the triggering event(s) snapshotted onto the
+    // alert (AlertStore schema v6). Survives events.db pruning so the
+    // inspector can show what fired even on an old alert. "" when absent.
+    public var triggeringEventsJson: String = ""
     public let timestamp: Date
     public let mitre: [String]
     public let category: String
@@ -127,6 +131,7 @@ public struct V2MockAlert: Identifiable, Sendable, Hashable {
                 workingDirectory: String = "",
                 processSHA256: String = "",
                 hostName: String = "",
+                triggeringEventsJson: String = "",
                 timestamp: Date,
                 mitre: [String], category: String, description: String,
                 actionsTaken: [String], suppressed: Bool,
@@ -154,6 +159,7 @@ public struct V2MockAlert: Identifiable, Sendable, Hashable {
         self.workingDirectory = workingDirectory
         self.processSHA256 = processSHA256
         self.hostName = hostName
+        self.triggeringEventsJson = triggeringEventsJson
         self.timestamp = timestamp
         self.mitre = mitre
         self.category = category

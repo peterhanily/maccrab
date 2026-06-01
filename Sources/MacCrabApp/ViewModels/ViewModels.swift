@@ -100,6 +100,11 @@ struct AlertViewModel: Identifiable, Hashable {
     /// triaged this alert. Default nil so existing memberwise init
     /// callers (mocks, previews, tests) don't need to pass it.
     var llmInvestigation: MacCrabCore.LLMInvestigation? = nil
+    /// (v1.17.2) JSON array of the triggering event(s) snapshotted onto the
+    /// alert at creation (AlertStore schema v6), so the originating event is
+    /// visible even after events.db prunes it. Nil for alerts with no backing
+    /// Event. Default nil so mock/preview constructors don't need updating.
+    var triggeringEventsJson: String? = nil
 
     var timeString: String {
         Self.timeFormatter.string(from: timestamp)
