@@ -276,6 +276,27 @@ public struct CodeSignatureInfo: Codable, Sendable, Hashable {
         self.isAdhocSigned = isAdhocSigned
         self.entitlements = entitlements
     }
+
+    /// Return a copy with a corrected `signerType`, preserving every other
+    /// field. Used by EventEnricher's v1.17.2 anti-spoof re-verification: a
+    /// collector-side `.apple` classification derived from the
+    /// attacker-controllable `com.apple.*` signing identifier is downgraded to
+    /// the cryptographically-verified signer (`anchor apple` check) when the
+    /// two disagree.
+    public func withSignerType(_ newSignerType: SignerType) -> CodeSignatureInfo {
+        CodeSignatureInfo(
+            signerType: newSignerType,
+            teamId: teamId,
+            signingId: signingId,
+            authorities: authorities,
+            flags: flags,
+            isNotarized: isNotarized,
+            issuerChain: issuerChain,
+            certHashes: certHashes,
+            isAdhocSigned: isAdhocSigned,
+            entitlements: entitlements
+        )
+    }
 }
 
 // MARK: - ProcessAncestor

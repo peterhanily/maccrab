@@ -127,9 +127,38 @@ public actor EventEnricher {
 
         // --- 3. Evaluate code signing ---
         let codeSignature: CodeSignatureInfo?
-        if proc.codeSignature != nil {
-            // The collector already provided signing info; keep it.
-            codeSignature = proc.codeSignature
+        if let collectorSig = proc.codeSignature {
+            // The collector (ESHelpers / EsloggerParser) already classified the
+            // signer cheaply from the kernel signals. Keep it — EXCEPT for the
+            // one spoofable case (v1.17.2 anti-spoof):
+            //
+            // SignerType.classify promotes a binary to `.apple` when its
+            // signing identifier starts with `com.apple.` AND it has a
+            // non-empty team_id (needed to keep Apple's NON-platform apps —
+            // Xcode, iWork — classified .apple). But `signing_id` is the
+            // developer-chosen `Identifier=` field: a third party holding any
+            // Developer ID cert can self-name `com.apple.*` and be laundered
+            // into `.apple`, skipping the ~126 SignerType:apple-negated rules.
+            //
+            // Kernel `is_platform_binary` is unspoofable, so a genuine platform
+            // binary needs no further check. Only the
+            // (.apple AND NOT platform-binary) case is ambiguous — re-verify it
+            // CRYPTOGRAPHICALLY via the `anchor apple` SecRequirement. This is
+            // the expensive path, but it runs ONLY for that narrow case and is
+            // LRU-cached per executable path, so a real Apple app pays it once
+            // and the common (.devId/.adHoc/.unsigned/platform) events never do.
+            if collectorSig.signerType == .apple && !proc.isPlatformBinary {
+                let verified = await codeSigningCache.evaluate(path: proc.executable)
+                if verified.signerType != .apple {
+                    // signing_id said Apple but the cert chain does not anchor
+                    // to Apple — a spoof. Trust the cryptographic verdict.
+                    codeSignature = collectorSig.withSignerType(verified.signerType)
+                } else {
+                    codeSignature = collectorSig
+                }
+            } else {
+                codeSignature = collectorSig
+            }
         } else {
             codeSignature = await codeSigningCache.evaluate(path: proc.executable)
         }

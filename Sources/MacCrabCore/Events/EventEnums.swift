@@ -104,15 +104,17 @@ public enum SignerType: String, Codable, Sendable, Hashable, CaseIterable {
     ///    signed this way, so this is required to keep them classified `.apple`
     ///    rather than tripping the ~126 SignerType:apple-negated rules.
     ///
-    /// CAVEAT (pre-existing, tracked as a follow-up): the signing identifier is
-    /// the developer-chosen `Identifier=` field, so a third party holding a
-    /// Developer ID cert CAN self-name `com.apple.*` and be mis-classified
-    /// `.apple` here. Closing that without losing the Apple-app case requires
-    /// cert-authority ("anchor apple") validation, which the cheap collector
-    /// path doesn't have. The identifier check is gated on a non-empty team_id
-    /// so an AD-HOC binary (empty team_id) can never use it — that gate is the
-    /// v1.17.1 hardening (a brief hoist had let ad-hoc `com.apple.*` binaries
-    /// reach `.apple`).
+    /// NOTE on the `com.apple.*` identifier: it is the developer-chosen
+    /// `Identifier=` field, so a third party holding a Developer ID cert could
+    /// self-name `com.apple.*` and reach `.apple` HERE (this is a cheap,
+    /// collector-side classification with no crypto). That spoof is closed
+    /// DOWNSTREAM in v1.17.2: `EventEnricher.enrich` re-verifies any
+    /// (.apple AND NOT platform-binary) classification against the
+    /// cryptographic `anchor apple` SecRequirement (LRU-cached) and downgrades
+    /// a non-anchored binary to its real signer. The identifier check is also
+    /// gated on a non-empty team_id so an AD-HOC binary (empty team_id) can
+    /// never use it — that gate is the v1.17.1 hardening (a brief hoist had let
+    /// ad-hoc `com.apple.*` binaries reach `.apple`).
     public static func classify(
         codesigningFlags: UInt32,
         teamId: String,
