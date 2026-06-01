@@ -46,11 +46,11 @@ detection:
     # workflow). Restrict parents to actual downloaders or runtime
     # interpreters — those are the credible "fetched-then-executed"
     # signature.
-    # v1.17.1 FP fix: dropped /node, /python, /python3 as direct parents.
-    # They made the normal node->node->esbuild (and python->python) bundler
-    # pattern under node_modules fire with NO curl/wget anywhere — ~25% of
-    # HIGH-tier noise. The credible "fetched-then-executed" parent is an
-    # actual downloader; keep only those.
+    # v1.17.1 FP fix: this curl/wget-only lineage no longer lists /node,
+    # /python as parents (they made the normal node->node->esbuild bundler
+    # pattern fire with NO curl/wget — ~25% of HIGH-tier noise). The
+    # native-HTTP-loader case those parents covered is restored, signature-
+    # gated, in selection_lineage_interp below.
     selection_lineage:
         ParentImage|endswith:
             - '/curl'
@@ -68,6 +68,21 @@ detection:
             - '/bun'
             - '/installer'
             - '/package_script_service'
+    # v1.17.1 follow-up: restore coverage of node/python NATIVE-HTTP loaders
+    # (require('https').get / urllib — no curl/wget process), the axios-npm /
+    # BlueNoroff shape. Dropping these parents outright (to kill the signed
+    # node->node->esbuild bundler FP) also blinded us to an unsigned payload
+    # dropped to ~/Library/Caches by a node/python parent with no C2 callback.
+    # Re-add them, but gate on the EXEC'd binary being not-notarized so signed
+    # bundlers (esbuild/swc, which are notarized) stay excluded while an
+    # unsigned dropper still fires.
+    selection_lineage_interp:
+        ParentImage|endswith:
+            - '/node'
+            - '/python'
+            - '/python3'
+            - '/bun'
+        NotarizationStatus: 'not_notarized'
     filter_known_tool_caches:
         Image|contains:
             - '/Cypress/Cache/'
@@ -76,7 +91,7 @@ detection:
             - '/electron/Cache/'
             - '/.cache/ms-playwright/'
             - '/.cache/Cypress/'
-    condition: (selection_exec_user_writable or selection_user_writable_caches) and selection_lineage and not filter_known_tool_caches
+    condition: (selection_exec_user_writable or selection_user_writable_caches) and (selection_lineage or selection_lineage_interp) and not filter_known_tool_caches
 falsepositives:
     - Browser-automation toolkits (Playwright, Puppeteer, Cypress, Electron) that legitimately cache and execute headless-browser binaries from `~/Library/Caches/` — covered by `filter_known_tool_caches`
     - Native-addon prebuilds (bcrypt, sharp, sqlite3, esbuild, swc) that cache compiled binaries under `~/Library/Caches/<pkg>/` and execute them — extend filter as packages are observed

@@ -221,4 +221,44 @@ struct Phase2RuleFireTests {
             $0.ruleId.contains("ssh-launched-security-dump")
         }, "SSH-specific rule should not fire on local terminal session")
     }
+
+    // MARK: - staged_fetch_then_exec_from_user_writable (v1.17.1 interp lineage)
+
+    /// v1.17.1 restored node/python NATIVE-HTTP-loader coverage via the
+    /// `selection_lineage_interp` branch (parent node/python + not-notarized
+    /// exec), gated so signed bundlers don't trip it. Positive case.
+    @Test("node-parent unsigned payload in Caches fires staged_fetch (interp lineage)")
+    func stagedFetchInterpFires() async throws {
+        let engine = try await loadEngine()
+        let proc = process(
+            name: "x",
+            executable: "/Users/alice/Library/Caches/evilpkg/x",
+            signer: .unsigned,                 // -> NotarizationStatus not_notarized
+            ancestorExec: "/opt/homebrew/bin/node",
+            ancestorName: "node"
+        )
+        let event = processEvent(process: proc)
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("fetch followed by execution") },
+                "Expected staged_fetch to fire on node-parent unsigned Caches exec, got: \(matches.map(\.ruleName))")
+    }
+
+    /// Negative case: a node-parent exec of a NOTARIZED bundler binary
+    /// (esbuild/swc) under Caches must NOT fire — that was the ~25% FP the
+    /// not-notarized gate exists to exclude.
+    @Test("node-parent NOTARIZED bundler in Caches does NOT fire staged_fetch")
+    func stagedFetchInterpNotarizedDoesNotFire() async throws {
+        let engine = try await loadEngine()
+        let proc = process(
+            name: "esbuild",
+            executable: "/Users/alice/Library/Caches/esbuild/bin/esbuild",
+            signer: .devId,                    // -> NotarizationStatus notarized
+            ancestorExec: "/opt/homebrew/bin/node",
+            ancestorName: "node"
+        )
+        let event = processEvent(process: proc)
+        let matches = await engine.evaluate(event)
+        #expect(!matches.contains { $0.ruleName.lowercased().contains("fetch followed by execution") },
+                "staged_fetch should not fire on a notarized bundler, got: \(matches.map(\.ruleName))")
+    }
 }
