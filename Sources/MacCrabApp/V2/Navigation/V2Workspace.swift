@@ -76,12 +76,12 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
         case .overview:      return []
         case .alerts:        return [.alertsOpen, .alertsCampaigns, .alertsHistory, .alertsSuppressions]
         case .events:        return []
+        // v1.17.2: Investigation is trace-graph + agent-traces + AI analysis.
+        // The forensics sub-tabs (Cases/Plugins/Artifacts/Findings) moved to
+        // the dedicated Forensics workspace and their Investigation entries
+        // were removed — they had become redirect-only "Moved" stubs.
         case .investigation: return [.investigationTraceGraph, .investigationAgentTraces,
-                                     .investigationAIAnalysis,
-                                     .investigationForensicsCases,
-                                     .investigationForensicsPlugins,
-                                     .investigationForensicsArtifacts,
-                                     .investigationForensicsFindings]
+                                     .investigationAIAnalysis]
         case .forensics:     return [.forensicsScans,
                                      .forensicsPastScans,
                                      .forensicsFindings,
@@ -113,13 +113,10 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
     case investigationAgentTraces
     case investigationAIAnalysis
 
-    // Investigation → Forensics (v1.13b — Mac Context Plugin Platform).
-    // v1.17: legacy tabs — show "Moved to Forensics →" redirect
-    // banner. New work lives under the .forensics workspace tabs.
-    case investigationForensicsCases
-    case investigationForensicsPlugins
-    case investigationForensicsArtifacts
-    case investigationForensicsFindings
+    // (v1.17.2) The Investigation→Forensics legacy tabs
+    // (investigationForensicsCases/Plugins/Artifacts/Findings) were removed.
+    // Forensics is its own workspace now; those tabs had degraded to
+    // redirect-only "Moved" stubs. New work lives under the .forensics tabs.
 
     // v1.17 rc.4 — customer-shaped Forensics workspace per
     // docs/forensics-rebuild-2026-05-25.md. Two tabs:
@@ -160,14 +157,10 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationTraceGraph:        return String(localized: "workspaceTab.investigation.traceGraph",     defaultValue: "TraceGraph")
         case .investigationAgentTraces:       return String(localized: "workspaceTab.investigation.agentTraces",    defaultValue: "Agent Traces")
         case .investigationAIAnalysis:        return String(localized: "workspaceTab.investigation.aiAnalysis",     defaultValue: "AI Analysis")
-        case .investigationForensicsCases:    return String(localized: "workspaceTab.investigation.forensicsCases", defaultValue: "Forensics · Cases")
-        case .investigationForensicsPlugins:  return String(localized: "workspaceTab.investigation.forensicsPlugins", defaultValue: "Forensics · Plugins")
         case .forensicsScans:                 return String(localized: "workspaceTab.forensics.scans",    defaultValue: "Run a scan")
         case .forensicsPastScans:             return String(localized: "workspaceTab.forensics.pastScans", defaultValue: "Past scans")
         case .forensicsFindings:              return String(localized: "workspaceTab.forensics.findings", defaultValue: "Findings")
         case .forensicsCatalog:               return String(localized: "workspaceTab.forensics.catalog",  defaultValue: "Catalog")
-        case .investigationForensicsArtifacts: return String(localized: "workspaceTab.investigation.forensicsArtifacts", defaultValue: "Forensics · Artifacts")
-        case .investigationForensicsFindings: return String(localized: "workspaceTab.investigation.forensicsFindings", defaultValue: "Forensics · Findings")
         case .detectionRules:                 return String(localized: "workspaceTab.detection.rules",              defaultValue: "Rules")
         case .detectionAIGuard:               return String(localized: "workspaceTab.detection.aiGuard",            defaultValue: "AI Guard")
         case .detectionBrowser:               return String(localized: "workspaceTab.detection.browser",            defaultValue: "Browser")
@@ -187,9 +180,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .alertsOpen, .alertsCampaigns, .alertsHistory, .alertsSuppressions:
             return .alerts
         case .investigationTraceGraph, .investigationAgentTraces,
-             .investigationAIAnalysis,
-             .investigationForensicsCases, .investigationForensicsPlugins,
-             .investigationForensicsArtifacts, .investigationForensicsFindings:
+             .investigationAIAnalysis:
             return .investigation
         case .forensicsScans, .forensicsPastScans, .forensicsFindings, .forensicsCatalog:
             return .forensics

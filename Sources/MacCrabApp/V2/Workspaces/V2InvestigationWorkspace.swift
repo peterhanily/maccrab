@@ -209,11 +209,8 @@ struct V2InvestigationWorkspace: View {
         case .investigationTraceGraph:        traceGraphTab
         case .investigationAgentTraces:       agentTracesTab
         case .investigationAIAnalysis:        aiAnalysisTab
-        // v1.13b — Mac Context Plugin Platform read-only surfaces.
-        case .investigationForensicsCases:     forensicsMovedBanner(legacyTab: "Cases", newTab: .forensicsScans) { V2ForensicsCasesView() }
-        case .investigationForensicsPlugins:   forensicsMovedBanner(legacyTab: "Plugins", newTab: .forensicsScans) { V2ForensicsPluginsView() }
-        case .investigationForensicsArtifacts: forensicsMovedBanner(legacyTab: "Artifacts", newTab: .forensicsScans) { V2ForensicsArtifactsView() }
-        case .investigationForensicsFindings:  forensicsMovedBanner(legacyTab: "Findings", newTab: .forensicsFindings) { V2ForensicsLegacyFindingsView() }
+        // v1.17.2: the Investigation→Forensics tabs were removed (Forensics is
+        // its own workspace). A stale persisted selection falls back here.
         default: traceGraphTab
         }
     }
@@ -1771,42 +1768,6 @@ struct V2InvestigationWorkspace: View {
 
     // MARK: - Forensics moved banner (v1.17)
 
-    /// v1.17 — legacy Forensics tabs under Investigation show a
-    /// "Moved to Forensics →" banner above the original content.
-    /// Banner click jumps to the new tab. Old tabs continue to
-    /// work for one release; v1.18 removes them entirely.
-    @ViewBuilder
-    private func forensicsMovedBanner<Content: View>(
-        legacyTab: String,
-        newTab: V2WorkspaceTab,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                state.currentWorkspace = .forensics
-                state.selectedTabs[.forensics] = newTab
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "arrow.right.circle.fill")
-                        .foregroundStyle(.tint)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Moved: this tab is now under Forensics → \(newTab.title)")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("v1.17 reshaped the IA. The legacy '\(legacyTab)' tab here will be removed in v1.18.")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text("Go →").font(.system(size: 11)).foregroundStyle(.tint)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color.accentColor.opacity(0.10))
-            }
-            .buttonStyle(.plain)
-            content()
-        }
-    }
 }
 
 // MARK: - V2TraceLayout
