@@ -98,6 +98,13 @@ if [ -d "$PROJECT_DIR/compiled_rules" ] && [ "$(find "$PROJECT_DIR/compiled_rule
     info "Installing pre-compiled detection rules..."
     cp -f "$PROJECT_DIR/compiled_rules/"*.json "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
     cp -f "$PROJECT_DIR/compiled_rules/sequences/"*.json "$SUPPORT_DIR/compiled_rules/sequences/" 2>/dev/null || true
+    # Also copy the .bundle_version marker + manifest.json. Without these,
+    # RuleBundleInstaller.syncIfNeeded() in the app reads installedVersion=""
+    # on first launch, decides the rules are stale, and re-syncs WITH an admin
+    # password prompt — even though the rules are already correct. Copying both
+    # makes the first-launch version+manifest check match and skip the prompt.
+    cp -f "$PROJECT_DIR/compiled_rules/.bundle_version" "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
+    cp -f "$PROJECT_DIR/compiled_rules/manifest.json" "$SUPPORT_DIR/compiled_rules/" 2>/dev/null || true
 elif [ -d "$PROJECT_DIR/Rules" ] && command -v python3 &>/dev/null; then
     info "Compiling detection rules..."
     python3 Compiler/compile_rules.py \

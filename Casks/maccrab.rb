@@ -78,6 +78,14 @@ cask "maccrab" do
     Dir.glob("#{staged_path}/compiled_rules/sequences/*.json").each do |f|
       system_command "/bin/cp", args: [f, "/Library/Application Support/MacCrab/compiled_rules/sequences/"], sudo: true
     end
+    # Copy the .bundle_version marker + manifest.json alongside the rules.
+    # Without them the app's RuleBundleInstaller reads installedVersion="" on
+    # first launch, thinks the rules are stale, and re-syncs WITH an admin
+    # password prompt — even though brew just installed the correct rules.
+    ["compiled_rules/.bundle_version", "compiled_rules/manifest.json"].each do |rel|
+      src = "#{staged_path}/#{rel}"
+      system_command "/bin/cp", args: [src, "/Library/Application Support/MacCrab/#{rel}"], sudo: true if File.exist?(src)
+    end
 
     # The system extension itself is not installed here. It ships
     # inside MacCrab.app/Contents/Library/SystemExtensions/ and is
