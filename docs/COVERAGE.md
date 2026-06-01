@@ -10,13 +10,13 @@ ATT&CK technique tags from each rule's `tags:` block.
 
 | Metric | Count |
 |---|---|
-| Rules total | **475** |
+| Rules total | **476** |
 | Status: stable | 92 |
-| Status: experimental | 377 |
+| Status: experimental | 378 |
 | Status: deprecated | 3 |
-| Severity: critical | 98 |
-| Severity: high | 222 |
-| Severity: medium | 112 |
+| Severity: critical | 23 |
+| Severity: high | 295 |
+| Severity: medium | 115 |
 | Severity: low | 37 |
 | Severity: informational | 6 |
 | Distinct MITRE ATT&CK techniques covered | 169 |
@@ -42,7 +42,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `agent_filesystem_violation_probable.yml`<br/>Agent Wrote To Privileged Path (Lineage Attribution) | stable | medium | T1543.001 T1543.004 T1555.001 |
 | `agent_traceparent_credential_access.yml`<br/>Agent Read Credential Material (Traceparent-Bound) | stable | high | T1552.001 T1552.004 T1555 |
 | `agent_writes_outside_project_to_dotfiles.yml`<br/>AI Coding Tool Writes to Shell Dotfile Outside Project | experimental | high | T1546.004 |
-| `ai_tool_data_exfiltration.yml`<br/>AI Tool Child Process Uploads Data to Non-Standard Destination | experimental | critical | T1041 T1048.003 T1071.001 |
+| `ai_tool_data_exfiltration.yml`<br/>AI Tool Child Process Uploads Data to Non-Standard Destination | experimental | high | T1041 T1048.003 T1071.001 |
 | `ai_tool_downloads_script.yml`<br/>AI Coding Tool Downloads and Executes Script | stable | high | T1059.004 |
 | `ai_tool_encoded_payload.yml`<br/>Encoded Payload in AI Tool Command | experimental | high | T1027 |
 | `ai_tool_installs_package.yml`<br/>AI Coding Tool Installs Package | experimental | medium | T1195.001 |
@@ -58,17 +58,17 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `ai_tool_unapproved_network.yml`<br/>AI Tool Connects to Unapproved Network Destination | experimental | high | T1041 T1071.001 |
 | `ai_tool_writes_outside_project.yml`<br/>AI Tool Process Writes File Outside Project Directory | experimental | high | T1036 |
 | `ai_tool_writes_persistence.yml`<br/>AI Tool Installs Persistence Mechanism | stable | high | T1543.001 |
-| `binary_dropped_into_claude_dir.yml`<br/>Executable Dropped Into .claude/ Subdirectory (SessionStart Hijack) | experimental | critical | T1195.001 T1546 T1564.001 |
+| `binary_dropped_into_claude_dir.yml`<br/>Executable Dropped Into .claude/ Subdirectory (SessionStart Hijack) | experimental | high | T1195.001 T1546 T1564.001 |
 | `canary_skill_or_rules_read.yml`<br/>AI-Agent Honey-Prompt File Read | experimental | critical | T1083 |
-| `claude_code_project_config_rce.yml`<br/>Claude Code Project Config Hook RCE Pattern | experimental | critical | T1059 T1546 |
+| `claude_code_project_config_rce.yml`<br/>Claude Code Project Config Hook RCE Pattern | experimental | high | T1059 T1546 |
 | `claude_settings_hook_injection_by_non_claude.yml`<br/>~/.claude/settings.json Modified by Non-Claude Process (Hook Injection) | experimental | high | T1195.001 T1546 |
 | `honeyprompt_canary_package_install.yml`<br/>Honey-Prompt Canary Package Install Attempted | experimental | critical | T1195.001 |
 | `llm_classifier_high_risk_intent.yml`<br/>MacCrab IntentClassifier Returned High-Risk Verdict | experimental | high | T1195 |
 | `mcp_server_added.yml`<br/>MCP Server Configuration Added | stable | medium | T1195.002 |
-| `mcp_server_config_injection_by_non_ai_tool.yml`<br/>MCP Server Config Modified by Package-Manager Lineage (SANDWORM_MODE / Shai-Hulud) | experimental | critical | T1195.001 T1546 T1546.016 |
+| `mcp_server_config_injection_by_non_ai_tool.yml`<br/>MCP Server Config Modified by Package-Manager Lineage (SANDWORM_MODE / Shai-Hulud) | experimental | high | T1195.001 T1546 T1546.016 |
 | `mcp_server_suspicious_command.yml`<br/>MCP Server with Suspicious Command Path | stable | high | T1036 T1059 |
-| `mcp_server_tool_poisoning.yml`<br/>MCP Server with Potential Tool Description Injection | stable | critical | T1059 T1195.002 |
-| `skill_md_poisoning_install.yml`<br/>SKILL.md Poisoning — Install of Untrusted Agent Skill | experimental | critical | T1059 T1546 |
+| `mcp_server_tool_poisoning.yml`<br/>MCP Server with Potential Tool Description Injection | stable | high | T1059 T1195.002 |
+| `skill_md_poisoning_install.yml`<br/>SKILL.md Poisoning — Install of Untrusted Agent Skill | experimental | high | T1059 T1546 |
 | `vscode_tasks_json_modified_by_non_vscode.yml`<br/>.vscode/tasks.json Modified by Non-Editor Process (Folder-Open Hook Injection) | experimental | high | T1195.001 T1546 |
 
 ### Collection (TA0009) (13 rules)
@@ -100,7 +100,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `dns_high_entropy_query.yml`<br/>High-Entropy DNS Query (Possible DGA or Tunneling) | experimental | low | T1568.002 |
 | `dns_over_https_manual.yml`<br/>Manual DNS-over-HTTPS Query to Bypass Local DNS | experimental | medium | T1071.004 |
 | `doh_evasion_non_browser.yml`<br/>DNS-over-HTTPS by Non-Browser Process | experimental | high | T1071.004 |
-| `iodine_dns_tunnel.yml`<br/>DNS Tunneling Tool Detected (iodine/dns2tcp) | stable | critical | T1071.004 |
+| `iodine_dns_tunnel.yml`<br/>DNS Tunneling Tool Detected (iodine/dns2tcp) | stable | high | T1071.004 |
 | `launchctl_load_remote.yml`<br/>launchctl Loading from Remote or Temp Path | stable | high | T1543.001 |
 | `netcat_listener.yml`<br/>Netcat Listener Established | stable | high | T1095 |
 | `ngrok_or_tunnel.yml`<br/>Tunnel Service Tool Detected (ngrok/cloudflared/bore) | stable | high | T1572 |
@@ -136,13 +136,13 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
 | `auth_brute_force.yml`<br/>Sudo Stdin Password Or Keychain Unlock By Non-Apple Process | experimental | medium | T1110 T1555.001 |
-| `authorization_plugin_non_apple.yml`<br/>Non-Apple Authorization Plugin Installed | stable | critical | T1556.003 |
+| `authorization_plugin_non_apple.yml`<br/>Non-Apple Authorization Plugin Installed | stable | high | T1556.003 |
 | `aws_credentials_accessed.yml`<br/>AWS Credential Files Accessed by Unusual Process | experimental | medium | T1552.001 |
 | `browser_cookie_access.yml`<br/>Browser Cookie Database Accessed by Non-Browser | experimental | high | T1539 |
 | `certificates_exported.yml`<br/>Certificate or PKCS12 Export via security Command | stable | high | T1552.004 |
 | `chrome_login_data_copied.yml`<br/>Chrome Login Data Database Copied by Non-Chrome Process | stable | high | T1555.003 |
 | `credential_dump_via_dscl.yml`<br/>Credential Extraction via dscl Directory Service | experimental | high | T1003 |
-| `crypto_wallet_data_access.yml`<br/>Cryptocurrency Wallet Data Accessed by Untrusted Process | experimental | critical | T1555 |
+| `crypto_wallet_data_access.yml`<br/>Cryptocurrency Wallet Data Accessed by Untrusted Process | experimental | high | T1555 |
 | `gcore_keychain_exploit.yml`<br/>gcore Keychain Key Extraction (CVE-2025-24204) | experimental | critical | T1003.007 T1555.001 |
 | `git_credential_helper_abuse.yml`<br/>Git Credential Helper Invoked by Non-Git Process | experimental | high | T1555 |
 | `keychain_cli_extract.yml`<br/>Keychain Password Extraction via security CLI | experimental | high | T1555.001 |
@@ -156,24 +156,24 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `messages_database_access.yml`<br/>Messages.app Database Accessed by Non-Messages Process | stable | high | T1005 |
 | `network_sniffing.yml`<br/>Network Sniffing Tool Executed | experimental | medium | T1040 |
 | `notes_database_access.yml`<br/>Notes.app Database Accessed by Non-Notes Process | experimental | high | T1005 |
-| `pam_module_installed.yml`<br/>PAM Module Installed or Modified | stable | critical | T1556.003 |
+| `pam_module_installed.yml`<br/>PAM Module Installed or Modified | stable | high | T1556.003 |
 | `pam_module_tampering.yml`<br/>PAM Module Configuration Tampered | experimental | high | T1556.003 |
 | `password_manager_db.yml`<br/>Password Manager Database File Accessed | experimental | high | T1555.005 |
-| `process_reads_other_process_memory_macos.yml`<br/>Process Reads Another Process Memory via task_for_pid / mach_vm_read (TanStack OIDC Theft) | experimental | critical | T1003 T1057 T1555 T1555.005 |
+| `process_reads_other_process_memory_macos.yml`<br/>Process Reads Another Process Memory via task_for_pid / mach_vm_read (TanStack OIDC Theft) | experimental | medium | T1003 T1057 T1555 T1555.005 |
 | `safari_history_accessed.yml`<br/>Safari History Database Accessed by Non-Safari Process | experimental | high | T1217 |
 | `safari_password_accessed.yml`<br/>Safari Passwords Database Accessed | stable | high | T1555.003 |
-| `securityd_memory_access.yml`<br/>securityd Process Memory Access via Mach APIs | experimental | critical | T1003 |
+| `securityd_memory_access.yml`<br/>securityd Process Memory Access via Mach APIs | experimental | high | T1003 |
 | `sensitive_file_read_untrusted.yml`<br/>Untrusted Process Reads macOS Local Directory Service Data | experimental | high | T1003 |
 | `shadow_hash_access.yml`<br/>macOS Shadow Hash Plist Access | experimental | high | T1003 |
 | `ssh_agent_access_suspicious.yml`<br/>SSH Agent Socket Accessed by Suspicious Process | experimental | high | T1563.001 |
 | `ssh_key_access.yml`<br/>SSH Private Key Accessed by Unusual Process | experimental | high | T1552.004 |
 | `ssh_key_file_read.yml`<br/>SSH Private Key File Accessed | experimental | medium | T1552.004 |
 | `ssh_launched_security_dump.yml`<br/>Keychain or Credential Dump over SSH Session | experimental | high | T1003 T1555.001 |
-| `tcc_db_access.yml`<br/>TCC Database Direct Access | stable | critical | T1562.001 |
+| `tcc_db_access.yml`<br/>TCC Database Direct Access | stable | high | T1562.001 |
 | `token_files_accessed.yml`<br/>Cloud Service Token Files Accessed | experimental | medium | T1528 |
 | `wifi_password_access.yml`<br/>WiFi Password Extraction via security Command | stable | high | T1555.001 |
 
-### Defense Evasion (TA0005) (68 rules)
+### Defense Evasion (TA0005) (69 rules)
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
@@ -183,6 +183,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `code_signature_invalidated.yml`<br/>Code Signature Invalidated at Runtime | experimental | high | T1553.002 |
 | `codesign_remove.yml`<br/>Code Signature Removed from Binary | stable | high | T1553.002 |
 | `csrutil_status_check.yml`<br/>SIP Status Queried via csrutil | experimental | informational | T1518.001 |
+| `developer_cert_revoked.yml`<br/>Execution of Binary With Revoked Developer Certificate | experimental | critical | T1553.001 |
 | `dyld_injection_runtime.yml`<br/>DYLD_INSERT_LIBRARIES Runtime Injection | stable | high | T1574.006 |
 | `dyld_insert_libraries.yml`<br/>DYLD_INSERT_LIBRARIES Environment Variable Used | stable | high | T1574.006 |
 | `dyld_insert_libraries_env.yml`<br/>DYLD_INSERT_LIBRARIES Set in Process Environment | experimental | high | T1574.006 |
@@ -196,7 +197,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `firewall_disabled.yml`<br/>macOS Application Firewall Disabled | stable | high | T1562.004 |
 | `gatekeeper_disabled.yml`<br/>Gatekeeper Disabled via spctl | stable | critical | T1553.001 |
 | `gatekeeper_override.yml`<br/>Gatekeeper Assessment Overridden by User | experimental | high | T1553.001 |
-| `gatekeeper_policy_db_modified.yml`<br/>Gatekeeper Policy Database Modified by Non-System Process | experimental | critical | T1553.001 T1562.001 |
+| `gatekeeper_policy_db_modified.yml`<br/>Gatekeeper Policy Database Modified by Non-System Process | experimental | high | T1553.001 T1562.001 |
 | `gatekeeper_user_bypass.yml`<br/>User Bypassed Gatekeeper for Blocked Application | experimental | medium | T1204.002 T1553.001 |
 | `hidden_file_created.yml`<br/>Hidden File Created in User Directory | experimental | low | T1564.001 |
 | `hidden_file_creation_non_home.yml`<br/>Hidden File Created Outside Home Directory | experimental | medium | T1564.001 |
@@ -206,13 +207,13 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `kernel_cache_rebuild.yml`<br/>Kernel Cache Rebuild by Non-System Process | stable | high | T1014 |
 | `launchservices_cache_tampered.yml`<br/>LaunchServices Assessment Cache Modified by Non-System Process | experimental | medium | T1553.001 |
 | `log_deletion.yml`<br/>System Log Files Deleted | stable | high | T1070.002 |
-| `maccrab_tamper_attempt.yml`<br/>Attempted Tamper of MacCrab Components (Self-Protection) | experimental | critical | T1070.004 T1562.001 |
+| `maccrab_tamper_attempt.yml`<br/>Attempted Tamper of MacCrab Components (Self-Protection) | experimental | high | T1070.004 T1562.001 |
 | `mas_receipt_access_by_non_sandbox.yml`<br/>Mac App Store Receipt Read By Non-Sandboxed Process | experimental | high | T1005 T1552.001 |
 | `mdm_profile_installed_unexpected.yml`<br/>Unexpected MDM Profile Installation | experimental | high | T1553.004 T1562.001 |
-| `mdm_profile_removal.yml`<br/>MDM Profile Removal Attempt | stable | critical | T1562.001 |
-| `mdm_profile_removed.yml`<br/>MDM Profile Removal Attempt | experimental | critical | T1562.001 |
+| `mdm_profile_removal.yml`<br/>MDM Profile Removal Attempt | stable | high | T1562.001 |
+| `mdm_profile_removed.yml`<br/>MDM Profile Removal Attempt | experimental | high | T1562.001 |
 | `mount_noexec_bypass.yml`<br/>Mount noexec Flag Manipulation | experimental | low | T1562.001 T1564.009 |
-| `network_extension_unsigned.yml`<br/>Unsigned Network Extension Provider Installation | experimental | critical | T1556 |
+| `network_extension_unsigned.yml`<br/>Unsigned Network Extension Provider Installation | experimental | high | T1556 |
 | `network_extension_unsigned_install.yml`<br/>Network Extension Installed by Unsigned Process | experimental | high | T1557 |
 | `network_policy_plist_tampered.yml`<br/>Network Firewall / Policy Preferences Tampered By Non-Vendor Process | experimental | high | T1562.001 T1562.004 |
 | `notarization_absent_non_system.yml`<br/>Non-System Binary Lacks Notarization | stable | high | T1553.001 |
@@ -220,7 +221,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `openssl_decrypt_in_install_lineage.yml`<br/>openssl Decrypt In Package-Install Lineage (Staged Payload Decrypt) | experimental | high | T1027 T1140 T1195.001 |
 | `persona_takeover_fingerprint_drift.yml`<br/>Maintainer git-config Fingerprint Single-Field Drift (Persona Takeover Signal) | experimental | medium | T1078 |
 | `plutil_binary_to_xml.yml`<br/>plutil Reading Sensitive Plist From Non-Platform Parent | experimental | low | T1562.001 |
-| `privacy_preferences_tamper.yml`<br/>Direct Write to Privacy Preferences Plist | stable | critical | T1562.001 |
+| `privacy_preferences_tamper.yml`<br/>Direct Write to Privacy Preferences Plist | stable | high | T1562.001 |
 | `process_injection_task_for_pid.yml`<br/>Process Injection via task_for_pid Reference | experimental | high | T1055 |
 | `process_suspension.yml`<br/>Process Suspended via SIGSTOP From Non-Platform Parent | experimental | low | T1562.001 |
 | `proxy_config_manipulation.yml`<br/>System Proxy Configuration Modified | experimental | high | T1090 |
@@ -232,14 +233,14 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `rosetta_unsigned_execution.yml`<br/>Unsigned x86_64 Binary Executed Under Rosetta 2 | experimental | medium | T1036 |
 | `rosetta_unsigned_x86_binary.yml`<br/>Unsigned x86_64 Binary Execution via Rosetta 2 | experimental | high | T1204.002 |
 | `sandbox_escape_attempt.yml`<br/>sandbox-exec Invoked With Permissive Profile | experimental | medium | T1497.001 |
-| `security_tool_killed.yml`<br/>Security Tool Process Terminated | experimental | critical | T1562.001 |
-| `sip_check_before_tampering.yml`<br/>System Integrity Protection Disable Attempt | stable | critical | T1553.006 |
+| `security_tool_killed.yml`<br/>Security Tool Process Terminated | experimental | high | T1562.001 |
+| `sip_check_before_tampering.yml`<br/>System Integrity Protection Disable Attempt | stable | high | T1553.006 |
 | `sip_disabled.yml`<br/>System Integrity Protection Disabled | stable | critical | T1562.001 |
-| `sip_protected_process_interference.yml`<br/>Attempt to Kill or Signal SIP-Protected Security Process | stable | critical | T1562.001 |
-| `sudoers_modification.yml`<br/>Sudoers File Modified | experimental | critical | T1548.003 |
+| `sip_protected_process_interference.yml`<br/>Attempt to Kill or Signal SIP-Protected Security Process | stable | high | T1562.001 |
+| `sudoers_modification.yml`<br/>Sudoers File Modified | experimental | high | T1548.003 |
 | `suspicious_xpc_connection.yml`<br/>Unsigned Process Connects to Privileged XPC Service | experimental | high | T1559 |
-| `task_for_pid_injection.yml`<br/>Mach Port task_for_pid Process Injection | stable | critical | T1055 |
-| `tcc_db_direct_write.yml`<br/>Direct TCC Database Modification | experimental | critical | T1548 T1562.001 |
+| `task_for_pid_injection.yml`<br/>Mach Port task_for_pid Process Injection | stable | medium | T1055 |
+| `tcc_db_direct_write.yml`<br/>Direct TCC Database Modification | experimental | high | T1548 T1562.001 |
 | `tcc_reset_attempt.yml`<br/>TCC Database Reset via tccutil | stable | high | T1562.001 |
 | `timestomp_touch.yml`<br/>Timestamp Modification via touch Command | experimental | medium | T1070.006 |
 | `unexpected_apfs_snapshot.yml`<br/>APFS Snapshot Activity Outside Time Machine / Apple Tooling | experimental | low | T1564 |
@@ -287,7 +288,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `base64_decode_execute.yml`<br/>Base64 Decode Piped to Shell Execution | stable | high | T1027 T1059.004 |
 | `binary_executed_from_tmp.yml`<br/>Ad-Hoc or Unsigned Binary Executed from /tmp | experimental | medium | T1204.002 |
 | `crypto_miner_process.yml`<br/>Cryptocurrency Miner Process Detected | experimental | high | T1496 |
-| `crypto_stratum_protocol.yml`<br/>Stratum Mining Protocol in Command Line | experimental | critical | T1496 |
+| `crypto_stratum_protocol.yml`<br/>Stratum Mining Protocol in Command Line | experimental | high | T1496 |
 | `curl_wget_download_execute.yml`<br/>curl or wget Download and Pipe to Shell | experimental | medium | T1059.004 T1105 |
 | `deep_shell_nesting.yml`<br/>Deep Shell Nesting Detected | experimental | medium | T1059.004 |
 | `hidden_process_with_network.yml`<br/>Hidden (Dot-Prefixed) Binary Execution | experimental | medium | T1564.001 |
@@ -353,10 +354,10 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `known_macos_ransomware.yml`<br/>Known macOS Ransomware Process Detected | experimental | critical | T1486 |
 | `mass_file_deletion.yml`<br/>Mass File Deletion from Critical Directories | experimental | high | T1485 |
 | `mass_file_encryption.yml`<br/>Mass File Encryption Pattern Detected | experimental | high | T1486 |
-| `mass_unlink_from_package_lineage.yml`<br/>Recursive Unlink Targeting $HOME From Package-Manager Lineage | experimental | critical | T1070.004 T1195.001 T1485 |
+| `mass_unlink_from_package_lineage.yml`<br/>Recursive Unlink Targeting $HOME From Package-Manager Lineage | experimental | high | T1070.004 T1195.001 T1485 |
 | `ransomware_note_created.yml`<br/>Ransomware Note or Encrypted Extension File Created | experimental | critical | T1486 |
-| `security_tool_disabled.yml`<br/>macOS Security Feature Disabled via Command Line | experimental | critical | T1562.001 |
-| `service_stop.yml`<br/>macOS System Service Stopped via launchctl bootout | experimental | critical | T1489 |
+| `security_tool_disabled.yml`<br/>macOS Security Feature Disabled via Command Line | experimental | high | T1562.001 |
+| `service_stop.yml`<br/>macOS System Service Stopped via launchctl bootout | experimental | high | T1489 |
 
 ### Initial Access (TA0001) (13 rules)
 
@@ -364,17 +365,17 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 |---|---|---|---|
 | `app_translocation_execution.yml`<br/>Application Executed from App Translocation Path | experimental | medium | T1204.002 |
 | `calendar_ics_handler.yml`<br/>Calendar Invitation Handler Spawning Processes | experimental | high | T1566.001 |
-| `database_server_spawns_shell.yml`<br/>Database Server Spawns Shell or Scripting Interpreter | experimental | critical | T1059 T1190 |
+| `database_server_spawns_shell.yml`<br/>Database Server Spawns Shell or Scripting Interpreter | experimental | high | T1059 T1190 |
 | `dmg_mounted_from_suspicious_location.yml`<br/>DMG Mounted from User-Writable Staging Path | experimental | low | T1204.002 |
 | `fake_keychain_dialog_from_install_lineage.yml`<br/>osascript Fake Keychain / iCloud Password Dialog From Package-Install Lineage (OpenClaw) | experimental | critical | T1056.002 T1059.002 T1195.001 T1555 |
 | `iso_mounted_from_download.yml`<br/>ISO or DMG Mounted from Downloads Directory | experimental | medium | T1204.002 |
-| `network_service_writes_webshell.yml`<br/>Network Service Writes Potential Web Shell File | experimental | critical | T1190 T1505.003 |
-| `office_macro_execution.yml`<br/>Microsoft Office Spawning Macro-Related Processes | stable | critical | T1204.002 T1566.001 |
+| `network_service_writes_webshell.yml`<br/>Network Service Writes Potential Web Shell File | experimental | high | T1190 T1505.003 |
+| `office_macro_execution.yml`<br/>Microsoft Office Spawning Macro-Related Processes | stable | high | T1204.002 T1566.001 |
 | `sshd_spawns_unusual_child.yml`<br/>sshd Spawns Unusual Child Process | experimental | medium | T1190 |
 | `url_scheme_handler_collision.yml`<br/>URL-Scheme Handler Registered To Non-Canonical App | experimental | medium | T1547.015 |
 | `url_scheme_hijack.yml`<br/>Custom URL Scheme Handler Registered | experimental | medium | T1036 |
 | `web_server_spawns_reverse_shell.yml`<br/>Web Server Spawns Reverse Shell or Download Utility | experimental | high | T1190 |
-| `web_server_spawns_shell.yml`<br/>Web Server Process Spawns Shell Interpreter | experimental | critical | T1190 T1505.003 |
+| `web_server_spawns_shell.yml`<br/>Web Server Process Spawns Shell Interpreter | experimental | high | T1190 T1505.003 |
 
 ### Lateral Movement (TA0008) (18 rules)
 
@@ -407,21 +408,21 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `adhoc_signed_launchagent_write.yml`<br/>Ad-Hoc Signed Binary Writes a LaunchAgent or LaunchDaemon | experimental | high | T1543.001 T1543.004 |
 | `app_installed_outside_applications.yml`<br/>Application Bundle Staged in Suspicious Path | experimental | medium | T1036.005 |
 | `at_job_creation.yml`<br/>At Job Scheduled (Legacy macOS Scheduler) | experimental | high | T1053.002 |
-| `authorization_plugin_installed.yml`<br/>Authorization Plugin Installed | stable | critical | T1547.002 |
+| `authorization_plugin_installed.yml`<br/>Authorization Plugin Installed | stable | high | T1547.002 |
 | `browser_extension_installed.yml`<br/>Browser Extension Installed by Non-Browser Process | experimental | high | T1176 |
 | `cron_job_created.yml`<br/>Cron Job Created by Non-Crontab Process | experimental | high | T1053.003 |
-| `directory_service_plugin.yml`<br/>Directory Service Plugin Installed | stable | critical | T1556 |
+| `directory_service_plugin.yml`<br/>Directory Service Plugin Installed | stable | high | T1556 |
 | `dock_persistence_entry_written.yml`<br/>Dock Persistence Entry Written via defaults | experimental | high | T1547 |
 | `dock_tile_plugin.yml`<br/>Dock Tile Plugin Installed | experimental | high | T1547 |
 | `emond_rule_created.yml`<br/>Event Monitor Daemon Rule Created | stable | high | T1546 |
 | `finder_sync_extension.yml`<br/>Finder Sync Extension Installed by Unsigned Process | experimental | medium | T1547 |
 | `folder_actions_abuse.yml`<br/>Folder Actions Script Installed for Persistence | experimental | high | T1547.015 |
 | `gh_token_monitor_plist_dropped.yml`<br/>TanStack gh-token-monitor LaunchAgent Plist Dropped (Dead-Man's-Switch Watchdog) | experimental | critical | T1195.001 T1485 T1543.001 |
-| `honeyfile_accessed.yml`<br/>Deception Honeyfile Accessed | stable | critical | T1083 T1552.001 |
+| `honeyfile_accessed.yml`<br/>Deception Honeyfile Accessed | stable | high | T1083 T1552.001 |
 | `kext_loaded.yml`<br/>Kernel Extension Loaded | stable | high | T1547.006 |
 | `launch_agent_created_by_unsigned.yml`<br/>LaunchAgent Created by Unsigned Process | stable | high | T1543.001 |
 | `launch_agent_user_created.yml`<br/>User LaunchAgent Created by Non-Installer Parent | experimental | high | T1543.001 |
-| `launch_daemon_created.yml`<br/>LaunchDaemon Created | stable | critical | T1543.004 |
+| `launch_daemon_created.yml`<br/>LaunchDaemon Created | stable | high | T1543.004 |
 | `launchagent_with_distant_future_trigger.yml`<br/>LaunchAgent Plist With Distant Future Trigger (Time-Bomb Persistence) | experimental | medium | T1029 T1543.001 |
 | `launchd_override_created.yml`<br/>LaunchDaemon Override Database Modified | stable | high | T1543.004 |
 | `login_item_added_from_tmp.yml`<br/>Login Item Added from Temporary Directory | stable | high | T1547.015 |
@@ -447,13 +448,13 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
-| `authorizationdb_modify.yml`<br/>Authorization Database Modified via security Command | stable | critical | T1548 |
+| `authorizationdb_modify.yml`<br/>Authorization Database Modified via security Command | stable | high | T1548 |
 | `dscl_password_change.yml`<br/>Password Change via dscl Command | stable | high | T1098 |
-| `exploit_payload_in_tmp.yml`<br/>Unsigned Binary Execution from /tmp with Elevated Privileges | experimental | critical | T1068 |
+| `exploit_payload_in_tmp.yml`<br/>Unsigned Binary Execution from /tmp with Elevated Privileges | experimental | high | T1068 |
 | `kernel_exploit_crash_indicator.yml`<br/>Crash Reporter Invoked Against Kernel or Privileged Subsystem (Precursor) | experimental | low | T1068 |
-| `mach_port_exploitation.yml`<br/>Mach Port Manipulation for Process Injection | experimental | critical | T1055 |
+| `mach_port_exploitation.yml`<br/>Mach Port Manipulation for Process Injection | experimental | high | T1055 |
 | `pkexec_equivalent.yml`<br/>AuthorizationExecuteWithPrivileges Pattern Detected | experimental | high | T1548.004 |
-| `platform_binary_dylib_injection.yml`<br/>Platform Binary Loads Unsigned Code via Tcl/Dylib Injection | experimental | critical | T1574.006 |
+| `platform_binary_dylib_injection.yml`<br/>Platform Binary Loads Unsigned Code via Tcl/Dylib Injection | experimental | high | T1574.006 |
 | `platform_binary_stdin_injection.yml`<br/>Platform Binary Receives Piped Input from Suspicious Source | experimental | high | T1059 |
 | `sandbox_escape_indicators.yml`<br/>App Sandbox Escape Indicators (DEPRECATED — unsalvageable) | deprecated | informational | T1611 |
 | `setuid_setgid_modification.yml`<br/>SetUID or SetGID Bit Modified on File | experimental | high | T1548.001 |
@@ -464,7 +465,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `symlink_race_tmp.yml`<br/>Symlink in Tmp Directory Pointing Outside Tmp | experimental | medium | T1548 |
 | `synthetic_click_tcc_bypass.yml`<br/>Synthetic Click or Accessibility API Abuse | experimental | high | T1056 T1548 |
 | `tcc_bypass_via_injection.yml`<br/>TCC Bypass via Process Injection into Protected App Bundle | experimental | high | T1068 |
-| `tcc_database_manipulation.yml`<br/>TCC Database Direct SQLite Manipulation | experimental | critical | T1548 |
+| `tcc_database_manipulation.yml`<br/>TCC Database Direct SQLite Manipulation | experimental | high | T1548 |
 | `tcc_full_disk_via_ssh.yml`<br/>SSH Session Accessing FDA-Protected Paths | stable | high | T1548 |
 | `xpc_service_enumeration.yml`<br/>Privileged XPC Service Enumeration (Discovery Precursor) | experimental | low | T1057 T1559 |
 | `xpc_service_exploit_pattern.yml`<br/>Unsigned Process Connects to Privileged XPC Service | experimental | high | T1548 T1559 |
@@ -480,8 +481,8 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `dead_mans_switch_literal_scanner.yml`<br/>Dead-Man's-Switch Wiper Token Literal Observed | experimental | critical | T1195.001 T1485 |
 | `developer_credential_bulk_harvest.yml`<br/>Developer Credential File Read By Untrusted Process (DEPRECATED — count not enforceable) | deprecated | high | T1195.001 T1552 T1552.001 T1552.004 |
 | `git_credential_accessed_by_non_git.yml`<br/>Git Credential Files Accessed by Unexpected Process | experimental | high | T1195.001 T1552.001 |
-| `github_user_repos_post_from_non_git.yml`<br/>api.github.com /user/repos POST From Non-Git Client (Dead-Drop Repo Creation) | experimental | critical | T1195.001 T1552 T1567 |
-| `glassworm_persistence_init_json.yml`<br/>GlassWorm Persistence via init.json in Home Directory | experimental | critical | T1195.001 T1547 |
+| `github_user_repos_post_from_non_git.yml`<br/>api.github.com /user/repos POST From Non-Git Client (Dead-Drop Repo Creation) | experimental | high | T1195.001 T1552 T1567 |
+| `glassworm_persistence_init_json.yml`<br/>GlassWorm Persistence via init.json in Home Directory | experimental | high | T1195.001 T1547 |
 | `hidden_vnc_socks_proxy.yml`<br/>Hidden VNC or SOCKS Proxy Server Started by Non-System Process | experimental | medium | T1090 T1195.001 T1219 |
 | `homebrew_formula_no_check_sha.yml`<br/>Homebrew Formula Installed Without SHA Verification (:no_check) | experimental | medium | T1195.002 |
 | `homebrew_tap_mitm_cleartext_http.yml`<br/>Homebrew Process Fetches Over Cleartext HTTP (Tap MITM) | experimental | high | T1195.002 T1557 |
@@ -494,14 +495,14 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `npm_postinstall_downloads_binary.yml`<br/>NPM Postinstall Downloads External Binary | experimental | high | T1059.004 T1105 T1195.001 |
 | `npm_postinstall_spawns_shell.yml`<br/>NPM Postinstall Script Spawns Shell Process | experimental | medium | T1059.004 T1195.001 |
 | `npm_publish_from_ci.yml`<br/>npm Publish Executed from Unusual Context | experimental | high | T1059.004 T1195.001 |
-| `npm_publish_self_propagation.yml`<br/>npm publish Spawned by Non-Interactive Parent (Worm Self-Propagation) | experimental | critical | T1098 T1195.001 |
+| `npm_publish_self_propagation.yml`<br/>npm publish Spawned by Non-Interactive Parent (Worm Self-Propagation) | experimental | high | T1098 T1195.001 |
 | `npm_token_accessed_by_non_npm.yml`<br/>npm Auth Token Accessed by Non-npm Process | experimental | high | T1195.001 T1552.001 |
 | `npmrc_pypirc_modified_by_non_package_manager.yml`<br/>Package-Manager Config File Modified by Non-Package-Manager Process | experimental | high | T1195.002 T1565.001 |
 | `obfuscator_signature_in_package_payload.yml`<br/>Obfuscator-Style Signature in Newly-Installed Package File | experimental | medium | T1027 T1195.001 |
 | `package_drops_native_binary_in_pure_js_pkg.yml`<br/>Native Binary Dropped Under node_modules Without binding.gyp (Smuggled Mach-O) | experimental | medium | T1105 T1195.001 |
 | `package_install_drops_github_workflow.yml`<br/>Package-Install Lineage Writes a GitHub Actions Workflow | experimental | high | T1195.001 T1546 |
 | `package_manager_downloads_and_executes.yml`<br/>Package Manager Spawns Download Tool Followed by Execution | experimental | high | T1059.004 T1105 T1195.001 |
-| `package_manager_downloads_bun_runtime.yml`<br/>Package-Install Lineage Downloads Bun Runtime via curl/wget (Mini Shai-Hulud) | experimental | critical | T1027 T1105 T1195.001 |
+| `package_manager_downloads_bun_runtime.yml`<br/>Package-Install Lineage Downloads Bun Runtime via curl/wget (Mini Shai-Hulud) | experimental | high | T1027 T1105 T1195.001 |
 | `package_postinstall_fetches_alt_runtime.yml`<br/>Package Postinstall Lineage Fetches Bun / Deno / Node Runtime Binary | experimental | high | T1027 T1105 T1195.001 |
 | `package_runtime_drop_evasion.yml`<br/>Package-Manager Descendant Drops Alt JS/Python Runtime (Evasion) | experimental | high | T1027 T1105 T1195.001 |
 | `pip_install_from_ai_tool.yml`<br/>pip Install Command Spawned by AI Coding Tool | experimental | medium | T1195.001 T1204.002 |
@@ -509,32 +510,32 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `pip_install_with_extra_index_url_to_public_pypi.yml`<br/>pip Install Uses --extra-index-url Alongside Public PyPI (Dependency Confusion Risk) | experimental | high | T1195.002 |
 | `pip_package_writes_outside_site_packages.yml`<br/>pip Install Process Writes Outside site-packages | experimental | high | T1059.006 T1195.001 T1546 |
 | `pip_wheel_drops_javascript_runtime_files.yml`<br/>pip-Installed Wheel Drops JavaScript / Bun Runtime Files (Cross-Ecosystem Smuggle) | experimental | critical | T1027 T1195.001 |
-| `postinstall_script_persistence.yml`<br/>Package Install Process Creates Persistence Mechanism | experimental | critical | T1053.003 T1195.001 T1543.001 |
+| `postinstall_script_persistence.yml`<br/>Package Install Process Creates Persistence Mechanism | experimental | high | T1053.003 T1195.001 T1543.001 |
 | `process_scans_for_llm_tools.yml`<br/>Unexpected Process Reads AI/LLM Tool Configuration | experimental | medium | T1083 T1195.001 T1552.001 |
-| `pypi_twine_upload_from_non_interactive.yml`<br/>twine upload Spawned by Non-Interactive Parent (PyPI Worm Propagation) | experimental | critical | T1098 T1195.001 |
+| `pypi_twine_upload_from_non_interactive.yml`<br/>twine upload Spawned by Non-Interactive Parent (PyPI Worm Propagation) | experimental | high | T1098 T1195.001 |
 | `python_process_reads_cloud_credentials.yml`<br/>Python Process Reads Cloud Provider Credentials | experimental | medium | T1195.001 T1552.001 |
 | `python_process_reads_env_files.yml`<br/>Python Process Reads .env Files Outside Project Directory | experimental | medium | T1195.001 T1552.001 |
 | `python_process_reads_k8s_config.yml`<br/>Python Process Reads Kubernetes Configuration | experimental | high | T1195.001 T1552.001 |
 | `python_process_reads_ssh_keys.yml`<br/>Python Process Reads SSH Private Keys | experimental | high | T1195.001 T1552.004 |
 | `python_pth_file_created.yml`<br/>Python .pth File Created in Site-Packages | experimental | high | T1195.001 T1546 |
-| `registry_oidc_token_exchange_from_non_interactive.yml`<br/>npm Registry OIDC Token Exchange From Non-Interactive Parent | experimental | critical | T1098 T1195.001 |
+| `registry_oidc_token_exchange_from_non_interactive.yml`<br/>npm Registry OIDC Token Exchange From Non-Interactive Parent | experimental | high | T1098 T1195.001 |
 | `suspicious_binary_in_library_caches.yml`<br/>Non-Apple Binary Created in Library Caches Masquerading as Apple | experimental | high | T1036.005 T1543 |
 | `suspicious_vscode_extension_network.yml`<br/>VS Code Extension Makes Suspicious Outbound Connection | experimental | medium | T1071 T1195.001 |
 | `unexpected_node_installation.yml`<br/>Unexpected Node.js Installation in Home Directory | experimental | high | T1059.007 T1105 T1195.001 |
 | `urgency_lexicon_in_install_lineage_pr.yml`<br/>Urgency-Lexicon Markers In Package-Install Lineage Content | experimental | medium | T1566 |
 | `vscode_extension_spawns_shell.yml`<br/>VS Code Extension Host Spawns Shell Outside Workspace | experimental | medium | T1059.004 T1195.001 |
 | `vscode_extension_steals_credentials.yml`<br/>VS Code Process Reads Developer Credential Files | experimental | high | T1195.001 T1552.001 |
-| `webhook_exfil_url_in_install_content.yml`<br/>Known Exfil Endpoint URL in Installed Package Content | experimental | critical | T1102 T1195.001 T1567 |
+| `webhook_exfil_url_in_install_content.yml`<br/>Known Exfil Endpoint URL in Installed Package Content | experimental | high | T1102 T1195.001 T1567 |
 | `workflow_drop_with_self_hosted_runner.yml`<br/>GitHub Actions Workflow With self-hosted Runner Dropped by Package Install (TanStack) | experimental | critical | T1078.004 T1195.001 T1546 |
 
 ### TCC / macOS Privacy (8 rules)
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
-| `accessibility_granted_to_unsigned.yml`<br/>Accessibility Permission Granted to Unsigned Application | stable | critical | T1056.001 |
+| `accessibility_granted_to_unsigned.yml`<br/>Accessibility Permission Granted to Unsigned Application | stable | high | T1056.001 |
 | `camera_access_granted.yml`<br/>Camera TCC Permission Granted to Non-Standard Application | experimental | high | T1125 |
 | `contacts_access_granted.yml`<br/>Contacts TCC Permission Granted to Unsigned Application | experimental | medium | T1560 |
-| `fda_granted_to_unsigned.yml`<br/>Full Disk Access Granted to Unsigned Application | stable | critical | T1562.001 |
+| `fda_granted_to_unsigned.yml`<br/>Full Disk Access Granted to Unsigned Application | stable | high | T1562.001 |
 | `input_monitoring_granted.yml`<br/>Input Monitoring TCC Permission Granted | stable | high | T1056 |
 | `microphone_access_granted.yml`<br/>Microphone TCC Permission Granted to Non-Standard Application | experimental | high | T1123 |
 | `photos_access_granted.yml`<br/>Photos Library TCC Permission Granted to Unsigned Application | experimental | medium | T1005 |
@@ -557,46 +558,46 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
-| `ai_credential_fence_breach.yml`<br/>AI Tool Reads Credentials Then Makes Network Connection | experimental | critical | T1071 T1552 |
+| `ai_credential_fence_breach.yml`<br/>AI Tool Reads Credentials Then Makes Network Connection | experimental | high | T1071 T1552 |
 | `ai_tool_slopsquatting_install.yml`<br/>AI Coding Tool Triggers Package Install with Suspicious Outcome | experimental | high | T1059 T1195.001 |
-| `archive_to_cloud_exfil.yml`<br/>Sensitive File Archive Followed by Cloud Upload | experimental | critical | T1560.001 T1567.002 |
-| `browser_exploit_chain.yml`<br/>Browser Exploitation to Shell to Payload | experimental | critical | T1059.004 T1189 |
-| `browser_extension_data_theft.yml`<br/>Malicious Browser Extension Reads Cookies Then Exfiltrates | experimental | critical | T1185 T1539 |
+| `archive_to_cloud_exfil.yml`<br/>Sensitive File Archive Followed by Cloud Upload | experimental | high | T1560.001 T1567.002 |
+| `browser_exploit_chain.yml`<br/>Browser Exploitation to Shell to Payload | experimental | high | T1059.004 T1189 |
+| `browser_extension_data_theft.yml`<br/>Malicious Browser Extension Reads Cookies Then Exfiltrates | experimental | high | T1185 T1539 |
 | `clipboard_hijack_then_exfil.yml`<br/>Clipboard Content Captured Then Sent to External Server | experimental | high | T1115 |
 | `container_escape_to_host.yml`<br/>Container Process Writes to Host Filesystem Then Persists | experimental | high | T1547 T1611 |
 | `credential_theft_exfil.yml`<br/>Credential File Access Followed by Network Upload | experimental | high | T1041 T1555 |
 | `cron_install_then_exec.yml`<br/>Crontab/At Job Installation Followed by Execution | experimental | high | T1053.003 T1059 |
-| `defense_evasion_kill_persist.yml`<br/>Security Tool Killed Then Persistence Installed | stable | critical | T1543.001 T1562.001 |
-| `discovery_cred_exfil.yml`<br/>Discovery to Credential Access to Exfiltration | experimental | critical | T1082 T1555.001 |
+| `defense_evasion_kill_persist.yml`<br/>Security Tool Killed Then Persistence Installed | stable | high | T1543.001 T1562.001 |
+| `discovery_cred_exfil.yml`<br/>Discovery to Credential Access to Exfiltration | experimental | high | T1082 T1555.001 |
 | `dmg_mount_unsigned_exec.yml`<br/>DMG Mount Followed by Unsigned Binary Execution | experimental | high | T1204.002 |
-| `download_persist_c2.yml`<br/>Download to Persistence to C2 Attack Chain | experimental | critical | T1071.001 T1543.001 |
+| `download_persist_c2.yml`<br/>Download to Persistence to C2 Attack Chain | experimental | high | T1071.001 T1543.001 |
 | `download_then_cryptominer.yml`<br/>File Download Followed by Cryptominer Execution | experimental | high | T1105 T1496 |
 | `dropper_execution_cleanup.yml`<br/>Dropper Execution with Self-Cleanup | experimental | high | T1070.004 |
-| `gh_token_revocation_polling_loop.yml`<br/>Package-Install Lineage Followed by Sustained api.github.com Polling (TanStack Dead-Man's-Switch) | experimental | critical | T1071.001 T1195.001 T1485 |
+| `gh_token_revocation_polling_loop.yml`<br/>Package-Install Lineage Followed by Sustained api.github.com Polling (TanStack Dead-Man's-Switch) | experimental | high | T1071.001 T1195.001 T1485 |
 | `installer_pkg_persistence.yml`<br/>Installer Package Drops Persistence | experimental | high | T1543.001 |
-| `keylogger_install_and_persist.yml`<br/>CGEvent Tap Installed Then Persistence Written | experimental | critical | T1056.001 T1547.011 |
+| `keylogger_install_and_persist.yml`<br/>CGEvent Tap Installed Then Persistence Written | experimental | medium | T1056.001 T1547.011 |
 | `lateral_ssh_persist.yml`<br/>SSH Connection Followed by Persistence on Remote Host Indicators | experimental | high | T1021.004 |
-| `llm_api_key_harvest_exfil.yml`<br/>LLM Tool Config Scan Followed by Credential Exfiltration | experimental | critical | T1041 T1195.001 T1552.001 |
-| `notarized_dropper_pattern.yml`<br/>Notarized Binary Drops and Executes Unnotarized Payload | experimental | critical | T1105 T1553.001 |
-| `npm_module_require_then_bulk_credential_read.yml`<br/>node Process Reads Multiple Credential Files Shortly After /node_modules/ Spawn (node-ipc / require-time) | experimental | critical | T1059.007 T1195.001 T1552 T1555 |
-| `npm_postinstall_to_rat.yml`<br/>npm Postinstall Drops and Executes RAT (Axios-style) | stable | critical | T1059.004 T1195.001 |
-| `osascript_download_execute.yml`<br/>AppleScript Downloads and Executes Payload | experimental | critical | T1059.002 T1105 |
-| `package_typosquat_full_chain.yml`<br/>Typosquatted Package Install Calls Home and Drops Persistence | experimental | critical | T1195.001 |
-| `phishing_attachment_exec.yml`<br/>Phishing Attachment Opens Then Spawns Shell or Downloader | experimental | critical | T1059 T1566.001 |
-| `pip_install_to_credential_harvest.yml`<br/>pip Install Triggers Credential Harvesting (LiteLLM-style) | stable | critical | T1195.001 T1552.001 |
-| `privesc_to_persistence.yml`<br/>Privilege Escalation Followed by Persistence Installation | experimental | critical | T1543.004 T1548.003 |
+| `llm_api_key_harvest_exfil.yml`<br/>LLM Tool Config Scan Followed by Credential Exfiltration | experimental | high | T1041 T1195.001 T1552.001 |
+| `notarized_dropper_pattern.yml`<br/>Notarized Binary Drops and Executes Unnotarized Payload | experimental | high | T1105 T1553.001 |
+| `npm_module_require_then_bulk_credential_read.yml`<br/>node Process Reads Multiple Credential Files Shortly After /node_modules/ Spawn (node-ipc / require-time) | experimental | high | T1059.007 T1195.001 T1552 T1555 |
+| `npm_postinstall_to_rat.yml`<br/>npm Postinstall Drops and Executes RAT (Axios-style) | stable | high | T1059.004 T1195.001 |
+| `osascript_download_execute.yml`<br/>AppleScript Downloads and Executes Payload | experimental | high | T1059.002 T1105 |
+| `package_typosquat_full_chain.yml`<br/>Typosquatted Package Install Calls Home and Drops Persistence | experimental | high | T1195.001 |
+| `phishing_attachment_exec.yml`<br/>Phishing Attachment Opens Then Spawns Shell or Downloader | experimental | high | T1059 T1566.001 |
+| `pip_install_to_credential_harvest.yml`<br/>pip Install Triggers Credential Harvesting (LiteLLM-style) | stable | high | T1195.001 T1552.001 |
+| `privesc_to_persistence.yml`<br/>Privilege Escalation Followed by Persistence Installation | experimental | high | T1543.004 T1548.003 |
 | `quarantine_remove_execute.yml`<br/>Quarantine Removal Followed by Execution | stable | high | T1553.001 |
 | `ransomware_kill_chain.yml`<br/>Ransomware Kill Chain — Recovery Inhibition Then Data Destruction | experimental | critical | T1485 T1486 T1490 |
-| `reverse_shell_chain.yml`<br/>Shell Spawn to Reverse Shell Connection | stable | critical | T1059.004 |
-| `rosetta_download_execute_c2.yml`<br/>Rosetta 2 Download-Execute-C2 Chain | experimental | critical | — |
+| `reverse_shell_chain.yml`<br/>Shell Spawn to Reverse Shell Connection | stable | high | T1059.004 |
+| `rosetta_download_execute_c2.yml`<br/>Rosetta 2 Download-Execute-C2 Chain | experimental | high | — |
 | `screenshot_then_exfil.yml`<br/>Screen Capture Followed by Data Upload | experimental | high | T1041 T1113 |
 | `ssh_lateral_tool_transfer.yml`<br/>SSH Session Transfers Tool Then Executes It | experimental | high | T1021.004 T1105 |
-| `supply_chain_full_kill_chain.yml`<br/>Full Supply Chain Kill Chain - Install to Persist to Exfiltrate | experimental | critical | T1195.001 T1543.001 T1552.001 |
+| `supply_chain_full_kill_chain.yml`<br/>Full Supply Chain Kill Chain - Install to Persist to Exfiltrate | experimental | high | T1195.001 T1543.001 T1552.001 |
 | `tcc_grant_then_abuse.yml`<br/>TCC Permission Grant Followed by Sensitive Access (Same Lineage) | experimental | medium | T1562.001 |
 | `tempest_prep_chain.yml`<br/>TEMPEST Preparation Chain — SDR Connect then Outbound Data Transfer | experimental | high | T1048 T1125 |
-| `usb_drop_then_exec.yml`<br/>File Dropped from Removable Media Then Executed | experimental | critical | T1059 T1091 |
-| `vscode_extension_to_credential_theft.yml`<br/>VS Code Extension Steals Credentials and Establishes C2 (GlassWorm-style) | experimental | critical | T1195.001 T1552.001 |
-| `worm_self_propagation_signal.yml`<br/>Worm Self-Propagation Signal (Shai-Hulud / Lightning Pattern) | experimental | critical | T1098 T1195.001 T1555 T1567 |
+| `usb_drop_then_exec.yml`<br/>File Dropped from Removable Media Then Executed | experimental | high | T1059 T1091 |
+| `vscode_extension_to_credential_theft.yml`<br/>VS Code Extension Steals Credentials and Establishes C2 (GlassWorm-style) | experimental | high | T1195.001 T1552.001 |
+| `worm_self_propagation_signal.yml`<br/>Worm Self-Propagation Signal (Shai-Hulud / Lightning Pattern) | experimental | high | T1098 T1195.001 T1555 T1567 |
 | `xcode_supply_chain.yml`<br/>Xcode Build Spawns Unexpected Network Connection | experimental | high | T1195.001 |
 
 ## Full MITRE ATT&CK technique list

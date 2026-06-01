@@ -4,9 +4,9 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-f59e0b)]()
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-1921%20passing-brightgreen)]()
-[![Rules](https://img.shields.io/badge/rules-434%20%2B%2041%20seq%20%2B%206%20graph-blueviolet)]()
-[![Version](https://img.shields.io/badge/version-1.17.1-blue)](https://github.com/peterhanily/maccrab/releases)
+[![Tests](https://img.shields.io/badge/tests-1922%20passing-brightgreen)]()
+[![Rules](https://img.shields.io/badge/rules-435%20%2B%2041%20seq%20%2B%206%20graph-blueviolet)]()
+[![Version](https://img.shields.io/badge/version-1.17.2-blue)](https://github.com/peterhanily/maccrab/releases)
 [![Website](https://img.shields.io/badge/site-maccrab.com-e04820)](https://maccrab.com)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20(Ventura)-lightgrey)]()
@@ -504,7 +504,7 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **475 rules** (434 single-event + 41 sequence)
+release ships **476 rules** (435 single-event + 41 sequence)
 covering **169 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 
@@ -514,7 +514,7 @@ tactics:
 | `TA0002` | Execution | 94 |
 | `TA0003` | Persistence | 101 |
 | `TA0004` | Privilege Escalation | 43 |
-| `TA0005` | Defense Evasion | 125 |
+| `TA0005` | Defense Evasion | 126 |
 | `TA0006` | Credential Access | 84 |
 | `TA0007` | Discovery | 37 |
 | `TA0008` | Lateral Movement | 26 |
@@ -523,7 +523,7 @@ tactics:
 | `TA0011` | Command and Control | 53 |
 | `TA0040` | Impact | 27 |
 | — | **Sequences** (temporal multi-step) | **41** |
-| — | **Total** | **475** |
+| — | **Total** | **476** |
 
 Counts are derived from the YAML tree at release time — see
 [`docs/COVERAGE.md`](docs/COVERAGE.md) for the rule-by-technique
@@ -1133,7 +1133,7 @@ maccrab/
 │   │   │   ├── AlertStore.swift         #   SQLite alert storage
 │   │   │   ├── EventStore.swift         #   SQLite event ring buffer
 │   │   │   ├── CommandSanitizer.swift   #   Input sanitization
-│   │   │   ├── NotificationOutput.swift #   macOS notification delivery
+│   │   │   ├── NotificationOutput.swift #   daemon notification gate (logging only; app delivers banners)
 │   │   │   ├── WebhookOutput.swift      #   JSON POST webhook
 │   │   │   └── SyslogOutput.swift       #   RFC 5424 syslog sender
 │   │   ├── Output/                      # Report generation

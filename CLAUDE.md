@@ -58,7 +58,7 @@ Sources/MacCrabCore/
   Utilities/      LockedCounter, PowerGate (battery/thermal gating), shared primitives
   Integrations/   SecurityToolIntegrations (CrowdStrike, SentinelOne log ingestion)
 
-Rules/            434 single-event Sigma-compatible YAML rules (19 tactic directories)
+Rules/            435 single-event Sigma-compatible YAML rules (19 tactic directories)
   sequences/      41 multi-step sequence rules
   graph/          6 multi-entity TraceGraph rules (v1.12.0)
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
@@ -69,7 +69,7 @@ Tests/            Swift Testing unit tests (1916 tests in 357 suites)
 
 ## Detection Stack (5 tiers)
 
-1. **Rules** -- 434 single-event Sigma-compatible YAML rules compiled to JSON predicates, plus 41 sequence rules across 19 tactic dirs, plus 6 graph rules (Rules/graph/*.json) evaluated against materialized TraceGraph traces. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
+1. **Rules** -- 435 single-event Sigma-compatible YAML rules compiled to JSON predicates, plus 41 sequence rules across 19 tactic dirs, plus 6 graph rules (Rules/graph/*.json) evaluated against materialized TraceGraph traces. Category-indexed for O(1) dispatch. Rules >50ms logged for profiling.
 2. **Anomaly** -- Welford z-score statistical anomaly; 2nd-order Markov chain process trees; behavioral scoring (70+ weighted indicators with feedback-adjusted weights).
 3. **Sequences** -- 41 temporal multi-step rules with process lineage correlation, 10K partial match cap.
 4. **Campaigns** -- Kill chain, alert storm, AI compromise, coordinated attack, lateral movement detection. Incremental tactic/user indexes for O(1) lookups.

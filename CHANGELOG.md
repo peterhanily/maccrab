@@ -3,6 +3,46 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.2] — 2026-06-01
+
+A maintenance release: a security-dependency bump, four operator-reported
+fixes, and detection-quality hardening.
+
+### Fixed
+
+- **Notifications won't double-post.** A configured "escalate" response action
+  no longer posts its own banner through the legacy "System Events" path — the
+  MacCrab app is the single, correctly-attributed notification source.
+- **"Open rule" on a built-in alert** (e.g. forensic scanners, cross-process
+  correlation) now shows an explanation instead of an empty rule list.
+- **The triggering event is preserved with each alert,** so an alert reviewed
+  long after the live event was pruned still shows what actually fired (new
+  "Triggering event" section in the alert inspector).
+- **A revoked-Developer-ID binary is now caught on first execution** — software
+  whose Apple certificate was revoked (the typical post-takedown state for
+  macOS stealers) is flagged critical even though it still carries a
+  structurally-valid signature.
+- **Installs no longer trigger a spurious admin prompt** on first launch, and
+  `brew` installs now include the graph-detection rules.
+- **Uninstall** removes MacCrab's privacy (TCC) grants on a full wipe.
+- Fewer false positives: the credential-access monitor now matches credential
+  files precisely (no more flagging `.env.example`, `Cookies.tsx`, or public
+  SSH keys), and developer-tool builds are recognized reliably.
+
+### Changed
+
+- **Updated Sparkle to 2.9.2,** which addresses two security advisories in the
+  auto-update framework. The release pipeline now also self-checks that every
+  update is signed with the correct key before publishing.
+- The Investigation workspace is now focused on trace analysis; forensic case
+  browsing lives entirely in the dedicated Forensics workspace.
+- Hardened signer classification so a third-party binary cannot impersonate
+  Apple by self-naming its code-signature identifier, and rule overrides are
+  no longer honored from a directory writable by non-root accounts.
+
+Universal (Apple silicon + Intel), Developer ID signed and notarized.
+Minimum macOS 13.
+
 ## [1.17.1] — 2026-05-31
 
 Fast-follow fixing notifications (GitHub issue #2) and two operator-reported
