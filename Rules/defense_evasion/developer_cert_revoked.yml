@@ -1,0 +1,35 @@
+title: Execution of Binary With Revoked Developer Certificate
+id: d1a2b3c4-3007-4000-a000-000000003007
+status: experimental
+description: >
+    Detects execution of a binary whose Developer ID code-signing
+    certificate has been REVOKED by Apple (spctl/notarization assessment
+    returns "revoked"). Apple revokes a Developer ID certificate when the
+    signed software is confirmed malicious — the documented response to
+    AMOS / Atomic Stealer and similar campaigns after takedown. A revoked
+    binary still carries a structurally-valid Apple-anchored signature, so
+    SignerType resolves to devId and (without this rule) it would read as a
+    benign-looking "not_notarized" Developer-ID tool and be excluded by the
+    notarization rule's devId trust filter. Running a revoked-cert binary is
+    near-certainly malicious: it would NOT clear Gatekeeper on a fresh launch.
+    Relies on NotarizationStatus == 'revoked', which the rule engine sources
+    from the enriched spctl verdict (NotarizationChecker).
+author: MacCrab Community
+date: 2026/06/01
+references:
+    - https://www.kandji.io/blog/amos-macos-stealer-analysis
+    - https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution
+    - https://attack.mitre.org/techniques/T1553/001/
+tags:
+    - attack.defense_evasion
+    - attack.t1553.001
+logsource:
+    category: process_creation
+    product: macos
+detection:
+    selection:
+        NotarizationStatus: 'revoked'
+    condition: selection
+falsepositives:
+    - Essentially none — a revoked Developer-ID certificate means Apple pulled it, almost always after the signed software was confirmed malicious. Legitimate software does not run under a revoked certificate.
+level: critical

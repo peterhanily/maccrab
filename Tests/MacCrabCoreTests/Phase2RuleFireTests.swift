@@ -261,4 +261,34 @@ struct Phase2RuleFireTests {
         #expect(!matches.contains { $0.ruleName.lowercased().contains("fetch followed by execution") },
                 "staged_fetch should not fire on a notarized bundler, got: \(matches.map(\.ruleName))")
     }
+
+    // MARK: - developer_cert_revoked (v1.17.2)
+
+    /// A binary whose Developer-ID cert Apple has revoked: spctl reports
+    /// "revoked", surfaced via the notarization.status enrichment. Must fire
+    /// the dedicated critical rule.
+    @Test("revoked notarization status fires developer_cert_revoked")
+    func revokedCertFires() async throws {
+        let engine = try await loadEngine()
+        let proc = process(name: "evil", executable: "/Applications/Evil.app/Contents/MacOS/evil", signer: .devId)
+        var event = processEvent(process: proc)
+        event.enrichments["notarization.status"] = "revoked"
+        let matches = await engine.evaluate(event)
+        #expect(matches.contains { $0.ruleName.lowercased().contains("revoked") },
+                "Expected developer_cert_revoked to fire, got: \(matches.map(\.ruleName))")
+    }
+
+    /// And it must NOT be swept up as plain "not_notarized" — with the v1.17.2
+    /// resolver the enriched 'revoked' wins, so the notarization-absent rule
+    /// (which selects not_notarized) does not also fire on it.
+    @Test("revoked binary does NOT match the not_notarized notarization-absent rule")
+    func revokedNotTreatedAsNotNotarized() async throws {
+        let engine = try await loadEngine()
+        let proc = process(name: "evil", executable: "/Applications/Evil.app/Contents/MacOS/evil", signer: .devId)
+        var event = processEvent(process: proc)
+        event.enrichments["notarization.status"] = "revoked"
+        let matches = await engine.evaluate(event)
+        #expect(!matches.contains { $0.ruleName.lowercased().contains("lacks notarization") },
+                "revoked should resolve to 'revoked', not 'not_notarized', got: \(matches.map(\.ruleName))")
+    }
 }

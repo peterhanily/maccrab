@@ -959,10 +959,22 @@ public actor RuleEngine {
             // exactly so Rules/defense_evasion/notarization_absent_*.yml,
             // mas_receipt_access_by_non_sandbox.yml, and
             // sequences/notarized_dropper_pattern.yml can predicate on
-            // 'notarized' / 'not_notarized' literally. nil when the
-            // codeSignature enricher hasn't attached info yet — Sigma's
-            // `equals` against nil returns false, which matches the
-            // rule author's intent (don't fire on unknown).
+            // 'notarized' / 'not_notarized' literally.
+            //
+            // v1.17.2: prefer the enriched `notarization.status` when present —
+            // it carries the FULL spctl verdict including 'revoked' (a binary
+            // whose Developer-ID cert Apple has since revoked; the AMOS/Atomic
+            // Stealer post-takedown pattern) and 'unknown'. The codeSignature
+            // boolean below is only two-state (isNotarized) and can't express
+            // revoked, so a revoked-cert binary would otherwise read as plain
+            // 'not_notarized' and be swept up by notarization_absent's
+            // devId/notarized trust filters. The enrichment is populated by
+            // NotarizationChecker (EventLoop) once its cache is warm; on a cold
+            // first-seen exec it's absent, so we fall back to the boolean —
+            // preserving the existing notarized/not_notarized behaviour.
+            if let enriched = event.enrichments["notarization.status"], !enriched.isEmpty {
+                return enriched
+            }
             guard let sig = event.process.codeSignature else { return nil }
             return sig.isNotarized ? "notarized" : "not_notarized"
 
