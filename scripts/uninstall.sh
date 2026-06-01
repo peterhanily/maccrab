@@ -166,6 +166,22 @@ if [ "$REMOVE_DATA" = true ]; then
     info "Removing tamper forensic logs..."
     rm -f "/var/log/maccrab_tamper.log" 2>/dev/null || true
     rm -f "${SUDO_HOME:-$HOME}/.maccrab_tamper.log" 2>/dev/null || true
+    # Revoke MacCrab's TCC privacy grants (Accessibility, Full Disk Access,
+    # Screen Recording, etc.). Gated to the --yes / clean-slate path, mirroring
+    # the keychain wipe. The app's grants are keyed to com.maccrab.app and live
+    # in the CONSOLE USER's TCC store, so reset them as SUDO_USER; the sysext's
+    # grants are system-scoped, so reset com.maccrab.agent* as root. `reset All`
+    # clears every service for the bundle in one call. Best-effort.
+    if command -v tccutil >/dev/null 2>&1; then
+        info "Revoking MacCrab TCC privacy grants..."
+        if [ -n "${SUDO_USER:-}" ]; then
+            sudo -u "$SUDO_USER" tccutil reset All com.maccrab.app 2>/dev/null || true
+        else
+            tccutil reset All com.maccrab.app 2>/dev/null || true
+        fi
+        tccutil reset All com.maccrab.agent 2>/dev/null || true
+        tccutil reset All com.maccrab.agent.systemextension 2>/dev/null || true
+    fi
     # Keychain-stored API keys live in the user's keychain under
     # service "com.maccrab.secrets". Account names are the rawValues
     # of `SecretsStore.SecretKey` enum (`Sources/MacCrabCore/Storage/
