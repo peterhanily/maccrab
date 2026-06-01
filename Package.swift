@@ -47,7 +47,14 @@ let package = Package(
         // Pinned to .exact rather than `from:` — Sparkle runs privileged
         // update installs, so a compromised upstream release could push
         // code to every MacCrab user. Bump deliberately, not implicitly.
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.1"),
+        //
+        // 2.9.2 (2026-05-17) fixes two medium advisories present in <= 2.9.1:
+        //   - GHSA-g3hp-f6mg-559v: AppInstaller post-stage-1 XPC listener
+        //     accepted unvalidated connections (spoofed appcast item data).
+        //   - GHSA-hg88-v3cw-3qrh: binary-delta intermediate-symlink traversal
+        //     in a malicious .delta (we ship full DMGs only, so unreachable
+        //     for our users, but closed regardless).
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2"),
     ],
     targets: [
         // SQLCipher amalgamation, vendored from sqlcipher/sqlcipher v4.16.0
