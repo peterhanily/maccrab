@@ -484,10 +484,14 @@ public struct V2DetectionWorkspace: View {
         guard !q.isEmpty else { return false }
         let items = q.isEmpty ? rules : filteredRules
         guard items.isEmpty else { return false }
-        let builtIn = ["maccrab.ai-guard", "maccrab.campaign", "maccrab.behavior",
-                       "maccrab.threat-intel", "maccrab.intent", "maccrab.anomaly",
-                       "maccrab.dns", "maccrab.score", "maccrab.lateral"]
-        return builtIn.contains { q.hasPrefix($0) || q.contains($0) }
+        // EVERY built-in (non-Sigma) detection engine emits an alert id under
+        // the `maccrab.` namespace (ai-guard, campaign, behavior, correlator,
+        // forensic, dns, threat-intel, clipboard, deep, network, prevention,
+        // supply-chain, intent, llm, …). Sigma YAML rule ids are UUIDs. So a
+        // search that hit nothing AND looks like a `maccrab.` id is, by
+        // construction, a built-in detection — no need to enumerate every
+        // prefix (the old hardcoded list missed maccrab.forensic.* etc.).
+        return q.hasPrefix("maccrab.")
     }
 
     private var builtInDetectionNote: some View {
@@ -497,7 +501,7 @@ public struct V2DetectionWorkspace: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("No editable rule matches “\(debouncedRuleQuery)”.")
                     .font(.system(size: 12, weight: .medium))
-                Text("Alerts with IDs like maccrab.ai-guard.*, maccrab.campaign.*, maccrab.behavior.* or maccrab.threat-intel.* come from MacCrab's built-in detection engines (AI Guard, campaign correlation, behavioral scoring, threat intel) — not Sigma YAML rules, so there's nothing to edit or tune here.")
+                Text("Alerts with a `maccrab.*` ID (e.g. AI Guard, campaign correlation, behavioral scoring, threat intel, forensic scanners, cross-process correlation, DNS analysis) come from MacCrab's built-in detection engines — not Sigma YAML rules, so there's nothing to edit or tune here.")
                     .font(.system(size: 11))
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
