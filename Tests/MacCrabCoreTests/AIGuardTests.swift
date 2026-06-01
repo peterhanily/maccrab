@@ -156,6 +156,47 @@ struct CredentialFenceTests {
         #expect(result?.description.contains("Claude Code") == true)
         #expect(result?.description.contains("SSH") == true)
     }
+
+    // MARK: - v1.17.2 anchored-matcher FP regressions
+
+    @Test("env templates (.env.example/.sample/.template) are NOT credential reads")
+    func envTemplatesNotFlagged() {
+        let fence = CredentialFence()
+        for f in [".env.example", ".env.sample", ".env.template", ".env.dist"] {
+            #expect(fence.checkAccess(filePath: "/Users/user/project/\(f)") == nil,
+                    "\(f) is a committed secret-free template, must not flag")
+        }
+        // The real ones still fire.
+        #expect(fence.checkAccess(filePath: "/Users/user/project/.env") == .envFile)
+        #expect(fence.checkAccess(filePath: "/Users/user/project/.env.local") == .envFile)
+    }
+
+    @Test("look-alike source files are NOT flagged (old unanchored-substring FP)")
+    func lookAlikeSourceFilesNotFlagged() {
+        let fence = CredentialFence()
+        // `/Cookies` used to substring-match these; `.env` matched environment.ts.
+        for f in [
+            "/Users/user/project/src/Cookies.tsx",
+            "/Users/user/project/src/CookieBanner.tsx",
+            "/Users/user/project/src/environment.ts",
+            "/Users/user/project/components/LoginData.tsx",
+            "/Users/user/project/config.ts",            // not ~/.aws/config
+            "/Users/user/project/known_hosts_helper.go",
+        ] {
+            #expect(fence.checkAccess(filePath: f) == nil, "\(f) must not be flagged")
+        }
+        // Real browser stores still fire (exact filenames).
+        #expect(fence.checkAccess(filePath: "/Users/user/Library/Application Support/Google/Chrome/Default/Cookies") == .browserCredential)
+        #expect(fence.checkAccess(filePath: "/Users/user/Library/Application Support/Google/Chrome/Default/Login Data") == .browserCredential)
+    }
+
+    @Test("MacCrab's own files + honey-prompt decoys do not self-trip the fence")
+    func selfExclusion() {
+        let fence = CredentialFence()
+        #expect(fence.checkAccess(filePath: "/Library/Application Support/MacCrab/decoys/.env") == nil)
+        #expect(fence.checkAccess(filePath: "/Users/user/.maccrab/.aws/credentials") == nil)
+        #expect(fence.checkAccess(filePath: "/Users/user/project/decoys/id_rsa") == nil)
+    }
 }
 
 // MARK: - Project Boundary Tests
