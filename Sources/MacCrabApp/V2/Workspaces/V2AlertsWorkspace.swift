@@ -989,19 +989,22 @@ struct V2AlertsWorkspace: View {
             // alert at creation (AlertStore schema v6). Unlike "Surrounding
             // events", this survives events.db pruning — so even a months-old
             // alert still shows what actually fired. Only shown when present.
-            if !alert.triggeringEventsJson.isEmpty,
-               !triggeringEventSummaries(from: alert.triggeringEventsJson).isEmpty {
-                let snapshot = alert.triggeringEventsJson
+            // Parse the snapshot ONCE (was parsed 3×: twice in the guard +
+            // once in the ForEach).
+            let triggerLines = alert.triggeringEventsJson.isEmpty
+                ? []
+                : triggeringEventSummaries(from: alert.triggeringEventsJson)
+            if !triggerLines.isEmpty {
                 V2InspectorSection("Triggering event") {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(triggeringEventSummaries(from: snapshot).enumerated()), id: \.offset) { _, line in
+                        ForEach(Array(triggerLines.enumerated()), id: \.offset) { _, line in
                             Text(line)
                                 .font(V2Theme.meta())
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Text("Captured at alert time — preserved even after the live event is pruned.")
-                            .font(.system(size: 10))
+                            .font(V2Theme.meta())
                             .foregroundStyle(V2Theme.mutedText)
                     }
                 }

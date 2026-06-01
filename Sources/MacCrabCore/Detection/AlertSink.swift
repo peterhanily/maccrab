@@ -139,7 +139,10 @@ public actor AlertSink {
         guard !alerts.isEmpty else { return }
         let toInsert: [Alert]
         if let event {
-            toInsert = alerts.map { Self.enrichWithAttribution(alert: $0, event: event) }
+            // All alerts in a batch share one triggering event — encode the
+            // snapshot ONCE rather than per alert.
+            let snapshot = EventSnapshot.encode([event])
+            toInsert = alerts.map { Self.enrichWithAttribution(alert: $0, event: event, precomputedSnapshot: snapshot) }
         } else {
             toInsert = alerts.map { Self.enrichWithHostOnly(alert: $0) }
         }
@@ -170,7 +173,13 @@ public actor AlertSink {
     /// Empty strings on the Event side are converted to nil here so the
     /// "" → NULL contract is enforced at the chokepoint rather than
     /// scattered through every Alert constructor.
-    nonisolated static func enrichWithAttribution(alert: Alert, event: Event) -> Alert {
+    /// - Parameter precomputedSnapshot: when several alerts share ONE event
+    ///   (the rule-engine batch path), the caller encodes the event snapshot
+    ///   once and passes it here, so we don't re-encode the identical JSON
+    ///   per alert. nil → encode from `event` (single-alert path).
+    nonisolated static func enrichWithAttribution(
+        alert: Alert, event: Event, precomputedSnapshot: String? = nil
+    ) -> Alert {
         let aiTool = event.enrichments["ai_tool"] ?? event.enrichments["agent_tool"]
         let parentExec = event.process.ancestors.first?.executable
         let sha256 = event.process.hashes?.sha256
@@ -202,8 +211,10 @@ public actor AlertSink {
             hostName: alert.hostName ?? Self.defaultHostName(),
             // v1.17.2: snapshot the triggering event so it survives events.db
             // pruning. Preserve a caller-supplied snapshot (e.g. a sequence/
-            // campaign alert that already attached its contributing events).
+            // campaign alert that already attached its contributing events);
+            // else use the batch-shared precomputed snapshot; else encode now.
             triggeringEventsJson: alert.triggeringEventsJson
+                ?? precomputedSnapshot
                 ?? EventSnapshot.encode([event])
         )
     }
