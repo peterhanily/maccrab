@@ -40,6 +40,18 @@ final class AlertNotifier: NSObject {
     /// Timestamp of the newest alert we've already considered. Persisted
     /// so a relaunch doesn't re-notify the backlog.
     private var cursor: Date?
+    /// Upgrade-handoff gate. While set to a future date, `tick()` returns
+    /// WITHOUT posting or advancing the cursor, so a freshly-launched
+    /// post-upgrade app stays silent during the `OSSystemExtensionRequest`
+    /// (.replace) window — when the OLD resident sysext (≤v1.17.1) may still
+    /// be posting its own osascript banners and the exiting old app process
+    /// is briefly co-resident. The AppDelegate arms this on the sysext's
+    /// `.activating` transition and clears it on settle. It is an ABSOLUTE
+    /// deadline, so posting resumes even if the request never completes —
+    /// the gate is fail-open. Not advancing the cursor means alerts that
+    /// fired in the window are re-evaluated once it lifts (same discipline
+    /// as the `.notDetermined` early-return in `tick()`).
+    var suppressUntil: Date?
     /// Latest known authorization status (for the menu-bar health hint).
     private(set) var authorizationDenied = false
 
@@ -82,6 +94,10 @@ final class AlertNotifier: NSObject {
     /// Read alerts newer than the cursor, gate each, and post. Cheap
     /// enough to run on the 5s status-bar timer.
     func tick() async {
+        // Upgrade-handoff gate (fail-open, absolute deadline). See
+        // `suppressUntil`. Return without advancing the cursor so any
+        // alert that fired during the window is re-evaluated once it lifts.
+        if let until = suppressUntil, Date() < until { return }
         reloadConfig()
         guard let store = openStoreIfNeeded() else { return }
 

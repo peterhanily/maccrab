@@ -136,6 +136,22 @@ struct MacCrabApp: App {
                     @unknown default: break
                     }
                 }
+                // Upgrade-handoff: hush banner posting while a sysext
+                // activation/replace is in flight, so a freshly-launched
+                // post-upgrade app doesn't double-post over the OLD resident
+                // sysext's osascript banners. The gate is fail-open (absolute
+                // deadline in armNotifierHandoffGate) and lifts the instant
+                // the request settles — so a normal launch is a brief no-op.
+                .onChange(of: sysextManager.state) { newState in
+                    switch newState {
+                    case .activating:
+                        appDelegate.armNotifierHandoffGate()
+                    case .activated, .notActivated, .failed:
+                        appDelegate.clearNotifierHandoffGate()
+                    case .unknown, .awaitingApproval:
+                        break  // bounded by the gate's deadline
+                    }
+                }
                 // maccrab:// deep links (APPCORE-01). The OS delivers the
                 // URL here; V2 owns its navigation state via @StateObject,
                 // so we cross the module boundary via NotificationCenter —
@@ -384,6 +400,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await self?.alertNotifier?.tick() }
         }
         updateStatusBarIcon()
+    }
+
+    /// Upgrade-handoff gate for banner posting (see
+    /// `AlertNotifier.suppressUntil`). Armed when the sysext enters
+    /// `.activating` and cleared when it settles. The 30s ABSOLUTE deadline
+    /// is the fail-open ceiling: if the activation request never settles,
+    /// posting resumes regardless. Near-instant on a normal launch (an
+    /// already-active extension settles in a tick or two); only meaningful
+    /// during a real `.replace` after an app upgrade.
+    @MainActor func armNotifierHandoffGate() {
+        alertNotifier?.suppressUntil = Date().addingTimeInterval(30)
+    }
+
+    @MainActor func clearNotifierHandoffGate() {
+        alertNotifier?.suppressUntil = nil
     }
 
     /// Flip the statusbar title to the healthy crab or the warning

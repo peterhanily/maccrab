@@ -9,6 +9,7 @@ struct V2DashboardShell: View {
     @StateObject private var state = V2DashboardState()
     @ObservedObject var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("v2.colorScheme") private var colorSchemeRaw: String = "dark"
 
     init(appState: AppState) {
@@ -91,6 +92,29 @@ struct V2DashboardShell: View {
             // first launch. No-op for live if no MacCrab DBs exist.
             await state.connectLiveData()
             state.startAutoRefresh()
+        }
+        // Upgrade-handoff recovery: when the sysext finishes (re)booting
+        // (bootPhase non-ready→ready), re-probe the on-disk stores once.
+        // Covers the case where the launch-time connectLiveData() probe ran
+        // before the (re)started sysext had created its DBs — leaving the
+        // dashboard on mock or a degraded live provider (a store's DB absent
+        // at probe time) until a manual restart. Edge-gated in the state, so
+        // a steady stream of "ready" heartbeats triggers nothing.
+        .onChange(of: appState.heartbeat?.bootPhase) { newPhase in
+            Task { await state.onSysextBootPhase(newPhase) }
+        }
+        // Belt-and-suspenders for the above: appState heartbeat polling is
+        // scenePhase-gated (paused while the dashboard window is hidden), so
+        // a sysext reboot that happens while hidden isn't observed as a
+        // bootPhase edge on re-open. When the window returns to the
+        // foreground, opportunistically re-probe — but ONLY when we're not
+        // already on a healthy live provider, so a healthy dashboard pays no
+        // probe cost and this stays a no-op once recovered.
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active,
+                  state.provider.mode != .live || state.provider.lastErrorDescription != nil
+            else { return }
+            Task { await state.reconnectLiveDataIfStale() }
         }
         // Critical-alert notification "View" button posts this; we
         // navigate to the alert in the Alerts workspace + Open tab.

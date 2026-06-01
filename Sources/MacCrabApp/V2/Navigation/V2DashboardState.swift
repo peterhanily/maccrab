@@ -41,6 +41,12 @@ public final class V2DashboardState: ObservableObject {
     /// `.task` modifiers off this so they re-fetch on each tick.
     @Published public var refreshTick: Int = 0
     private var autoRefreshTask: Task<Void, Never>? = nil
+    /// Last sysext bootPhase seen, to edge-detect the non-ready→ready
+    /// transition that drives a one-shot live-data reconnect after the
+    /// daemon (re)boots — e.g. when the launch-time `connectLiveData()`
+    /// probe ran before the (re)started sysext had created its on-disk
+    /// stores, leaving the dashboard on mock or a *degraded* live provider.
+    private var lastBootPhase: String? = nil
 
     /// Refresh cadence in seconds. Aligned with v1
     /// `pollIntervalSeconds` AppStorage so toggling either side
@@ -140,6 +146,42 @@ public final class V2DashboardState: ObservableObject {
                 displayFor: 4
             ))
         }
+    }
+
+    /// Re-probe the on-disk stores and switch to a (healthier) live provider
+    /// WITHOUT the `connectLiveData()` toasts. Recovers the cases the
+    /// launch-time `connectLiveData()` can miss after a sysext (re)boot:
+    ///   • no DBs existed at the launch probe → still on mock once they appear;
+    ///   • a store's DB was absent at the launch probe (e.g. events.db present
+    ///     but alerts.db not yet created mid-(re)boot) → a *degraded* live
+    ///     provider whose `alerts()` returns [] — `lastErrorDescription` is
+    ///     non-nil — and the DB now opens cleanly;
+    ///   • the canonical data directory changed (system ⇄ user-home).
+    /// Silent on failure (keeps the current provider — e.g. a probe that lands
+    /// mid-VACUUM). Note a merely *locked* DB still opens read-only, so that
+    /// case is already live and needs no recovery. Swaps ONLY when the probe
+    /// succeeds AND the current provider is mock, on a different dir, or
+    /// degraded while the re-probe is clean — so a redundant probe to the same
+    /// healthy live dir is a no-op and steady state never regresses (no thrash).
+    public func reconnectLiveDataIfStale() async {
+        guard let live = await V2LiveDataProvider() else { return }
+        let currentIsDegraded = provider.lastErrorDescription != nil
+        if provider.mode != .live
+            || provider.dataDir != live.dataDir
+            || (currentIsDegraded && live.lastErrorDescription == nil) {
+            self.provider = live
+        }
+    }
+
+    /// Drive a one-shot reconnect on the sysext's non-ready→ready boot
+    /// edge. Called from the shell's `.onChange(of: heartbeat.bootPhase)`.
+    /// Fires at most once per (re)boot: the daemon writes bootPhase="ready"
+    /// once per start, and the edge guard ignores the steady stream of
+    /// "ready" heartbeats that follow — so this never thrashes the provider.
+    public func onSysextBootPhase(_ phase: String?) async {
+        defer { lastBootPhase = phase }
+        guard lastBootPhase != "ready", phase == "ready" else { return }
+        await reconnectLiveDataIfStale()
     }
 
     public func disconnectLiveData() {
