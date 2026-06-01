@@ -115,6 +115,15 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
     /// outbound webhook/syslog redact this separately for privacy.
     public let hostName: String?
 
+    /// (v1.17.2) Snapshot of the triggering event(s), as a JSON array of
+    /// event `raw_json` blobs — triggering event first, then any contributing
+    /// events for sequence/campaign alerts. Captured at alert creation
+    /// (AlertSink) because events.db prunes on a ~30 min hot tier while alerts
+    /// are kept ~365 days, so the originating event is otherwise long gone
+    /// when an old alert is reviewed. Bounded by `EventSnapshot.maxEvents` and
+    /// the per-event 64 KB payload cap; nil for alerts built without an Event.
+    public let triggeringEventsJson: String?
+
     // MARK: Initializer
 
     public init(
@@ -142,7 +151,8 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         aiTool: String? = nil,
         parentExecutable: String? = nil,
         processSha256: String? = nil,
-        hostName: String? = nil
+        hostName: String? = nil,
+        triggeringEventsJson: String? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -169,6 +179,7 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         self.parentExecutable = parentExecutable
         self.processSha256 = processSha256
         self.hostName = hostName
+        self.triggeringEventsJson = triggeringEventsJson
     }
 }
 

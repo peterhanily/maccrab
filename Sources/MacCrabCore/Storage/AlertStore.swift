@@ -196,6 +196,25 @@ public actor AlertStore {
                 "CREATE INDEX IF NOT EXISTS idx_alerts_ai_tool_ts ON alerts(ai_tool, timestamp)",
             ]
         ),
+        // v6 (v1.17.2): snapshot the triggering event(s) ONTO the alert.
+        // Pre-v6 an alert kept only event_id; events.db prunes on a ~30 min
+        // hot tier while alerts are retained ~365 days, so by the time an
+        // operator opens an old alert the triggering event is long gone and
+        // the dashboard could only do a lossy ±30 min time-window search
+        // around the alert timestamp. This column stores a bounded JSON array
+        // of the contributing event raw_json blobs (triggering event first,
+        // plus contributing events for sequence/campaign alerts) captured at
+        // alert-creation in AlertSink — the same single chokepoint the v5
+        // attribution columns use. Bounded by EventSnapshot.maxEvents and the
+        // existing 64 KB-per-event payload cap; expires with the alert row, so
+        // no separate retention/prune is needed.
+        Migration(
+            version: 6,
+            name: "add_triggering_events_snapshot",
+            sql: [
+                "ALTER TABLE alerts ADD COLUMN triggering_events_json TEXT",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -290,7 +309,8 @@ public actor AlertStore {
                 ai_tool TEXT,
                 parent_executable TEXT,
                 process_sha256 TEXT,
-                host_name TEXT
+                host_name TEXT,
+                triggering_events_json TEXT
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)",
@@ -330,8 +350,9 @@ public actor AlertStore {
                 d3fend_techniques, remediation_hint, analyst_metadata_json,
                 campaign_id,
                 user_id, user_name, working_directory,
-                ai_tool, parent_executable, process_sha256, host_name
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                ai_tool, parent_executable, process_sha256, host_name,
+                triggering_events_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -532,6 +553,9 @@ public actor AlertStore {
         bindTextNonEmptyOrNull(stmt, index: 22, value: alert.parentExecutable)
         bindTextNonEmptyOrNull(stmt, index: 23, value: alert.processSha256)
         bindTextNonEmptyOrNull(stmt, index: 24, value: alert.hostName)
+        // 25: triggering-event snapshot (schema v6). NULL for alerts built
+        // without contributing events. AlertSink fills this from the Event(s).
+        bindTextNonEmptyOrNull(stmt, index: 25, value: alert.triggeringEventsJson)
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
@@ -1245,6 +1269,9 @@ public actor AlertStore {
             let parentExecutable = columnTextOrNil(stmt, index: 21)
             let processSha256 = columnTextOrNil(stmt, index: 22)
             let hostName = columnTextOrNil(stmt, index: 23)
+            // Column 24: triggering-events snapshot (schema v6). NULL for
+            // pre-v6 rows and for alerts created without contributing events.
+            let triggeringEventsJson = columnTextOrNil(stmt, index: 24)
 
             let alert = Alert(
                 id: id,
@@ -1270,7 +1297,8 @@ public actor AlertStore {
                 aiTool: aiTool,
                 parentExecutable: parentExecutable,
                 processSha256: processSha256,
-                hostName: hostName
+                hostName: hostName,
+                triggeringEventsJson: triggeringEventsJson
             )
             results.append(alert)
         }

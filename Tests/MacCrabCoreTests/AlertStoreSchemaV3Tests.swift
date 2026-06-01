@@ -238,12 +238,13 @@ struct AlertStoreSchemaV5Tests {
         #expect(version >= 5)
     }
 
-    @Test("Migration is idempotent — re-opening v5 DB preserves user_version")
+    @Test("Migration is idempotent — re-opening DB preserves user_version (v6)")
     func migrationIdempotent() async throws {
         let path = makeTempPath()
         defer { cleanup(path) }
 
-        // First open: fresh install creates the schema and runs to v5.
+        // First open: fresh install creates the schema and runs to the latest
+        // migration (v6 — triggering_events_json snapshot column).
         _ = try AlertStore(path: path)
         // Second open: reapplies the migration set against an at-or-ahead
         // counter (no version bump). Must not throw.
@@ -254,7 +255,7 @@ struct AlertStoreSchemaV5Tests {
         let raw = try #require(openRaw(path))
         defer { sqlite3_close(raw) }
         let version = try #require(try? SchemaMigrator.readVersion(db: raw))
-        #expect(version == 5, "version should be exactly 5 after multiple opens, got \(version)")
+        #expect(version == 6, "version should be exactly 6 after multiple opens, got \(version)")
     }
 
     @Test("v2-shape DB opens cleanly on v5 binary — forward-compatible migration")
@@ -503,5 +504,51 @@ struct AlertStoreSchemaV5Tests {
             #expect(row?.aiTool == "claude_code")
             #expect(row?.hostName != nil)
         }
+    }
+
+    // MARK: - v6 triggering-event snapshot
+
+    @Test("submit(alert:event:) snapshots the triggering event onto the alert (survives event pruning)")
+    func sinkSnapshotsTriggeringEvent() async throws {
+        let (sink, store, path) = try await makeSink()
+        defer { cleanup(path) }
+
+        let alert = bareAlert(id: "snap1")
+        let event = eventWith(userId: 1337, userName: "bob", workingDirectory: "/Users/bob/work")
+        _ = try await sink.submit(alert: alert, event: event)
+
+        let row = try await store.alert(id: "snap1")
+        let json = try #require(row?.triggeringEventsJson,
+                                "triggering_events_json should be populated from the Event")
+        // It's a JSON array; the triggering event's id must be inside it so the
+        // dashboard can render the originating event even after events.db prunes.
+        #expect(json.hasPrefix("["))
+        #expect(json.contains(event.id.uuidString),
+                "snapshot should contain the triggering event's id")
+    }
+
+    @Test("alert built without an Event has a nil triggering-event snapshot")
+    func noEventNoSnapshot() async throws {
+        let (sink, store, path) = try await makeSink()
+        defer { cleanup(path) }
+
+        // The Event-less submit path (self-defense / health stubs).
+        _ = try await sink.submit(alert: bareAlert(id: "snap2"))
+        let row = try await store.alert(id: "snap2")
+        #expect(row?.triggeringEventsJson == nil,
+                "no-Event alerts must store NULL, not an empty blob")
+    }
+
+    @Test("EventSnapshot.encode caps at maxEvents and stays well-formed JSON")
+    func snapshotBoundsEvents() {
+        let many = (0..<(EventSnapshot.maxEvents + 5)).map { _ in
+            eventWith(userId: 1, userName: "x", workingDirectory: "/tmp")
+        }
+        let json = EventSnapshot.encode(many)
+        let data = (json ?? "").data(using: .utf8) ?? Data()
+        let arr = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
+        #expect(arr != nil, "snapshot must be a JSON array")
+        #expect((arr?.count ?? 0) <= EventSnapshot.maxEvents,
+                "snapshot must cap at maxEvents, got \(arr?.count ?? -1)")
     }
 }

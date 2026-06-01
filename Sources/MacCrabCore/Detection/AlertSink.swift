@@ -199,7 +199,12 @@ public actor AlertSink {
             aiTool: alert.aiTool ?? Self.nilIfEmpty(aiTool),
             parentExecutable: alert.parentExecutable ?? Self.nilIfEmpty(parentExec),
             processSha256: alert.processSha256 ?? Self.nilIfEmpty(sha256),
-            hostName: alert.hostName ?? Self.defaultHostName()
+            hostName: alert.hostName ?? Self.defaultHostName(),
+            // v1.17.2: snapshot the triggering event so it survives events.db
+            // pruning. Preserve a caller-supplied snapshot (e.g. a sequence/
+            // campaign alert that already attached its contributing events).
+            triggeringEventsJson: alert.triggeringEventsJson
+                ?? EventSnapshot.encode([event])
         )
     }
 
@@ -250,5 +255,53 @@ public actor AlertSink {
     nonisolated private static func nilIfEmpty(_ s: String?) -> String? {
         guard let s, !s.isEmpty else { return nil }
         return s
+    }
+}
+
+// MARK: - EventSnapshot (v1.17.2)
+
+/// Encodes the triggering event(s) of an alert into a bounded JSON string
+/// stored on the alert row (`triggering_events_json`, schema v6).
+///
+/// events.db prunes on a ~30 min hot tier while alerts are retained ~365
+/// days, so an old alert's originating event is otherwise gone when reviewed.
+/// Snapshotting it onto the alert keeps the "what did I actually see" context
+/// for the life of the alert without a cross-DB join that fails post-eviction.
+///
+/// Bounds (so this can't balloon the alert DB):
+///  - at most `maxEvents` events (triggering first, then contributing events
+///    for sequence/campaign alerts),
+///  - each event capped at `maxBytesPerEvent` (mirrors EventStore's 64 KB
+///    raw_json cap) — an over-cap event is replaced with a small marker so the
+///    array stays well-formed.
+public enum EventSnapshot {
+    /// Max events captured per alert. A single-event rule alert stores 1; a
+    /// sequence/campaign alert can attach its contributing events up to here.
+    public static let maxEvents = 8
+    /// Per-event byte cap after JSON encoding (matches EventStore.maxRawJsonBytes).
+    public static let maxBytesPerEvent = 64 * 1024
+
+    private static let encoder = JSONEncoder()
+
+    /// Returns a JSON-array string of the (bounded) events, or nil if empty /
+    /// nothing encodable — nil maps to a NULL column, never an empty blob.
+    public static func encode(_ events: [Event]) -> String? {
+        let bounded = events.prefix(maxEvents)
+        guard !bounded.isEmpty else { return nil }
+
+        var jsonElements: [String] = []
+        for event in bounded {
+            guard let data = try? encoder.encode(event) else { continue }
+            if data.count > maxBytesPerEvent {
+                // Don't store an oversized blob; keep the array well-formed
+                // with a marker that records the id + why it was dropped.
+                let marker = "{\"id\":\"\(event.id.uuidString)\",\"snapshot\":\"omitted\",\"reason\":\"event exceeded \(maxBytesPerEvent) bytes\"}"
+                jsonElements.append(marker)
+            } else if let s = String(data: data, encoding: .utf8) {
+                jsonElements.append(s)
+            }
+        }
+        guard !jsonElements.isEmpty else { return nil }
+        return "[" + jsonElements.joined(separator: ",") + "]"
     }
 }
