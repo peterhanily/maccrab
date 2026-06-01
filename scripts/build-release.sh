@@ -67,6 +67,22 @@ trap 'rm -rf "$STAGING_DIR"' EXIT
 
 cd "$PROJECT_DIR"
 
+# ─── Sparkle config: single source of truth ──────────────────────────
+# The shipped app's Info.plist (heredoc below) used to HARDCODE SUPublicEDKey
+# + SUFeedURL — a third independent copy that prerelease-check.sh never
+# validated (it only compares project.yml vs MacCrabApp-Info.plist). A future
+# key rotation that updated those two but forgot this script would pass the
+# pre-release gate GREEN while shipping a DMG with a stale key, bricking
+# auto-update for every installed user (a yank-class failure). Derive both
+# from Xcode/project.yml (canonical) at build time and fail hard if absent, so
+# there is exactly ONE source and no drift surface.
+SU_EDKEY=$(grep -E '^[[:space:]]*SUPublicEDKey:' Xcode/project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+SU_FEEDURL=$(grep -E '^[[:space:]]*SUFeedURL:' Xcode/project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -z "$SU_EDKEY" ] || [ -z "$SU_FEEDURL" ]; then
+    echo "  ERROR: could not read SUPublicEDKey / SUFeedURL from Xcode/project.yml — refusing to build a DMG with missing Sparkle config" >&2
+    exit 1
+fi
+
 # Source credentials from env file if it exists
 ENV_FILE="$HOME/.maccrab-release-env"
 if [ -f "$ENV_FILE" ]; then
@@ -74,6 +90,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 echo "Building MacCrab v$VERSION..."
+echo "  Sparkle: feed=$SU_FEEDURL key=${SU_EDKEY:0:8}… (from project.yml)"
 
 # ─── Compile for both architectures ──────────────────────────────────
 echo "  Building arm64..."
@@ -332,9 +349,11 @@ cat > "$APP/Contents/Info.plist" << PLIST
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <!-- Sparkle 2 auto-update config. SUPublicEDKey is the ed25519
          verification key; losing the matching private key bricks
-         updates for every existing install. -->
-    <key>SUFeedURL</key><string>https://maccrab.com/appcast.xml</string>
-    <key>SUPublicEDKey</key><string>de+dzPjBve7LP5qxoE7nR6shThsjubkVasi+i8ehT4E=</string>
+         updates for every existing install. Both values are interpolated
+         from Xcode/project.yml (the single source of truth) — never edit
+         them here; rotate the key in project.yml only. -->
+    <key>SUFeedURL</key><string>${SU_FEEDURL}</string>
+    <key>SUPublicEDKey</key><string>${SU_EDKEY}</string>
     <key>SUEnableAutomaticChecks</key><true/>
     <key>SUScheduledCheckInterval</key><integer>86400</integer>
     <key>SUAutomaticallyUpdate</key><false/>

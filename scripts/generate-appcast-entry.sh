@@ -96,6 +96,37 @@ LEN=$(echo    "$SIG_LINE" | sed -E 's/.*length="([^"]+)".*/\1/')
 [[ -n "$ED_SIG" ]] || { echo "ERROR: could not parse edSignature from: $SIG_LINE" >&2; exit 1; }
 [[ -n "$LEN"    ]] || { echo "ERROR: could not parse length from: $SIG_LINE"     >&2; exit 1; }
 
+# Verify the signing key pairs with the SHIPPED public key BEFORE emitting the
+# appcast item. The signature comes from whatever EdDSA private key the login
+# Keychain holds; if that key does NOT pair with the SUPublicEDKey baked into
+# the app (project.yml — canonical), every installed user's Sparkle verification
+# fails silently and the update is dead on arrival. This catches a regenerated /
+# wrong-account / restored-backup key BEFORE publish, not after a yank.
+EXPECTED_PUB=$(grep -E '^[[:space:]]*SUPublicEDKey:' "$SCRIPT_DIR/../Xcode/project.yml" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+if [[ -z "$EXPECTED_PUB" ]]; then
+    echo "ERROR: could not read SUPublicEDKey from Xcode/project.yml to verify the appcast signature" >&2
+    exit 1
+fi
+# 1. Pairing: generate_keys -p prints the PUBLIC key for the Keychain private
+#    key. It must equal the public key shipped in the app.
+GENKEYS="$SPARKLE_BIN/generate_keys"
+if [[ -x "$GENKEYS" ]]; then
+    ACTUAL_PUB=$("$GENKEYS" -p 2>/dev/null | tr -d '[:space:]')
+    if [[ -n "$ACTUAL_PUB" && "$ACTUAL_PUB" != "$EXPECTED_PUB" ]]; then
+        echo "ERROR: the Keychain Sparkle private key does NOT pair with the shipped SUPublicEDKey." >&2
+        echo "       shipped (project.yml): ${EXPECTED_PUB:0:12}…   keychain: ${ACTUAL_PUB:0:12}…" >&2
+        echo "       Publishing would brick auto-update for every installed user. Aborting." >&2
+        exit 1
+    fi
+fi
+# 2. Signature validity: confirm the just-produced edSignature actually verifies
+#    for the DMG with the Keychain key (catches a corrupt/partial signature).
+if ! "$SPARKLE_BIN/sign_update" --verify "$DMG" "$ED_SIG" >/dev/null 2>&1; then
+    echo "ERROR: the produced appcast edSignature failed sign_update --verify against the DMG. Aborting." >&2
+    exit 1
+fi
+echo "  Appcast signature verified; signing key pairs with shipped SUPublicEDKey ${EXPECTED_PUB:0:8}…"
+
 PUB_DATE=$(LC_TIME=en_US.UTF-8 date -u '+%a, %d %b %Y %H:%M:%S +0000')
 DMG_NAME=$(basename "$DMG")
 DOWNLOAD_URL="${DOWNLOAD_BASE}/v${VERSION}/${DMG_NAME}"
