@@ -91,13 +91,21 @@ final class AlertNotifier: NSObject {
 
     // MARK: - Poll tick (driven by the process-lifetime AppDelegate timer)
 
+    /// Pure handoff-gate decision, extracted for unit testing. True while
+    /// `suppressUntil` is a future instant. It's an ABSOLUTE deadline, so it
+    /// lapses (fail-open) once `now` passes it; nil means not gated.
+    nonisolated static func isHandoffGated(suppressUntil: Date?, now: Date) -> Bool {
+        guard let until = suppressUntil else { return false }
+        return now < until
+    }
+
     /// Read alerts newer than the cursor, gate each, and post. Cheap
     /// enough to run on the 5s status-bar timer.
     func tick() async {
         // Upgrade-handoff gate (fail-open, absolute deadline). See
         // `suppressUntil`. Return without advancing the cursor so any
         // alert that fired during the window is re-evaluated once it lifts.
-        if let until = suppressUntil, Date() < until { return }
+        if Self.isHandoffGated(suppressUntil: suppressUntil, now: Date()) { return }
         reloadConfig()
         guard let store = openStoreIfNeeded() else { return }
 

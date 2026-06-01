@@ -165,12 +165,31 @@ public final class V2DashboardState: ObservableObject {
     /// healthy live dir is a no-op and steady state never regresses (no thrash).
     public func reconnectLiveDataIfStale() async {
         guard let live = await V2LiveDataProvider() else { return }
-        let currentIsDegraded = provider.lastErrorDescription != nil
-        if provider.mode != .live
-            || provider.dataDir != live.dataDir
-            || (currentIsDegraded && live.lastErrorDescription == nil) {
+        if Self.shouldAdoptReprobe(
+            currentMode: provider.mode,
+            currentDir: provider.dataDir,
+            currentDegraded: provider.lastErrorDescription != nil,
+            reprobeDir: live.dataDir,
+            reprobeDegraded: live.lastErrorDescription != nil
+        ) {
             self.provider = live
         }
+    }
+
+    /// Pure swap decision for `reconnectLiveDataIfStale`, extracted for unit
+    /// testing. Adopt the re-probed provider when the current one is NOT a
+    /// healthy live provider on the same dir: it's mock, on a different data
+    /// directory, or degraded (a store failed to open) while the re-probe is
+    /// clean. A healthy live provider on the same dir is a no-op — so a
+    /// redundant probe never thrashes the provider or regresses steady state.
+    nonisolated static func shouldAdoptReprobe(
+        currentMode: V2DataSourceMode, currentDir: String?, currentDegraded: Bool,
+        reprobeDir: String?, reprobeDegraded: Bool
+    ) -> Bool {
+        if currentMode != .live { return true }
+        if currentDir != reprobeDir { return true }
+        if currentDegraded && !reprobeDegraded { return true }
+        return false
     }
 
     /// Drive a one-shot reconnect on the sysext's non-ready→ready boot
@@ -179,9 +198,20 @@ public final class V2DashboardState: ObservableObject {
     /// once per start, and the edge guard ignores the steady stream of
     /// "ready" heartbeats that follow — so this never thrashes the provider.
     public func onSysextBootPhase(_ phase: String?) async {
-        defer { lastBootPhase = phase }
-        guard lastBootPhase != "ready", phase == "ready" else { return }
-        await reconnectLiveDataIfStale()
+        // Record the new phase BEFORE the await so an interleaving call
+        // during reconnectLiveDataIfStale() sees the updated value and can't
+        // double-fire the same edge.
+        let fire = Self.bootPhaseDidBecomeReady(previous: lastBootPhase, next: phase)
+        lastBootPhase = phase
+        if fire { await reconnectLiveDataIfStale() }
+    }
+
+    /// Pure non-ready→ready edge detector for `onSysextBootPhase`, extracted
+    /// for unit testing. True exactly when the sysext just reached "ready"
+    /// from a non-ready (or unknown/nil) phase — so the steady stream of
+    /// "ready" heartbeats that follows a boot fires the reconnect zero times.
+    nonisolated static func bootPhaseDidBecomeReady(previous: String?, next: String?) -> Bool {
+        previous != "ready" && next == "ready"
     }
 
     public func disconnectLiveData() {
