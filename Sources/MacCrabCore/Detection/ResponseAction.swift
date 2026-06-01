@@ -596,59 +596,25 @@ public actor ResponseEngine {
 
     // MARK: Escalate Notification
 
-    /// Send a high-priority macOS notification with detailed alert information.
-    /// Uses osascript for reliable delivery from CLI daemons.
+    /// Escalate-notification response action.
+    ///
+    /// v1.17.2 (GitHub issue #2 conflict fix): this used to spawn
+    /// `osascript -e 'display notification …'`. That is the EXACT legacy path
+    /// issue #2 removed everywhere else — osascript banners are attributed to
+    /// "Script Editor"/"System Events" (not MacCrab, so no entry to turn off)
+    /// and outlive an uninstall. It also DOUBLE-posted: the alert is already
+    /// written to the alert store, and the signed app's AlertNotifier polls
+    /// the store and delivers every alert via UNUserNotificationCenter (under
+    /// MacCrab's own identity, with sound). So the osascript banner added
+    /// nothing but the regression.
+    ///
+    /// The app is now the sole OS-notification poster. This action is a no-op
+    /// beyond logging — kept as a type so existing daemon_config.json files
+    /// that list it still decode. The alert's presence in the store IS the
+    /// escalation; severity-based emphasis belongs in the app's gate.
     private nonisolated func sendEscalatedNotification(alert: Alert, event: Event) -> Bool {
-        let severityLabel: String
-        let soundName: String
-        switch alert.severity {
-        case .critical:
-            severityLabel = "CRITICAL"
-            soundName = "Sosumi"
-        case .high:
-            severityLabel = "HIGH"
-            soundName = "Basso"
-        case .medium:
-            severityLabel = "MEDIUM"
-            soundName = "Purr"
-        case .low:
-            severityLabel = "LOW"
-            soundName = "Pop"
-        case .informational:
-            severityLabel = "INFO"
-            soundName = "Tink"
-        }
-
-        let processName = event.process.name
-        let pid = event.process.pid
-        let techniques = alert.mitreTechniques ?? "none"
-
-        let title = "MacCrab [\(severityLabel)] \(alert.ruleTitle)"
-        let body = "Process: \(processName) (PID \(pid))\\nRule: \(alert.ruleId)\\nMITRE: \(techniques)\\nAction required — check MacCrab dashboard"
-
-        // Escape for AppleScript
-        let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
-        let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
-
-        let script = """
-            display notification "\(escapedBody)" \
-            with title "\(escapedTitle)" \
-            sound name "\(soundName)"
-            """
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
+        logger.notice("escalateNotification for \(alert.ruleId, privacy: .public): delivery handled by the app (AlertNotifier); no daemon-side osascript banner")
+        return true
     }
 
     // MARK: Run Script
