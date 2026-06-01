@@ -357,6 +357,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, let vm = self.appState?.alertToViewModel(alert) else { return }
             self.showAlertPopover(alert: vm)
         }
+        // Banner tap → bring the dashboard window forward THEN hand off to
+        // V2 via the same bridge the in-app popover uses
+        // (AlertPopoverView.onShowDashboard). showDashboard() first so the
+        // WindowGroup is mounted to receive maccrab.openAlert.
+        notifier.onOpenAlert = { [weak self] alertId in
+            guard let self else { return }
+            self.showDashboard()
+            NotificationCenter.default.post(
+                name: Notification.Name("maccrab.openAlert"),
+                object: nil,
+                userInfo: ["alertId": alertId]
+            )
+        }
         self.alertNotifier = notifier
         Task { await notifier.requestAuthorization() }
         // Start the statusbar health poller. Uses a 5s cadence so the

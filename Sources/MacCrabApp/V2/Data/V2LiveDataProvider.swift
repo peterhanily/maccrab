@@ -44,6 +44,13 @@ public final class V2LiveDataProvider: V2DataProvider {
     /// user-override JSON landed on disk.
     private var rulesCacheUserRulesMtime: Date? = nil
 
+    /// Cached sequence + graph (composite) rule id→title map, gated on
+    /// the compiled_rules dir mtime — the same invalidation signal as
+    /// `rulesCache`. Composite rules only change on recompile / app
+    /// upgrade, so a per-launch cache is plenty.
+    private var compositeLabelsCache: [String: String] = [:]
+    private var compositeLabelsCacheMtime: Date? = nil
+
     /// Returns nil if no candidate directory exists at all (fresh dev
     /// machine where the daemon has never run). Caller should fall
     /// back to V2MockDataProvider.
@@ -259,6 +266,57 @@ public final class V2LiveDataProvider: V2DataProvider {
         rulesCacheTelemetryMtime = teleMtime
         rulesCacheUserRulesMtime = userMtime
         return mapped
+    }
+
+    public func compositeRuleLabels() async -> [String: String] {
+        guard let dir = dataDir else { return [:] }
+        let rulesPath = dir + "/compiled_rules"
+        let dirMtime = (try? FileManager.default
+            .attributesOfItem(atPath: rulesPath))?[.modificationDate] as? Date
+        if !compositeLabelsCache.isEmpty, dirMtime == compositeLabelsCacheMtime {
+            return compositeLabelsCache
+        }
+        // Each compiled sequence/graph file is a single object with a
+        // top-level `id` + `title` (41 sequence files, 6 graph files).
+        // Read off-main; these are tiny but it keeps file I/O off the
+        // MainActor like the rules()/haystack paths.
+        let sequencesDir = rulesPath + "/sequences"
+        let graphDir = rulesPath + "/graph"
+        let labels = await Task.detached(priority: .userInitiated) {
+            V2LiveDataProvider.loadCompositeRuleLabels(
+                sequencesDir: sequencesDir, graphDir: graphDir)
+        }.value
+        compositeLabelsCache = labels
+        compositeLabelsCacheMtime = dirMtime
+        return labels
+    }
+
+    /// Pure file→map reader for `compositeRuleLabels()`, extracted so it
+    /// is unit-testable against a temp dir (the codebase convention for
+    /// the V2 provider — see `toV2Rule`/`toV2Alert`). Each compiled
+    /// sequence/graph file is a single object with a top-level `id` +
+    /// `title`. Returns `[lowercasedId: title]`. Missing dirs / unreadable
+    /// or malformed files are skipped silently.
+    nonisolated static func loadCompositeRuleLabels(
+        sequencesDir: String, graphDir: String
+    ) -> [String: String] {
+        struct Stub: Decodable { let id: String; let title: String }
+        let fm = FileManager.default
+        let dec = JSONDecoder()
+        var out: [String: String] = [:]
+        for sub in [sequencesDir, graphDir] {
+            guard let urls = try? fm.contentsOfDirectory(
+                at: URL(fileURLWithPath: sub),
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for url in urls where url.pathExtension == "json" {
+                guard let data = try? Data(contentsOf: url),
+                      let stub = try? dec.decode(Stub.self, from: data) else { continue }
+                out[stub.id.lowercased()] = stub.title
+            }
+        }
+        return out
     }
 
     public func heartbeat() async -> V2HeartbeatSnapshot? {

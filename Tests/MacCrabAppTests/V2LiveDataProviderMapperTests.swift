@@ -203,3 +203,82 @@ struct V2LiveDataProviderMapperTests {
         #expect(v2.edgeCount == 0)
     }
 }
+
+// Pin the composite-rule (sequence + graph) id→title reader that backs
+// the Detection workspace's "no editable rule matches" note. Sequence
+// rule ids are UUIDs and graph rule ids are `maccrab_` slugs — neither
+// is a single-event Sigma rule, so an alert deep-linking one would land
+// on a blank rules table without this map. Pre-fix only `maccrab.`-dot
+// built-ins were explained; sequence/graph alerts showed nothing.
+@Suite("V2LiveDataProvider composite rule labels")
+struct V2CompositeRuleLabelsTests {
+
+    /// Build a temp compiled_rules tree with the given sequence/graph
+    /// file contents and return its sequences/ + graph/ dir paths.
+    private func makeTempTree(
+        sequences: [String: String] = [:],
+        graph: [String: String] = [:]
+    ) throws -> (seq: String, graph: String) {
+        let fm = FileManager.default
+        let root = NSTemporaryDirectory() + "maccrab-composite-test-"
+            + UUID().uuidString + "/compiled_rules"
+        let seqDir = root + "/sequences"
+        let graphDir = root + "/graph"
+        try fm.createDirectory(atPath: seqDir, withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: graphDir, withIntermediateDirectories: true)
+        for (name, body) in sequences {
+            try body.write(toFile: seqDir + "/" + name, atomically: true, encoding: .utf8)
+        }
+        for (name, body) in graph {
+            try body.write(toFile: graphDir + "/" + name, atomically: true, encoding: .utf8)
+        }
+        return (seqDir, graphDir)
+    }
+
+    @Test("Reads sequence + graph ids, lowercases keys, preserves titles")
+    func readsBothFamilies() throws {
+        let dirs = try makeTempTree(
+            sequences: ["s1.json": #"{"id":"e1f2a3b4-0007-4000-b000-000000000007","title":"AI Tool Reads Credentials Then Network","level":"high"}"#],
+            graph: ["g1.json": #"{"id":"maccrab_worm_self_propagation","title":"Worm self-propagation","severity":"critical"}"#]
+        )
+        let map = V2LiveDataProvider.loadCompositeRuleLabels(
+            sequencesDir: dirs.seq, graphDir: dirs.graph)
+        #expect(map.count == 2)
+        // Keys lowercased so they match the workspace's lowercased query.
+        #expect(map["e1f2a3b4-0007-4000-b000-000000000007"] == "AI Tool Reads Credentials Then Network")
+        #expect(map["maccrab_worm_self_propagation"] == "Worm self-propagation")
+    }
+
+    @Test("An uppercase id is matchable via its lowercased key")
+    func lowercasesUppercaseIds() throws {
+        let dirs = try makeTempTree(
+            graph: ["g.json": #"{"id":"MacCrab_Mixed_Case","title":"Mixed"}"#]
+        )
+        let map = V2LiveDataProvider.loadCompositeRuleLabels(
+            sequencesDir: dirs.seq, graphDir: dirs.graph)
+        #expect(map["maccrab_mixed_case"] == "Mixed")
+        #expect(map["MacCrab_Mixed_Case"] == nil)
+    }
+
+    @Test("Malformed or non-json files are skipped, not fatal")
+    func skipsMalformed() throws {
+        let dirs = try makeTempTree(
+            sequences: [
+                "ok.json": #"{"id":"seq-ok","title":"Good"}"#,
+                "bad.json": "{ not valid json",
+                "noid.json": #"{"title":"missing id"}"#,
+                "notes.txt": #"{"id":"ignored","title":"wrong ext"}"#
+            ]
+        )
+        let map = V2LiveDataProvider.loadCompositeRuleLabels(
+            sequencesDir: dirs.seq, graphDir: dirs.graph)
+        #expect(map == ["seq-ok": "Good"])
+    }
+
+    @Test("Missing directories return empty without throwing")
+    func missingDirsAreEmpty() {
+        let map = V2LiveDataProvider.loadCompositeRuleLabels(
+            sequencesDir: "/nonexistent/seq", graphDir: "/nonexistent/graph")
+        #expect(map.isEmpty)
+    }
+}

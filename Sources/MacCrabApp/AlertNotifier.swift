@@ -48,6 +48,13 @@ final class AlertNotifier: NSObject {
     /// AppDelegate.showAlertPopover.
     var onFallback: ((Alert) -> Void)?
 
+    /// Invoked when the user TAPS a posted banner. The AppDelegate wires
+    /// this to bring the dashboard window forward (LSUIElement menubar app
+    /// — it may be closed) and then navigate to the alert via the
+    /// `maccrab.openAlert` bridge. Mirrors the in-app popover's
+    /// "Show dashboard" action. See `userNotificationCenter(_:didReceive:)`.
+    var onOpenAlert: ((String) -> Void)?
+
     private static let cursorDefaultsKey = "maccrab.alertNotifier.cursor"
 
     init(dataDir: String? = AlertNotifier.resolveDataDir()) {
@@ -229,8 +236,17 @@ extension AlertNotifier: UNUserNotificationCenterDelegate {
         [.banner, .sound]
     }
 
-    /// Tapping a banner opens the dashboard to that alert via the
-    /// existing maccrab:// deep-link bridge.
+    /// Tapping a banner brings the dashboard forward and opens that
+    /// alert. Routes through `onOpenAlert` (wired by the AppDelegate to
+    /// `showDashboard()` + the `maccrab.openAlert` bridge) — the same
+    /// path the in-app alert popover uses.
+    ///
+    /// Pre-fix this built a `maccrab://alert/<id>` URL and posted it to
+    /// `maccrab.openURL`. That URL never parsed: host "alert" ≠ the
+    /// `V2Workspace` case "alerts", and the id sat in the path instead of
+    /// `?entity=`, so `V2DeepLink.parse` returned nil and the tap showed a
+    /// "Could not open link" toast instead of opening the alert — broken
+    /// since app-owned notifications shipped (v1.17.1, 0e575c2).
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
@@ -238,11 +254,7 @@ extension AlertNotifier: UNUserNotificationCenterDelegate {
         let alertId = response.notification.request.content.userInfo["alertId"] as? String
         await MainActor.run {
             NSApp.activate(ignoringOtherApps: true)
-            if let alertId, let url = URL(string: "maccrab://alert/\(alertId)") {
-                NotificationCenter.default.post(
-                    name: Notification.Name("maccrab.openURL"),
-                    object: nil, userInfo: ["url": url])
-            }
+            if let alertId { onOpenAlert?(alertId) }
         }
     }
 }

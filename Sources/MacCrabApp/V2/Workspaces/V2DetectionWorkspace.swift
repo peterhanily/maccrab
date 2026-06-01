@@ -42,6 +42,12 @@ public struct V2DetectionWorkspace: View {
     /// /Library/Application Support/MacCrab/user_rules/<id>.json.
     /// Refreshed at .task and after each Disable / Enable action.
     @State private var userDisabledRuleIDs: Set<String> = []
+    /// Sequence + graph (composite) rule id → title, lowercased keys.
+    /// An alert can deep-link a composite-rule id into the search box;
+    /// those rules aren't single-event Sigma and never appear in
+    /// `rules`, so without this the table just goes blank. Loaded in
+    /// the rules-load task. See `builtInDetectionNote`.
+    @State private var compositeRuleLabels: [String: String] = [:]
 
     public init(state: V2DashboardState) { self.state = state }
 
@@ -135,6 +141,12 @@ public struct V2DetectionWorkspace: View {
 
             let m = await state.provider.mcpServers()
             await MainActor.run { self.mcpServers = m }
+
+            // Composite (sequence + graph) rule labels — for the
+            // empty-table explanation when an alert deep-links a
+            // non-single-event detection id.
+            let comp = await state.provider.compositeRuleLabels()
+            await MainActor.run { self.compositeRuleLabels = comp }
 
             // Precompute the lowercase haystack so the filter is a
             // single string `contains` per row instead of 4 concats
@@ -482,26 +494,31 @@ public struct V2DetectionWorkspace: View {
     private var builtInDetectionSearchUnmatched: Bool {
         let q = debouncedRuleQuery.lowercased()
         guard !q.isEmpty else { return false }
-        let items = q.isEmpty ? rules : filteredRules
-        guard items.isEmpty else { return false }
-        // EVERY built-in (non-Sigma) detection engine emits an alert id under
-        // the `maccrab.` namespace (ai-guard, campaign, behavior, correlator,
-        // forensic, dns, threat-intel, clipboard, deep, network, prevention,
-        // supply-chain, intent, llm, …). Sigma YAML rule ids are UUIDs. So a
-        // search that hit nothing AND looks like a `maccrab.` id is, by
-        // construction, a built-in detection — no need to enumerate every
-        // prefix (the old hardcoded list missed maccrab.forensic.* etc.).
-        return q.hasPrefix("maccrab.")
+        guard filteredRules.isEmpty else { return false }
+        // Two families of detection deep-link a ruleId here but have
+        // nothing editable in this single-event Sigma list:
+        //   1. Programmatic built-in engines — ai-guard, campaign,
+        //      behavior, correlator, forensic, dns, threat-intel, … —
+        //      every one emits an id under the `maccrab.` namespace.
+        //   2. Composite rules — sequence + graph — whose ids (UUIDs and
+        //      `maccrab_` slugs) live in compiled_rules/{sequences,graph}/
+        //      and are evaluated by separate engines, so they never load
+        //      into this list. Pre-fix only family (1) was covered, so an
+        //      alert from a sequence/graph rule landed on a blank table.
+        return q.hasPrefix("maccrab.") || compositeRuleLabels[q] != nil
     }
 
     private var builtInDetectionNote: some View {
-        HStack(alignment: .top, spacing: 8) {
+        let compositeTitle = compositeRuleLabels[debouncedRuleQuery.lowercased()]
+        return HStack(alignment: .top, spacing: 8) {
             Image(systemName: "info.circle")
                 .foregroundStyle(V2Theme.mutedText)
             VStack(alignment: .leading, spacing: 3) {
                 Text("No editable rule matches “\(debouncedRuleQuery)”.")
                     .font(.system(size: 12, weight: .medium))
-                Text("Alerts with a `maccrab.*` ID (e.g. AI Guard, campaign correlation, behavioral scoring, threat intel, forensic scanners, cross-process correlation, DNS analysis) come from MacCrab's built-in detection engines — not Sigma YAML rules, so there's nothing to edit or tune here.")
+                Text(compositeTitle.map {
+                    "“\($0)” is a multi-step correlation detection — a sequence or trace-graph rule evaluated across several events, not a single-event Sigma rule. There's nothing to edit or tune for it on this screen."
+                } ?? "Alerts with a `maccrab.*` ID (e.g. AI Guard, campaign correlation, behavioral scoring, threat intel, forensic scanners, cross-process correlation, DNS analysis) come from MacCrab's built-in detection engines — not Sigma YAML rules, so there's nothing to edit or tune here.")
                     .font(.system(size: 11))
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)

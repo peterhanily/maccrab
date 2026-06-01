@@ -120,6 +120,25 @@ struct V2DeepLinkTests {
         #expect(dest.tab == .alertsOpen)
     }
 
+    @Test("regression: notification-tap's pre-fix maccrab://alert/<id> form does NOT parse")
+    func legacyAlertSingularHostDoesNotParse() throws {
+        // AlertNotifier (v1.17.1, 0e575c2) built `maccrab://alert/<id>`:
+        // host "alert" ≠ the V2Workspace case "alerts", and the id sat in
+        // the path rather than ?entity=. parse() returned nil → goto(url:)
+        // showed a "Could not open link" toast instead of opening the
+        // alert. Banner taps now route through onOpenAlert → the
+        // maccrab.openAlert bridge and never build this URL; pin that the
+        // broken form stays unparseable so nobody silently reintroduces it.
+        let broken = try #require(URL(string: "maccrab://alert/alt-001"))
+        #expect(V2DeepLink.parse(broken) == nil)
+        // The canonical, parseable equivalent (host "alerts" + tab + entity).
+        let canonical = try #require(URL(string: "maccrab://alerts/alertsopen?entity=alt-001"))
+        let dest = try #require(V2DeepLink.parse(canonical))
+        #expect(dest.workspace == .alerts)
+        #expect(dest.tab == .alertsOpen)
+        #expect(dest.entityId == "alt-001")
+    }
+
     // MARK: - v1.17 legacy Forensics redirects (audit-D)
 
     @Test("legacy investigation/forensicsCases redirects to forensics/forensicsScans")

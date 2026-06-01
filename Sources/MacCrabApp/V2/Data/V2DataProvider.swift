@@ -39,6 +39,17 @@ public protocol V2DataProvider: AnyObject {
     func campaigns(limit: Int) async -> [V2MockCampaign]
     func traces(limit: Int) async -> [V2MockTrace]
     func rules() async -> [V2MockRule]
+
+    /// Composite (sequence + graph) rule id → display title. These
+    /// live in `compiled_rules/{sequences,graph}/`, are evaluated by
+    /// separate engines, and so NEVER appear in `rules()` (single-event
+    /// Sigma only). An alert deep-links its ruleId into the Detection
+    /// rule-search box; for a composite-rule id that lands on an empty
+    /// table, so the workspace uses this map to explain why instead of
+    /// showing a blank list. Keys are LOWERCASED to match the
+    /// workspace's lowercased query. Defaults to empty (mock provider).
+    func compositeRuleLabels() async -> [String: String]
+
     func feeds() async -> [V2MockFeed]
     func mcpServers() async -> [V2MockMCP]
     func collectors() async -> [V2MockCollector]
@@ -198,4 +209,7 @@ extension V2DataProvider {
     /// Default integrations to empty — keeps `V2MockDataProvider`
     /// from needing a no-op override.
     public func integrations() async -> [V2MockIntegration] { [] }
+    /// Default to empty — only the live provider reads the on-disk
+    /// sequence/graph rule files.
+    public func compositeRuleLabels() async -> [String: String] { [:] }
 }
