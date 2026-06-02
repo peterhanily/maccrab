@@ -1053,20 +1053,37 @@ struct V2AlertsWorkspace: View {
                         state.switchWorkspace(.events)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    V2ActionButton("Open rule", icon: "shield.lefthalf.filled", style: .secondary,
-                                   tooltip: "Jump to this rule in Detection › Rules") {
-                        // Pre-fill the rule search query so the rules
-                        // table filters down to this rule, plus carry
-                        // the rule id as the entity selection so the
-                        // inspector opens automatically.
-                        state.ruleSearchQuery = alert.ruleId
-                        state.goto(V2NavigationDestination(
-                            workspace: .detection,
-                            tab: .detectionRules,
-                            entityId: alert.ruleId
-                        ))
+                    if alert.ruleId.hasPrefix("maccrab.campaign.") {
+                        // A campaign alert is a correlation across many
+                        // alerts, not an editable Sigma rule — "Open rule"
+                        // would dead-end on the built-in explanation note.
+                        // Route to the Campaigns tab, where the correlation
+                        // actually lives. (The alert carries no campaign id,
+                        // so we open the list rather than a specific one.)
+                        V2ActionButton("View campaigns", icon: "square.stack.3d.up", style: .secondary,
+                                       tooltip: "This alert is a campaign correlation — open the Campaigns tab") {
+                            state.goto(V2NavigationDestination(
+                                workspace: .alerts,
+                                tab: .alertsCampaigns
+                            ))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        V2ActionButton("Open rule", icon: "shield.lefthalf.filled", style: .secondary,
+                                       tooltip: "Jump to this rule in Detection › Rules") {
+                            // Pre-fill the rule search query so the rules
+                            // table filters down to this rule, plus carry
+                            // the rule id as the entity selection so the
+                            // inspector opens automatically.
+                            state.ruleSearchQuery = alert.ruleId
+                            state.goto(V2NavigationDestination(
+                                workspace: .detection,
+                                tab: .detectionRules,
+                                entityId: alert.ruleId
+                            ))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     V2ActionButton("Suppress", icon: "bell.slash", style: .secondary,
                                    disabled: alert.suppressed,
                                    tooltip: alert.suppressed
