@@ -107,6 +107,8 @@ else
         "pollIntervalSeconds"   # dashboard auto-refresh timer, not daemon
         "launchAtLogin"         # OS-managed login item, not daemon config
         "uiMode.storageKey"     # UIMode.storageKey constant (not a string literal — kept for documentation)
+        "forensics.catalogBaseURL" # rave catalog URL, consumed app-side by RaveCatalogClient (forensics is app/CLI/MCP-only, not linked by the sysext)
+        "forensics.retentionDays"  # forensic-scan retention, applied app-side; forensics platform is not linked by the sysext
     )
 
     # Bindings that MUST round-trip to the daemon. Each maps to a sync
