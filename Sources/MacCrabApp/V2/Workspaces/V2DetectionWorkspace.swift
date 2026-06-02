@@ -12,7 +12,9 @@ public struct V2DetectionWorkspace: View {
     @State private var selectedRule: V2MockRule?
     /// Cached lowercased haystack per rule, computed once when
     /// `rules` is loaded. Each rule's haystack is the concat of
-    /// (id, title, category, mitre joined). Pre-fix the rulesTable
+    /// (id, title, category, mitre joined, description) — so an operator
+    /// can find a rule by its id, its name/title (= the alert name), its
+    /// MITRE tag, OR free text from its description. Pre-fix the rulesTable
     /// rebuilt this concatenation + lowercased per row × 427 rules
     /// per keystroke — that's 1700+ string allocations per char
     /// typed in the search box. Now: precompute once + cheap
@@ -50,6 +52,16 @@ public struct V2DetectionWorkspace: View {
     @State private var compositeRuleLabels: [String: String] = [:]
 
     public init(state: V2DashboardState) { self.state = state }
+
+    /// Lowercased search haystack for one rule — id + title (= the alert
+    /// name) + category + MITRE + description. The single source of truth
+    /// for the rule search box, used by BOTH the precomputed cache and the
+    /// not-yet-built fallback so the two can't drift. Extracted as a pure
+    /// function so the searchable-field set is unit-testable.
+    nonisolated static func ruleSearchHaystack(for rule: V2MockRule) -> String {
+        (rule.id + " " + rule.title + " " + rule.category + " "
+            + rule.mitre.joined(separator: " ") + " " + rule.description).lowercased()
+    }
 
     private var ruleQuery: Binding<String> {
         Binding(get: { state.ruleSearchQuery },
@@ -94,8 +106,7 @@ public struct V2DetectionWorkspace: View {
                 // i.e. the filter looks broken. Mirrors the haystack formula.
                 return snapshot.filter { rule in
                     let h = haystack[rule.id]
-                        ?? (rule.id + " " + rule.title + " " + rule.category + " "
-                            + rule.mitre.joined(separator: " ")).lowercased()
+                        ?? V2DetectionWorkspace.ruleSearchHaystack(for: rule)
                     return h.contains(q)
                 }
             }.value
@@ -149,13 +160,12 @@ public struct V2DetectionWorkspace: View {
             await MainActor.run { self.compositeRuleLabels = comp }
 
             // Precompute the lowercase haystack so the filter is a
-            // single string `contains` per row instead of 4 concats
-            // + lowercase per row per keystroke. Detached so the
-            // string work doesn't block main.
+            // single string `contains` per row instead of rebuilding the
+            // field concat + lowercase per row per keystroke. Detached so
+            // the string work doesn't block main.
             let haystack = await Task.detached(priority: .userInitiated) {
                 Dictionary(uniqueKeysWithValues: r.map { rule -> (String, String) in
-                    let h = (rule.id + " " + rule.title + " " + rule.category + " "
-                             + rule.mitre.joined(separator: " ")).lowercased()
+                    let h = V2DetectionWorkspace.ruleSearchHaystack(for: rule)
                     return (rule.id, h)
                 })
             }.value
