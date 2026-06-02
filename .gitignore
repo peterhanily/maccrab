@@ -185,6 +185,9 @@ coverage/
 # -----------------------------------------------------------------------------
 # Local planning docs (not part of public repo)
 plans/
+# Execution-companion / forward roadmap — relocated to the private wiki
+# (opsec review 2026-06-02); kept local-only like plans/.
+GOAL.md
 
 # Scratch-work patterns
 TODO.local.md

@@ -239,9 +239,9 @@ until users reinstall.
 - `~/.maccrab-release-env` is `chmod 600`, gitignored, and excluded
   from any cloud-sync paths.
 - After each release, verify the appcast publish landed (curl the
-  live URL). Field-observed once: a soft-fail in the publish step
-  left v1.9 users stranded on v1.8 for a week before anyone noticed.
-  v1.10's release.sh hard-fails on missing token to prevent this.
+  live URL). A soft-fail in the publish step can silently leave
+  existing users un-updated, so release.sh hard-fails on a missing
+  token to prevent that.
 
 ## Provenance
 
