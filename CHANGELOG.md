@@ -3,6 +3,30 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.3] — 2026-06-02
+
+A maintenance release: two navigation/notification fixes, a rule-search
+improvement, and update-process resilience hardening.
+
+### Fixed
+
+- **Tapping a notification opens the alert.** Clicking a MacCrab
+  notification banner now reliably navigates to that alert in the
+  dashboard (it previously could report that the link couldn't be opened).
+- **"Open rule" on a multi-step detection** (sequence and trace-graph
+  rules) now shows an explanation instead of an empty rule list, matching
+  the behavior for MacCrab's other built-in detections.
+
+### Improved
+
+- **Rule search matches descriptions** — the Detection rule search now
+  searches rule descriptions in addition to id, name, category, and MITRE
+  technique.
+- **Smoother updates** — the app no longer briefly double-posts
+  notifications during the detection-engine handover on update, and the
+  dashboard self-recovers if it connected before the updated engine
+  finished starting (no manual restart needed).
+
 ## [1.17.2] — 2026-06-01
 
 A maintenance release: a security-dependency bump, four operator-reported
