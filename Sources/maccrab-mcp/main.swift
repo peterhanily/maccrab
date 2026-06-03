@@ -627,6 +627,10 @@ actor SuppressBudget {
 }
 let suppressBudget = SuppressBudget()
 
+// v1.18: resolve the trace store path ONCE (writer-aware) instead of per
+// handler, so the chosen dir can't flip between calls.
+let traceGraphPath = resolveTraceGraphPath()
+
 func handleToolCall(name: String, args: [String: Any]) async -> Any {
     switch name {
     case "get_alerts":
@@ -1527,10 +1531,19 @@ private func resolveTraceGraphPath() -> String {
         .first?.appendingPathComponent("MacCrab").path
         ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
     let systemDir = "/Library/Application Support/MacCrab"
+    // v1.18: deterministic, writer-aware resolution. A `-wal` sidecar means
+    // the daemon is actively writing that store; prefer it (system/root dir
+    // first, then user/dev dir) instead of racing on newest mtime, which
+    // could flip the chosen store between calls. Newest-mtime is only the
+    // fallback when no live writer is detectable.
+    let fm = FileManager.default
+    for dir in [systemDir, userDir] where fm.fileExists(atPath: dir + "/tracegraph.db-wal") {
+        return dir + "/tracegraph.db"
+    }
     let candidates = [dataDir, userDir, systemDir]
     let chosen = candidates
         .map { dir -> (String, Date) in
-            let mtime = (try? FileManager.default
+            let mtime = (try? fm
                 .attributesOfItem(atPath: dir + "/tracegraph.db"))?[.modificationDate] as? Date
             return (dir, mtime ?? .distantPast)
         }
@@ -1542,7 +1555,7 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
     let limit = min(max(args["limit"] as? Int ?? 25, 1), 200)
     let statusFilter = args["status"] as? String
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
         // v1.11.1 (audit perf HIGH): push status filter into SQL so a
         // caller asking for `limit:25 status:open` actually gets up
         // to 25 matching rows (pre-fix the filter ran AFTER the limit,
@@ -1578,7 +1591,7 @@ func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": "Missing required argument: trace_id"]]]
     }
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
         guard let pair = try await store.loadTrace(id: traceId) else {
             return ["content": [["type": "text", "text": "Trace \(traceId) not found."]]]
         }
@@ -1619,7 +1632,7 @@ func handleHuntTrace(_ args: [String: Any]) async -> Any {
     }
     let limit = min(max(args["limit"] as? Int ?? 25, 1), 100)
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
         // v1.11.1 (audit perf LOW): SQL-side LIKE instead of pulling
         // 500 candidates + Swift substring scan. Lets SQLite skip
         // deserializing non-matches.
@@ -1716,7 +1729,7 @@ func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": "Missing required argument: event_id"]]]
     }
     do {
-        let store = try await SQLiteCausalGraphStore(databasePath: resolveTraceGraphPath())
+        let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
         // v1.11.1 (audit perf HIGH): single SQL UNION across the
         // membership index AND the anchor_event_id column instead of
         // listing 200 traces + linearly scanning each one's members.
