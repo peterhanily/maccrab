@@ -696,7 +696,14 @@ enum DaemonSetup {
                 store: causalStore,
                 materializer: materializer
             )
-            causalGraphBridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+            // v1.17.4 (perf): gate graph ingest on the same default noise
+            // filter the EventStore insert path uses (own instance — keeps
+            // the EventStore drop counter clean). The graph was previously
+            // fed EVERY event, churning on self-monitoring/dev-tool noise.
+            causalGraphBridge = EventToRollingCausalGraphBridge(
+                rollingGraph: rollingGraph,
+                insertFilter: EventInsertFilter.defaultFilter(supportDir: supportDir)
+            )
             causalStoreOuter = causalStore
             logger.info("TraceGraph materializer wired — events will now anchor traces in tracegraph.db")
         } else {
@@ -1197,7 +1204,30 @@ enum DaemonSetup {
             let backend: any LLMBackend
             switch llmConfig.provider {
             case .ollama:
-                backend = OllamaBackend(baseURL: llmConfig.ollamaURL, model: llmConfig.ollamaModel, apiKey: llmConfig.ollamaAPIKey)
+                let ollama = OllamaBackend(baseURL: llmConfig.ollamaURL, model: llmConfig.ollamaModel, apiKey: llmConfig.ollamaAPIKey)
+                // v1.17.4: bounded (3s) model-presence probe. Pre-fix the
+                // sysext defaulted to ollama/llama3.1:8b; if that model isn't
+                // pulled (the live host has only qwen2.5:7b), every call 404s
+                // and the circuit breaker thrashes forever with no signal.
+                // Disable cleanly when the model is known-absent; stay
+                // optimistic if /api/tags is unreachable (a transiently-down
+                // Ollama at boot must not disable LLM until restart). 3s
+                // mirrors makeFromConfig's bounded probe — no 60s blocking.
+                let installed: Bool? = await withTaskGroup(of: Bool?.self) { group -> Bool? in
+                    group.addTask { await ollama.modelIsInstalled() }
+                    group.addTask {
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        return nil  // timeout → undeterminable → optimistic
+                    }
+                    let result = await group.next() ?? nil
+                    group.cancelAll()
+                    return result
+                }
+                if installed == false {
+                    print("LLM backend: configured Ollama model '\(llmConfig.ollamaModel)' not pulled — LLM disabled (pull it or pick an installed model in Settings → AI Backend)")
+                    return nil
+                }
+                backend = ollama
             case .claude:
                 guard let key = llmConfig.claudeAPIKey, !key.isEmpty else {
                     print("LLM backend: Claude requires API key")
@@ -1534,7 +1564,7 @@ enum DaemonSetup {
 
         if isRoot {
             do {
-                collector = try ESCollector()
+                collector = try ESCollector(subscribeFileOpen: config.subscribeFileOpenEvents)
                 logger.info("ES collector started successfully (native client)")
                 esMode = "native client"
             } catch {

@@ -319,6 +319,29 @@ public actor CaseManager {
         try FileManager.default.removeItem(at: layout.caseDirectory)
     }
 
+    /// v1.18: delete every case created before `cutoff`. Routes through
+    /// `deleteCase` so encrypted scans release their keychain DEK (a raw
+    /// removeItem would orphan it) and so each id is UUID-validated.
+    /// Best-effort: a case that fails to delete is skipped, not fatal.
+    /// Returns the ids removed and the bytes reclaimed. This is the
+    /// enforcement the "Scan retention" setting (`forensics.retentionDays`)
+    /// always promised — previously only the manual "Run cleanup now"
+    /// button invoked it; nothing ran it automatically.
+    @discardableResult
+    public func pruneCases(olderThan cutoff: Date) async -> (deleted: [String], freedBytes: Int64) {
+        var deleted: [String] = []
+        var freed: Int64 = 0
+        let manifests = (try? await listCases()) ?? []
+        for manifest in manifests where manifest.createdAt < cutoff {
+            let bytes = CaseDirectoryLayout(casesRoot: casesRoot, caseID: manifest.id).diskBytes()
+            if (try? await deleteCase(id: manifest.id)) != nil {
+                deleted.append(manifest.id)
+                freed += bytes
+            }
+        }
+        return (deleted, freed)
+    }
+
     // MARK: - DEK + manifest helpers
 
     private static func makeDEK() throws -> Data {

@@ -1,6 +1,9 @@
 title: Remote Thread Created in Another Process
 id: d1a2b3c4-0429-4000-a000-000000000429
-status: experimental
+# v1.17.4: DEPRECATED — logsource.category 'es_event' is never dispatched by
+# the engine, and NOTIFY_REMOTE_THREAD_CREATE is not subscribed by
+# ESCollector. Doubly dead; parked disabled until that ES plumbing exists.
+status: deprecated
 description: >
     Detects NOTIFY_REMOTE_THREAD_CREATE events where a process creates a
     thread inside another process's address space. This is a strong indicator

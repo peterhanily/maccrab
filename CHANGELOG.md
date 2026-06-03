@@ -3,6 +3,62 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.4] — 2026-06-03
+
+A reliability and detection-quality release: bounds runaway disk/CPU
+growth, cuts alert noise on developer/AI-tool activity, revives several
+detection paths that had silently stopped firing, and makes the
+engine-side AI backend actually reachable.
+
+### Fixed
+
+- **Unbounded disk growth.** The causal-graph store (`tracegraph.db`)
+  could grow without limit (field-observed at 17 GB) because its
+  entity/edge data was never pruned. It now has time-based retention, a
+  size cap, and an orphan sweep, with the caps configurable.
+- **Sustained CPU.** The detection engine no longer feeds every event
+  into the causal graph — it applies the same noise filter as the event
+  store and batches each event's graph writes into a single transaction.
+- **False "coordinated attack" campaigns on legitimate tooling.** Deep
+  shell nesting and keychain/`sudo` rules no longer flood alerts on
+  routine developer / AI-agent activity (full process-lineage filtering,
+  severity recalibration, and an AI-attribution campaign guard).
+- **Credential-file READ detection.** Rules that detect reads of SSH
+  keys, cloud credentials, and crypto-wallet data can now fire — the
+  engine observes file *opens* for those specific paths (previously it
+  only saw writes/closes, so the read rules were dead).
+- **14 content-scanning rules revived.** A collector/enricher action
+  mismatch had silently disabled every `FileContent` rule (AI skill /
+  MCP / workflow poisoning detections); fixed and covered by tests.
+- **6 permanently-dead rules** (wrong event category) are now correctly
+  marked deprecated, and a new compiler check fails the build if a rule
+  ships under a category the engine never dispatches.
+- **MCP server transport** is now spec-conformant newline-delimited JSON
+  (was LSP-style framing), fixing interop with MCP clients, plus a fixed
+  input-parsing bug that could drop or corrupt back-to-back messages.
+
+### Added / Improved
+
+- **Configurable storage caps.** `tracegraph`, OTLP `traces`, generated
+  `reports/`, and auto-generated rules now have retention/size knobs in
+  `daemon_config.json`; the events write-ahead log is now size-bounded.
+- **Engine-side AI backend now works.** Settings → AI Backend now reaches
+  the detection engine (via the privileged control channel); the engine
+  verifies the configured local model is actually installed before
+  enabling LLM features (no more silent 404 loops), and rejects
+  non-loopback endpoints by default.
+- **Forensic-scan retention** is now enforced automatically.
+
+### Changed (upgrade notes)
+
+- **Forensic scans now auto-delete after 1 year by default** (was:
+  never). Set Settings → Scan retention → *Never* to keep everything.
+- **The default `alerts.jsonl` tail is no longer written.** Alerts remain
+  in the queryable alert store; configure a `file` output in
+  `daemon_config.json` if you want a local NDJSON copy.
+- **Credential-path file-open monitoring is on by default.** Set
+  `subscribe_file_open_events: false` in `daemon_config.json` to disable.
+
 ## [1.17.3] — 2026-06-02
 
 A maintenance release: two navigation/notification fixes, a rule-search

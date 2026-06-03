@@ -1,6 +1,9 @@
 title: User Bypassed Gatekeeper for Blocked Application
 id: d1a2b3c4-0433-4000-a000-000000000433
-status: experimental
+# v1.17.4: DEPRECATED — logsource.category 'es_event' is never dispatched by
+# the engine, and NOTIFY_GATEKEEPER_USER_OVERRIDE is not subscribed by
+# ESCollector. Doubly dead; parked disabled until that ES plumbing exists.
+status: deprecated
 description: >
     Detects NOTIFY_GATEKEEPER_USER_OVERRIDE events indicating a user clicked
     "Open Anyway" on an application that Gatekeeper blocked. While this may

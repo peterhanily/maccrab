@@ -714,6 +714,22 @@ public actor CampaignDetector {
             let distinctRuleIds = Set(pidAlerts.map(\.ruleId))
             guard distinctRuleIds.count >= 2 else { return nil }
 
+            // v1.17.4: an AI coding tool legitimately querying the keychain
+            // (`security find-generic-password`) is a breadcrumb, not a
+            // campaign. When every rule firing for this PID is one of the
+            // low-severity single-event keychain/sudo approximations AND the
+            // activity is attributed to an AI tool, do not mint a
+            // coordinated_attack — the kill-chain path has a severity floor,
+            // this path had none. The individual low alerts still stand.
+            let keychainSingleEventRuleIds: Set<String> = [
+                "d1a2b3c4-0448-4000-a000-000000000448",  // auth_brute_force
+                "d1a2b3c4-0501-4000-a000-000000000501",  // wifi_password_extraction
+            ]
+            if latestAlert.aiTool != nil,
+               distinctRuleIds.isSubset(of: keychainSingleEventRuleIds) {
+                return nil
+            }
+
             if pidTactics.count >= 3 {
                 let description = "Process PID \(pid) triggered alerts spanning \(pidTactics.count) tactics: \(pidTactics.sorted().joined(separator: ", "))"
                 return Campaign(

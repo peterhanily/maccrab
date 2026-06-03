@@ -4,6 +4,7 @@
 import SwiftUI
 import AppKit
 import Sparkle
+import MacCrabForensics
 
 @main
 struct MacCrabApp: App {
@@ -353,6 +354,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // installed rule version differs from the bundled version.
         Task.detached(priority: .utility) {
             RuleBundleInstaller.syncIfNeeded()
+        }
+        // v1.18: forensic-scan retention. The "Scan retention" setting
+        // (forensics.retentionDays) promised cleanup "the next time the
+        // dashboard opens", but only the manual "Run cleanup now" button was
+        // ever wired. Run the sweep once at launch. Default 365d is
+        // registered here so an unset key reads as 1 year (matching the
+        // SettingsView @AppStorage default); "Never" (0) opts out.
+        Task.detached(priority: .utility) {
+            UserDefaults.standard.register(defaults: ["forensics.retentionDays": 365])
+            let days = UserDefaults.standard.integer(forKey: "forensics.retentionDays")
+            guard days > 0 else { return }
+            let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+            let mgr = CaseManager(casesRoot: CaseDirectoryLayout.defaultCasesRoot, dekVault: KeychainDEKVault())
+            let result = await mgr.pruneCases(olderThan: cutoff)
+            if !result.deleted.isEmpty {
+                NSLog("[MacCrab] Forensic scan retention: deleted \(result.deleted.count) scan(s) older than \(days)d")
+            }
         }
     }
 

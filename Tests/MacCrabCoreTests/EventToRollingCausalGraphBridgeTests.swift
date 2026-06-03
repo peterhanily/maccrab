@@ -71,6 +71,37 @@ struct EventToRollingCausalGraphBridgeTests {
         await store.close()
     }
 
+    @Test("Insert filter gates graph ingest — dropped events never reach the store (v1.17.4 perf)")
+    func insertFilterGatesIngest() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let materializer = TraceMaterializer(store: store)
+        let rollingGraph = RollingCausalGraph(store: store, materializer: materializer)
+        // Filter drops any process named "curl" (stands in for self-monitoring/noise).
+        let bridge = EventToRollingCausalGraphBridge(
+            rollingGraph: rollingGraph,
+            insertFilter: EventInsertFilter(processNames: ["curl"])
+        )
+
+        let dropped = Event(
+            timestamp: now, eventCategory: .process, eventType: .start, eventAction: "exec",
+            process: processInfo(pid: 100, executable: "/usr/bin/curl"))
+        let traces = await bridge.process(dropped)
+        #expect(traces.isEmpty)
+        // Nothing ingested — the process entity must NOT exist.
+        let droppedKey = SHA256_hex("100|\(Int(now.timeIntervalSince1970))|/usr/bin/curl")
+        #expect(try await store.entity(id: "process:\(droppedKey)") == nil)
+
+        // Control: an event the filter does NOT drop still ingests.
+        let kept = Event(
+            timestamp: now, eventCategory: .process, eventType: .start, eventAction: "exec",
+            process: processInfo(pid: 200, executable: "/usr/bin/python3"))
+        _ = await bridge.process(kept)
+        let keptKey = SHA256_hex("200|\(Int(now.timeIntervalSince1970))|/usr/bin/python3")
+        #expect(try await store.entity(id: "process:\(keptKey)") != nil)
+        await store.close()
+    }
+
     @Test("Bridge translates AI agent enrichments into an AIAgentNode")
     func agentEnrichmentTranslated() async throws {
         let (store, dbPath) = try await makeStore()

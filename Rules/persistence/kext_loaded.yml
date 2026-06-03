@@ -1,6 +1,18 @@
+# v1.17.4: DEPRECATED. logsource.category `driver_load` is never dispatched
+# by the engine (mapEventCategoryToLogsource emits only the 8 real
+# categories), so this rule has always been silently dead. KEXTLOAD IS
+# collected (ESCollector → eventCategory .process → process_creation,
+# eventAction "kextload"), so a revive is possible via
+# `event.action: kextload` — but a faithful "non-Apple kext" filter needs
+# the KEXT's own code signature, which this event doesn't carry (the
+# process signer is the Apple loader daemon). Until kext-signature
+# enrichment exists, this rule is parked disabled; kextload/kextutil
+# process invocations remain partially covered by kext_unload /
+# system_extension_load. The new compiler category lint would otherwise
+# fail the build on this category.
 title: Kernel Extension Loaded
 id: d1a2b3c4-0017-4000-a000-000000000017
-status: stable
+status: deprecated
 description: Detects loading of kernel extensions. On modern macOS, kext loading is highly restricted and may indicate tampering.
 author: MacCrab Community
 date: 2026/03/31

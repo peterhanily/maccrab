@@ -1,6 +1,9 @@
 title: Code Signature Invalidated at Runtime
 id: d1a2b3c4-0430-4000-a000-000000000430
-status: experimental
+# v1.17.4: DEPRECATED — logsource.category 'es_event' is never dispatched by
+# the engine, and NOTIFY_CS_INVALIDATED is not subscribed by ESCollector.
+# Doubly dead; parked disabled until that ES plumbing exists.
+status: deprecated
 description: >
     Detects NOTIFY_CS_INVALIDATED events indicating a binary's code signature
     has become invalid at runtime. This can indicate runtime tampering,

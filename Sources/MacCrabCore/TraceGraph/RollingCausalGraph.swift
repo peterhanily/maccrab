@@ -209,16 +209,24 @@ public actor RollingCausalGraph {
 
     @discardableResult
     public func ingest(_ event: NormalizedEventInput) async throws -> [Trace] {
+        // v1.17.4 (perf): collect this event's entities + edges and persist
+        // them in ONE batched transaction (store.upsertBatch) instead of ~7
+        // individual autocommit upserts. Entities are appended before their
+        // edges, and the batch inserts all entities before all edges, so the
+        // trace_edges→trace_entities FKs hold for in-batch endpoints.
+        var entities: [TraceEntity] = []
+        var edges: [TraceEdge] = []
+
         // 1. Process node — always present.
         let processNode = makeProcessNode(from: event.process, agent: event.agent)
         let processEntity = try processNode.toEntity(source: "rolling_graph")
-        try await store.upsertEntity(processEntity)
+        entities.append(processEntity)
 
         // 2. Parent process spawn edge (when present).
         if let parentObservation = event.parentProcess {
             let parentNode = makeProcessNode(from: parentObservation)
             let parentEntity = try parentNode.toEntity(source: "rolling_graph")
-            try await store.upsertEntity(parentEntity)
+            entities.append(parentEntity)
             let edge = EdgeBuilder.build(
                 from: parentNode,
                 to: processNode,
@@ -227,7 +235,7 @@ public actor RollingCausalGraph {
                 observedAt: event.timestamp,
                 eventIds: [event.eventId]
             )
-            try await store.upsertEdge(edge)
+            edges.append(edge)
         } else if let parentKey = event.process.parentProcessKey {
             // Parent process key only — useful when we know the
             // ancestry but don't have a full ProcessObservation.
@@ -239,7 +247,7 @@ public actor RollingCausalGraph {
                 observedAt: event.timestamp,
                 eventIds: [event.eventId]
             )
-            try await store.upsertEdge(edge)
+            edges.append(edge)
         }
 
         // 3. AI agent attribution.
@@ -250,7 +258,7 @@ public actor RollingCausalGraph {
                 source: "trace_correlator",
                 confidence: agent.confidence
             )
-            try await store.upsertEntity(agentEntity)
+            entities.append(agentEntity)
             agentEntityId = agentEntity.id
             let agentEdge = EdgeBuilder.build(
                 from: agentNode,
@@ -260,7 +268,7 @@ public actor RollingCausalGraph {
                 observedAt: event.timestamp,
                 eventIds: [event.eventId]
             )
-            try await store.upsertEdge(agentEdge)
+            edges.append(agentEdge)
         }
 
         // 4. File event.
@@ -278,7 +286,7 @@ public actor RollingCausalGraph {
             )
             fileNode = node
             let fileEntity = try node.toEntity(source: "rolling_graph")
-            try await store.upsertEntity(fileEntity)
+            entities.append(fileEntity)
 
             let relation: EdgeRelation = mapFileAction(event.action)
             let edge = EdgeBuilder.build(
@@ -289,7 +297,7 @@ public actor RollingCausalGraph {
                 observedAt: event.timestamp,
                 eventIds: [event.eventId]
             )
-            try await store.upsertEdge(edge)
+            edges.append(edge)
 
             // Persistence detection: certain file kinds + create/write
             // trigger a parallel PersistenceNode + created_persistence edge.
@@ -305,7 +313,7 @@ public actor RollingCausalGraph {
                 )
                 persistenceNode = persistence
                 let persistEntity = try persistence.toEntity(source: "rolling_graph")
-                try await store.upsertEntity(persistEntity)
+                entities.append(persistEntity)
                 let persistEdge = EdgeBuilder.build(
                     from: processNode,
                     to: persistence,
@@ -314,7 +322,7 @@ public actor RollingCausalGraph {
                     observedAt: event.timestamp,
                     eventIds: [event.eventId]
                 )
-                try await store.upsertEdge(persistEdge)
+                edges.append(persistEdge)
             }
         }
 
@@ -332,7 +340,7 @@ public actor RollingCausalGraph {
             )
             networkNode = node
             let netEntity = try node.toEntity(source: "rolling_graph")
-            try await store.upsertEntity(netEntity)
+            entities.append(netEntity)
             let edge = EdgeBuilder.build(
                 from: processNode,
                 to: node,
@@ -341,8 +349,13 @@ public actor RollingCausalGraph {
                 observedAt: event.timestamp,
                 eventIds: [event.eventId]
             )
-            try await store.upsertEdge(edge)
+            edges.append(edge)
         }
+
+        // v1.17.4 (perf): persist the whole event's graph in ONE batched
+        // transaction (entities before edges). Must run BEFORE anchor
+        // detection / materialization below, which reads the persisted graph.
+        try await store.upsertBatch(entities: entities, edges: edges)
 
         // 6. Anchor detection + materialization
         let anchorContext = AnchorDetector.EventContext(

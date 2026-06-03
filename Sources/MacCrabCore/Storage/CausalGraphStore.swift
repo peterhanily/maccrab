@@ -449,6 +449,11 @@ public protocol CausalGraphStore: Sendable {
     // Entities + edges
     func upsertEntity(_ entity: TraceEntity) async throws
     func upsertEdge(_ edge: TraceEdge) async throws
+    /// v1.17.4 (perf): persist all entities then all edges for one event in
+    /// a single transaction. SQLite-backed stores override with a real
+    /// BEGIN/COMMIT; the default below preserves correctness for any other
+    /// conformer by looping the single-row upserts (entities first for FK).
+    func upsertBatch(entities: [TraceEntity], edges: [TraceEdge]) async throws
     func entity(id: String) async throws -> TraceEntity?
     func edge(id: String) async throws -> TraceEdge?
 
@@ -470,4 +475,15 @@ public protocol CausalGraphStore: Sendable {
     func appendHashChain(_ entry: TraceHashChainEntry) async throws
     func latestHashChainEntry(for traceId: String) async throws -> TraceHashChainEntry?
     func hashChainLength(for traceId: String) async throws -> Int
+}
+
+public extension CausalGraphStore {
+    /// Default upsertBatch: best-effort per-row, entities before edges so
+    /// trace_edges→trace_entities FKs hold. SQLiteCausalGraphStore overrides
+    /// this with a single transaction; this fallback keeps other conformers
+    /// (e.g. test doubles) correct without each needing a transactional impl.
+    func upsertBatch(entities: [TraceEntity], edges: [TraceEdge]) async throws {
+        for entity in entities { try? await upsertEntity(entity) }
+        for edge in edges { try? await upsertEdge(edge) }
+    }
 }

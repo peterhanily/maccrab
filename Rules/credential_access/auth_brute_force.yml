@@ -49,9 +49,31 @@ detection:
             - '/Bitwarden'
             - '/Dashlane'
             - '/KeePassXC'
-    condition: (selection_sudo or selection_security_unlock) and not filter_apple and not filter_password_managers
+    filter_interactive_terminal:
+        # v1.17.4: a keychain/sudo call whose FULL lineage includes an
+        # interactive terminal / SSH / multiplexer is almost always a human
+        # at a prompt, not an attack primitive. Same full-lineage token list
+        # as deep_shell_nesting.
+        ProcessAncestors|contains:
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/Ghostty'
+            - '/Hyper'
+            - '/login'
+            - '/sshd'
+            - '/tmux'
+            - '/screen'
+            - '/zellij'
+    condition: (selection_sudo or selection_security_unlock) and not filter_apple and not filter_password_managers and not filter_interactive_terminal
 falsepositives:
     - Automated deployment scripts that pipe a sudo password
     - Password managers querying the keychain (covered by filter_password_managers)
     - CI/CD harnesses running `security unlock-keychain` before signing
-level: medium
+# v1.17.4: demoted medium→low. This is a single-event approximation of
+# brute force (see description TODO); the campaign/sequence layer escalates
+# genuine cadence. Low keeps it from minting HIGH coordinated_attacks off
+# routine keychain reads.
+level: low

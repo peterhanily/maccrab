@@ -41,6 +41,14 @@ enum StoragePragmas {
     /// `.db-wal` file small and reduces transient memory.
     static let walAutocheckpointPages: Int32 = 1000
 
+    /// WAL size limit (bytes). After any checkpoint, SQLite truncates the
+    /// `-wal` file back to at most this size rather than letting it grow
+    /// unbounded between checkpoints. v1.18: events.db-wal was field-
+    /// observed at 251 MB — larger than the 239 MB main DB — because no
+    /// `journal_size_limit` was ever set, so a long-lived reader stalling
+    /// checkpoints let the WAL grow and never shrink back. 64 MB bounds it.
+    static let journalSizeLimitBytes: Int64 = 67_108_864 // 64 MB
+
     // CRITICAL ORDERING NOTE (Wave 9B.1, v1.12.6 RC2):
     //
     // `PRAGMA auto_vacuum = INCREMENTAL` MUST be set BEFORE
@@ -66,6 +74,7 @@ enum StoragePragmas {
         sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA journal_size_limit = \(journalSizeLimitBytes)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size = \(eventCacheSizeKB)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA mmap_size = \(eventMmapSizeBytes)", nil, nil, nil)
     }
@@ -77,6 +86,7 @@ enum StoragePragmas {
         sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA journal_size_limit = \(journalSizeLimitBytes)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size = \(alertCacheSizeKB)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA mmap_size = \(alertMmapSizeBytes)", nil, nil, nil)
     }
@@ -88,6 +98,7 @@ enum StoragePragmas {
         sqlite3_exec(handle, "PRAGMA journal_mode = WAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA wal_autocheckpoint = \(walAutocheckpointPages)", nil, nil, nil)
+        sqlite3_exec(handle, "PRAGMA journal_size_limit = \(journalSizeLimitBytes)", nil, nil, nil)
         sqlite3_exec(handle, "PRAGMA cache_size = \(alertCacheSizeKB)", nil, nil, nil)
     }
 

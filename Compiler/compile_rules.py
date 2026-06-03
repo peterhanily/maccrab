@@ -176,6 +176,19 @@ _warned_fields: set = set()
 # keep the compiler in sync with RuleEngine.resolveField.
 _unmapped_fields: set = set()
 
+# Categories the RuleEngine actually dispatches (mapEventCategoryToLogsource).
+# evaluate() does `guard let rules = ruleIndex[category] else { return [] }`, so a
+# rule indexed under any OTHER category string is never looked up — the v1.17
+# dead-category class (es_event ×5, driver_load ×1). An enabled rule under an
+# unknown category fails the build at the end of main(); `status: deprecated`
+# rules are exempt (they ship disabled on purpose).
+_KNOWN_ENGINE_CATEGORIES = {
+    "process_creation", "process_termination", "process_event",
+    "file_event", "network_connection", "authentication",
+    "tcc_event", "registry_event",
+}
+_bad_categories: set = set()
+
 
 def normalize_field(field_name: str) -> str:
     """Map a Sigma field name to its canonical ECS-style dot-path.
@@ -1186,6 +1199,20 @@ def compile_rule(rule_data: dict, source_file: str):
     status = (rule_data.get("status") or "experimental").strip().lower()
     enabled = status != "deprecated"
 
+    # v1.17.4: an ENABLED rule under a category the engine never dispatches is
+    # silently dead (ruleIndex[category] miss). Fail the build so this class
+    # can't regress; deprecated rules are exempt (intentionally disabled).
+    if enabled and category not in _KNOWN_ENGINE_CATEGORIES:
+        if category not in _bad_categories:
+            print(
+                f"  ERROR logsource.category '{category}' (rule "
+                f"'{rule_data.get('title', '?')}') is never dispatched by the engine "
+                f"— rule silently dead. Use a dispatched category "
+                f"({', '.join(sorted(_KNOWN_ENGINE_CATEGORIES))}) or set status: deprecated.",
+                file=sys.stderr,
+            )
+        _bad_categories.add(category)
+
     # Validate severity level.
     valid_levels = {"informational", "low", "medium", "high", "critical"}
     if level not in valid_levels:
@@ -1577,6 +1604,15 @@ def main():
             f"to nil at runtime (silently dead rules): {', '.join(sorted(_unmapped_fields))}.\n"
             f"Map each in SIGMA_FIELD_MAP or add to _KNOWN_PASSTHROUGH_FIELDS "
             f"(and ensure RuleEngine.resolveField handles it).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _bad_categories:
+        print(
+            f"\nERROR: {len(_bad_categories)} unknown logsource category(ies) on enabled "
+            f"rules (silently dead): {', '.join(sorted(_bad_categories))}.\n"
+            f"Route each to a dispatched category or mark the rule(s) status: deprecated.",
             file=sys.stderr,
         )
         sys.exit(1)

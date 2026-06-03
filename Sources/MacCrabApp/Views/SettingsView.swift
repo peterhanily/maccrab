@@ -590,7 +590,11 @@ struct SettingsView: View {
     // MARK: - Forensics
 
     @AppStorage("forensics.catalogBaseURL") private var forensicsCatalogBaseURL: String = ""
-    @AppStorage("forensics.retentionDays") private var forensicsRetentionDays: Int = 0
+    // v1.18: default flipped 0 (never) → 365 (1 year). Forensic scans now
+    // auto-prune after a year unless the operator picks "Never". The
+    // launch-time sweep (MacCrabApp.applicationDidFinishLaunching) and the
+    // "Run cleanup now" button both honor this via CaseManager.pruneCases.
+    @AppStorage("forensics.retentionDays") private var forensicsRetentionDays: Int = 365
     @State private var retentionDeleteResult: String? = nil
     private static let officialForensicsCatalog = "https://rave.maccrab.com/"
 
@@ -686,37 +690,17 @@ struct SettingsView: View {
     private func runRetentionCleanup() {
         let days = forensicsRetentionDays
         guard days > 0 else { return }
-        let casesRoot = CaseDirectoryLayout.defaultCasesRoot
         let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
         Task {
-            let fm = FileManager.default
-            // Route deletes through CaseManager so encrypted scans don't
-            // orphan their keychain DEK (a raw removeItem skips the vault).
-            // deleteCase also UUID-validates the id; a non-case dir would
-            // throw and be skipped, which is the safe direction.
-            let mgr = CaseManager(casesRoot: casesRoot, dekVault: KeychainDEKVault())
-            var deleted = 0
-            var freed: Int64 = 0
-            if let entries = try? fm.contentsOfDirectory(at: casesRoot, includingPropertiesForKeys: [URLResourceKey.isDirectoryKey]) {
-                for url in entries {
-                    let vals = try? url.resourceValues(forKeys: [URLResourceKey.isDirectoryKey])
-                    guard vals?.isDirectory == true else { continue }
-                    let manifest = url.appendingPathComponent("manifest.json")
-                    let mtime = (try? fm.attributesOfItem(atPath: manifest.path))?[.modificationDate] as? Date ?? .distantFuture
-                    if mtime < cutoff {
-                        let bytes = CaseDirectoryLayout(casesRoot: casesRoot, caseID: url.lastPathComponent).diskBytes()
-                        if (try? await mgr.deleteCase(id: url.lastPathComponent)) != nil {
-                            deleted += 1
-                            freed += bytes
-                        }
-                    }
-                }
-            }
+            // CaseManager.pruneCases routes through deleteCase so encrypted
+            // scans release their keychain DEK and each id is UUID-validated.
+            let mgr = CaseManager(casesRoot: CaseDirectoryLayout.defaultCasesRoot, dekVault: KeychainDEKVault())
+            let result = await mgr.pruneCases(olderThan: cutoff)
             let bcf = ByteCountFormatter()
             bcf.countStyle = .file
-            retentionDeleteResult = deleted == 0
+            retentionDeleteResult = result.deleted.isEmpty
                 ? "No scans older than \(days) days."
-                : "Deleted \(deleted) scan\(deleted == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: freed))."
+                : "Deleted \(result.deleted.count) scan\(result.deleted.count == 1 ? "" : "s") · freed \(bcf.string(fromByteCount: result.freedBytes))."
         }
     }
 
@@ -1291,6 +1275,33 @@ struct SettingsView: View {
                 ofItemAtPath: configPath
             )
         }
+
+        // v1.17.4: also push the NON-SECRET config to the ROOT engine via the
+        // privileged inbox. The user-dir file above is read only by the app's
+        // own LLM stack; the root sysext reads /Library/.../llm_config.json,
+        // which this app can't write directly — so engine-side LLM features
+        // (campaign investigation, etc.) were silently dead. Keys are NOT sent
+        // (the keychain is the cross-process key store); the sysext
+        // URL-hardens on receipt. Takes effect on the next engine restart.
+        var engineConfig: [String: Any] = [
+            "enabled": llmEnabled,
+            "provider": llmProvider,
+            "ollama_url": llmOllamaURL,
+            "ollama_model": llmOllamaModel,
+        ]
+        switch llmProvider {
+        case "openai":
+            engineConfig["openai_url"] = llmOpenAIURL
+            engineConfig["openai_model"] = llmModel.isEmpty ? "gpt-4o-mini" : llmModel
+        case "claude":
+            engineConfig["claude_model"] = llmModel.isEmpty ? "claude-sonnet-4-6" : llmModel
+        case "mistral":
+            engineConfig["mistral_model"] = llmModel.isEmpty ? "mistral-small-latest" : llmModel
+        case "gemini":
+            engineConfig["gemini_model"] = llmModel.isEmpty ? "gemini-2.0-flash" : llmModel
+        default: break
+        }
+        V2DaemonControl.sendLLMConfig(engineConfig)
 
         // Update AppState so UI reflects immediately
         appState.llmStatus.isConfigured = llmEnabled

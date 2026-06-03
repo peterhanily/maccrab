@@ -49,8 +49,17 @@ public actor EventToRollingCausalGraphBridge {
     public static let processKeyEnrichmentKey = "process_key"
     public static let parentProcessKeyEnrichmentKey = "parent_process_key"
 
-    public init(rollingGraph: RollingCausalGraph) {
+    /// v1.17.4 (perf): the same pre-insert noise filter the EventStore path
+    /// uses. Pre-fix the causal graph ingested EVERY event — unlike
+    /// EventStore, which drops self-monitoring + dev-tool scratch at insert —
+    /// so the graph churned on noise that carries no detection signal and
+    /// dominated daemon CPU. Given its OWN instance (not shared with
+    /// EventStore) so the insert-filter drop counter stays clean.
+    private let insertFilter: EventInsertFilter?
+
+    public init(rollingGraph: RollingCausalGraph, insertFilter: EventInsertFilter? = nil) {
         self.rollingGraph = rollingGraph
+        self.insertFilter = insertFilter
     }
 
     /// Convert a v1.9 `Event` into a `NormalizedEventInput` and ingest.
@@ -58,6 +67,13 @@ public actor EventToRollingCausalGraphBridge {
     /// downstream alert sink to surface.
     @discardableResult
     public func process(_ event: Event) async -> [Trace] {
+        // v1.17.4 (perf): self-gate on the noise filter before doing any
+        // graph work. The graph needs none of what defaultFilter drops
+        // (self-monitoring, pty/null, SQLite scratch), and ingesting it was
+        // the dominant per-event CPU cost.
+        if insertFilter?.shouldDrop(event: event) == true {
+            return []
+        }
         guard let normalized = normalize(event) else {
             return []
         }

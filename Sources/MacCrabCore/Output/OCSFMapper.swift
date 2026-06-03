@@ -188,6 +188,7 @@ public enum OCSFMapper {
         case .delete:   return 4
         case .close:    return 0
         case .link:     return 1
+        case .open:     return 2   // OCSF File Activity: Read
         }
     }
 

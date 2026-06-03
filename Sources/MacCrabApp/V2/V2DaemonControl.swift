@@ -46,6 +46,35 @@ public enum V2DaemonControl {
         return requested
     }
 
+    /// Push the (non-secret) LLM backend config to the ROOT engine via the
+    /// privileged inbox. Settings → AI Backend writes the uid-501 user-dir
+    /// llm_config.json, which the root sysext never reads (it reads
+    /// /Library/.../llm_config.json — a path this app can't write). This
+    /// drops an `llm-config-<token>.json` request the sysext validates +
+    /// URL-hardens before persisting. Cloud API KEYS are NOT sent here (a
+    /// uid-501 file steering a root process's outbound URL + keys is an
+    /// SSRF/exfil surface) — only provider, URLs, model names, and the
+    /// agentic flag travel this channel; keys travel via the shared
+    /// keychain. Returns true if the request was queued.
+    @discardableResult
+    public static func sendLLMConfig(_ config: [String: Any]) -> Bool {
+        guard let inboxDir = resolveInboxDir() else { return false }
+        return writeLLMConfigRequest(inboxDir: inboxDir, config: config)
+    }
+
+    private static func writeLLMConfigRequest(inboxDir: String, config: [String: Any]) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: inboxDir) {
+            try? fm.createDirectory(atPath: inboxDir, withIntermediateDirectories: true)
+        }
+        let path = inboxDir + "/llm-config-\(UUID().uuidString).json"
+        var payload = config
+        payload["queuedAt"] = ISO8601DateFormatter().string(from: Date())
+        payload["source"] = "MacCrabApp"
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
+    }
+
     /// Resolve the data directory the daemon actually writes to, matching
     /// V2LiveDataProvider.pickDataDirectory: prefer the root sysext's
     /// /Library path, else the dev daemon's ~/Library path.

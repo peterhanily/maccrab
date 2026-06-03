@@ -58,6 +58,40 @@ struct CampaignDetectorFPRegressionTests {
         #expect(!coordinated.isEmpty)
     }
 
+    // v1.17.4: an AI tool querying the keychain (`security find-generic-
+    // password`) tripped auth_brute_force + wifi_password_extraction on the
+    // same security pid → 2 tactics → a false CRITICAL/HIGH coordinated
+    // attack (the live "Claude Code = coordinated_attack" FP). The campaign
+    // guard suppresses it when every rule is a low keychain/sudo single-event
+    // approximation AND the activity is AI-attributed.
+    @Test("AI-attributed keychain breadcrumbs do NOT form a coordinated attack")
+    func aiKeychainNotCoordinated() async {
+        let detector = CampaignDetector()
+        _ = await detector.processAlert(
+            .init(ruleId: "d1a2b3c4-0448-4000-a000-000000000448", ruleTitle: "Keychain Unlock",
+                  severity: .low, processPath: "/usr/bin/security", pid: 4242,
+                  tactics: ["attack.credential_access"], aiTool: "claude_code"))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "d1a2b3c4-0501-4000-a000-000000000501", ruleTitle: "Wi-Fi Password",
+                  severity: .low, processPath: "/usr/bin/security", pid: 4242,
+                  tactics: ["attack.credential_access", "attack.wireless"], aiTool: "claude_code"))
+        #expect(campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
+    }
+
+    @Test("Guard is scoped: same keychain rules WITHOUT AI attribution still form a campaign")
+    func nonAiKeychainStillCoordinated() async {
+        let detector = CampaignDetector()
+        _ = await detector.processAlert(
+            .init(ruleId: "d1a2b3c4-0448-4000-a000-000000000448", ruleTitle: "Keychain Unlock",
+                  severity: .low, processPath: "/usr/bin/security", pid: 7000,
+                  tactics: ["attack.credential_access"]))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "d1a2b3c4-0501-4000-a000-000000000501", ruleTitle: "Wi-Fi Password",
+                  severity: .low, processPath: "/usr/bin/security", pid: 7000,
+                  tactics: ["attack.credential_access", "attack.wireless"]))
+        #expect(!campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
+    }
+
     @Test("Sparkle Autoupdate path is allowlisted from coordinated attack")
     func sparkleAutoupdateSilent() async {
         let detector = CampaignDetector()

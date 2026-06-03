@@ -198,6 +198,21 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
                 "CREATE INDEX IF NOT EXISTS idx_hash_chain_trace_seq ON trace_hash_chain(trace_id, sequence_number)",
             ]
         ),
+        Migration(
+            version: 2,
+            name: "substrate_lastseen_indexes",
+            sql: [
+                // v1.18: standalone last_seen indexes so the substrate
+                // retention sweep (pruneOrphanedGraph / pruneOldestGraph)
+                // can range-scan and ORDER BY last_seen without a full
+                // table scan. The v1 composite indexes all LEAD with
+                // entity_type / source / target / relation, so a bare
+                // `WHERE last_seen < ?` or `ORDER BY last_seen` cannot use
+                // them.
+                "CREATE INDEX IF NOT EXISTS idx_entities_lastseen ON trace_entities(last_seen)",
+                "CREATE INDEX IF NOT EXISTS idx_edges_lastseen ON trace_edges(last_seen)",
+            ]
+        ),
     ]
 
     // MARK: Lifecycle
@@ -316,6 +331,9 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
             sqlite3_exec(openedHandle, "PRAGMA journal_mode = WAL", nil, nil, nil)
             sqlite3_exec(openedHandle, "PRAGMA synchronous = NORMAL", nil, nil, nil)
             sqlite3_exec(openedHandle, "PRAGMA wal_autocheckpoint = 1000", nil, nil, nil)
+            // v1.18: bound the WAL so it can't outgrow the main DB (see
+            // StoragePragmas.journalSizeLimitBytes).
+            sqlite3_exec(openedHandle, "PRAGMA journal_size_limit = \(StoragePragmas.journalSizeLimitBytes)", nil, nil, nil)
         }
         sqlite3_exec(openedHandle, "PRAGMA cache_size = -16000", nil, nil, nil)
         sqlite3_exec(openedHandle, "PRAGMA mmap_size = 67108864", nil, nil, nil)
@@ -429,6 +447,109 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
             throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    // MARK: - upsertBatch  (v1.17.4 perf)
+    //
+    // Persist all entities then all edges for ONE event inside a SINGLE
+    // transaction, reusing one prepared statement per table (reset + rebind)
+    // instead of prepare/step/finalize + autocommit PER ROW. Pre-fix a
+    // single event's ~7 upserts were ~7 autocommit transactions + 7
+    // prepares (RollingCausalGraph.ingest called the store one row at a
+    // time). The transaction MUST live here, in the store actor: there is
+    // no `await` between BEGIN and COMMIT, so no other actor call can
+    // interleave (wrapping it from RollingCausalGraph across the await
+    // boundary would be unsafe). Entities are inserted before edges so the
+    // trace_edges→trace_entities FKs hold for in-batch endpoints. Per-row
+    // failures (e.g. an edge whose endpoint is neither in the batch nor the
+    // DB) are logged and skipped — best-effort, matching the pre-batch
+    // resilience, never aborting the whole event.
+    public func upsertBatch(entities: [TraceEntity], edges: [TraceEdge]) async throws {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        guard !entities.isEmpty || !edges.isEmpty else { return }
+
+        sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
+        do {
+            if !entities.isEmpty {
+                let sql = """
+                INSERT INTO trace_entities (
+                    id, entity_type, stable_key, display_name,
+                    first_seen, last_seen, attributes_json, source,
+                    confidence, observation_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(entity_type, stable_key) DO UPDATE SET
+                    last_seen = max(trace_entities.last_seen, excluded.last_seen),
+                    observation_count = trace_entities.observation_count + 1,
+                    attributes_json = excluded.attributes_json,
+                    confidence = excluded.confidence,
+                    display_name = excluded.display_name
+                """
+                var stmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                    throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+                }
+                defer { sqlite3_finalize(stmt) }
+                for entity in entities {
+                    let encryptedAttrs = encryption?.encrypt(entity.attributesJson) ?? entity.attributesJson
+                    sqlite3_bind_text(stmt, 1, entity.id, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 2, entity.entityType, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 3, entity.stableKey, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 4, entity.displayName, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_double(stmt, 5, entity.firstSeen.timeIntervalSince1970)
+                    sqlite3_bind_double(stmt, 6, entity.lastSeen.timeIntervalSince1970)
+                    sqlite3_bind_text(stmt, 7, encryptedAttrs, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 8, entity.source, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_double(stmt, 9, entity.confidence)
+                    if sqlite3_step(stmt) != SQLITE_DONE {
+                        logger.debug("upsertBatch entity skipped: \(String(cString: sqlite3_errmsg(db)), privacy: .public)")
+                    }
+                    sqlite3_reset(stmt)
+                    sqlite3_clear_bindings(stmt)
+                }
+            }
+            if !edges.isEmpty {
+                let sql = """
+                INSERT INTO trace_edges (
+                    id, source_entity_id, target_entity_id, relation,
+                    first_seen, last_seen, confidence, confidence_tier,
+                    evidence_json, event_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_entity_id, target_entity_id, relation) DO UPDATE SET
+                    last_seen = max(trace_edges.last_seen, excluded.last_seen),
+                    confidence = excluded.confidence,
+                    confidence_tier = excluded.confidence_tier,
+                    evidence_json = excluded.evidence_json,
+                    event_ids_json = excluded.event_ids_json
+                """
+                var stmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                    throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+                }
+                defer { sqlite3_finalize(stmt) }
+                for edge in edges {
+                    let encryptedEvidence = encryption?.encrypt(edge.evidenceJson) ?? edge.evidenceJson
+                    sqlite3_bind_text(stmt, 1, edge.id, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 2, edge.sourceEntityId, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 3, edge.targetEntityId, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 4, edge.relation, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_double(stmt, 5, edge.firstSeen.timeIntervalSince1970)
+                    sqlite3_bind_double(stmt, 6, edge.lastSeen.timeIntervalSince1970)
+                    sqlite3_bind_double(stmt, 7, edge.confidence)
+                    sqlite3_bind_text(stmt, 8, edge.confidenceTier, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 9, encryptedEvidence, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 10, edge.eventIdsJson, -1, SQLITE_TRANSIENT)
+                    if sqlite3_step(stmt) != SQLITE_DONE {
+                        logger.debug("upsertBatch edge skipped: \(String(cString: sqlite3_errmsg(db)), privacy: .public)")
+                    }
+                    sqlite3_reset(stmt)
+                    sqlite3_clear_bindings(stmt)
+                }
+            }
+            sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        } catch {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            throw error
         }
     }
 
@@ -1170,6 +1291,116 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     public func databaseSizeBytes() -> Int64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: databasePath)
         return (attrs?[.size] as? Int64) ?? 0
+    }
+
+    // MARK: - Substrate (entity/edge) retention  (v1.18.0)
+    //
+    // trace_entities + trace_edges are the GLOBAL causal-graph substrate:
+    // upserted on every ingested event (RollingCausalGraph.ingest) but,
+    // prior to v1.18, NEVER deleted by any path. cascadeDeleteTraces only
+    // removes `traces` + its membership / rule_hits / replay / hash_chain
+    // children — the substrate was explicitly left orphaned ("the next
+    // anchor can re-attach via upsert"). With anchors firing rarely while
+    // upserts run per-event, the substrate accumulated monotonically with
+    // lifetime event volume; field-observed at 17 GB on this host.
+    //
+    // These methods bound the substrate WITHOUT corrupting surviving
+    // traces. A row is deletable only when no surviving trace references
+    // it: an edge must be absent from BOTH trace_membership and
+    // trace_hash_chain (which carry edge_id as plain, non-FK columns); an
+    // entity must be absent from trace_membership AND not an endpoint of
+    // any surviving edge. Edges are swept before entities to respect the
+    // trace_edges -> trace_entities foreign keys and so freshly-orphaned
+    // edges release their endpoints within the same sweep. Deletes are
+    // batched, yielding the actor between batches, so a multi-GB sweep
+    // can't stall the event pump that shares this actor.
+
+    /// An edge id is a deletable orphan when no surviving trace references
+    /// it via membership or the hash chain.
+    private static let edgeOrphanGuardSQL = """
+        id NOT IN (SELECT edge_id FROM trace_membership WHERE edge_id IS NOT NULL) \
+        AND id NOT IN (SELECT edge_id FROM trace_hash_chain WHERE edge_id IS NOT NULL)
+        """
+
+    /// An entity id is a deletable orphan when no surviving trace
+    /// references it via membership and no surviving edge uses it as an
+    /// endpoint. Valid only AFTER the edge sweep in the same pass.
+    private static let entityOrphanGuardSQL = """
+        id NOT IN (SELECT entity_id FROM trace_membership WHERE entity_id IS NOT NULL) \
+        AND id NOT IN (SELECT source_entity_id FROM trace_edges) \
+        AND id NOT IN (SELECT target_entity_id FROM trace_edges)
+        """
+
+    /// Delete graph substrate older than `cutoff` that no surviving trace
+    /// references. Edges first, then entities. Returns counts deleted.
+    @discardableResult
+    public func pruneOrphanedGraph(olderThan cutoff: Date) async throws -> (edges: Int, entities: Int) {
+        let cutoffSecs = cutoff.timeIntervalSince1970
+        let edges = try await batchedSubstrateDelete(
+            table: "trace_edges", guardSQL: Self.edgeOrphanGuardSQL, cutoff: cutoffSecs)
+        let entities = try await batchedSubstrateDelete(
+            table: "trace_entities", guardSQL: Self.entityOrphanGuardSQL, cutoff: cutoffSecs)
+        return (edges, entities)
+    }
+
+    /// Size-cap fallback: delete the oldest unreferenced substrate (by
+    /// last_seen ascending), up to `count` rows per table. Orphan-guarded
+    /// exactly like `pruneOrphanedGraph` so it can never corrupt a
+    /// surviving trace, even when evicting recent-ish rows under pressure.
+    @discardableResult
+    public func pruneOldestGraph(count: Int) async throws -> (edges: Int, entities: Int) {
+        guard count > 0 else { return (0, 0) }
+        let edges = try await batchedSubstrateDelete(
+            table: "trace_edges", guardSQL: Self.edgeOrphanGuardSQL, cutoff: nil, oldestFirstLimit: count)
+        let entities = try await batchedSubstrateDelete(
+            table: "trace_entities", guardSQL: Self.entityOrphanGuardSQL, cutoff: nil, oldestFirstLimit: count)
+        return (edges, entities)
+    }
+
+    /// Batched orphan delete. Deletes rows from `table` matching the
+    /// orphan `guardSQL` and, when `cutoff` is non-nil, `last_seen <
+    /// cutoff`. When `oldestFirstLimit` is non-nil, evicts the oldest
+    /// rows by last_seen and bounds total work to that many rows. Loops
+    /// in `batchSize` chunks (each its own statement), yielding the actor
+    /// between batches so concurrent upserts aren't starved. Returns the
+    /// total rows deleted.
+    private func batchedSubstrateDelete(
+        table: String,
+        guardSQL: String,
+        cutoff: Double?,
+        oldestFirstLimit: Int? = nil,
+        batchSize: Int = 5000
+    ) async throws -> Int {
+        guard let db else { throw CausalGraphStoreError.databaseOpenFailed("closed") }
+        var total = 0
+        var remaining = oldestFirstLimit ?? Int.max
+        while remaining > 0 {
+            let thisBatch = min(batchSize, remaining)
+            var conds = [guardSQL]
+            if cutoff != nil { conds.append("last_seen < ?1") }
+            let order = oldestFirstLimit != nil ? "ORDER BY last_seen ASC " : ""
+            let sql = """
+            DELETE FROM \(table) WHERE id IN (
+                SELECT id FROM \(table) WHERE \(conds.joined(separator: " AND ")) \(order)LIMIT \(thisBatch)
+            )
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw CausalGraphStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            if let c = cutoff { sqlite3_bind_double(stmt, 1, c) }
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                throw CausalGraphStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            let n = Int(sqlite3_changes(db))
+            total += n
+            remaining -= n
+            if n < thisBatch { break }
+            await Task.yield()
+        }
+        return total
     }
 
     // MARK: - Incremental vacuum (Wave 9B, v1.12.6)

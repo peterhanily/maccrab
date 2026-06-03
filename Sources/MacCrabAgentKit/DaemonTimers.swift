@@ -54,6 +54,10 @@ enum DaemonTimers {
         /// without retention, silently breaking pruning. Now retained.
         let tracegraphPruneTimer: DispatchSourceTimer?
         let tracesPruneTimer: DispatchSourceTimer?
+        /// v1.18.0: daily sweep for generated-artifact directories that
+        /// previously had no retention — `reports/` (age-based) and
+        /// `compiled_rules/auto_generated/` (count cap, oldest-first).
+        let artifactsPruneTimer: DispatchSourceTimer?
         /// v1.10.0: file-based IPC poller. Polls
         /// /Library/Application Support/MacCrab/inbox/*.json every 5 s
         /// so the dashboard (running as the user) can request mutations
@@ -396,23 +400,36 @@ enum DaemonTimers {
             t.schedule(deadline: .now() + 3600, repeating: 86400)
             t.setEventHandler {
                 Task {
-                    let days = 90
-                    let capBytes: Int64 = 250 * 1024 * 1024
+                    // v1.18: retention + size cap are now operator-tunable
+                    // (storage.tracegraphRetentionDays / tracegraphMaxSizeMB),
+                    // replacing the hardcoded 90d / 250 MB.
+                    let days = max(1, min(state.storage.tracegraphRetentionDays, 3650))
+                    let capBytes = Int64(max(50, state.storage.tracegraphMaxSizeMB)) * 1024 * 1024
                     let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
                     let pruned = (try? await causalStore.pruneTraces(olderThan: cutoff)) ?? 0
                     if pruned > 0 {
                         logger.info("TraceGraph retention sweep: \(pruned) traces older than \(days)d pruned")
                     }
+                    // v1.18: bound the global entity/edge substrate — the
+                    // dominant (and, pre-v1.18, never-reclaimed) tenant of
+                    // tracegraph.db. Orphan-guarded so surviving traces are
+                    // never corrupted.
+                    let orphans = (try? await causalStore.pruneOrphanedGraph(olderThan: cutoff)) ?? (edges: 0, entities: 0)
+                    if orphans.edges > 0 || orphans.entities > 0 {
+                        logger.info("TraceGraph substrate sweep: pruned \(orphans.edges) edges + \(orphans.entities) entities older than \(days)d")
+                    }
                     let size = await causalStore.databaseSizeBytes()
                     if size > capBytes {
-                        // Drop 10% of trace rows oldest-first; keep
-                        // looping until under cap or zero rows pruned.
+                        // Over cap: drop oldest traces AND evict the oldest
+                        // unreferenced substrate (the bulk). Keep looping
+                        // until under cap or nothing more can be pruned.
                         for _ in 0..<5 {
                             let count = (try? await causalStore.traceCount()) ?? 0
                             let dropTarget = max(50, count / 10)
-                            let dropped = (try? await causalStore.pruneOldestTraces(count: dropTarget)) ?? 0
-                            logger.warning("TraceGraph size cap: pruned \(dropped) oldest traces (\(size / 1024 / 1024) MB > \(capBytes / 1024 / 1024) MB cap)")
-                            if dropped == 0 { break }
+                            let droppedTraces = (try? await causalStore.pruneOldestTraces(count: dropTarget)) ?? 0
+                            let droppedGraph = (try? await causalStore.pruneOldestGraph(count: 50_000)) ?? (edges: 0, entities: 0)
+                            logger.warning("TraceGraph size cap: pruned \(droppedTraces) oldest traces + \(droppedGraph.edges) edges + \(droppedGraph.entities) entities (\(size / 1024 / 1024) MB > \(capBytes / 1024 / 1024) MB cap)")
+                            if droppedTraces == 0 && droppedGraph.edges == 0 && droppedGraph.entities == 0 { break }
                             let nowSize = await causalStore.databaseSizeBytes()
                             if nowSize < capBytes { break }
                         }
@@ -467,8 +484,10 @@ enum DaemonTimers {
             t.schedule(deadline: .now() + 3600, repeating: 86400)
             t.setEventHandler {
                 Task {
-                    let days = 90
-                    let capBytes: Int64 = 100 * 1024 * 1024
+                    // v1.18: operator-tunable (storage.tracesRetentionDays /
+                    // tracesMaxSizeMB), replacing the hardcoded 90d / 100 MB.
+                    let days = max(1, min(state.storage.tracesRetentionDays, 3650))
+                    let capBytes = Int64(max(50, state.storage.tracesMaxSizeMB)) * 1024 * 1024
                     let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
                     let pruned = (try? await traceStore.prune(olderThan: cutoff)) ?? 0
                     if pruned > 0 {
@@ -527,6 +546,54 @@ enum DaemonTimers {
         } else {
             tracesPruneTimer = nil
         }
+
+        // v1.18.0: generated-artifact retention. Daily, cheap, independent
+        // of the DB stores. reports/ pruned by age (storage.reportsRetentionDays);
+        // compiled_rules/auto_generated/ capped to the newest N files
+        // (storage.autoGeneratedRulesMax, oldest pruned first). 0 disables
+        // either sweep.
+        let artifactsPruneTimer: DispatchSourceTimer
+        let artifactsTimer = DispatchSource.makeTimerSource(queue: .global())
+        artifactsTimer.schedule(deadline: .now() + 3600, repeating: 86400)
+        let artifactsSupportDir = state.supportDir
+        let reportsRetentionDays = state.storage.reportsRetentionDays
+        let autoGeneratedRulesMax = state.storage.autoGeneratedRulesMax
+        artifactsTimer.setEventHandler {
+            let fm = FileManager.default
+            if reportsRetentionDays > 0 {
+                let dir = artifactsSupportDir + "/reports"
+                let cutoff = Date().addingTimeInterval(-Double(reportsRetentionDays) * 86400)
+                var removed = 0
+                if let names = try? fm.contentsOfDirectory(atPath: dir) {
+                    for name in names {
+                        let p = dir + "/" + name
+                        let mtime = (try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date
+                        if let m = mtime, m < cutoff, (try? fm.removeItem(atPath: p)) != nil { removed += 1 }
+                    }
+                }
+                if removed > 0 {
+                    logger.info("Reports retention sweep: \(removed) report(s) older than \(reportsRetentionDays)d pruned")
+                }
+            }
+            if autoGeneratedRulesMax > 0 {
+                let dir = artifactsSupportDir + "/compiled_rules/auto_generated"
+                if let names = try? fm.contentsOfDirectory(atPath: dir), names.count > autoGeneratedRulesMax {
+                    let byAge = names.compactMap { name -> (String, Date)? in
+                        let p = dir + "/" + name
+                        let m = (try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date
+                        return m.map { (p, $0) }
+                    }.sorted { $0.1 < $1.1 }   // oldest first
+                    let dropCount = byAge.count - autoGeneratedRulesMax
+                    var removed = 0
+                    for (p, _) in byAge.prefix(dropCount) where (try? fm.removeItem(atPath: p)) != nil { removed += 1 }
+                    if removed > 0 {
+                        logger.info("Auto-generated rules cap: pruned \(removed) oldest rule file(s) (kept newest \(autoGeneratedRulesMax))")
+                    }
+                }
+            }
+        }
+        artifactsTimer.resume()
+        artifactsPruneTimer = artifactsTimer
 
         // v1.8.0 tiered storage with adaptive retention + size-cap fallback.
         //
@@ -1194,6 +1261,7 @@ enum DaemonTimers {
                 let suppressCampaignReqs = files.filter { $0.hasPrefix("suppress-campaign-") && $0.hasSuffix(".json") }
                 let refreshIntelReqs = files.filter { $0.hasPrefix("refresh-intel-") && $0.hasSuffix(".json") }
                 let reloadRulesReqs = files.filter { $0.hasPrefix("reload-rules-") && $0.hasSuffix(".json") }
+                let llmConfigReqs = files.filter { $0.hasPrefix("llm-config-") && $0.hasSuffix(".json") }
                 let flushRequests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
@@ -1202,6 +1270,7 @@ enum DaemonTimers {
                 await handleSuppressCampaignRequests(suppressCampaignReqs, inboxDir: inboxDir, state: state)
                 await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
                 await handleReloadRulesRequests(reloadRulesReqs, inboxDir: inboxDir, state: state)
+                await handleLLMConfigRequests(llmConfigReqs, inboxDir: inboxDir, state: state)
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
             }
         }
@@ -1223,6 +1292,7 @@ enum DaemonTimers {
             livenessTimer: livenessTimer,
             tracegraphPruneTimer: tracegraphPruneTimer,
             tracesPruneTimer: tracesPruneTimer,
+            artifactsPruneTimer: artifactsPruneTimer,
             inboxPoller: inboxPoller
         )
     }
@@ -1408,6 +1478,88 @@ enum DaemonTimers {
         guard anyAuthorized else { return }
         print("[inbox] reload-rules: \(names.count) request(s) — raising SIGHUP to self")
         kill(getpid(), SIGHUP)
+    }
+
+    /// v1.17.4: apply a dashboard-pushed LLM backend config. The app writes
+    /// the uid-501 user-dir llm_config.json, which the ROOT sysext never
+    /// reads (it reads <support>/llm_config.json). This bridges the
+    /// NON-SECRET fields over the privileged inbox so engine-side LLM
+    /// features become reachable. Security posture: a uid-501 file steering
+    /// a root process's outbound URL is an SSRF/exfil surface, so any
+    /// non-loopback ollama_url/openai_url is DEFAULT-DENIED unless the
+    /// payload sets allow_remote_endpoint=true. Cloud API keys never travel
+    /// this channel (keychain leg). Takes effect on the next engine restart.
+    private static func handleLLMConfigRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        // Coalesce: apply only the newest authorized request.
+        var newest: (mtime: Date, payload: [String: Any], uid: Int)?
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: uid, result: "malformed")
+                continue
+            }
+            let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                ?? Date(timeIntervalSince1970: 0)
+            if newest == nil || mtime > newest!.mtime { newest = (mtime, json, uid) }
+            auditLogInbox(state: state, prefix: "llm-config", id: "-", uid: uid, result: "ok")
+        }
+        guard let chosen = newest else { return }
+
+        // Whitelist NON-SECRET keys; default-deny non-loopback endpoints.
+        let allowRemote = (chosen.payload["allow_remote_endpoint"] as? Bool) ?? false
+        let urlKeys: Set<String> = ["ollama_url", "openai_url"]
+        let allowedKeys = ["enabled", "provider", "ollama_url", "ollama_model",
+                           "openai_url", "openai_model", "claude_model",
+                           "mistral_model", "gemini_model", "agentic_investigation_enabled"]
+        var sanitized: [String: Any] = [:]
+        for key in allowedKeys {
+            guard let value = chosen.payload[key] else { continue }
+            if urlKeys.contains(key), let urlStr = value as? String,
+               !isLoopbackEndpoint(urlStr), !allowRemote {
+                print("[inbox] llm-config: rejected non-loopback \(key)=\(urlStr) (set allow_remote_endpoint to override)")
+                auditLogInbox(state: state, prefix: "llm-config", id: key, uid: chosen.uid, result: "url_rejected_nonloopback")
+                continue
+            }
+            sanitized[key] = value
+        }
+        guard !sanitized.isEmpty else { return }
+
+        // Merge onto the existing root config (preserve fields/keys not in
+        // this payload), write 0600 root-owned.
+        let rootPath = state.supportDir + "/llm_config.json"
+        var merged: [String: Any] = {
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: rootPath)),
+               let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return existing
+            }
+            return [:]
+        }()
+        for (k, v) in sanitized { merged[k] = v }
+        if let out = try? JSONSerialization.data(withJSONObject: merged, options: [.sortedKeys, .prettyPrinted]) {
+            try? out.write(to: URL(fileURLWithPath: rootPath), options: .atomic)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: rootPath)
+            print("[inbox] llm-config: applied \(sanitized.count) field(s) → \(rootPath) (effective next engine restart)")
+        }
+    }
+
+    /// A URL string whose host is loopback (localhost / 127.x / ::1).
+    /// Default-deny gate for engine-side LLM endpoints (SSRF/exfil guard).
+    private static func isLoopbackEndpoint(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString),
+              let host = url.host?.lowercased(), !host.isEmpty else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host.hasPrefix("127.")
+            || host == "::1" || host == "[::1]"
     }
 
     private static func handleSuppressCampaignRequests(

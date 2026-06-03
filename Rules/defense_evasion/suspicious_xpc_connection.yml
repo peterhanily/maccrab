@@ -1,6 +1,10 @@
 title: Unsigned Process Connects to Privileged XPC Service
 id: d1a2b3c4-0431-4000-a000-000000000431
-status: experimental
+# v1.17.4: DEPRECATED — logsource.category 'es_event' is never dispatched by
+# the engine, and the underlying ES events (XPC_CONNECT etc.) are not
+# subscribed by ESCollector. Doubly dead; parked disabled until that ES
+# plumbing exists. (id/title preserved so suppressions keep working.)
+status: deprecated
 description: >
     Detects NOTIFY_XPC_CONNECT events where an unsigned or ad-hoc signed
     process attempts to connect to a privileged XPC service. Attackers may

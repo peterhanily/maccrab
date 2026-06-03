@@ -111,6 +111,27 @@ public actor FileContentEnricher {
             "/router_init.js", "/execution.js", "/start.py",
         ]
         for marker in installerLogFiles where targetPath.hasSuffix(marker) { return true }
+        // v1.17.4: AI-agent skill / config / hook / CI roots. The 14
+        // FileContent|contains rules (skill_md_poisoning_install,
+        // mcp_server_suspicious_command, claude_code_project_config_rce,
+        // binary_dropped_into_claude_dir, workflow_drop_with_self_hosted_runner,
+        // …) all target these paths; before the close-gate fix they were
+        // dead, and even after it they stayed dead because shouldScan
+        // returned false for them. Bounded volume (these change rarely vs
+        // the event firehose) and the 64 KB / 8 MB read caps still apply.
+        let agentContentRoots: [String] = [
+            "/.claude/skills/", "/.codex/skills/", "/.cursor/skills/",
+            "/.claude/scripts/", "/.claude/hooks/", "/.claude/agents/",
+            "/.github/workflows/",
+        ]
+        for root in agentContentRoots where targetPath.contains(root) { return true }
+        let agentConfigFiles: [String] = [
+            "/.claude/claude_desktop_config.json", "/.claude.json", "/.cursor/mcp.json",
+            "/.claude/settings.json", "/.claude/project.json", "/.claude/local.json",
+        ]
+        for file in agentConfigFiles where targetPath.hasSuffix(file) { return true }
+        // NOTE: the non-root maccrabd FSEvents fallback emits no close-class
+        // action, so FileContent enrichment is sysext/ES-only by design.
         return false
     }
 

@@ -19,7 +19,12 @@ logsource:
 detection:
     # NOTE: shells are Apple platform binaries by design; the standard
     # `not PlatformBinary` filter would disable this rule entirely.
-    # FP control lives in the parent-lineage filters below.
+    # v1.17.4: FP filters key on ProcessAncestors (the FULL lineage chain),
+    # NOT GrandparentImage. The condition requires the grandparent to be a
+    # shell, so a GrandparentImage-based terminal/build filter could never
+    # match — the Terminal/build tool sits ABOVE the shell chain. With the
+    # old grandparent-only filters this rule fired on ~50% of all process
+    # creations (99,784 fires in one telemetry window).
     selection_shell:
         Image|endswith:
             - '/sh'
@@ -48,7 +53,7 @@ detection:
             - '/tcsh'
             - '/csh'
     filter_terminal:
-        GrandparentImage|endswith:
+        ProcessAncestors|contains:
             - '/Terminal'
             - '/iTerm2'
             - '/Alacritty'
@@ -64,7 +69,7 @@ detection:
     filter_build_systems:
         # Build tools and language runtimes commonly create deep shell
         # nesting via wrapper scripts and post-install hooks.
-        GrandparentImage|endswith:
+        ProcessAncestors|contains:
             - '/make'
             - '/gmake'
             - '/ninja'
@@ -101,7 +106,7 @@ detection:
     filter_env_managers:
         # Shell environment managers that legitimately spawn nested shells
         # for shimming / activation.
-        GrandparentImage|endswith:
+        ProcessAncestors|contains:
             - '/direnv'
             - '/asdf'
             - '/mise'
@@ -113,7 +118,7 @@ detection:
             - '/sdk'
     filter_ci_cd:
         # CI/CD agents and automation tools
-        GrandparentImage|contains:
+        ProcessAncestors|contains:
             - 'jenkins'
             - 'buildkite'
             - 'github-actions'

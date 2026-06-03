@@ -289,10 +289,14 @@ public actor EventEnricher {
         // (Info.plist + LaunchAgents + a handful of installer
         // filenames + bounded node_modules/site-packages source
         // files) that the synchronous cost is acceptable.
+        // v1.17.4: collectors emit "close_modified" (ESCollector/Kdebug/
+        // Eslogger), never bare "close" — the old `== "close"` gate meant
+        // ALL 14 FileContent|contains rules were dead. hasPrefix is tolerant
+        // of any close-class action.
         if let scanner = fileContentEnricher,
            let filePath = event.file?.path,
            event.eventCategory == .file,
-           event.eventAction == "close",
+           event.eventAction.hasPrefix("close"),
            FileContentEnricher.shouldScan(targetPath: filePath) {
             if let content = await scanner.scan(path: filePath) {
                 enrichedEvent.enrichments["FileContent"] = content

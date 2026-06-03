@@ -1,6 +1,9 @@
 title: Unsigned Process Opens IOKit Device
 id: d1a2b3c4-0432-4000-a000-000000000432
-status: experimental
+# v1.17.4: DEPRECATED — logsource.category 'es_event' is never dispatched by
+# the engine, and AUTH_IOKIT_OPEN is not subscribed by ESCollector. Doubly
+# dead; parked disabled until that ES plumbing exists.
+status: deprecated
 description: >
     Detects AUTH_IOKIT_OPEN events where an unsigned process opens an IOKit
     device. IOKit provides direct access to hardware and kernel drivers.

@@ -49,6 +49,44 @@ public actor OllamaBackend: LLMBackend {
         return true
     }
 
+    // MARK: - Model presence probe (v1.17.4)
+
+    /// True iff `configured` names a model present in `availableTags`.
+    /// Pure + unit-testable. Matches the exact tag, and tolerates Ollama's
+    /// `:latest` aliasing (so `llama3.1` matches `llama3.1:latest` and vice
+    /// versa) — but does NOT treat a bare name as matching an arbitrary
+    /// version tag (`llama3.1` does not match only-`llama3.1:8b`), mirroring
+    /// Ollama's own resolution.
+    static func modelTagMatches(configured: String, availableTags: [String]) -> Bool {
+        func norm(_ s: String) -> String {
+            let l = s.lowercased()
+            return l.hasSuffix(":latest") ? String(l.dropLast(":latest".count)) : l
+        }
+        let want = configured.lowercased()
+        let wantNorm = norm(configured)
+        return availableTags.contains { $0.lowercased() == want || norm($0) == wantNorm }
+    }
+
+    /// Installed model tags from `GET /api/tags` (e.g. `["qwen2.5:7b"]`),
+    /// or nil on any network/parse failure.
+    public func listModels() async -> [String]? {
+        let url = baseURL.appendingPathComponent("api/tags")
+        guard let (data, response) = try? await session.data(from: url),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = obj["models"] as? [[String: Any]] else { return nil }
+        return models.compactMap { $0["name"] as? String }
+    }
+
+    /// Whether this backend's configured model is actually pulled.
+    /// `true`/`false` = determined; `nil` = couldn't reach `/api/tags`, so
+    /// the caller should stay optimistic (a transiently-down Ollama at boot
+    /// must not permanently disable LLM until restart).
+    public func modelIsInstalled() async -> Bool? {
+        guard let tags = await listModels() else { return nil }
+        return Self.modelTagMatches(configured: model, availableTags: tags)
+    }
+
     public func complete(systemPrompt: String, userPrompt: String,
                          maxTokens: Int, temperature: Double) async -> String? {
         let url = baseURL.appendingPathComponent("api/generate")

@@ -177,7 +177,11 @@ let stdoutHandle = FileHandle.standardOutput
 func writeJSON(_ obj: Any) {
     guard let data = try? JSONSerialization.data(withJSONObject: obj),
           let str = String(data: data, encoding: .utf8) else { return }
-    let output = "Content-Length: \(data.count)\r\n\r\n\(str)"
+    // v1.17.4: MCP stdio transport is newline-delimited JSON (one compact
+    // object per line), NOT LSP Content-Length framing. Compact
+    // JSONSerialization (no .prettyPrinted) escapes any embedded newline, so
+    // `str` contains none — appending "\n" is a safe single-line frame.
+    let output = str + "\n"
     // Use POSIX write() for reliable unbuffered output
     let outputData = Array(output.utf8)
     outputData.withUnsafeBufferPointer { ptr in
@@ -2014,36 +2018,21 @@ let decoder = JSONDecoder()
 // Security: validate parent process at startup
 validateParentProcess()
 
-// Read JSON-RPC messages from stdin.
-// MCP uses Content-Length framing, but many clients also send bare JSON lines.
-// Support both: if a line starts with "Content-Length:", read the framed message.
-// Otherwise, try to parse the line as a JSON-RPC request directly.
-let stdinHandle = FileHandle.standardInput
+// Read newline-delimited JSON-RPC messages from stdin (MCP stdio transport).
+//
+// v1.17.4: the prior build also tried to accept LSP Content-Length framing,
+// but interleaving readLine() (buffered) with FileHandle.readData on the
+// same fd buffer-stole bytes and corrupted framed messages (a spurious
+// -32700 parse error plus a dropped message per frame). We now read ONLY
+// newline-delimited JSON, matching the corrected newline-delimited output.
 
 // Disable stdout buffering for reliable pipe output
 setbuf(stdout, nil)
 
 while let line = readLine(strippingNewline: true) {
     let trimmed = line.trimmingCharacters(in: .whitespaces)
-    guard !trimmed.isEmpty else { continue }
-
-    var body: Data
-
-    if trimmed.lowercased().hasPrefix("content-length:") {
-        let lengthStr = trimmed.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
-        guard let length = Int(lengthStr), length > 0 else { continue }
-
-        // Read until blank line (end of headers)
-        while let headerLine = readLine(strippingNewline: true), !headerLine.trimmingCharacters(in: .whitespaces).isEmpty {}
-
-        // Read exactly `length` bytes
-        body = stdinHandle.readData(ofLength: length)
-    } else if trimmed.hasPrefix("{") {
-        // Bare JSON line
-        body = trimmed.data(using: .utf8) ?? Data()
-    } else {
-        continue
-    }
+    guard trimmed.hasPrefix("{") else { continue }
+    let body = trimmed.data(using: .utf8) ?? Data()
 
     guard let request = try? decoder.decode(JSONRPCRequest.self, from: body) else {
         // Parse failed — send generic error (don't leak request body which may contain secrets)

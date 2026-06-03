@@ -41,6 +41,11 @@ public enum FileAction: String, Codable, Sendable, Hashable, CaseIterable {
     case delete
     case close
     case link
+    /// v1.17.4: file OPEN (read access). Emitted only for credential/secret
+    /// paths (ESCollector's in-process allowlist) so the "credential file
+    /// READ by untrusted process" rule class can fire — previously dead
+    /// because no OPEN event was ever subscribed.
+    case open
 }
 
 // MARK: - NetworkDirection

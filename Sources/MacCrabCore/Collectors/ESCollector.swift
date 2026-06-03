@@ -103,6 +103,9 @@ public final class ESCollector: @unchecked Sendable {
     private var continuation: AsyncStream<Event>.Continuation?
     private var traceBindingContinuation: AsyncStream<TraceBindingSignal>.Continuation?
     private let logger = Logger(subsystem: "com.maccrab.core", category: "ESCollector")
+    /// v1.17.4: subscribe to ES NOTIFY_OPEN (credential-read detection).
+    /// Config kill-switch (DaemonConfig.subscribeFileOpenEvents).
+    private let subscribeFileOpen: Bool
 
     /// v1.9 Agent Traces feature flag, read once at type-load. Set
     /// `MACCRAB_AGENT_TRACES=1` in the daemon's environment to enable
@@ -176,13 +179,50 @@ public final class ESCollector: @unchecked Sendable {
         "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer",
     ]
 
+    // MARK: - Credential-read allowlist (v1.17.4)
+    //
+    // The ONLY paths for which a NOTIFY_OPEN emits an Event. The OPEN stream
+    // is enormous, so this tight allowlist is the load-bearing bound on what
+    // reaches the detection pipeline — it mirrors the target paths of the
+    // credential-read rules (crypto_wallet_data_access, token_files_accessed,
+    // ai_tool_reads_ssh_keys, …) plus the canonical secret locations. Keep it
+    // tight; broadening it re-introduces the firehose. Pure + unit-tested
+    // (isCredentialReadPath) even though ES delivery itself is live-only.
+    static let credentialReadPathSubstrings: [String] = [
+        "/.ssh/",
+        "/.aws/credentials", "/.aws/config",
+        "/.config/gcloud/credentials", "/.config/gcloud/access_tokens",
+        "/.azure/accessTokens", "/.azure/msal_token_cache",
+        "/.kube/config", "/.docker/config.json",
+        "/.terraform.d/credentials", "/.config/gh/hosts.yml",
+        "/.npmrc", "/.pypirc", "/.netrc", "/.gnupg/",
+        "/Library/Keychains/",
+        "Application Support/Electrum/wallets/",
+        "Application Support/Exodus/exodus.wallet/",
+        "/.ethereum/keystore/",
+        // browser-extension wallet storage (specific extension ids)
+        "/Local Extension Settings/hnfanknocfeofbddgcijnmhnfnkdnaad",  // Coinbase Wallet
+        "/Local Extension Settings/fhbohimaelbohpjbbldcngcnapndodjp",  // Binance Chain Wallet
+        "/Local Extension Settings/egjidjbpglichdcondbcbdnbeeppgdph",  // Trust Wallet
+    ]
+
+    /// True iff `path` is a credential/secret location worth emitting an OPEN
+    /// (read) event for. The hot-path early-out for NOTIFY_OPEN.
+    static func isCredentialReadPath(_ path: String) -> Bool {
+        for substring in credentialReadPathSubstrings where path.contains(substring) {
+            return true
+        }
+        return false
+    }
+
     // MARK: - Initialisation
 
     /// Creates a new ES client, subscribes to events, and begins emitting
     /// `Event` values on the `events` stream.
     ///
     /// - Throws: `ESCollectorError` if the client cannot be created.
-    public init() throws {
+    public init(subscribeFileOpen: Bool = true) throws {
+        self.subscribeFileOpen = subscribeFileOpen
         // Build the AsyncStream and capture the continuation so the
         // ES callback can yield events into it.
         var capturedContinuation: AsyncStream<Event>.Continuation!
@@ -283,7 +323,11 @@ public final class ESCollector: @unchecked Sendable {
         guard let client = self.client else {
             throw ESCollectorError.notRunning
         }
-        let events = Self.subscribedEvents
+        var events = Self.subscribedEvents
+        // v1.17.4: NOTIFY_OPEN is enormous system-wide, so emission is bounded
+        // to a tight credential-dir allowlist in the handler (isCredentialReadPath).
+        // Gated so an operator can disable it if the firehose ever degrades a host.
+        if subscribeFileOpen { events.append(ES_EVENT_TYPE_NOTIFY_OPEN) }
         let result = events.withUnsafeBufferPointer { buffer -> es_return_t in
             es_subscribe(client, buffer.baseAddress!, UInt32(buffer.count))
         }
@@ -547,6 +591,27 @@ public final class ESCollector: @unchecked Sendable {
                 eventAction: "write",
                 process: processInfo,
                 file: fileInfo,
+                severity: .informational
+            )
+
+        case ES_EVENT_TYPE_NOTIFY_OPEN:
+            // v1.17.4: emit ONLY for credential/secret paths. The OPEN
+            // firehose is enormous system-wide; the in-process allowlist
+            // (isCredentialReadPath) is the load-bearing bound AND the
+            // cheapest possible early-out for the ~all non-credential opens
+            // (a single substring check, then return). Revives the
+            // "credential file READ by untrusted process" rule class, dead
+            // until now because no OPEN event was ever emitted.
+            let openEvent = msg.event.open
+            let openPath = esFileToPath(openEvent.file)
+            guard Self.isCredentialReadPath(openPath) else { return nil }
+            return Event(
+                timestamp: timestamp,
+                eventCategory: .file,
+                eventType: .change,
+                eventAction: "open",
+                process: processInfo,
+                file: FileInfo(path: openPath, action: .open),
                 severity: .informational
             )
 

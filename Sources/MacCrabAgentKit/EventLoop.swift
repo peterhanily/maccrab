@@ -252,7 +252,7 @@ enum EventLoop {
                                 kind = .fileWrite(path: file.path)
                             case .delete:
                                 kind = .fileWrite(path: file.path)
-                            case .close:
+                            case .close, .open:
                                 kind = .fileRead(path: file.path)
                             }
                             await state.agentLineageService.record(
@@ -1970,34 +1970,15 @@ enum EventLoop {
                         }
                     }
 
-                    // Write JSON alert to log file (with rotation at 50MB)
-                    if let jsonData = try? JSONEncoder().encode(alert),
-                       let jsonString = String(data: jsonData, encoding: .utf8) {
-                        let logPath = state.supportDir + "/alerts.jsonl"
-                        // Rotate if over 50MB
-                        if let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
-                           let size = attrs[.size] as? UInt64, size > 50_000_000 {
-                            let rotatedPath = logPath + ".\(Int(Date().timeIntervalSince1970))"
-                            try? FileManager.default.moveItem(atPath: logPath, toPath: rotatedPath)
-                            // Keep only last 5 rotated files
-                            let dir = (logPath as NSString).deletingLastPathComponent
-                            if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
-                                let rotated = files.filter { $0.hasPrefix("alerts.jsonl.") }.sorted().reversed()
-                                for old in rotated.dropFirst(5) {
-                                    try? FileManager.default.removeItem(atPath: dir + "/" + old)
-                                }
-                            }
-                        }
-                        // Atomic append -- use O_APPEND to avoid seek+write race
-                        let lineData = (jsonString + "\n").data(using: .utf8)!
-                        let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o600)
-                        if fd >= 0 {
-                            lineData.withUnsafeBytes { ptr in
-                                _ = write(fd, ptr.baseAddress!, ptr.count)
-                            }
-                            close(fd)
-                        }
-                    }
+                    // v1.17.4: removed the always-on inline alerts.jsonl writer.
+                    // It dual-wrote the file (its own 50 MB/keep-5 rotation)
+                    // alongside the configurable FileOutput sink (100 MB rotation)
+                    // — two code paths, conflicting rotation, on the same default
+                    // path. No code reads alerts.jsonl; AlertStore (alerts.db) is
+                    // the canonical, queryable alert store. Operators who want a
+                    // local NDJSON tail configure a `file` output (daemon_config
+                    // `outputs`), which flows through `state.additionalOutputs`
+                    // below as the single writer.
 
                     // Webhook output (Phase 3)
                     if let webhook = state.webhookOutput {
