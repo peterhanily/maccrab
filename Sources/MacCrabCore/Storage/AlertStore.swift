@@ -820,6 +820,21 @@ public actor AlertStore {
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
+    /// v1.18: read-only count of UNSUPPRESSED alerts for a campaign — the
+    /// pre-flight for the MCP `suppress_campaign` fan-out confirmation. Uses
+    /// the IDENTICAL predicate as `suppress(campaignId:)` so the count and
+    /// the subsequent UPDATE agree exactly.
+    public func countByCampaign(campaignId id: String) throws -> Int {
+        let sql = "SELECT COUNT(*) FROM alerts WHERE campaign_id = ?1 AND suppressed = 0"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw AlertStoreError.stepFailed("Failed to count alerts by campaign")
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
     /// Marks an alert as suppressed.
     ///
     /// - Parameter id: The alert's unique identifier.

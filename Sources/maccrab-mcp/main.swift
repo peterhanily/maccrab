@@ -8,7 +8,7 @@
 //   get_events         — Query recent events with category filtering
 //   get_campaigns      — List detected attack campaigns
 //   get_status         — Daemon status, rule count, event stats
-//   hunt               — Natural language threat hunting (SQL generation)
+//   hunt               — Full-text threat hunting (FTS over events)
 //   get_security_score — System security posture score with factors
 //   suppress_alert     — Suppress an alert by ID
 //   get_alert_detail   — Full alert detail: description, LLM investigation, D3FEND, ancestry
@@ -189,6 +189,16 @@ func writeJSON(_ obj: Any) {
     }
 }
 
+/// MCP CallToolResult failure shape. Validation failures, not-found, and
+/// thrown exceptions set `isError: true` so an agent reads them as errors,
+/// not as data. (Empty result SETS and successful verdicts stay
+/// success-shaped — they are not tool failures.) The dispatcher merges this
+/// dict into the JSON-RPC `result` envelope and only rewrites `content[].text`,
+/// so the `isError` key rides through untouched, per the MCP schema.
+func toolError(_ message: String) -> [String: Any] {
+    ["isError": true, "content": [["type": "text", "text": message]]]
+}
+
 // MARK: - Tool Definitions
 
 let tools: [[String: Any]] = [
@@ -238,11 +248,11 @@ let tools: [[String: Any]] = [
     ],
     [
         "name": "hunt",
-        "description": "Search for threats using a natural language query or SQL. Examples: 'show unsigned processes with network connections', 'find critical alerts from the last hour', 'processes connecting to unusual ports'.",
+        "description": "Full-text threat hunting across events (FTS phrase / substring search over the event stream). Examples: 'ssh', 'launchctl', 'unsigned'. Note: this is a text search, not a natural-language or SQL interpreter.",
         "inputSchema": [
             "type": "object",
             "properties": [
-                "query": ["type": "string", "description": "Natural language threat hunting query or SQL SELECT"],
+                "query": ["type": "string", "description": "Full-text threat-hunting query (FTS phrase / substring match over events)"],
                 "limit": ["type": "integer", "description": "Max results to return (default 50, max 100)", "default": 50],
             ],
             "required": ["query"],
@@ -282,6 +292,7 @@ let tools: [[String: Any]] = [
             "type": "object",
             "properties": [
                 "campaign_id": ["type": "string", "description": "The campaign alert ID to suppress (from get_campaigns)"],
+                "confirm": ["type": "boolean", "description": "Set true to proceed when the campaign would suppress more than 50 contributing alerts (required for large fan-outs)"],
             ],
             "required": ["campaign_id"],
         ] as [String: Any],
@@ -599,6 +610,22 @@ let tools: [[String: Any]] = [
 // MARK: - Tool Handlers
 
 let dataDir = resolveDataDir()
+
+/// v1.18: per-process suppression budget — defense-in-depth over the audit
+/// log so a misbehaving agent can't mass-suppress across a session. Shared
+/// by suppress_alert AND suppress_campaign so the campaign path can't bypass
+/// the per-alert cap. Per-process (an agent restarting the server resets it,
+/// hence the separate fan-out confirm on suppress_campaign for bulk hits).
+actor SuppressBudget {
+    private var used = 0
+    let limit = 50
+    func tryConsume() -> Bool {
+        if used >= limit { return false }
+        used += 1
+        return true
+    }
+}
+let suppressBudget = SuppressBudget()
 
 func handleToolCall(name: String, args: [String: Any]) async -> Any {
     switch name {
@@ -1279,12 +1306,17 @@ func handleGetSecurityScore() async -> Any {
 
 func handleSuppressAlert(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'alert_id' parameter is required"]]]
+        return toolError("'alert_id' parameter is required")
     }
 
     // Input validation: alert IDs are UUIDs
     guard alertId.count <= 64 else {
-        return ["content": [["type": "text", "text": "Error: invalid alert_id format"]]]
+        return toolError("invalid alert_id format")
+    }
+
+    // v1.18: per-session suppression budget (defense-in-depth over the audit log).
+    guard await suppressBudget.tryConsume() else {
+        return toolError("suppress budget exhausted (max \(suppressBudget.limit) per server session) — restart the MCP session or use the dashboard for bulk suppression")
     }
 
     // Audit log: state-modifying operation
@@ -1295,7 +1327,7 @@ func handleSuppressAlert(_ args: [String: Any]) async -> Any {
         try await store.suppress(alertId: alertId)
         return ["content": [["type": "text", "text": "Alert \(alertId) suppressed successfully."]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error suppressing alert: \(error.localizedDescription)"]]]
+        return toolError("suppressing alert: \(error.localizedDescription)")
     }
 }
 
@@ -1364,16 +1396,31 @@ func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
 
 func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
     guard let campaignId = args["campaign_id"] as? String, !campaignId.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'campaign_id' parameter is required"]]]
+        return toolError("'campaign_id' parameter is required")
     }
     guard campaignId.count <= 64 else {
-        return ["content": [["type": "text", "text": "Error: invalid campaign_id format"]]]
+        return toolError("invalid campaign_id format")
     }
 
-    auditLog("suppress_campaign", details: "campaign_id=\(campaignId) ppid=\(getppid())")
+    // v1.18: per-session suppression budget (shared with suppress_alert).
+    guard await suppressBudget.tryConsume() else {
+        return toolError("suppress budget exhausted (max \(suppressBudget.limit) per server session) — restart the MCP session or use the dashboard for bulk suppression")
+    }
 
     do {
         let store = try AlertStore(directory: dataDir)
+
+        // v1.18: fan-out confirmation. A campaign can suppress many alerts;
+        // require an explicit confirm for large fan-outs so an agent can't
+        // mass-suppress in one call. The pre-count uses the SAME predicate as
+        // suppress(campaignId:) so the gate and the mutation agree exactly.
+        let pending = (try? await store.countByCampaign(campaignId: campaignId)) ?? 0
+        let confirmed = (args["confirm"] as? Bool) == true
+        if pending > 50 && !confirmed {
+            return toolError("suppress_campaign would suppress \(pending) contributing alerts — re-call with confirm:true to proceed, or use the dashboard for bulk suppression.")
+        }
+
+        auditLog("suppress_campaign", details: "campaign_id=\(campaignId) pending=\(pending) confirm=\(confirmed) ppid=\(getppid())")
 
         // Suppress the campaign alert itself.
         try await store.suppress(alertId: campaignId)
@@ -1386,7 +1433,7 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
         let extra = count == 0 ? "" : " Also suppressed \(count) contributing alert(s)."
         return ["content": [["type": "text", "text": "Campaign \(campaignId) suppressed.\(extra)"]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]]]
+        return toolError("\(error.localizedDescription)")
     }
 }
 
