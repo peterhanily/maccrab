@@ -1073,8 +1073,27 @@ enum DaemonTimers {
             let payloadTruncatedTotal = await state.eventStore.payloadTruncatedTotal()
             let esloggerDroppedTotal = await state.esloggerCollector?.getDroppedEventCount() ?? 0
 
+            // v1.18: engine LLM health — surfaces "enabled but unreachable /
+            // misconfigured model" instead of failing silently. nil service
+            // → not configured for the engine.
+            let llmHealthDict: [String: Any]
+            if let h = await state.llmService?.healthSnapshot() {
+                llmHealthDict = [
+                    "configured": true,
+                    "provider": h.provider,
+                    "model": h.model,
+                    "last_success_unix": h.lastSuccessAtUnix ?? 0,
+                    "consecutive_failures": h.consecutiveFailures,
+                    "circuit_open": h.circuitOpen,
+                    "healthy": h.lastSuccessAtUnix != nil && !h.circuitOpen,
+                ]
+            } else {
+                llmHealthDict = ["configured": false]
+            }
+
             let payload: [String: Any] = [
                 "written_at_unix": nowUnix,
+                "llm": llmHealthDict,
                 "uptime_seconds": uptime,
                 "events_processed": events,
                 "alerts_emitted": alerts,

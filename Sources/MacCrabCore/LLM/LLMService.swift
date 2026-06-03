@@ -7,6 +7,17 @@
 import Foundation
 import os.log
 
+/// v1.18: engine LLM health snapshot, surfaced in heartbeat_rich.json so an
+/// "enabled but unreachable / misconfigured" backend is visible instead of
+/// failing silently. Sendable so it can cross the actor boundary.
+public struct LLMHealth: Sendable {
+    public let provider: String
+    public let model: String
+    public let lastSuccessAtUnix: Double?
+    public let consecutiveFailures: Int
+    public let circuitOpen: Bool
+}
+
 public actor LLMService {
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "service")
 
@@ -30,6 +41,13 @@ public actor LLMService {
     private var totalCalls: Int = 0
     private var cacheHits: Int = 0
 
+    /// v1.18: health observability — timestamp of the last successful
+    /// backend response + the configured provider/model labels, so
+    /// "enabled but never succeeded" is distinguishable from "working".
+    private var lastSuccessAt: Date?
+    private let providerLabel: String
+    private let modelLabel: String
+
     public init(backend: any LLMBackend, config: LLMConfig,
                 cache: LLMCache = LLMCache()) {
         self.backend = backend
@@ -45,6 +63,33 @@ public actor LLMService {
                 || config.ollamaURL.contains("127.0.0.1")
                 || config.ollamaURL.contains("::1"))
         self.shouldSanitize = !isLocalProvider && config.sanitizeForCloud
+        self.providerLabel = config.provider.rawValue
+        switch config.provider {
+        case .ollama:  self.modelLabel = config.ollamaModel
+        case .claude:  self.modelLabel = config.claudeModel
+        case .openai:  self.modelLabel = config.openaiModel
+        case .mistral: self.modelLabel = config.mistralModel
+        case .gemini:  self.modelLabel = config.geminiModel
+        }
+    }
+
+    /// Reset the failure counter AND stamp the last-success time. Called on
+    /// every successful backend response (regular + extended-thinking paths).
+    private func markSuccess() {
+        consecutiveFailures = 0
+        lastSuccessAt = Date()
+    }
+
+    /// v1.18: current LLM health for the heartbeat. Pure read of internal
+    /// state; safe to call from the heartbeat timer.
+    public func healthSnapshot() -> LLMHealth {
+        LLMHealth(
+            provider: providerLabel,
+            model: modelLabel,
+            lastSuccessAtUnix: lastSuccessAt?.timeIntervalSince1970,
+            consecutiveFailures: consecutiveFailures,
+            circuitOpen: Date() < circuitOpenUntil
+        )
     }
 
     /// Build an `LLMService` from an `LLMConfig`, picking the right
@@ -175,7 +220,7 @@ public actor LLMService {
             return nil
         }
 
-        consecutiveFailures = 0  // Reset on success
+        markSuccess()  // reset failures + stamp last-success time
 
         // Response size guard
         guard response.count <= maxResponseSize else {
@@ -253,7 +298,7 @@ public actor LLMService {
             return nil
         }
 
-        consecutiveFailures = 0
+        markSuccess()  // reset failures + stamp last-success time
         guard response.count <= maxResponseSize else {
             logger.warning("LLM extended-thinking response too large, discarding")
             return nil
