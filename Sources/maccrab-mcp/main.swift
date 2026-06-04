@@ -1854,7 +1854,7 @@ func handleForensicsListPlugins(_ args: [String: Any]) async -> Any {
 func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
     guard let pluginID = args["plugin_id"] as? String,
           let caseID = args["case_id"] as? String else {
-        return ["content": [["type": "text", "text": "missing required arguments: plugin_id, case_id"]]]
+        return toolError("missing required arguments: plugin_id, case_id")
     }
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
@@ -1919,7 +1919,7 @@ func handleForensicsSearchArtifacts(_ args: [String: Any]) async -> Any {
 func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
     guard let caseID = args["case_id"] as? String,
           let artifactID = args["artifact_id"] as? Int else {
-        return ["content": [["type": "text", "text": "missing required arguments: case_id, artifact_id"]]]
+        return toolError("missing required arguments: case_id, artifact_id")
     }
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()

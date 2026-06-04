@@ -34,11 +34,24 @@ detection:
             - 'RemoteManagement'
             - 'ScreenSharing'
     selection_enable:
+        # Enable-ish verbs. 'load' also substring-matches 'unload' and
+        # 'activate' matches 'deactivate'; filter_disable below removes those
+        # so the rule fires only on ENABLE, not disable/query. (L1)
         CommandLine|contains:
             - 'load'
             - 'enable'
-            - 'on'
-            - 'true'
+            - 'kickstart'
+            - 'activate'
+            - 'bootstrap'
+            - 'setremotelogin on'
+    filter_disable:
+        # Disable/teardown operations must NOT trip an "enabled" alert.
+        CommandLine|contains:
+            - 'unload'
+            - 'bootout'
+            - 'disable'
+            - 'deactivate'
+            - 'setremotelogin off'
     filter_apple:
         SignerType:
             - 'apple'
@@ -46,7 +59,7 @@ detection:
     filter_system:
         ParentImage|startswith:
             - '/System/'
-    condition: selection_tool and selection_service and not filter_apple and not filter_system
+    condition: selection_tool and selection_service and selection_enable and not filter_disable and not filter_apple and not filter_system
 falsepositives:
     - IT management and MDM solutions (Jamf, Mosyle, Kandji)
     - System administrators enabling remote access intentionally
