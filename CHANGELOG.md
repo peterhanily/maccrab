@@ -3,6 +3,49 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.5] — 2026-06-04
+
+A security and detection-precision release on top of v1.17.4: closes a
+local exfiltration gap in the engine's LLM-configuration path, completes
+credential-read coverage, sharpens several rules against evasion and
+false positives, and fixes a Homebrew upgrade that could disturb the
+system extension.
+
+### Fixed
+
+- **LLM endpoint hardening.** The engine now strictly validates that a
+  configured local LLM endpoint is genuinely loopback (IPv4-literal parse,
+  not a textual prefix) before trusting it, so a hostname crafted to look
+  local can't redirect the engine's LLM traffic to an external host or
+  bypass prompt sanitization.
+- **Homebrew upgrades no longer disturb the system extension.** The cask
+  uninstall step previously ran on `brew upgrade` and could tear down the
+  Endpoint Security extension mid-upgrade; it no longer does. Deactivation
+  on a true uninstall is handled by the in-app control or the bundled
+  uninstall script.
+- **Cryptocurrency-wallet read coverage.** Credential-read detection now
+  covers the full set of wallets the rule targets (MetaMask, Phantom,
+  Atomic, Coinomi, and others) rather than a subset; a build-time check
+  keeps the open-monitoring allowlist in sync with the rule.
+- **Credential reads in the trace graph.** File-open/read events now map
+  into the causal graph, so multi-step credential-access traces
+  materialize.
+
+### Improved
+
+- **Detection precision.** Shell-nesting and keychain/`sudo` lineage
+  filters now match at path-component boundaries (closing an evasion gap
+  such as staging under a `node_modules` path and removing collisions like
+  `screen` vs `screensharingd`); the Wi-Fi extraction rule again matches
+  `security find-generic-password -ga`; keychain open-monitoring drops the
+  high-volume platform-binary (`securityd`) opens.
+- **MCP error reporting.** Tool failures / invalid arguments across the
+  hunt, cluster, trace, package, and forensics tools now report as errors.
+- **Engine open-event handling** no longer builds process metadata for the
+  discarded majority of file opens before the credential-path check.
+- **Dashboard.** The Investigation view reads engine LLM health off the
+  main thread.
+
 ## [1.17.4] — 2026-06-03
 
 A reliability and detection-quality release: bounds runaway disk/CPU

@@ -30,7 +30,7 @@ public enum MacCrabVersion {
     /// Build-time version string. Bumped manually each release; the
     /// prerelease-check script verifies this matches `release.json`,
     /// the cask, and the Info.plist values.
-    public static let fallback: String = "1.17.4"
+    public static let fallback: String = "1.17.5"
 
     /// Best available version string. Reads `CFBundleShortVersionString`
     /// from the host bundle when present, otherwise returns
