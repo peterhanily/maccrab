@@ -110,7 +110,8 @@ struct V2HeartbeatSnapshotTests {
             eventTypeCounts1h: eventTypeCounts1h,
             collectors: [],
             payloadTruncatedTotal: 0,
-            esloggerDroppedTotal: 0
+            esloggerDroppedTotal: 0,
+            llm: nil
         )
     }
 }
