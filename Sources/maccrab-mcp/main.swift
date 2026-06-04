@@ -1762,8 +1762,13 @@ import MacCrabForensics
 
 /// Lazy registry bootstrap shared across all forensics MCP tools.
 /// Subsequent calls are idempotent.
-@MainActor
-final class ForensicsMCPBootstrapper {
+// MUST NOT be @MainActor. The tools/call dispatch parks the MAIN THREAD on a
+// DispatchSemaphore (sem.wait), so a MainActor-isolated ensure() can never run
+// — it deadlocks every forensics tool (list_plugins / run_collector /
+// search_artifacts / get_artifact / timeline / explain_case / posture_findings)
+// while non-forensics tools work fine. An actor runs ensure() on its own
+// cooperative executor, off the (parked) main thread. (RC H1: was @MainActor.)
+actor ForensicsMCPBootstrapper {
     static let shared = ForensicsMCPBootstrapper()
     private var bootstrapped = false
     private init() {}
