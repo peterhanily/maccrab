@@ -130,6 +130,14 @@ struct DaemonConfig: Codable {
         /// Hard cap on the alerts.db file size, in MB.
         var alertsMaxSizeMB: Int = 100
 
+        /// Hard cap on the `alert_evidence` table (the +/- event window
+        /// snapshotted per alert, stored IN events.db). v1.17.5: this table
+        /// was governed only by age (alertsRetentionDays) + a per-alert row
+        /// cap, NOT by total size, so on a busy host it ballooned past the
+        /// events cap (field-observed 194 MB). Oldest rows are evicted once
+        /// the table's raw_json payload exceeds this. (RC H2)
+        var evidenceMaxSizeMB: Int = 100
+
         /// Campaign retention, in days. Campaigns are the highest-density
         /// signal in the store — even a year is tiny.
         var campaignsRetentionDays: Int = 365
@@ -437,6 +445,7 @@ struct DaemonConfig: Codable {
             if let v = storage["aggregateDays"]      as? Int { config.storage.aggregateDays = v }
             if let v = storage["alertsRetentionDays"]    as? Int { config.storage.alertsRetentionDays = v }
             if let v = storage["alertsMaxSizeMB"]    as? Int { config.storage.alertsMaxSizeMB = v }
+            if let v = storage["evidenceMaxSizeMB"]  as? Int { config.storage.evidenceMaxSizeMB = v }
             if let v = storage["campaignsRetentionDays"] as? Int { config.storage.campaignsRetentionDays = v }
             if let v = storage["campaignsMaxSizeMB"] as? Int { config.storage.campaignsMaxSizeMB = v }
             // v1.18.0: tracegraph + traces caps (were hardcoded in DaemonTimers).
@@ -490,6 +499,7 @@ struct DaemonConfig: Codable {
             "aggregate_days":                   "aggregateDays",
             "alerts_retention_days":            "alertsRetentionDays",
             "alerts_max_size_mb":               "alertsMaxSizeMB",
+            "evidence_max_size_mb":             "evidenceMaxSizeMB",
             "campaigns_retention_days":         "campaignsRetentionDays",
             "campaigns_max_size_mb":            "campaignsMaxSizeMB",
             "tracegraph_retention_days":        "tracegraphRetentionDays",

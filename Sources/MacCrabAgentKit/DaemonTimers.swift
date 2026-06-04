@@ -679,7 +679,8 @@ enum DaemonTimers {
                     capSizeMB: capMB,
                     hotTierMinutes: hotMinutes,
                     aggregateDays: aggregateDays,
-                    alertsRetentionDays: alertsRetention
+                    alertsRetentionDays: alertsRetention,
+                    evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB)
                 )
             }
         }
@@ -731,7 +732,8 @@ enum DaemonTimers {
                     capSizeMB: capMB,
                     hotTierMinutes: hotMinutes,
                     aggregateDays: aggregateDays,
-                    alertsRetentionDays: alertsRetention
+                    alertsRetentionDays: alertsRetention,
+                    evidenceMaxSizeMB: max(10, state.storage.evidenceMaxSizeMB)
                 )
             }
         }
@@ -1806,7 +1808,8 @@ func runAdaptiveRollupSweep(
     hotTierMinutes: Int = 30,
     aggregateDays: Int = 90,
     alertsRetentionDays: Int = 365,
-    evidencePerAlertCap: Int = 50
+    evidencePerAlertCap: Int = 50,
+    evidenceMaxSizeMB: Int = 100
 ) async {
     // v1.8.0-rc6: Prune oversized alert_evidence FIRST. On the field test
     // host, a single sweep found 802K evidence rows / 2.4 GB — the storage
@@ -1818,8 +1821,12 @@ func runAdaptiveRollupSweep(
         let evidenceCutoff = Date().addingTimeInterval(-Double(alertsRetentionDays) * 86400)
         let evictedByAge = (try? await eventStore.pruneAlertEvidence(olderThan: evidenceCutoff)) ?? 0
         let evictedByCap = (try? await eventStore.pruneAlertEvidenceCap(perAlertMax: evidencePerAlertCap)) ?? 0
-        if evictedByAge > 0 || evictedByCap > 0 {
-            logger.notice("alert_evidence prune: \(evictedByAge) by age (>\(alertsRetentionDays)d), \(evictedByCap) by per-alert cap (>\(evidencePerAlertCap) rows)")
+        // RC H2: total-size cap. Age + per-alert-cap don't bound total size,
+        // so on a busy host alert_evidence outgrew the events cap (194 MB).
+        let evidenceCapBytes = Int64(max(10, evidenceMaxSizeMB)) * 1_048_576
+        let evictedBySize = (try? await eventStore.pruneAlertEvidenceBySize(maxBytes: evidenceCapBytes)) ?? 0
+        if evictedByAge > 0 || evictedByCap > 0 || evictedBySize > 0 {
+            logger.notice("alert_evidence prune: \(evictedByAge) by age (>\(alertsRetentionDays)d), \(evictedByCap) by per-alert cap (>\(evidencePerAlertCap) rows), \(evictedBySize) by size (>\(evidenceMaxSizeMB) MB)")
         }
     }
 

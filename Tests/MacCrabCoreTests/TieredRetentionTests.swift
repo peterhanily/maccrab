@@ -85,6 +85,40 @@ struct TieredRetentionTests {
         #expect(evidence.count == 1)
     }
 
+    @Test("pruneAlertEvidenceBySize evicts oldest until under the byte cap (RC H2)")
+    func evidenceSizeCapEvictsOldest() async throws {
+        let (store, tmp) = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        // 30 alerts, each with one evidence row, spaced 1 min apart (oldest first).
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        var ids: [String] = []
+        for i in 0..<30 {
+            let t = base.addingTimeInterval(Double(i) * 60)
+            try await store.insert(event: sampleEvent(at: t))
+            let id = "alert-\(i)"
+            ids.append(id)
+            try await store.recordAlertEvidence(alertId: id, alertTimestamp: t)
+        }
+        // Measure one row's payload to set a cap that keeps ~10 rows.
+        let oneRow = try await store.evidenceFor(alertId: ids[0]).count
+        #expect(oneRow == 1)
+
+        // Cap above current size -> no-op.
+        let noop = try await store.pruneAlertEvidenceBySize(maxBytes: 100_000_000)
+        #expect(noop == 0)
+
+        // Cap of 0 / negative -> guard returns 0 (no deletion).
+        #expect(try await store.pruneAlertEvidenceBySize(maxBytes: 0) == 0)
+
+        // Tight cap with a tiny batch -> evicts the OLDEST rows, newest survive.
+        let deleted = try await store.pruneAlertEvidenceBySize(maxBytes: 1500, batchSize: 3)
+        #expect(deleted > 0)
+        // The oldest alert's evidence must be gone; the newest must remain.
+        #expect(try await store.evidenceFor(alertId: ids[0]).isEmpty)
+        #expect(try await store.evidenceFor(alertId: ids[29]).count == 1)
+    }
+
     @Test("evidenceFor returns empty for unknown alert id")
     func evidenceForUnknownAlertEmpty() async throws {
         let (store, tmp) = try makeTempStore()

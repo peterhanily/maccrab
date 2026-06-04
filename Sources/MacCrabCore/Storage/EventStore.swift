@@ -1694,6 +1694,44 @@ public actor EventStore {
         return Int(sqlite3_changes(db))
     }
 
+    /// v1.17.5 (RC H2): bound the alert_evidence table by TOTAL payload size.
+    /// Age + per-alert-cap pruning leave total size ungoverned, so on a busy
+    /// host the table outgrew the events cap (field-observed 194 MB inside the
+    /// 365-day window). Evicts the OLDEST rows across all alerts until the
+    /// raw_json payload total is <= maxBytes. Returns rows deleted.
+    @discardableResult
+    public func pruneAlertEvidenceBySize(maxBytes: Int64, batchSize: Int = 2000) async throws -> Int {
+        guard maxBytes > 0 else { return 0 }
+        let batch = max(1, batchSize)
+        func payloadBytes() throws -> Int64 {
+            let stmt = try prepare("SELECT COALESCE(SUM(LENGTH(raw_json)), 0) FROM alert_evidence")
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+            return sqlite3_column_int64(stmt, 0)
+        }
+        var total = try payloadBytes()
+        guard total > maxBytes else { return 0 }
+        var deleted = 0
+        // Delete oldest rows in batches until under the cap. Bounded to 4096
+        // iterations so a pathological table can't wedge the sweep.
+        for _ in 0..<4096 {
+            if total <= maxBytes { break }
+            let stmt = try prepare(
+                "DELETE FROM alert_evidence WHERE rowid IN (SELECT rowid FROM alert_evidence ORDER BY timestamp ASC LIMIT \(batch))")
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard rc == SQLITE_DONE else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+                throw EventStoreError.stepFailed("pruneAlertEvidenceBySize failed: \(msg)")
+            }
+            let n = Int(sqlite3_changes(db))
+            deleted += n
+            if n == 0 { break }
+            total = try payloadBytes()
+        }
+        return deleted
+    }
+
     /// Read events captured for `alertId` by `recordAlertEvidence`. Returns
     /// the surrounding ±windowSeconds of activity that the alert detail view
     /// renders. Empty if the alert pre-dates v1.8 evidence capture.
