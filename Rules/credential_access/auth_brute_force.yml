@@ -50,23 +50,17 @@ detection:
             - '/Dashlane'
             - '/KeePassXC'
     filter_interactive_terminal:
-        # v1.17.4: a keychain/sudo call whose FULL lineage includes an
-        # interactive terminal / SSH / multiplexer is almost always a human
-        # at a prompt, not an attack primitive. Same full-lineage token list
-        # as deep_shell_nesting.
-        ProcessAncestors|contains:
-            - '/Terminal'
-            - '/iTerm2'
-            - '/Alacritty'
-            - '/kitty'
-            - '/WarpTerminal'
-            - '/Ghostty'
-            - '/Hyper'
-            - '/login'
-            - '/sshd'
-            - '/tmux'
-            - '/screen'
-            - '/zellij'
+        # A keychain/sudo call whose FULL lineage includes an interactive
+        # terminal emulator / multiplexer is usually a human at a prompt.
+        # ABF-1: but do NOT exempt '/sshd' or '/login' — SSH is a primary
+        # attacker initial-access vector and interactive/reverse shells inherit
+        # an sshd/login ancestor, so exempting them gives post-compromise
+        # `sudo -S` / `security unlock-keychain` a free pass. Local GUI Terminal
+        # use stays exempt via the Terminal.app ancestor regardless. Also
+        # boundary-anchored so '/screen' (tmux/screen) no longer matches
+        # 'screensharingd' / 'ScreenFlow'. (?i) = case-insensitive.
+        ProcessAncestors|re:
+            - '(?i)(^|/|\n)(Terminal|iTerm2|Alacritty|kitty|WarpTerminal|Ghostty|Hyper|tmux|screen|zellij)(\n|$)'
     condition: (selection_sudo or selection_security_unlock) and not filter_apple and not filter_password_managers and not filter_interactive_terminal
 falsepositives:
     - Automated deployment scripts that pipe a sudo password

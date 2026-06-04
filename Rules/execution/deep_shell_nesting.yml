@@ -69,53 +69,20 @@ detection:
     filter_build_systems:
         # Build tools and language runtimes commonly create deep shell
         # nesting via wrapper scripts and post-install hooks.
-        ProcessAncestors|contains:
-            - '/make'
-            - '/gmake'
-            - '/ninja'
-            - '/cmake'
-            - '/xcodebuild'
-            - '/xcrun'
-            - '/node'
-            - '/npm'
-            - '/npx'
-            - '/pnpm'
-            - '/yarn'
-            - '/bun'
-            - '/deno'
-            - '/gradle'
-            - '/gradlew'
-            - '/mvnw'
-            - '/mvn'
-            - '/bazel'
-            - '/bazelisk'
-            - '/buck'
-            - '/cargo'
-            - '/rustup'
-            - '/brew'
-            - '/pip'
-            - '/pip3'
-            - '/uv'
-            - '/poetry'
-            - '/pipenv'
-            - '/tox'
-            - '/just'
-            - '/task'
-            - '/installer'
-            - '/package_script_service'
+        # DSN-1: ProcessAncestors is the newline-joined name+executable of the
+        # whole lineage, so a bare `|contains '/node'` also matched any
+        # ancestor path under '/node_modules/' (where supply-chain payloads
+        # run), '/installer' matched any 'installer*' dir, '/sdk' matched
+        # '/SDKs/', etc. — a suppression an attacker could stage into. Match
+        # each tool as a complete lineage entry instead: a name line, or a
+        # path basename, terminated by newline/end. (?i) = case-insensitive.
+        ProcessAncestors|re:
+            - '(?i)(^|/|\n)(make|gmake|ninja|cmake|xcodebuild|xcrun|node|npm|npx|pnpm|yarn|bun|deno|gradle|gradlew|mvnw|mvn|bazel|bazelisk|buck|cargo|rustup|brew|pip|pip3|poetry|pipenv|tox|just|task|installer|package_script_service|uv)(\n|$)'
     filter_env_managers:
         # Shell environment managers that legitimately spawn nested shells
-        # for shimming / activation.
-        ProcessAncestors|contains:
-            - '/direnv'
-            - '/asdf'
-            - '/mise'
-            - '/nvm'
-            - '/pyenv'
-            - '/rbenv'
-            - '/jenv'
-            - '/sdkman-init.sh'
-            - '/sdk'
+        # for shimming / activation. Boundary-anchored (see filter_build_systems).
+        ProcessAncestors|re:
+            - '(?i)(^|/|\n)(direnv|asdf|mise|nvm|pyenv|rbenv|jenv|sdkman-init\.sh|sdk)(\n|$)'
     filter_ci_cd:
         # CI/CD agents and automation tools
         ProcessAncestors|contains:
