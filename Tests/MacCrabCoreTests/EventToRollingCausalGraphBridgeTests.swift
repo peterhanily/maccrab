@@ -177,6 +177,32 @@ struct EventToRollingCausalGraphBridgeTests {
         await store.close()
     }
 
+    @Test("mapAction wires the v1.17.4 file actions into the causal graph (ES-OPEN-3)")
+    func mapActionCoversNewFileActions() async throws {
+        let (store, dbPath) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: dbPath) }
+        let materializer = TraceMaterializer(store: store)
+        let rollingGraph = RollingCausalGraph(store: store, materializer: materializer)
+        let bridge = EventToRollingCausalGraphBridge(rollingGraph: rollingGraph)
+
+        func isFileRead(_ a: RollingCausalGraph.NormalizedEventInput.Action?) -> Bool {
+            if case .fileRead = a { return true }; return false
+        }
+        func isFileWrite(_ a: RollingCausalGraph.NormalizedEventInput.Action?) -> Bool {
+            if case .fileWrite = a { return true }; return false
+        }
+
+        // The headline regression: ESCollector emits "open" for credential
+        // reads — it MUST map to a read leg, not be dropped.
+        #expect(isFileRead(bridge.mapAction("open")))
+        #expect(isFileRead(bridge.mapAction("read")))          // legacy alias still maps
+        // A modified-close is a completed write session.
+        #expect(isFileWrite(bridge.mapAction("close_modified")))
+        #expect(isFileWrite(bridge.mapAction("write")))        // control
+        #expect(bridge.mapAction("fchmod") == nil)             // genuinely-unknown still dropped
+        await store.close()
+    }
+
     @Test("Unknown event action is silently dropped (returns no traces, no error)")
     func unknownActionDropped() async throws {
         let (store, dbPath) = try await makeStore()

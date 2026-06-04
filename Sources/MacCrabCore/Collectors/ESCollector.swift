@@ -197,13 +197,34 @@ public final class ESCollector: @unchecked Sendable {
         "/.terraform.d/credentials", "/.config/gh/hosts.yml",
         "/.npmrc", "/.pypirc", "/.netrc", "/.gnupg/",
         "/Library/Keychains/",
+        // Deception: any READ of a deployed decoy / honey-prompt is the
+        // signal itself (MacCrab's own opens are muted via muteSelf, so a
+        // hit here is always a third party). Rescues the critical
+        // canary_skill_or_rules_read rule, dead until OPEN emission covered
+        // this prefix. (Deployed $HOME honeyfiles at arbitrary paths still
+        // need a manifest-sourced allowlist — tracked as a follow-up.)
+        "Application Support/MacCrab/decoys/",
+        // Native desktop wallets — full mirror of crypto_wallet_data_access.yml
+        // selection_native_wallets (kept in sync by ESCredentialReadAllowlistTests).
         "Application Support/Electrum/wallets/",
         "Application Support/Exodus/exodus.wallet/",
+        "Application Support/Atomic/Local Storage/",
+        "Application Support/Coinomi/",
+        "Application Support/Daedalus/",
+        "Application Support/monero-project/",
+        "Application Support/Trezor Suite/",
+        "Application Support/Ledger Live/",
+        "Library/Containers/io.trezor.TrezorSuite/",
         "/.ethereum/keystore/",
-        // browser-extension wallet storage (specific extension ids)
+        // Browser-extension wallet storage (specific extension ids) — full
+        // mirror of selection_browser_extension_wallets.
+        "/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn",  // MetaMask
+        "/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa",  // Phantom (Solana)
         "/Local Extension Settings/hnfanknocfeofbddgcijnmhnfnkdnaad",  // Coinbase Wallet
         "/Local Extension Settings/fhbohimaelbohpjbbldcngcnapndodjp",  // Binance Chain Wallet
         "/Local Extension Settings/egjidjbpglichdcondbcbdnbeeppgdph",  // Trust Wallet
+        "/Local Extension Settings/lmenefjjbnabbnchedhpaichpfphndbg",  // WalletConnect
+        "/Local Extension Settings/efbglgofoippbgcjepnhiblaibcnclgk",  // MetaMask Flask (dev)
     ]
 
     /// True iff `path` is a credential/secret location worth emitting an OPEN
@@ -213,6 +234,16 @@ public final class ESCollector: @unchecked Sendable {
             return true
         }
         return false
+    }
+
+    /// True iff `path` is an on-disk keychain database the keychain read-rules
+    /// target (`/Keychains/…(.keychain-db|.keychain)`). Used to drop the
+    /// high-frequency platform-binary (securityd / Security.framework) opens at
+    /// emission so the credential allowlist stays a tight firehose bound —
+    /// those rules only flag NON-Apple openers anyway. (ES-OPEN-5)
+    static func isKeychainPath(_ path: String) -> Bool {
+        return path.contains("/Keychains/")
+            && (path.hasSuffix(".keychain-db") || path.hasSuffix(".keychain"))
     }
 
     // MARK: - Initialisation
@@ -475,6 +506,25 @@ public final class ESCollector: @unchecked Sendable {
             timeIntervalSince1970: TimeInterval(msg.time.tv_sec) + TimeInterval(msg.time.tv_nsec) / 1_000_000_000
         )
 
+        // v1.17.4 hot-path guard (ES-OPEN-4): the NOTIFY_OPEN firehose is
+        // system-wide and ~all opens are discarded by the credential
+        // allowlist. Do the cheap path check (a substring scan + a bool
+        // field) BEFORE the heap-allocating processFromESProcess build, so
+        // the discarded majority costs almost nothing. Otherwise the ES
+        // callback queue backpressures under a heavy open rate and the
+        // kernel silently DROPS messages across ALL event types.
+        if msg.event_type == ES_EVENT_TYPE_NOTIFY_OPEN {
+            let openPath = esFileToPath(msg.event.open.file)
+            guard isCredentialReadPath(openPath) else { return nil }
+            // ES-OPEN-5: keychain DBs are opened constantly by securityd /
+            // the Security framework (platform binaries) for every keychain
+            // query; the keychain read-rules only care about non-Apple
+            // openers, so drop the platform-binary case here.
+            if isKeychainPath(openPath) && msg.process.pointee.is_platform_binary {
+                return nil
+            }
+        }
+
         // Source process
         let esProcess = msg.process
         let processInfo = processFromESProcess(esProcess)
@@ -595,13 +645,14 @@ public final class ESCollector: @unchecked Sendable {
             )
 
         case ES_EVENT_TYPE_NOTIFY_OPEN:
-            // v1.17.4: emit ONLY for credential/secret paths. The OPEN
-            // firehose is enormous system-wide; the in-process allowlist
-            // (isCredentialReadPath) is the load-bearing bound AND the
-            // cheapest possible early-out for the ~all non-credential opens
-            // (a single substring check, then return). Revives the
-            // "credential file READ by untrusted process" rule class, dead
-            // until now because no OPEN event was ever emitted.
+            // v1.17.4: emit ONLY for credential/secret paths. The firehose
+            // bound (isCredentialReadPath + the platform-binary keychain
+            // drop) is enforced upstream BEFORE processInfo is built — see
+            // the hot-path guard at the top of normalise — so reaching here
+            // means the path already passed. The recompute below is the
+            // defensive re-check and only runs on the rare matched open.
+            // Revives the "credential file READ by untrusted process" rule
+            // class, dead until now because no OPEN event was ever emitted.
             let openEvent = msg.event.open
             let openPath = esFileToPath(openEvent.file)
             guard Self.isCredentialReadPath(openPath) else { return nil }

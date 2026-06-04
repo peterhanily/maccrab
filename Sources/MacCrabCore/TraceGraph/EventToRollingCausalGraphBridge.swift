@@ -193,13 +193,24 @@ public actor EventToRollingCausalGraphBridge {
         }
     }
 
-    private func mapAction(_ action: String) -> RollingCausalGraph.NormalizedEventInput.Action? {
+    // nonisolated (pure string→enum switch, no actor state) + internal so
+    // the v1.17.4 file-action mapping can be pinned directly by
+    // EventToRollingCausalGraphBridgeTests (ES-OPEN-3).
+    nonisolated func mapAction(_ action: String) -> RollingCausalGraph.NormalizedEventInput.Action? {
         switch action.lowercased() {
         case "exec":         return .exec
         case "exit":         return .exit
         case "create":       return .fileCreate
         case "write":        return .fileWrite
-        case "read":         return .fileRead
+        // "open" is the credential-read action emitted by ESCollector /
+        // KdebugCollector NOTIFY_OPEN (v1.17.4); "read" is a legacy alias
+        // no collector emits but kept so a future one maps cleanly. Without
+        // these the headline credential-READ leg never enters the causal
+        // substrate. (ES-OPEN-3)
+        case "open", "read": return .fileRead
+        // A modified-close is a completed write session; map to .fileWrite
+        // (not .fileRead) so it lands on the write side of the graph.
+        case "close_modified": return .fileWrite
         case "rename":       return .fileRename
         case "unlink",
              "delete":       return .fileDelete
