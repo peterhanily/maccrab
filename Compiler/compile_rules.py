@@ -118,6 +118,11 @@ _KNOWN_PASSTHROUGH_FIELDS = {
     "FileAction", "FileContent",
     # Code signing enrichment fields
     "NotarizationStatus", "Architecture",
+    # v1.18 introspection (actor->target) enrichment fields, set by ESCollector
+    # for get_task_read / trace / remote_thread_create events and resolved via
+    # RuleEngine's enrichment passthrough.
+    "TargetImage", "TargetProcessName", "TargetSignerType", "TargetPid",
+    "TargetIsSelf", "SameTeam",
     # --- Phase 1 enrichment fields (hashes, session, signing) ---
     # Hash fingerprints populated by ProcessHasher/FileHasher enrichers.
     "ProcessSHA256", "ProcessCDHash", "ProcessMD5",

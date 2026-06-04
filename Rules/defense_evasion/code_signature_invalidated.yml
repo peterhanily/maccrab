@@ -1,29 +1,36 @@
 title: Code Signature Invalidated at Runtime
 id: d1a2b3c4-0430-4000-a000-000000000430
-# v1.17.4: DEPRECATED — logsource.category 'es_event' is never dispatched by
-# the engine, and NOTIFY_CS_INVALIDATED is not subscribed by ESCollector.
-# Doubly dead; parked disabled until that ES plumbing exists.
-status: deprecated
+status: experimental
 description: >
-    Detects NOTIFY_CS_INVALIDATED events indicating a binary's code signature
-    has become invalid at runtime. This can indicate runtime tampering,
-    self-modifying code, or an attacker patching a signed binary in memory
-    to bypass code signing enforcement.
+    Detects a process whose code signature became invalid at runtime
+    (ES NOTIFY_CS_INVALIDATED) — runtime patching of a signed binary in memory,
+    self-modifying code, or an attacker bypassing code-signing enforcement.
+    This is a self-event (TargetIsSelf=true): the process invalidated its OWN
+    signature.
+
+    v1.18: revived onto the real ES event. The dominant false positive is
+    legitimate JIT (Electron/Chromium/Node/Java/LLVM) which invalidates the
+    signature as part of normal dynamic codegen, so those runtimes are filtered
+    by path; Apple-signed processes clear via SignerType + NoiseFilter. What
+    remains — a non-Apple, non-JIT binary tampering its own signature — is high
+    signal.
 author: MacCrab Community
 date: 2026/04/05
+modified: 2026/06/04
 references:
     - https://attack.mitre.org/techniques/T1553/002/
 tags:
     - attack.defense_evasion
     - attack.t1553.002
 logsource:
-    category: es_event
+    category: process_event
     product: macos
-    service: cs_invalidated
 detection:
     selection:
-        EventType: 'NOTIFY_CS_INVALIDATED'
-    filter_known_tools:
+        event.action: 'cs_invalidated'
+    filter_apple:
+        SignerType: 'apple'
+    filter_jit_tools:
         Image|endswith:
             - '/Electron'
             - '/electron'
@@ -34,15 +41,15 @@ detection:
             - '/Chromium Helper'
             - '/node'
             - '/java'
-    filter_electron_path:
+            - '/mono'
+            - '/dotnet'
+    filter_jit_frameworks:
         Image|contains:
             - '.app/Contents/Frameworks/Electron Framework.framework/'
             - '.app/Contents/Frameworks/Chromium Embedded Framework.framework/'
-    filter_apple:
-        SignerType: 'apple'
-    condition: selection and not filter_known_tools and not filter_electron_path and not filter_apple
+            - '/Contents/Frameworks/Squirrel.framework/'
+    condition: selection and not filter_apple and not filter_jit_tools and not filter_jit_frameworks
 falsepositives:
-    - Electron-based applications with JIT compilation
-    - Java applications with dynamic class loading
-    - Development builds with incomplete signing
+    - JIT/dynamic-codegen runtimes not in the allowlist (new Electron/Node builds, PyPy, Wasmtime)
+    - Development builds with incomplete or ad-hoc signing
 level: high

@@ -1,16 +1,21 @@
 title: Remote Thread Created in Another Process
 id: d1a2b3c4-0429-4000-a000-000000000429
-# v1.17.4: DEPRECATED — logsource.category 'es_event' is never dispatched by
-# the engine, and NOTIFY_REMOTE_THREAD_CREATE is not subscribed by
-# ESCollector. Doubly dead; parked disabled until that ES plumbing exists.
-status: deprecated
+status: experimental
 description: >
-    Detects NOTIFY_REMOTE_THREAD_CREATE events where a process creates a
-    thread inside another process's address space. This is a strong indicator
-    of code injection, used for defense evasion, privilege escalation, or
-    credential theft on macOS.
+    Detects a process creating a thread inside ANOTHER process's address space
+    (ES NOTIFY_REMOTE_THREAD_CREATE). This is a strong, low-false-positive
+    indicator of code injection used for defense evasion, privilege escalation,
+    or credential theft — even debuggers attach via ptrace/TRACE rather than
+    thread_create, so a remote thread into a process you don't own is rarely
+    legitimate.
+
+    v1.18: revived onto the real ES event (was parked on the never-dispatched
+    `es_event` category). Subject = the injecting process; target carried as
+    Target* enrichments. Same-team and target-self pairs are excluded in place
+    of the unimplemented |fieldref same-signer filter.
 author: MacCrab Community
 date: 2026/04/05
+modified: 2026/06/04
 references:
     - https://attack.mitre.org/techniques/T1055/
 tags:
@@ -18,33 +23,27 @@ tags:
     - attack.privilege_escalation
     - attack.t1055
 logsource:
-    category: es_event
+    category: process_event
     product: macos
-    service: remote_thread_create
 detection:
     selection:
-        EventType: 'NOTIFY_REMOTE_THREAD_CREATE'
+        event.action: 'remote_thread_create'
+    filter_self:
+        TargetIsSelf: 'true'
+    filter_same_team:
+        SameTeam: 'true'
     filter_apple:
         SignerType: 'apple'
     filter_debugger:
         Image|endswith:
             - '/lldb'
+            - '/lldb-rpc-server'
             - '/debugserver'
             - '/DTServiceHub'
-            - '/Xcode'
-    filter_same_signer:
-        # NOTE (v1.8.0): the |fieldref modifier is not implemented in the
-        # MacCrab compiler — it's silently dropped from the predicate, so
-        # the filter does not currently exclude same-signer-pair injections.
-        # Tracked: re-implement once the compiler grows native fieldref
-        # support (would require comparing two columns at predicate time).
-        # In the meantime, accept slightly higher FP on legitimate
-        # same-signer cross-process Mach activity (entitlement / IPC
-        # plumbing) — net detection still surfaces real cross-app injection.
-        SigningID|fieldref: 'TargetSigningID'
-    condition: selection and not filter_apple and not filter_debugger and not filter_same_signer
+            - '/ReportCrash'
+            - '/spindump'
+    condition: selection and not filter_self and not filter_same_team and not filter_apple and not filter_debugger
 falsepositives:
-    - Debugging and profiling tools (lldb, Instruments)
-    - Accessibility frameworks injecting into apps
-    - Antivirus or endpoint security products
+    - Accessibility frameworks injecting helper threads into apps
+    - Non-Apple endpoint-security / profiling products
 level: high

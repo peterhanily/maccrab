@@ -151,6 +151,18 @@ public final class ESCollector: @unchecked Sendable {
         ES_EVENT_TYPE_NOTIFY_MPROTECT,
         ES_EVENT_TYPE_NOTIFY_SETOWNER,
         ES_EVENT_TYPE_NOTIFY_SETMODE,
+        // v1.18 introspection family — observe one process acting on ANOTHER
+        // (memory read / injection / trace) or tampering its own signature.
+        // All grantable under the existing endpoint-security.client entitlement
+        // (the debugger entitlement is only needed to CALL these, not OBSERVE
+        // them) and all available at the macOS 13 deploy floor (GET_TASK_READ
+        // 11.3, TRACE 11.0, REMOTE_THREAD_CREATE 12.3, CS_INVALIDATED 10.15) —
+        // no @available guard required. PROC_CHECK (firehose) +
+        // GATEKEEPER_USER_OVERRIDE (macOS 15, file-shaped) are deferred.
+        ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,
+        ES_EVENT_TYPE_NOTIFY_TRACE,
+        ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE,
+        ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED,
     ]
 
     // MARK: - Noisy Path Muting
@@ -244,6 +256,26 @@ public final class ESCollector: @unchecked Sendable {
     static func isKeychainPath(_ path: String) -> Bool {
         return path.contains("/Keychains/")
             && (path.hasSuffix(".keychain-db") || path.hasSuffix(".keychain"))
+    }
+
+    /// Enrichment keys describing the TARGET of an actor->target introspection
+    /// event (get_task_read / trace / remote_thread_create). Keys are the exact
+    /// Sigma field names so RuleEngine.resolveField resolves them via its
+    /// enrichment passthrough — no model or engine change. `TargetIsSelf` and
+    /// `SameTeam` are the cheap FP gates rules use in place of the
+    /// not-yet-implemented |fieldref modifier.
+    static func introspectionEnrichments(actor: ProcessInfo, target: ProcessInfo) -> [String: String] {
+        let actorTeam = actor.codeSignature?.teamId ?? ""
+        let targetTeam = target.codeSignature?.teamId ?? ""
+        let sameTeam = !actorTeam.isEmpty && actorTeam == targetTeam
+        return [
+            "TargetImage": target.executable,
+            "TargetProcessName": target.name,
+            "TargetSignerType": target.codeSignature?.signerType.rawValue ?? "unknown",
+            "TargetPid": String(target.pid),
+            "TargetIsSelf": actor.pid == target.pid ? "true" : "false",
+            "SameTeam": sameTeam ? "true" : "false",
+        ]
     }
 
     // MARK: - Initialisation
@@ -752,6 +784,58 @@ public final class ESCollector: @unchecked Sendable {
                 enrichments: enrichments,
                 severity: .informational
             )
+
+        // -----------------------------------------------------------------
+        // MARK: Introspection Events (v1.18) — actor acts on a TARGET process
+        // -----------------------------------------------------------------
+        // The subject (msg.process) is the ACTOR; the target is the process
+        // being read/traced/injected. We carry the target via Sigma-named
+        // enrichment keys (TargetImage/TargetSignerType/TargetIsSelf/SameTeam)
+        // so RuleEngine resolves them through its enrichment passthrough with
+        // no model change, and rules get cheap FP gates (target-self = JIT/own
+        // process; same-team = legitimate intra-vendor IPC) without the
+        // unimplemented |fieldref modifier. Emitted as .process/.change ->
+        // logsource category "process_event".
+
+        case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ:
+            // task_read_for_pid: the memory-read port acquisition that gates
+            // every cross-process mach_vm_read (credential scraping from a
+            // live ssh-agent/securityd/gh process).
+            let target = processFromESProcess(msg.event.get_task_read.target)
+            return Event(
+                timestamp: timestamp, eventCategory: .process, eventType: .change,
+                eventAction: "get_task_read", process: processInfo,
+                enrichments: introspectionEnrichments(actor: processInfo, target: target),
+                severity: .informational)
+
+        case ES_EVENT_TYPE_NOTIFY_TRACE:
+            // ptrace(PT_ATTACH) — debugger-style attach to another process.
+            let target = processFromESProcess(msg.event.trace.target)
+            return Event(
+                timestamp: timestamp, eventCategory: .process, eventType: .change,
+                eventAction: "trace", process: processInfo,
+                enrichments: introspectionEnrichments(actor: processInfo, target: target),
+                severity: .informational)
+
+        case ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE:
+            // Thread created inside another process's task — code injection.
+            // Rarely benign (even debuggers use TRACE, not thread_create).
+            let target = processFromESProcess(msg.event.remote_thread_create.target)
+            return Event(
+                timestamp: timestamp, eventCategory: .process, eventType: .change,
+                eventAction: "remote_thread_create", process: processInfo,
+                enrichments: introspectionEnrichments(actor: processInfo, target: target),
+                severity: .informational)
+
+        case ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED:
+            // The process invalidated ITS OWN code signature at runtime
+            // (binary tampering, or benign JIT/dynamic codegen). Self-event:
+            // no target. TargetIsSelf=true lets rules reason about it.
+            return Event(
+                timestamp: timestamp, eventCategory: .process, eventType: .change,
+                eventAction: "cs_invalidated", process: processInfo,
+                enrichments: ["TargetIsSelf": "true"],
+                severity: .informational)
 
         // -----------------------------------------------------------------
         // MARK: Kext Events

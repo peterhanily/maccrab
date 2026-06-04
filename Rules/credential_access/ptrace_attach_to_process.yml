@@ -1,0 +1,53 @@
+title: ptrace Attach to Another Process by Untrusted Tool
+id: d1a2b3c4-0431-4000-a000-000000000431
+status: experimental
+description: >
+    Detects a process attaching to ANOTHER process via ptrace(PT_ATTACH)
+    (ES NOTIFY_TRACE) — the debugger-style attach an attacker uses to read or
+    manipulate a victim's memory/registers (e.g. to lift a decrypted secret
+    from a running credential helper). Legitimate debuggers (lldb/debugserver)
+    and same-team/self attaches are excluded, so what remains is an untrusted,
+    non-debugger process attaching to a process it does not own.
+
+    v1.18: new rule on the real ES event (subject = the tracer; target carried
+    as Target* enrichments).
+author: MacCrab Community
+date: 2026/06/04
+references:
+    - https://attack.mitre.org/techniques/T1055/008/
+    - https://attack.mitre.org/techniques/T1003/
+tags:
+    - attack.credential_access
+    - attack.defense_evasion
+    - attack.t1055.008
+    - attack.t1003
+logsource:
+    category: process_event
+    product: macos
+detection:
+    selection:
+        event.action: 'trace'
+    filter_self:
+        TargetIsSelf: 'true'
+    filter_same_team:
+        SameTeam: 'true'
+    filter_apple:
+        SignerType: 'apple'
+    filter_debugger:
+        Image|endswith:
+            - '/lldb'
+            - '/lldb-rpc-server'
+            - '/lldb-server'
+            - '/debugserver'
+            - '/gdb'
+            - '/DTServiceHub'
+    filter_dev_ide:
+        Image|contains:
+            - '/Applications/Xcode.app/'
+            - '/Cursor.app/'
+            - '/Visual Studio Code.app/'
+            - '/JetBrains'
+    condition: selection and not filter_self and not filter_same_team and not filter_apple and not filter_debugger and not filter_dev_ide
+falsepositives:
+    - Third-party debuggers / language-runtime debug servers not in the allowlist
+level: medium

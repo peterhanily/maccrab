@@ -1,14 +1,14 @@
 {
   "version": "1.17.5",
-  "release_date": "2026-06-04T14:24:12Z",
+  "release_date": "2026-06-04T16:12:07Z",
   "rules": 482,
-  "tests": 1985,
-  "test_suites": 367,
+  "tests": 1988,
+  "test_suites": 368,
   "dmg": {
     "filename": "MacCrab-v1.17.5.dmg",
     "url": "https://github.com/peterhanily/maccrab/releases/download/v1.17.5/MacCrab-v1.17.5.dmg",
-    "sha256": "9f48870d7a6563ce42bf7e4dec9493b94e683201c0f64276a20e185fbb78bf2e",
-    "size_bytes": 92950988
+    "sha256": "80e33021ff47702dc352b11f07717b572889c50b0c6cbc60552ad41c58421b20",
+    "size_bytes": 94360700
   },
   "notes_url": "https://github.com/peterhanily/maccrab/releases/tag/v1.17.5",
   "appcast_url": "https://maccrab.com/appcast.xml",
