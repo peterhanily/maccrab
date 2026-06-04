@@ -821,7 +821,7 @@ func handleAnalyzePackageMetadata(_ args: [String: Any]) async -> Any {
     }
     let analyzer = PackageMetadataAnalyzer()
     guard let result = await analyzer.analyze(packageName: name, registry: registry) else {
-        return ["content": [["type": "text", "text": "Failed to fetch metadata for \(name) on \(registry.rawValue)"]]]
+        return toolError("Failed to fetch metadata for \(name) on \(registry.rawValue)")
     }
     var lines: [String] = ["Metadata scan: \(name) (\(registry.rawValue))"]
     lines.append("Score: \(result.score)/100")
@@ -973,7 +973,7 @@ func handleClusterAlerts(_ args: [String: Any]) async -> Any {
         let path = dataDir + "/events.db"
         store = try AlertStore(path: path)
     } catch {
-        return ["content": [["type": "text", "text": "Failed to open AlertStore: \(error.localizedDescription)"]]]
+        return toolError("Failed to open AlertStore: \(error.localizedDescription)")
     }
 
     let since = Date().addingTimeInterval(-Double(hours) * 3600)
@@ -984,7 +984,7 @@ func handleClusterAlerts(_ args: [String: Any]) async -> Any {
         // AlertStore.alerts already accepts a severity floor.
         alerts = try await store.alerts(since: since, severity: minSeverity, suppressed: false, limit: 5000)
     } catch {
-        return ["content": [["type": "text", "text": "Failed to query alerts: \(error.localizedDescription)"]]]
+        return toolError("Failed to query alerts: \(error.localizedDescription)")
     }
 
     let svc = AlertClusterService()
@@ -1279,7 +1279,7 @@ func handleHunt(_ args: [String: Any]) async -> Any {
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Hunt error: \(error.localizedDescription)"]]]
+        return toolError("Hunt error: \(error.localizedDescription)")
     }
 }
 
@@ -1406,11 +1406,6 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
         return toolError("invalid campaign_id format")
     }
 
-    // v1.18: per-session suppression budget (shared with suppress_alert).
-    guard await suppressBudget.tryConsume() else {
-        return toolError("suppress budget exhausted (max \(suppressBudget.limit) per server session) — restart the MCP session or use the dashboard for bulk suppression")
-    }
-
     do {
         let store = try AlertStore(directory: dataDir)
 
@@ -1422,6 +1417,14 @@ func handleSuppressCampaign(_ args: [String: Any]) async -> Any {
         let confirmed = (args["confirm"] as? Bool) == true
         if pending > 50 && !confirmed {
             return toolError("suppress_campaign would suppress \(pending) contributing alerts — re-call with confirm:true to proceed, or use the dashboard for bulk suppression.")
+        }
+
+        // v1.18 / F1: consume the per-session budget (shared with suppress_alert)
+        // only once the call will actually suppress. The confirm-required bounce
+        // above suppressed nothing, so it must not debit the budget — otherwise
+        // one intended large suppression costs two units.
+        guard await suppressBudget.tryConsume() else {
+            return toolError("suppress budget exhausted (max \(suppressBudget.limit) per server session) — restart the MCP session or use the dashboard for bulk suppression")
         }
 
         auditLog("suppress_campaign", details: "campaign_id=\(campaignId) pending=\(pending) confirm=\(confirmed) ppid=\(getppid())")
@@ -1588,7 +1591,7 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
 
 func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
     guard let traceId = args["trace_id"] as? String, !traceId.isEmpty else {
-        return ["content": [["type": "text", "text": "Missing required argument: trace_id"]]]
+        return toolError("Missing required argument: trace_id")
     }
     do {
         let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
@@ -1628,7 +1631,7 @@ func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
 
 func handleHuntTrace(_ args: [String: Any]) async -> Any {
     guard let query = args["query"] as? String, !query.isEmpty else {
-        return ["content": [["type": "text", "text": "Missing required argument: query"]]]
+        return toolError("Missing required argument: query")
     }
     let limit = min(max(args["limit"] as? Int ?? 25, 1), 100)
     do {
@@ -1652,13 +1655,13 @@ func handleHuntTrace(_ args: [String: Any]) async -> Any {
 
 func handleVerifyBundle(_ args: [String: Any]) async -> Any {
     guard let path = args["path"] as? String, !path.isEmpty else {
-        return ["content": [["type": "text", "text": "Missing required argument: path"]]]
+        return toolError("Missing required argument: path")
     }
     let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
     var isDir: ObjCBool = false
     let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
     guard exists else {
-        return ["content": [["type": "text", "text": "Path not found: \(url.path)"]]]
+        return toolError("Path not found: \(url.path)")
     }
     // For files (assumed .maccrabtrace archives), extract to a tmp
     // directory before verifying. For directories, verify in place.
@@ -1678,13 +1681,13 @@ func handleVerifyBundle(_ args: [String: Any]) async -> Any {
             try p.run(); p.waitUntilExit()
             guard p.terminationStatus == 0 else {
                 try? FileManager.default.removeItem(at: tmp)
-                return ["content": [["type": "text", "text": "Failed to extract bundle archive: \(url.lastPathComponent)"]]]
+                return toolError("Failed to extract bundle archive: \(url.lastPathComponent)")
             }
             let inner = (try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? []
             bundleDir = inner.count == 1 ? inner[0] : tmp
             tmpDir = tmp
         } catch {
-            return ["content": [["type": "text", "text": "Failed to extract bundle archive: \(error.localizedDescription)"]]]
+            return toolError("Failed to extract bundle archive: \(error.localizedDescription)")
         }
     }
     // storage-01 parity: wire the same TOFU pin store maccrabctl uses so an
@@ -1726,7 +1729,7 @@ func handleVerifyBundle(_ args: [String: Any]) async -> Any {
 
 func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
     guard let eventId = args["event_id"] as? String, !eventId.isEmpty else {
-        return ["content": [["type": "text", "text": "Missing required argument: event_id"]]]
+        return toolError("Missing required argument: event_id")
     }
     do {
         let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
@@ -1825,7 +1828,7 @@ func handleForensicsListPlugins(_ args: [String: Any]) async -> Any {
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
     } catch {
-        return ["content": [["type": "text", "text": "bootstrap failed: \(error)"]]]
+        return toolError("bootstrap failed: \(error)")
     }
     let category = args["category"] as? String
     let manifests: [PluginManifest]
@@ -1872,7 +1875,7 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
             "notes": result.notes,
         ] as [String: Any])]]]
     } catch {
-        return ["content": [["type": "text", "text": "run_collector failed: \(error)"]]]
+        return toolError("run_collector failed: \(error)")
     }
 }
 
@@ -1909,7 +1912,7 @@ func handleForensicsSearchArtifacts(_ args: [String: Any]) async -> Any {
         let payload = rows.map(encodeArtifact)
         return ["content": [["type": "text", "text": jsonStringify(["artifacts": payload])]]]
     } catch {
-        return ["content": [["type": "text", "text": "search_artifacts failed: \(error)"]]]
+        return toolError("search_artifacts failed: \(error)")
     }
 }
 
@@ -1958,7 +1961,7 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
         }
         return ["content": [["type": "text", "text": "artifact not found in case"]]]
     } catch {
-        return ["content": [["type": "text", "text": "get_artifact failed: \(error)"]]]
+        return toolError("get_artifact failed: \(error)")
     }
 }
 
@@ -1984,7 +1987,7 @@ func handleForensicsTimeline(_ args: [String: Any]) async -> Any {
         let payload = rows.map(encodeArtifact)
         return ["content": [["type": "text", "text": jsonStringify(["timeline": payload])]]]
     } catch {
-        return ["content": [["type": "text", "text": "timeline failed: \(error)"]]]
+        return toolError("timeline failed: \(error)")
     }
 }
 
@@ -2023,7 +2026,7 @@ func handleForensicsExplainCase(_ args: [String: Any]) async -> Any {
         ]
         return ["content": [["type": "text", "text": jsonStringify(summary)]]]
     } catch {
-        return ["content": [["type": "text", "text": "explain_case failed: \(error)"]]]
+        return toolError("explain_case failed: \(error)")
     }
 }
 
@@ -2055,7 +2058,7 @@ func handleForensicsPostureFindings(_ args: [String: Any]) async -> Any {
                 : "Findings emitted by the v1.15 posture Analyzer.",
         ] as [String: Any])]]]
     } catch {
-        return ["content": [["type": "text", "text": "posture_findings failed: \(error)"]]]
+        return toolError("posture_findings failed: \(error)")
     }
 }
 

@@ -1316,17 +1316,24 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
     // can't stall the event pump that shares this actor.
 
     /// An edge id is a deletable orphan when no surviving trace references
-    /// it via membership or the hash chain.
+    /// it via membership, the hash chain, or a rule hit. trace_rule_hits
+    /// carries matched_edge_id as a plain (non-FK) column exactly like the
+    /// other two; guarding it forward-proofs the sweep against silently
+    /// deleting an edge a surviving rule-hit still points at, once
+    /// recordRuleHit gains a production caller. (STG-1 / F5)
     private static let edgeOrphanGuardSQL = """
         id NOT IN (SELECT edge_id FROM trace_membership WHERE edge_id IS NOT NULL) \
-        AND id NOT IN (SELECT edge_id FROM trace_hash_chain WHERE edge_id IS NOT NULL)
+        AND id NOT IN (SELECT edge_id FROM trace_hash_chain WHERE edge_id IS NOT NULL) \
+        AND id NOT IN (SELECT matched_edge_id FROM trace_rule_hits WHERE matched_edge_id IS NOT NULL)
         """
 
     /// An entity id is a deletable orphan when no surviving trace
-    /// references it via membership and no surviving edge uses it as an
-    /// endpoint. Valid only AFTER the edge sweep in the same pass.
+    /// references it via membership or a rule hit, and no surviving edge
+    /// uses it as an endpoint. Valid only AFTER the edge sweep in the same
+    /// pass. (matched_entity_id guard: see edgeOrphanGuardSQL — STG-1 / F5.)
     private static let entityOrphanGuardSQL = """
         id NOT IN (SELECT entity_id FROM trace_membership WHERE entity_id IS NOT NULL) \
+        AND id NOT IN (SELECT matched_entity_id FROM trace_rule_hits WHERE matched_entity_id IS NOT NULL) \
         AND id NOT IN (SELECT source_entity_id FROM trace_edges) \
         AND id NOT IN (SELECT target_entity_id FROM trace_edges)
         """

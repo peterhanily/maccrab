@@ -700,6 +700,23 @@ public actor CampaignDetector {
         let cutoff = Date().addingTimeInterval(-campaignWindow)
         let windowAlerts = recentAlerts.filter { $0.timestamp > cutoff }
 
+        // v1.17.4 / CAMP-1: an AI coding tool legitimately querying the
+        // keychain (`security find-generic-password`) is a breadcrumb, not a
+        // campaign. When every contributing rule is one of these low-severity
+        // single-event keychain/sudo approximations AND the activity is
+        // attributed to an AI tool, do not mint a coordinated_attack — the
+        // kill-chain path has a severity floor, these aggregation paths had
+        // none. Applied to BOTH the PID and process-path branches so the FP
+        // can't resurrect via whichever branch aggregates. The individual low
+        // alerts still stand.
+        let keychainSingleEventRuleIds: Set<String> = [
+            "d1a2b3c4-0448-4000-a000-000000000448",  // auth_brute_force
+            "d1a2b3c4-0501-4000-a000-000000000501",  // wifi_password_extraction
+        ]
+        func isAIKeychainBreadcrumb(_ ruleIds: Set<String>) -> Bool {
+            return latestAlert.aiTool != nil && ruleIds.isSubset(of: keychainSingleEventRuleIds)
+        }
+
         // Group by PID — alerts from same process spanning multiple tactics
         if let pid = latestAlert.pid {
             let pidAlerts = windowAlerts.filter { $0.pid == pid }
@@ -713,22 +730,7 @@ public actor CampaignDetector {
             // multiple rules firing, not one rule with rich tags.
             let distinctRuleIds = Set(pidAlerts.map(\.ruleId))
             guard distinctRuleIds.count >= 2 else { return nil }
-
-            // v1.17.4: an AI coding tool legitimately querying the keychain
-            // (`security find-generic-password`) is a breadcrumb, not a
-            // campaign. When every rule firing for this PID is one of the
-            // low-severity single-event keychain/sudo approximations AND the
-            // activity is attributed to an AI tool, do not mint a
-            // coordinated_attack — the kill-chain path has a severity floor,
-            // this path had none. The individual low alerts still stand.
-            let keychainSingleEventRuleIds: Set<String> = [
-                "d1a2b3c4-0448-4000-a000-000000000448",  // auth_brute_force
-                "d1a2b3c4-0501-4000-a000-000000000501",  // wifi_password_extraction
-            ]
-            if latestAlert.aiTool != nil,
-               distinctRuleIds.isSubset(of: keychainSingleEventRuleIds) {
-                return nil
-            }
+            if isAIKeychainBreadcrumb(distinctRuleIds) { return nil }
 
             if pidTactics.count >= 3 {
                 let description = "Process PID \(pid) triggered alerts spanning \(pidTactics.count) tactics: \(pidTactics.sorted().joined(separator: ", "))"
@@ -770,6 +772,7 @@ public actor CampaignDetector {
             // the coordinated-attack signal.
             let distinctRuleIds = Set(pathAlerts.map(\.ruleId))
             guard distinctRuleIds.count >= 2 else { return nil }
+            if isAIKeychainBreadcrumb(distinctRuleIds) { return nil }
 
             if pathTactics.count >= 3 {
                 let lastComponent = (path as NSString).lastPathComponent

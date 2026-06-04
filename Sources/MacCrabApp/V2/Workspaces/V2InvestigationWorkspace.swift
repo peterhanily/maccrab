@@ -9,6 +9,9 @@ struct V2InvestigationWorkspace: View {
     @State private var selectedTrace: V2MockTrace?
     @State private var traces: [V2MockTrace] = []
     @State private var recentAlerts: [V2MockAlert] = []
+    // F2: engine LLM health, refreshed off-main by reload() rather than read
+    // synchronously in the view body on every re-evaluation.
+    @State private var engineHeartbeat: V2HeartbeatSnapshot?
     @State private var traceMembersCache: [String: [V2TraceMember]] = [:]
     @State private var hoveredMemberId: String? = nil
     @State private var selectedMemberId: String? = nil
@@ -73,6 +76,11 @@ struct V2InvestigationWorkspace: View {
                 .prefix(8)
                 .map { $0 }
         }
+
+        // F2: heartbeat() reads the file off-main; cache the result so the
+        // AI Analysis tab doesn't read+parse it synchronously per body eval.
+        let hb = await state.provider.heartbeat()
+        await MainActor.run { self.engineHeartbeat = hb }
     }
 
     /// Export the current trace as a .maccrabtrace bundle. Shells
@@ -1759,7 +1767,7 @@ struct V2InvestigationWorkspace: View {
         // engine. Showing real engine reachability stops "enabled but
         // unreachable" from being invisible and stops pointing the operator
         // at a control that doesn't reflect engine state.
-        let engineLLM = V2HeartbeatSnapshot.readFreshest()?.llm
+        let engineLLM = engineHeartbeat?.llm
         return VStack(alignment: .leading, spacing: 16) {
             V2EmptyState(
                 title: "No AI investigation summary yet",
