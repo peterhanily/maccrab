@@ -19,18 +19,23 @@
 // only processes with a matching code-signing identity + access group can
 // read them.
 //
-// # Sysext sharing (v1.8.1)
+// # Sysext sharing (status as of v1.18 — corrected)
 //
-// Both the dashboard (.app, user-login session) and the System Extension
-// (sysextd, root) declare the `keychain-access-groups` entitlement with
-// `79S425CW99.com.maccrab.shared`. This lets either bundle read/write
-// the same items via the shared group. Pre-v1.8.1 the sysext fell back
-// to env-vars and llm_config.json — the external review's #2 finding.
-//
-// Migration: on every read, if the with-group lookup misses, retry
-// without-group; on hit, rewrite with-group so the next read finds it
-// directly. After a release cycle the without-group items are gone and
-// the fallback path becomes dead code.
+// The dashboard (.app) uses this keychain store for cloud API keys, and the
+// System Extension (sysextd, root) declares the same
+// `79S425CW99.com.maccrab.shared` keychain-access-group entitlement. BUT —
+// despite the entitlement — the ENGINE does NOT currently read the keychain:
+// it sources LLM config from `<root>/llm_config.json` + `MACCRAB_LLM_*` env
+// vars only (verified: no SecretsStore / Security import anywhere in
+// MacCrabAgentKit / MacCrabAgent). The v1.17.4 privileged-inbox bridge
+// (V2DaemonControl.sendLLMConfig → DaemonTimers.handleLLMConfigRequests)
+// carries NON-SECRET config (provider / URL / model) to the root config file;
+// cloud API KEYS are deliberately NOT sent over that channel. Net effect:
+// Ollama-LOCAL engine LLM works fully; engine-side CLOUD LLM is not yet
+// wired. Reading cloud keys from the root engine (a root process holding +
+// transmitting cloud credentials) is a deferred, security-sensitive item —
+// it needs the same scrutiny as the non-loopback-endpoint policy, not a
+// silent enablement.
 
 import Foundation
 import Security

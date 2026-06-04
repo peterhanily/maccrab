@@ -22,6 +22,11 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
     // payload-cap-firing rate and ES-collector drop rate.
     public let payloadTruncatedTotal: Int
     public let esloggerDroppedTotal: Int
+    /// v1.18: engine-side LLM health (from the `llm` block). nil when the
+    /// heartbeat predates this field. `configured == false` means the engine
+    /// has no LLM backend wired; configured-but-not-healthy means enabled
+    /// yet unreachable/misconfigured — previously invisible.
+    public let llm: LLMHealth?
 
     public struct Collector: Sendable, Equatable, Hashable {
         public let name: String
@@ -38,6 +43,38 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
 
         public var lastTick: Date? {
             lastTickUnix.map(Date.init(timeIntervalSince1970:))
+        }
+    }
+
+    /// Engine LLM health parsed from the heartbeat `llm` block.
+    public struct LLMHealth: Sendable, Equatable {
+        public let configured: Bool
+        public let provider: String
+        public let model: String
+        public let lastSuccessUnix: Double?
+        public let consecutiveFailures: Int
+        public let circuitOpen: Bool
+        public let healthy: Bool
+
+        init(from raw: [String: Any]) {
+            configured = raw["configured"] as? Bool ?? false
+            provider = raw["provider"] as? String ?? ""
+            model = raw["model"] as? String ?? ""
+            let ls = raw["last_success_unix"] as? Double ?? 0
+            lastSuccessUnix = ls > 0 ? ls : nil
+            consecutiveFailures = raw["consecutive_failures"] as? Int ?? 0
+            circuitOpen = raw["circuit_open"] as? Bool ?? false
+            healthy = raw["healthy"] as? Bool ?? false
+        }
+
+        /// One-line operator-facing summary of engine LLM state.
+        public var summary: String {
+            if !configured { return "Not configured for the engine" }
+            let who = "\(provider)/\(model)"
+            if healthy { return "\(who) — healthy" }
+            if circuitOpen { return "\(who) — circuit open (repeated failures)" }
+            if lastSuccessUnix == nil { return "\(who) — enabled, but no successful call yet" }
+            return "\(who) — degraded"
         }
     }
 
@@ -80,6 +117,7 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
         }
         let counts: [String: Int] = (raw["event_type_counts_1h"] as? [String: Any])?
             .compactMapValues { $0 as? Int } ?? [:]
+        let llm = (raw["llm"] as? [String: Any]).map(LLMHealth.init(from:))
         return V2HeartbeatSnapshot(
             writtenAt: writtenAt,
             uptimeSeconds: raw["uptime_seconds"] as? Int ?? 0,
@@ -96,7 +134,8 @@ public struct V2HeartbeatSnapshot: Sendable, Equatable {
             // pre-date Wave 9K render as "no truncation, no drops"
             // rather than crash.
             payloadTruncatedTotal: raw["payload_truncated_total"] as? Int ?? 0,
-            esloggerDroppedTotal: raw["eslogger_dropped_total"] as? Int ?? 0
+            esloggerDroppedTotal: raw["eslogger_dropped_total"] as? Int ?? 0,
+            llm: llm
         )
     }
 }

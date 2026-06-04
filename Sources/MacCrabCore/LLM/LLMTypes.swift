@@ -54,6 +54,13 @@ public struct LLMConfig: Codable, Sendable, CustomStringConvertible, CustomDebug
     /// dashboard will auto-run the bounded agentic loop (multiple LLM
     /// round-trips per campaign) — operator opt-in because it multiplies
     /// LLM cost/latency. Advisory-only regardless of this flag.
+    ///
+    /// SCOPE (v1.18): this is an APP-SIDE flag only. It is read solely by the
+    /// dashboard (AppState → AgenticInvestigator); the System Extension does
+    /// NOT construct an AgenticInvestigator and ignores this key even though
+    /// the v1.17.4 inbox bridge now carries it to the root config. Engine-side
+    /// autonomous (multi-round) investigation is intentionally not built —
+    /// the engine runs single-shot advisory summaries only.
     public var agenticInvestigationEnabled: Bool = false
 
     public init() {}

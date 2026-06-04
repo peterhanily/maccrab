@@ -1753,13 +1753,29 @@ struct V2InvestigationWorkspace: View {
     // MARK: - AI Analysis
 
     private var aiAnalysisTab: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        // v1.18: surface the ENGINE's actual LLM health (from the heartbeat
+        // llm block). Campaign investigations run in the detection engine,
+        // not the app — Settings → AI Backend now pushes config to the
+        // engine. Showing real engine reachability stops "enabled but
+        // unreachable" from being invisible and stops pointing the operator
+        // at a control that doesn't reflect engine state.
+        let engineLLM = V2HeartbeatSnapshot.readFreshest()?.llm
+        return VStack(alignment: .leading, spacing: 16) {
             V2EmptyState(
                 title: "No AI investigation summary yet",
-                body: "MacCrab generates an LLM investigation when a campaign is detected at HIGH or CRITICAL severity. Configure a backend in Settings → AI Backend (Ollama is local and recommended), then trigger a campaign or open an alert detail to see analysis here.",
+                body: "MacCrab generates an LLM investigation when a campaign is detected at HIGH or CRITICAL severity. The detection engine runs it using its own backend — Settings → AI Backend pushes your configuration to the engine (Ollama local is recommended). Trigger a campaign or open an alert detail to see analysis here.",
                 icon: "brain.head.profile"
             )
             .v2Panel()
+            if let llm = engineLLM {
+                Label("Engine LLM: \(llm.summary)",
+                      systemImage: llm.healthy ? "checkmark.seal"
+                        : (llm.configured ? "exclamationmark.triangle" : "minus.circle"))
+                    .font(.caption)
+                    .foregroundColor(llm.healthy ? .secondary
+                        : (llm.configured ? .orange : .secondary))
+                    .padding(.horizontal, 4)
+            }
             Spacer()
         }
         .padding(16)
