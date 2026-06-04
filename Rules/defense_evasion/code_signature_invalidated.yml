@@ -43,6 +43,10 @@ detection:
             - '/java'
             - '/mono'
             - '/dotnet'
+            - '/pypy'
+            - '/pypy3'
+            - '/wasmtime'
+            - '/wasmer'
     filter_jit_frameworks:
         Image|contains:
             - '.app/Contents/Frameworks/Electron Framework.framework/'

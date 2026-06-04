@@ -143,6 +143,7 @@ public enum OCSFMapper {
         case "exec", "fork":                return 1  // Launch
         case "exit", "signal":              return 2  // Terminate
         case "open":                        return 3  // Open
+        case "remote_thread_create":        return 4  // Inject
         default:                            return 0  // Unknown
         }
     }

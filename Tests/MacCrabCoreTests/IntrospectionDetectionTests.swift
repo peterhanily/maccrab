@@ -118,4 +118,26 @@ struct IntrospectionDetectionTests {
         #expect(fires(mal, "ptrace"), "expected ptrace detection, got: \(mal.map(\.ruleName))")
         #expect(!fires(dbg, "ptrace"), "lldb should be filtered")
     }
+
+    // MARK: - High-value target escalation (review fix)
+
+    @Test("memory read of a high-value target (securityd) escalates to a HIGH rule; apple filtered")
+    func highValueTargetEscalation() async throws {
+        let engine = try await loadRules()
+        let mal = await engine.evaluate(introspection(action: "get_task_read", actorName: "stealer", actorPath: "/tmp/stealer", targetImage: "/usr/libexec/securityd"))
+        let appl = await engine.evaluate(introspection(action: "get_task_read", actorName: "x", actorPath: "/usr/libexec/x", actorSigner: .apple, targetImage: "/usr/libexec/securityd"))
+        #expect(fires(mal, "High-Value"), "expected high-value escalation, got: \(mal.map(\.ruleName))")
+        #expect(!fires(appl, "High-Value"), "apple actor should be filtered")
+    }
+
+    // MARK: - Non-Apple benign introspector filters (review fix)
+
+    @Test("third-party EDR introspection is filtered from the base memory-read rule")
+    func edrFiltered() async throws {
+        let engine = try await loadRules()
+        let edr = await engine.evaluate(introspection(
+            action: "get_task_read", actorName: "falcond",
+            actorPath: "/Applications/Falcon.app/Contents/Resources/falcond", targetImage: "/tmp/victim"))
+        #expect(!fires(edr, "Read Access"), "EDR agent should be filtered, got: \(edr.map(\.ruleName))")
+    }
 }

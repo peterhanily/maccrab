@@ -47,7 +47,15 @@ detection:
             - '/Cursor.app/'
             - '/Visual Studio Code.app/'
             - '/JetBrains'
-    condition: selection and not filter_self and not filter_same_team and not filter_apple and not filter_debugger and not filter_dev_ide
+    filter_edr:
+        Image|contains:
+            - '/falcond'
+            - '/falcon-sensor'
+            - '/SentinelAgent'
+            - '/SentinelOne'
+            - '/Microsoft Defender'
+            - '/wdav'
+    condition: selection and not filter_self and not filter_same_team and not filter_apple and not filter_debugger and not filter_dev_ide and not filter_edr
 falsepositives:
     - Third-party debuggers / language-runtime debug servers not in the allowlist
 level: medium

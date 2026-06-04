@@ -34,6 +34,13 @@ struct DaemonConfig: Codable {
     /// unaffected. Live-validated only (ES events aren't unit-testable).
     var subscribeFileOpenEvents: Bool = true
 
+    /// v1.18: subscribe to the ES introspection family (get_task_read / trace /
+    /// remote_thread_create / cs_invalidated) for memory-scrape + injection +
+    /// code-sig-tamper detection. Emission is bounded to non-platform-binary
+    /// actors in ESCollector. Kill-switch: set `subscribe_introspection_events:
+    /// false` in daemon_config.json to disable the family independently.
+    var subscribeIntrospectionEvents: Bool = true
+
     // MARK: - Prompt Injection
     var promptInjectionConfidence: Int = 40
 

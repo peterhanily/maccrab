@@ -1564,7 +1564,8 @@ enum DaemonSetup {
 
         if isRoot {
             do {
-                collector = try ESCollector(subscribeFileOpen: config.subscribeFileOpenEvents)
+                collector = try ESCollector(subscribeFileOpen: config.subscribeFileOpenEvents,
+                                            subscribeIntrospection: config.subscribeIntrospectionEvents)
                 logger.info("ES collector started successfully (native client)")
                 esMode = "native client"
             } catch {

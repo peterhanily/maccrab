@@ -107,6 +107,12 @@ public final class ESCollector: @unchecked Sendable {
     /// Config kill-switch (DaemonConfig.subscribeFileOpenEvents).
     private let subscribeFileOpen: Bool
 
+    /// v1.18: subscribe to the introspection family (get_task_read / trace /
+    /// remote_thread_create / cs_invalidated). Kill-switch
+    /// (DaemonConfig.subscribeIntrospectionEvents) so an operator can disable
+    /// it independently of the OPEN family.
+    private let subscribeIntrospection: Bool
+
     /// v1.9 Agent Traces feature flag, read once at type-load. Set
     /// `MACCRAB_AGENT_TRACES=1` in the daemon's environment to enable
     /// TRACEPARENT extraction on NOTIFY_EXEC. Default-off so a v1.9
@@ -151,14 +157,18 @@ public final class ESCollector: @unchecked Sendable {
         ES_EVENT_TYPE_NOTIFY_MPROTECT,
         ES_EVENT_TYPE_NOTIFY_SETOWNER,
         ES_EVENT_TYPE_NOTIFY_SETMODE,
-        // v1.18 introspection family — observe one process acting on ANOTHER
-        // (memory read / injection / trace) or tampering its own signature.
-        // All grantable under the existing endpoint-security.client entitlement
-        // (the debugger entitlement is only needed to CALL these, not OBSERVE
-        // them) and all available at the macOS 13 deploy floor (GET_TASK_READ
-        // 11.3, TRACE 11.0, REMOTE_THREAD_CREATE 12.3, CS_INVALIDATED 10.15) —
-        // no @available guard required. PROC_CHECK (firehose) +
-        // GATEKEEPER_USER_OVERRIDE (macOS 15, file-shaped) are deferred.
+    ]
+
+    /// v1.18 introspection family — observe one process acting on ANOTHER
+    /// (memory read / injection / trace) or tampering its own signature.
+    /// Grantable under the existing endpoint-security.client entitlement (the
+    /// debugger entitlement is only needed to CALL these, not OBSERVE them) and
+    /// all available at the macOS 13 deploy floor (GET_TASK_READ 11.3, TRACE
+    /// 11.0, REMOTE_THREAD_CREATE 12.3, CS_INVALIDATED 10.15) — no @available
+    /// guard. Gated by `subscribeIntrospection` so an operator can disable the
+    /// family if it ever degrades a host. PROC_CHECK (firehose) +
+    /// GATEKEEPER_USER_OVERRIDE (macOS 15, file-shaped) are deferred.
+    private static let introspectionEvents: [es_event_type_t] = [
         ES_EVENT_TYPE_NOTIFY_GET_TASK_READ,
         ES_EVENT_TYPE_NOTIFY_TRACE,
         ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE,
@@ -284,8 +294,9 @@ public final class ESCollector: @unchecked Sendable {
     /// `Event` values on the `events` stream.
     ///
     /// - Throws: `ESCollectorError` if the client cannot be created.
-    public init(subscribeFileOpen: Bool = true) throws {
+    public init(subscribeFileOpen: Bool = true, subscribeIntrospection: Bool = true) throws {
         self.subscribeFileOpen = subscribeFileOpen
+        self.subscribeIntrospection = subscribeIntrospection
         // Build the AsyncStream and capture the continuation so the
         // ES callback can yield events into it.
         var capturedContinuation: AsyncStream<Event>.Continuation!
@@ -391,6 +402,7 @@ public final class ESCollector: @unchecked Sendable {
         // to a tight credential-dir allowlist in the handler (isCredentialReadPath).
         // Gated so an operator can disable it if the firehose ever degrades a host.
         if subscribeFileOpen { events.append(ES_EVENT_TYPE_NOTIFY_OPEN) }
+        if subscribeIntrospection { events.append(contentsOf: Self.introspectionEvents) }
         let result = events.withUnsafeBufferPointer { buffer -> es_return_t in
             es_subscribe(client, buffer.baseAddress!, UInt32(buffer.count))
         }
@@ -555,6 +567,22 @@ public final class ESCollector: @unchecked Sendable {
             if isKeychainPath(openPath) && msg.process.pointee.is_platform_binary {
                 return nil
             }
+        }
+
+        // v1.18 hot-path guard: introspection events are only interesting from
+        // a NON-platform-binary actor. Every benign introspector — lldb,
+        // debugserver, ReportCrash, spindump, sysdiagnose, OSAnalyticsHelper,
+        // Activity Monitor, securityd — is an Apple platform binary, and the
+        // rules filter Apple actors anyway, so dropping the platform-binary
+        // majority here (a cheap bool, before the doubled processFromESProcess
+        // for actor+target) bounds the volume with zero detection loss — the
+        // same firehose discipline as the OPEN allowlist.
+        switch msg.event_type {
+        case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ, ES_EVENT_TYPE_NOTIFY_TRACE,
+             ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE, ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED:
+            if msg.process.pointee.is_platform_binary { return nil }
+        default:
+            break
         }
 
         // Source process
@@ -796,6 +824,15 @@ public final class ESCollector: @unchecked Sendable {
         // process; same-team = legitimate intra-vendor IPC) without the
         // unimplemented |fieldref modifier. Emitted as .process/.change ->
         // logsource category "process_event".
+        //
+        // Notes: (a) we read ONLY `.target` (and the empty cs_invalidated),
+        // which is version-agnostic — the version>=5 `.type` field is
+        // deliberately not accessed, so no es_message version guard is needed.
+        // (b) SameTeam is derived from the kernel-attested team_id, so it is an
+        // FP-reduction heuristic an attacker cannot spoof without possessing
+        // the target team's signing identity — not a hard security boundary.
+        // (c) these are ES-native; they are NOT carried by the non-root
+        // eslogger/kdebug fallback, so these rules require the ES entitlement.
 
         case ES_EVENT_TYPE_NOTIFY_GET_TASK_READ:
             // task_read_for_pid: the memory-read port acquisition that gates

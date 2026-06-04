@@ -66,7 +66,23 @@ detection:
             - '/Zed.app/'
             - '/JetBrains'
             - '/Instruments.app/'
-    condition: selection and not filter_self and not filter_same_team and not filter_apple_signed and not filter_debuggers and not filter_dev_ide
+    filter_edr:
+        # Non-Apple security/EDR agents legitimately introspect processes
+        # (Developer-ID signed, so they survive the platform-binary emission gate).
+        Image|contains:
+            - '/falcond'
+            - '/falcon-sensor'
+            - '/SentinelAgent'
+            - '/SentinelOne'
+            - '/Microsoft Defender'
+            - '/wdav'
+    filter_password_managers:
+        Image|contains:
+            - '/1Password'
+            - '/Bitwarden'
+            - '/Dashlane'
+            - '/KeePassXC'
+    condition: selection and not filter_self and not filter_same_team and not filter_apple_signed and not filter_debuggers and not filter_dev_ide and not filter_edr and not filter_password_managers
 falsepositives:
     - Third-party debuggers/profilers not in the allowlist (add via maccrabctl suppress)
     - Non-Apple security/EDR agents that legitimately introspect processes

@@ -1,0 +1,66 @@
+title: Memory Read / Trace of a High-Value Credential Process
+id: d1a2b3c4-0432-4000-a000-000000000432
+status: experimental
+description: >
+    Detects an untrusted process acquiring read access to (get_task_read) or
+    attaching to (ptrace/trace) a HIGH-VALUE credential-bearing process —
+    securityd, ssh-agent/ssh-keysign, the keychain, or a password manager.
+    Reading these processes' live memory is the direct path to lifting a
+    decrypted secret (keychain item, SSH key, vault entry) that never touches
+    disk. This is the intent-escalated, high-confidence companion to
+    process_reads_other_process_memory_macos (which flags memory reads of ANY
+    process at medium); here the TARGET is what makes it HIGH.
+author: MacCrab Community
+date: 2026/06/04
+references:
+    - https://attack.mitre.org/techniques/T1003/
+    - https://attack.mitre.org/techniques/T1555/
+    - https://attack.mitre.org/techniques/T1555/001/
+tags:
+    - attack.credential_access
+    - attack.t1003
+    - attack.t1555
+    - attack.t1555.001
+logsource:
+    category: process_event
+    product: macos
+detection:
+    selection:
+        event.action:
+            - 'get_task_read'
+            - 'trace'
+        TargetImage|contains:
+            - '/securityd'
+            - '/ssh-agent'
+            - '/ssh-keysign'
+            - '/Keychains/'
+            - '/1Password'
+            - '/Bitwarden'
+            - '/Dashlane'
+            - '/KeePassXC'
+            - 'git-credential'
+            - '/aws-vault'
+    filter_self:
+        TargetIsSelf: 'true'
+    filter_same_team:
+        SameTeam: 'true'
+    filter_apple:
+        SignerType: 'apple'
+    filter_debuggers:
+        Image|endswith:
+            - '/lldb'
+            - '/lldb-rpc-server'
+            - '/debugserver'
+            - '/DTServiceHub'
+    filter_edr:
+        Image|contains:
+            - '/falcond'
+            - '/falcon-sensor'
+            - '/SentinelAgent'
+            - '/Microsoft Defender'
+            - '/wdav'
+    condition: selection and not filter_self and not filter_same_team and not filter_apple and not filter_debuggers and not filter_edr
+falsepositives:
+    - A password manager reading its OWN helper (excluded via same-team/self)
+    - Apple credential daemons cross-reading during auth flows (Apple-signed, excluded)
+level: high
