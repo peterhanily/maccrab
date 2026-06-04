@@ -1572,13 +1572,13 @@ enum DaemonTimers {
         }
     }
 
-    /// A URL string whose host is loopback (localhost / 127.x / ::1).
-    /// Default-deny gate for engine-side LLM endpoints (SSRF/exfil guard).
+    /// A URL string whose host is genuinely loopback (localhost / ::1 /
+    /// an IPv4 literal in 127.0.0.0/8). Default-deny gate for engine-side
+    /// LLM endpoints (SSRF/exfil guard). Delegates to the shared strict
+    /// validator so a hostname like `127.0.0.1.evil.com` is rejected — a
+    /// textual `hasPrefix("127.")` test would have let it through.
     private static func isLoopbackEndpoint(_ urlString: String) -> Bool {
-        guard let url = URL(string: urlString),
-              let host = url.host?.lowercased(), !host.isEmpty else { return false }
-        return host == "localhost" || host == "127.0.0.1" || host.hasPrefix("127.")
-            || host == "::1" || host == "[::1]"
+        return LoopbackEndpoint.isLoopback(urlString: urlString)
     }
 
     private static func handleSuppressCampaignRequests(

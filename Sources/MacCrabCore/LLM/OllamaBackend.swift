@@ -29,16 +29,16 @@ public actor OllamaBackend: LLMBackend {
     /// path also caught the case but inconsistently. Be explicit.
     static func isPlaintextRemote(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "http" else { return false }
-        guard let host = url.host?.lowercased(), !host.isEmpty else {
+        guard let host = url.host, !host.isEmpty else {
             // A nil/empty host means the URL parsed weirdly (e.g.,
             // `http:////path`). Treat as remote so we never leak an
             // API key over plaintext to an unknown destination.
             return true
         }
-        if host == "localhost" { return false }
-        if host == "127.0.0.1" || host.hasPrefix("127.") { return false }
-        if host == "::1" || host == "[::1]" { return false }
-        return true
+        // Strict loopback check (IPv4-literal parse, not a `127.` prefix):
+        // a host like `127.0.0.1.evil.com` is remote and must not receive
+        // a plaintext Bearer token.
+        return !LoopbackEndpoint.isLoopback(host: host)
     }
 
     public func isAvailable() async -> Bool {

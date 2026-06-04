@@ -142,24 +142,18 @@ cask "maccrab" do
             # showing in `launchctl list` as `application.com.maccrab.app.X.Y`
             # because `quit` returned before the app actually exited.
             signal:        [["TERM", "com.maccrab.app"]],
-            # Deactivate the system extension BEFORE the .app is removed.
-            # Without this step sysextd's ledger keeps a "pending" entry
-            # forever (visible via `systemextensionsctl list`) since the
-            # bundle it references gets deleted out from under it.
-            #
-            # v1.18: an ACTIVE ES sysext can't be reliably torn down by
-            # `systemextensionsctl uninstall` from a shell — it is SIP-gated
-            # and scripts/uninstall.sh documents that OSSystemExtensionRequest
-            # deactivation must be submitted by the SIGNED app. So drive it
-            # via the `maccrab://deactivate` deep link (the app submits the
-            # request; the user approves the macOS modal), with
-            # `systemextensionsctl uninstall` only as a best-effort fallback.
-            # NOT sudo: `open` must run in the user's GUI session.
-            early_script:  {
-              executable:   "/bin/sh",
-              args:         ["-c", "open 'maccrab://deactivate' >/dev/null 2>&1; sleep 3; /usr/bin/systemextensionsctl uninstall 79S425CW99 com.maccrab.agent >/dev/null 2>&1 || true"],
-              must_succeed: false,
-            },
+            # NOTE: system-extension deactivation is intentionally NOT driven
+            # from this uninstall stanza. Homebrew runs the uninstall steps on
+            # `brew upgrade`/`brew reinstall` too (only `signal:` is skipped),
+            # so deactivating here would tear down the live ES extension on
+            # every routine upgrade — dropping real-time protection and popping
+            # an approval modal mid-upgrade. On upgrade the freshly-installed
+            # app re-activates idempotently, so no teardown is needed. On a
+            # true uninstall, deactivate via the app's own "Disable Protection"
+            # flow or the bundled scripts/uninstall.sh (which submits the
+            # signed OSSystemExtensionRequest the same way the app does); a
+            # leftover sysextd ledger entry is cosmetic and reconciles once the
+            # bundle is gone. See caveats.
             launchctl:     [
               "com.maccrab.agent",
               "com.maccrab.daemon",
@@ -204,9 +198,14 @@ cask "maccrab" do
     was removed automatically. Approve the new extension in System
     Settings to restart protection.
 
-    Uninstall removes the app and deactivates the extension via MacCrab's
-    own deactivate flow (you'll approve a brief macOS modal; on SIP-enabled
-    Macs the shell `systemextensionsctl` fallback is expected to no-op).
+    `brew uninstall maccrab` removes the app and its launch services but
+    intentionally leaves the Endpoint Security extension registered (Homebrew
+    runs the same uninstall steps on every `brew upgrade`, so forcing a
+    deactivate here would drop protection on routine upgrades). To fully
+    remove the extension, first click "Disable Protection" on MacCrab's
+    Overview tab, or run the bundled scripts/uninstall.sh before uninstalling.
+    Any leftover entry clears after a reboot (confirm with
+    `systemextensionsctl list`).
 
     Your data (alerts, baselines, settings) is preserved at
     /Library/Application Support/MacCrab so upgrades don't wipe it. To
