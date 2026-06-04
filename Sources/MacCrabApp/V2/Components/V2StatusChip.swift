@@ -87,6 +87,21 @@ extension V2ChipKind {
         case .custom:     return "Custom"
         }
     }
+
+    /// RC H3 (a11y): a distinct SHAPE per severity so the dot doesn't encode
+    /// meaning by color alone (color-blind users). Severity tiers get clearly
+    /// different geometry: octagon (critical) / triangle (high) / diamond
+    /// (medium) / circle (low/info).
+    var shapeSymbol: String {
+        switch self {
+        case .critical, .down:            return "octagon.fill"
+        case .high, .warning, .degraded:  return "triangle.fill"
+        case .medium:                     return "diamond.fill"
+        case .healthy:                    return "checkmark.circle.fill"
+        case .low, .info, .neutral, .ai, .data, .custom:
+            return "circle.fill"
+        }
+    }
 }
 
 // MARK: - Severity dot
@@ -95,9 +110,14 @@ public struct V2SeverityDot: View {
     public let kind: V2ChipKind
     public init(_ kind: V2ChipKind) { self.kind = kind }
     public var body: some View {
-        Circle()
-            .fill(kind.color)
-            .frame(width: 8, height: 8)
-            .accessibilityHidden(true)
+        // RC H3 (a11y): shape-encode severity (not color alone) so color-blind
+        // users can distinguish it, and expose it to VoiceOver — this dot is
+        // sometimes the SOLE severity indicator in a row (was a plain Circle +
+        // accessibilityHidden). Footprint kept at ~8pt.
+        Image(systemName: kind.shapeSymbol)
+            .font(.system(size: 8))
+            .foregroundStyle(kind.color)
+            .frame(width: 9, height: 9)
+            .accessibilityLabel(kind.accessibilityName)
     }
 }

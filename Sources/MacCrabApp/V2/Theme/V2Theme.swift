@@ -73,14 +73,21 @@ public enum V2Theme {
 
     // MARK: - Semantic accents
 
-    public static let critical    = Color(red: 0.96, green: 0.39, blue: 0.27)  // red-orange
-    public static let high        = Color(red: 0.99, green: 0.62, blue: 0.30)  // amber-orange
-    public static let medium      = Color(red: 0.98, green: 0.78, blue: 0.39)  // amber
-    public static let low         = Color(red: 0.55, green: 0.65, blue: 0.78)  // muted blue-gray
-    public static let healthy     = Color(red: 0.22, green: 0.72, blue: 0.40)  // green (slightly darker for light-mode contrast)
-    public static let warning     = Color(red: 0.96, green: 0.65, blue: 0.27)  // warning amber
-    public static let aiAccent    = Color(red: 0.55, green: 0.36, blue: 0.92)  // purple/violet
-    public static let dataAccent  = Color(red: 0.20, green: 0.55, blue: 0.92)  // cyan/blue (darker for light-mode contrast)
+    // RC H3 (a11y): severity accents are adaptive. The bright dark-mode values
+    // (kept below) fail WCAG AA as text/icons on the light cream canvas
+    // (#FBF9F8) — measured 1.4–3.0:1. The `light:` variants are darkened so
+    // each clears AA 4.5:1 on that canvas (computed: critical 6.3, high 5.3,
+    // medium 5.3, low 5.5, healthy 5.4, ai 6.3, data 5.0). Used as chip text,
+    // dot fill, and accent throughout — making them adaptive fixes the chip
+    // contrast (V2StatusChip) at the same time.
+    public static var critical: Color   { dyn(dark: srgb(0.96, 0.39, 0.27), light: srgb(0.72, 0.10, 0.05)) }
+    public static var high: Color       { dyn(dark: srgb(0.99, 0.62, 0.30), light: srgb(0.66, 0.30, 0.02)) }
+    public static var medium: Color     { dyn(dark: srgb(0.98, 0.78, 0.39), light: srgb(0.55, 0.37, 0.00)) }
+    public static var low: Color        { dyn(dark: srgb(0.55, 0.65, 0.78), light: srgb(0.32, 0.40, 0.54)) }
+    public static var healthy: Color    { dyn(dark: srgb(0.22, 0.72, 0.40), light: srgb(0.10, 0.46, 0.24)) }
+    public static var warning: Color    { dyn(dark: srgb(0.96, 0.65, 0.27), light: srgb(0.66, 0.30, 0.02)) }
+    public static var aiAccent: Color   { dyn(dark: srgb(0.55, 0.36, 0.92), light: srgb(0.46, 0.24, 0.74)) }
+    public static var dataAccent: Color { dyn(dark: srgb(0.20, 0.55, 0.92), light: srgb(0.10, 0.42, 0.74)) }
 
     /// Highest-emphasis text — white in dark, near-black in light.
     public static var primaryText: Color {
