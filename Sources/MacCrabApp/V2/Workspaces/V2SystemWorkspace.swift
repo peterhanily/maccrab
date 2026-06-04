@@ -92,13 +92,13 @@ public struct V2SystemWorkspace: View {
                     .fill((isLive ? V2Theme.healthy : V2Theme.dataAccent).opacity(0.18))
                 Image(systemName: isLive ? "cylinder.split.1x2.fill" : "tray.full")
                     .foregroundStyle(isLive ? V2Theme.healthy : V2Theme.dataAccent)
-                    .font(.system(size: 16, weight: .semibold))
+                    .scaledSystem(16, weight: .semibold)
             }
             .frame(width: 38, height: 38)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
                     Text("Data source")
-                        .font(.system(size: 13, weight: .semibold))
+                        .scaledSystem(13, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
                     V2StatusChip(state.provider.mode.label,
                                  kind: isLive ? .healthy : .info)
@@ -452,12 +452,12 @@ public struct V2SystemWorkspace: View {
                 Circle().fill(V2Theme.brand.opacity(0.18))
                 Image(systemName: "gearshape.fill")
                     .foregroundStyle(V2Theme.brand)
-                    .font(.system(size: 18, weight: .bold))
+                    .scaledSystem(18, weight: .bold)
             }
             .frame(width: 44, height: 44)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Open MacCrab Settings")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledSystem(15, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
                 Text("AI backend, notifications, polling, storage retention, response actions, and integrations all live in the canonical Settings window.")
                     .font(V2Theme.body())
@@ -530,10 +530,10 @@ public struct V2SystemWorkspace: View {
                             icon: String, iconColor: Color) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(iconColor).font(.system(size: 11, weight: .semibold))
+                Image(systemName: icon).foregroundStyle(iconColor).scaledSystem(11, weight: .semibold)
                 Text(title.uppercased()).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.mutedText)
             }
-            Text(value).font(.system(size: 22, weight: .bold)).foregroundStyle(V2Theme.primaryText)
+            Text(value).scaledSystem(22, weight: .bold).foregroundStyle(V2Theme.primaryText)
             V2StatusChip(trend, kind: trendKind)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

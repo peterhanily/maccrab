@@ -213,7 +213,7 @@ struct V2ForensicsPastScansView: View {
                 Text(selectionMode
                      ? "Select scans, then Delete selected. Click a row to toggle."
                      : "Every scan run on this Mac, newest first. Click a scan to open it.")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -224,13 +224,13 @@ struct V2ForensicsPastScansView: View {
                         selectedIDs = []
                     }
                     .buttonStyle(.borderless)
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
                 } else {
                     Button("Select") { selectionMode = true }
                         .buttonStyle(.borderless)
-                        .font(.system(size: 12))
+                        .scaledSystem(12)
                     Text("\(scans.count) total")
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -249,16 +249,16 @@ struct V2ForensicsPastScansView: View {
                 }
             }
             .buttonStyle(.borderless)
-            .font(.system(size: 12))
+            .scaledSystem(12)
             Spacer()
             Text("\(selectedIDs.count) selected")
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(.secondary)
             Button(role: .destructive) {
                 pendingBulkDelete = true
             } label: {
                 Label("Delete selected", systemImage: "trash")
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
             }
             .disabled(selectedIDs.isEmpty)
         }
@@ -271,16 +271,16 @@ struct V2ForensicsPastScansView: View {
         HStack(spacing: 8) {
             Image(systemName: msg.hasPrefix("Deleted") ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .foregroundStyle(msg.hasPrefix("Deleted") ? .green : .orange)
-                .font(.system(size: 13))
+                .scaledSystem(13)
             Text(msg)
-                .font(.system(size: 12))
+                .scaledSystem(12)
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Dismiss") {
                 deleteResult = nil
             }
             .buttonStyle(.borderless)
-            .font(.system(size: 11))
+            .scaledSystem(11)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color(NSColor.controlBackgroundColor))
@@ -291,7 +291,7 @@ struct V2ForensicsPastScansView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("No scans yet.").font(.headline)
             Text("Run a scan from the Run a scan tab. Each scan you complete will appear here.")
-                .font(.system(size: 12))
+                .scaledSystem(12)
                 .foregroundStyle(.secondary)
         }
         .padding(20)
@@ -303,17 +303,17 @@ struct V2ForensicsPastScansView: View {
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(.tertiary)
             TextField("Filter by scan name", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .scaledSystem(12)
             if !query.isEmpty {
                 Button {
                     query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+                        .scaledSystem(12)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -411,7 +411,7 @@ struct ForensicsScanRow: View {
         HStack(alignment: .top, spacing: 8) {
             if selectionMode {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 16))
+                    .scaledSystem(16)
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                     .padding(.top, 1)
             }
@@ -419,23 +419,23 @@ struct ForensicsScanRow: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(scan.name)
-                            .font(.system(size: 13, weight: .semibold))
+                            .scaledSystem(13, weight: .semibold)
                             .foregroundStyle(.primary)
                         HStack(spacing: 6) {
                             Text(timeAgo(scan.createdAt))
-                                .font(.system(size: 11))
+                                .scaledSystem(11)
                                 .foregroundStyle(.secondary)
                             if scan.encryptionState != .plaintext {
                                 Image(systemName: "lock.fill")
-                                    .font(.system(size: 9))
+                                    .scaledSystem(9)
                                     .foregroundStyle(.secondary)
                             }
                             if let bytes = diskBytes {
                                 Text("·")
-                                    .font(.system(size: 11))
+                                    .scaledSystem(11)
                                     .foregroundStyle(.tertiary)
                                 Text(formatSize(bytes))
-                                    .font(.system(size: 11))
+                                    .scaledSystem(11)
                                     .foregroundStyle(bytes > 50 * 1_024 * 1_024 ? .orange : .secondary)
                             }
                         }
@@ -443,7 +443,7 @@ struct ForensicsScanRow: View {
                     Spacer()
                     if !selectionMode {
                         Text("View")
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                             .foregroundStyle(.tint)
                     }
                 }
@@ -467,7 +467,7 @@ struct ForensicsScanRow: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
+                    .scaledSystem(13)
                     .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)

@@ -31,7 +31,7 @@ struct JSONTreeView: View {
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: isOpen ? "chevron.down" : "chevron.right")
-                                    .font(.system(size: 9, weight: .semibold))
+                                    .scaledSystem(9, weight: .semibold)
                                     .foregroundStyle(.secondary)
                                     .frame(width: 10)
                                 artifactSummary(a)
@@ -50,7 +50,7 @@ struct JSONTreeView: View {
                 }
                 if artifacts.count > 200 {
                     Text("Showing first 200 of \(artifacts.count) artifacts.")
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .foregroundStyle(.tertiary)
                         .padding(.top, 6)
                 }
@@ -66,11 +66,11 @@ struct JSONTreeView: View {
     private func artifactSummary(_ a: CommittedArtifact) -> some View {
         HStack(spacing: 6) {
             Text(a.record.summary ?? a.record.contentType)
-                .font(.system(size: 12, weight: .medium))
+                .scaledSystem(12, weight: .medium)
                 .lineLimit(1)
             Spacer()
             Text(a.record.observedAt.formatted(date: .abbreviated, time: .shortened))
-                .font(.system(size: 10))
+                .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }
         .contentShape(Rectangle())
@@ -81,7 +81,7 @@ struct JSONTreeView: View {
             recordFields(a)
             if !a.record.data.isEmpty {
                 Text("data:")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .scaledSystem(10, weight: .semibold, design: .monospaced)
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
                 JSONNodeView(value: .object(a.record.data), depth: 1)
@@ -107,10 +107,10 @@ struct JSONTreeView: View {
 
     private func kvLine(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top, spacing: 6) {
-            Text(k).font(.system(size: 10, design: .monospaced))
+            Text(k).scaledSystem(10, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .frame(width: 100, alignment: .trailing)
-            Text(v).font(.system(size: 10, design: .monospaced))
+            Text(v).scaledSystem(10, design: .monospaced)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)

@@ -61,10 +61,10 @@ struct ArtifactBarChartView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             Text("Top \(min(buckets.count, Self.topN)) by \(humanField)")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSystem(12, weight: .semibold)
             Spacer()
             Text("\(artifacts.count) total event\(artifacts.count == 1 ? "" : "s")")
-                .font(.system(size: 10))
+                .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }
     }
@@ -73,7 +73,7 @@ struct ArtifactBarChartView: View {
         Text(groupField == nil
              ? "No groupField declared in this plugin's chart hint."
              : "No data for the declared group field.")
-            .font(.system(size: 11))
+            .scaledSystem(11)
             .foregroundStyle(.tertiary)
             .padding(.vertical, 20)
     }
@@ -88,7 +88,7 @@ struct ArtifactBarChartView: View {
                 .foregroundStyle(b.label == "(other)" ? Color.gray.opacity(0.5) : Color.accentColor.opacity(0.85))
                 .annotation(position: .trailing, alignment: .leading) {
                     Text("\(b.count)")
-                        .font(.system(size: 10, weight: .medium))
+                        .scaledSystem(10, weight: .medium)
                         .foregroundStyle(.secondary)
                 }
             }

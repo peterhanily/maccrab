@@ -54,7 +54,7 @@ public struct V2WorkspaceTabStrip: View {
                     selected = tab
                 } label: {
                     Text(tab.title)
-                        .font(.system(size: 13, weight: isOn ? .semibold : .medium))
+                        .scaledSystem(13, weight: isOn ? .semibold : .medium)
                         .foregroundStyle(isOn ? V2Theme.primaryText : V2Theme.mutedText)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)

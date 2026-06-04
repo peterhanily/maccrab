@@ -48,7 +48,7 @@ public struct V2CommandBar: View {
                 }
                 if let tab = state.currentTab() {
                     Image(systemName: "chevron.forward")
-                        .font(.system(size: 10, weight: .semibold))
+                        .scaledSystem(10, weight: .semibold)
                         .foregroundStyle(V2Theme.tertiaryText)
                     breadcrumbButton(
                         icon: nil,
@@ -66,10 +66,10 @@ public struct V2CommandBar: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 13, weight: .medium))
+                        .scaledSystem(13, weight: .medium)
                         .foregroundStyle(V2Theme.mutedText)
                     Text("Jump to anything")
-                        .font(.system(size: 14))
+                        .scaledSystem(14)
                         .foregroundStyle(V2Theme.mutedText)
                     Spacer()
                     HStack(spacing: 2) {
@@ -123,11 +123,11 @@ public struct V2CommandBar: View {
             HStack(spacing: 6) {
                 if let icon {
                     Image(systemName: icon)
-                        .font(.system(size: 12, weight: .medium))
+                        .scaledSystem(12, weight: .medium)
                         .foregroundStyle(V2Theme.mutedText)
                 }
                 Text(label)
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledSystem(13, weight: .medium)
                     .foregroundStyle(V2Theme.neutral)
             }
             .padding(.horizontal, 7)
@@ -143,7 +143,7 @@ public struct V2CommandBar: View {
     private func navButton(icon: String, enabled: Bool, tooltip: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSystem(12, weight: .semibold)
                 .foregroundStyle(enabled ? V2Theme.neutral : V2Theme.tertiaryText)
                 .frame(width: 28, height: 28)
                 .background(V2Theme.panelBackground.opacity(enabled ? 1.0 : 0.4))
@@ -176,7 +176,7 @@ private struct ShortcutChip: View {
     init(_ label: String) { self.label = label }
     var body: some View {
         Text(label)
-            .font(.system(size: 10, weight: .semibold))
+            .scaledSystem(10, weight: .semibold)
             .foregroundStyle(V2Theme.tertiaryText)
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
@@ -194,7 +194,7 @@ private struct IconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
+                .scaledSystem(13, weight: .semibold)
                 .foregroundStyle(hovering ? V2Theme.primaryText : V2Theme.mutedText)
                 .frame(width: 32, height: 32)
                 .background(hovering ? V2Theme.activeBackground : V2Theme.panelBackground)

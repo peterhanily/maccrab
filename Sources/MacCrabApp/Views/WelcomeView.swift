@@ -109,7 +109,7 @@ struct WelcomeView: View {
     private var languageStep: some View {
         VStack(spacing: 16) {
             Text("🦀")
-                .font(.system(size: 48))
+                .scaledSystem(48)
 
             Text(String(localized: "welcome.title", defaultValue: "Welcome to MacCrab"))
                 .font(.title).fontWeight(.bold)
@@ -141,7 +141,7 @@ struct WelcomeView: View {
     private var welcomeStep: some View {
         VStack(spacing: 16) {
             Text("🦀")
-                .font(.system(size: 48))
+                .scaledSystem(48)
 
             Text(String(localized: "welcome.whatIs", defaultValue: "What is MacCrab?"))
                 .font(.title2).fontWeight(.bold)
@@ -170,7 +170,7 @@ struct WelcomeView: View {
     private var readyStep: some View {
         VStack(spacing: 16) {
             Text("🦀")
-                .font(.system(size: 48))
+                .scaledSystem(48)
 
             Text(String(localized: "welcome.allSet", defaultValue: "Setup Checklist"))
                 .font(.title2).fontWeight(.bold)

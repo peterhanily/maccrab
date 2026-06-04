@@ -707,7 +707,7 @@ struct AlertPopoverView: View {
         HStack(alignment: .top, spacing: 12) {
             // Crab icon
             Text("🦀")
-                .font(.system(size: 28))
+                .scaledSystem(28)
                 .frame(width: 36, height: 36)
 
             // Content
@@ -723,7 +723,7 @@ struct AlertPopoverView: View {
                         .foregroundColor(Color(.tertiaryLabelColor))
                     Button(action: onDismiss) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
+                            .scaledSystem(9, weight: .bold)
                             .foregroundColor(Color(.tertiaryLabelColor))
                     }
                     .buttonStyle(.plain)

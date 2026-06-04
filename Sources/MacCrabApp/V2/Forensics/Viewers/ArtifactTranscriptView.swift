@@ -41,7 +41,7 @@ struct ArtifactTranscriptView: View {
                 }
                 if artifacts.count > 300 {
                     Text("Showing first 300 of \(artifacts.count). Newest at the bottom.")
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                         .padding(.top, 4)
                 }
@@ -64,10 +64,10 @@ struct ArtifactTranscriptView: View {
             if isFromMe { Spacer(minLength: 60) }
             VStack(alignment: isFromMe ? .trailing : .leading, spacing: 3) {
                 Text(sender)
-                    .font(.system(size: 10, weight: .medium))
+                    .scaledSystem(10, weight: .medium)
                     .foregroundStyle(.secondary)
                 Text(body)
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .background(isFromMe ? Color.accentColor.opacity(0.20) : Color.secondary.opacity(0.15))
                     .foregroundStyle(.primary)
@@ -75,7 +75,7 @@ struct ArtifactTranscriptView: View {
                     .frame(maxWidth: 480, alignment: isFromMe ? .trailing : .leading)
                     .textSelection(.enabled)
                 Text(ts.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 9))
+                    .scaledSystem(9)
                     .foregroundStyle(.tertiary)
             }
             if !isFromMe { Spacer(minLength: 60) }

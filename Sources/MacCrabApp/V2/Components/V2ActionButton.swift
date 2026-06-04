@@ -41,9 +41,9 @@ public struct V2ActionButton: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 if let icon {
-                    Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                    Image(systemName: icon).scaledSystem(12, weight: .semibold)
                 }
-                Text(label).font(.system(size: 13, weight: .semibold))
+                Text(label).scaledSystem(13, weight: .semibold)
             }
             .foregroundStyle(foreground.opacity(disabled ? 0.5 : 1.0))
             .padding(.horizontal, 14)

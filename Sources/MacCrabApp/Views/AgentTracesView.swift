@@ -276,7 +276,7 @@ struct AgentTracesView: View {
                 Text(value).font(.headline)
                 if let source {
                     Text(source)
-                        .font(.system(size: 9, weight: .semibold))
+                        .scaledSystem(9, weight: .semibold)
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
                         .background(Color.secondary.opacity(0.12))
@@ -293,7 +293,7 @@ struct AgentTracesView: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: "scope")
-                .font(.system(size: 48))
+                .scaledSystem(48)
                 .foregroundStyle(.secondary)
             Text(String(localized: "agentTraces.emptyTitle",
                          defaultValue: "No agent traces yet"))
@@ -357,7 +357,7 @@ struct AgentTracesView: View {
     private var placeholderDetail: some View {
         VStack(spacing: 8) {
             Image(systemName: "rectangle.dashed")
-                .font(.system(size: 32))
+                .scaledSystem(32)
                 .foregroundStyle(.secondary)
             Text(String(localized: "agentTraces.selectTrace",
                          defaultValue: "Select a trace to view its spans"))

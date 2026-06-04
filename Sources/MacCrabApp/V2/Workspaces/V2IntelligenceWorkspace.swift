@@ -153,7 +153,7 @@ public struct V2IntelligenceWorkspace: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "square.stack.3d.up.fill")
                     .foregroundStyle(V2Theme.dataAccent)
-                    .font(.system(size: 14))
+                    .scaledSystem(14)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Add custom feeds & IOCs")
@@ -208,7 +208,7 @@ public struct V2IntelligenceWorkspace: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .foregroundStyle(V2Theme.dataAccent)
-                    .font(.system(size: 14))
+                    .scaledSystem(14)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Managed feeds")
@@ -237,7 +237,7 @@ public struct V2IntelligenceWorkspace: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "key.fill")
                     .foregroundStyle(V2Theme.dataAccent)
-                    .font(.system(size: 14))
+                    .scaledSystem(14)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("LLM provider API keys")
@@ -1055,10 +1055,10 @@ public struct V2IntelligenceWorkspace: View {
                             icon: String, iconColor: Color) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(iconColor).font(.system(size: 11, weight: .semibold))
+                Image(systemName: icon).foregroundStyle(iconColor).scaledSystem(11, weight: .semibold)
                 Text(title.uppercased()).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.mutedText)
             }
-            Text(value).font(.system(size: 22, weight: .bold)).foregroundStyle(V2Theme.primaryText)
+            Text(value).scaledSystem(22, weight: .bold).foregroundStyle(V2Theme.primaryText)
             V2StatusChip(trend, kind: trendKind)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1159,7 +1159,7 @@ public struct V2FeedConfigSheet: View {
             HStack {
                 Image(systemName: feed.isBuiltIn ? "checkmark.seal.fill" : "clock.badge")
                     .foregroundStyle(feed.isBuiltIn ? V2Theme.healthy : V2Theme.dataAccent)
-                    .font(.system(size: 18, weight: .semibold))
+                    .scaledSystem(18, weight: .semibold)
                 Text(feed.label)
                     .font(V2Theme.workspaceTitle())
                     .foregroundStyle(V2Theme.primaryText)
@@ -1168,7 +1168,7 @@ public struct V2FeedConfigSheet: View {
                     onClose()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledSystem(11, weight: .semibold)
                         .foregroundStyle(V2Theme.mutedText)
                         .frame(width: 26, height: 26)
                         .contentShape(Rectangle())

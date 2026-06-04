@@ -263,7 +263,7 @@ struct V2InvestigationWorkspace: View {
     private var traceGraphExplainer: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 16, weight: .semibold))
+                .scaledSystem(16, weight: .semibold)
                 .foregroundStyle(V2Theme.dataAccent)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
@@ -295,7 +295,7 @@ struct V2InvestigationWorkspace: View {
             HStack(spacing: 10) {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
                     .foregroundStyle(V2Theme.dataAccent)
-                    .font(.system(size: 16, weight: .semibold))
+                    .scaledSystem(16, weight: .semibold)
                 Text(trace.title).font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
                 Spacer()
                 V2StatusChip("\(members.count) entities", kind: .data)
@@ -305,9 +305,9 @@ struct V2InvestigationWorkspace: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: graphAsList ? "point.3.connected.trianglepath.dotted" : "list.bullet")
-                                .font(.system(size: 10, weight: .semibold))
+                                .scaledSystem(10, weight: .semibold)
                             Text(graphAsList ? "Graph" : "List")
-                                .font(.system(size: 11, weight: .medium))
+                                .scaledSystem(11, weight: .medium)
                         }
                         .foregroundStyle(V2Theme.mutedText)
                         .padding(.horizontal, 8).padding(.vertical, 4)
@@ -367,7 +367,7 @@ struct V2InvestigationWorkspace: View {
                     HStack(spacing: 10) {
                         Image(systemName: m.isAnchor ? "flame.fill" : iconForEntityType(m.entityType))
                             .foregroundStyle(m.isAnchor ? V2Theme.high : V2Theme.dataAccent)
-                            .font(.system(size: 12, weight: m.isAnchor ? .bold : .regular))
+                            .scaledSystem(12, weight: m.isAnchor ? .bold : .regular)
                             .frame(width: 18, alignment: .center)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(m.displayName)
@@ -385,7 +385,7 @@ struct V2InvestigationWorkspace: View {
                         // (Arabic, Hebrew). The .right variant is
                         // direction-locked and looks broken in RTL.
                         Image(systemName: "chevron.forward")
-                            .font(.system(size: 9, weight: .semibold))
+                            .scaledSystem(9, weight: .semibold)
                             .foregroundStyle(V2Theme.mutedText)
                     }
                     .padding(.horizontal, 10)
@@ -472,7 +472,7 @@ struct V2InvestigationWorkspace: View {
                     // tuned low enough that it reads as paper texture
                     // rather than a competing element.
                     Text("🦀")
-                        .font(.system(size: min(geo.size.width, geo.size.height) * 0.78))
+                        .scaledSystem(min(geo.size.width, geo.size.height) * 0.78)
                         .opacity(0.028)
                         .saturation(0.35)
                         .allowsHitTesting(false)
@@ -644,9 +644,9 @@ struct V2InvestigationWorkspace: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: layoutCase.icon)
-                                .font(.system(size: 10, weight: .semibold))
+                                .scaledSystem(10, weight: .semibold)
                             Text(layoutCase.label)
-                                .font(.system(size: 11, weight: .medium))
+                                .scaledSystem(11, weight: .medium)
                         }
                         .foregroundStyle(graphLayout == layoutCase ? V2Theme.primaryText : V2Theme.mutedText)
                         .padding(.horizontal, 8).padding(.vertical, 4)
@@ -678,9 +678,9 @@ struct V2InvestigationWorkspace: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 10, weight: .semibold))
+                            .scaledSystem(10, weight: .semibold)
                         Text("Reset positions")
-                            .font(.system(size: 11, weight: .medium))
+                            .scaledSystem(11, weight: .medium)
                     }
                     .foregroundStyle(V2Theme.mutedText)
                     .padding(.horizontal, 8).padding(.vertical, 4)
@@ -704,7 +704,7 @@ struct V2InvestigationWorkspace: View {
                 pinchBaseline = graphZoom
             } label: {
                 Image(systemName: "minus.magnifyingglass")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledSystem(11, weight: .semibold)
                     .frame(width: 22, height: 22)
                     .foregroundStyle(V2Theme.mutedText)
                     .background(V2Theme.panelBackground)
@@ -714,7 +714,7 @@ struct V2InvestigationWorkspace: View {
             .disabled(graphZoom <= zoomMin)
 
             Text("\(Int(graphZoom * 100))%")
-                .font(.system(size: 10, weight: .medium))
+                .scaledSystem(10, weight: .medium)
                 .foregroundStyle(V2Theme.mutedText)
                 .frame(width: 40)
                 .padding(.vertical, 4)
@@ -731,7 +731,7 @@ struct V2InvestigationWorkspace: View {
                 pinchBaseline = graphZoom
             } label: {
                 Image(systemName: "plus.magnifyingglass")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledSystem(11, weight: .semibold)
                     .frame(width: 22, height: 22)
                     .foregroundStyle(V2Theme.mutedText)
                     .background(V2Theme.panelBackground)
@@ -954,14 +954,14 @@ struct V2InvestigationWorkspace: View {
                     .stroke(m.isAnchor ? V2Theme.high : V2Theme.dataAccent,
                             lineWidth: m.isAnchor ? 2 : 1)
                 Image(systemName: m.isAnchor ? "flame.fill" : iconForEntityType(m.entityType))
-                    .font(.system(size: m.isAnchor ? 14 : 11,
-                                  weight: m.isAnchor ? .bold : .regular))
+                    .scaledSystem(m.isAnchor ? 14 : 11,
+                                  weight: m.isAnchor ? .bold : .regular)
                     .foregroundStyle(m.isAnchor ? V2Theme.high : V2Theme.dataAccent)
             }
             .frame(width: m.isAnchor ? 36 : 26, height: m.isAnchor ? 36 : 26)
             .opacity(dim ? 0.35 : 1.0)
             Text(m.displayName)
-                .font(.system(size: 10, weight: m.isAnchor ? .semibold : .regular))
+                .scaledSystem(10, weight: m.isAnchor ? .semibold : .regular)
                 .foregroundStyle(dim ? V2Theme.tertiaryText : V2Theme.primaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -1036,7 +1036,7 @@ struct V2InvestigationWorkspace: View {
                     Circle().fill(kindColor.opacity(0.18))
                     Image(systemName: m.isAnchor ? "flame.fill" : iconForEntityType(m.entityType))
                         .foregroundStyle(kindColor)
-                        .font(.system(size: 14, weight: .bold))
+                        .scaledSystem(14, weight: .bold)
                 }
                 .frame(width: 32, height: 32)
                 VStack(alignment: .leading, spacing: 2) {
@@ -1057,7 +1057,7 @@ struct V2InvestigationWorkspace: View {
                     selectedMemberId = nil
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledSystem(11, weight: .semibold)
                         .foregroundStyle(V2Theme.mutedText)
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
@@ -1083,7 +1083,7 @@ struct V2InvestigationWorkspace: View {
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "info.circle")
                     .foregroundStyle(V2Theme.mutedText)
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                 Text(hintForEntityType(m.entityType))
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
@@ -1244,9 +1244,9 @@ struct V2InvestigationWorkspace: View {
             } label: {
                 VStack(spacing: 6) {
                     Image(systemName: "sidebar.right")
-                        .font(.system(size: 14, weight: .semibold))
+                        .scaledSystem(14, weight: .semibold)
                     Text("Show details")
-                        .font(.system(size: 10, weight: .semibold))
+                        .scaledSystem(10, weight: .semibold)
                         .rotationEffect(.degrees(-90))
                         .fixedSize()
                         .frame(width: 16, height: 88)
@@ -1315,7 +1315,7 @@ struct V2InvestigationWorkspace: View {
                         V2StatusChip("DEMO", kind: .ai, icon: "theatermasks.fill")
                     }
                     Text(trace.title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .scaledSystem(12, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
                         .lineLimit(1)
                         .frame(maxWidth: 280, alignment: .leading)
@@ -1323,7 +1323,7 @@ struct V2InvestigationWorkspace: View {
                     Text("No trace").font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
                 }
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .scaledSystem(9, weight: .semibold)
                     .foregroundStyle(V2Theme.mutedText)
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
@@ -1365,7 +1365,7 @@ struct V2InvestigationWorkspace: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(V2Theme.mutedText)
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                 TextField("Filter by title, process, or trace ID…", text: $tracePickerQuery)
                     .textFieldStyle(.plain)
                     .font(V2Theme.body())
@@ -1374,7 +1374,7 @@ struct V2InvestigationWorkspace: View {
                         tracePickerQuery = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                             .foregroundStyle(V2Theme.mutedText)
                     }
                     .buttonStyle(.plain)
@@ -1417,11 +1417,11 @@ struct V2InvestigationWorkspace: View {
     private func tracePickerSectionHeader(_ label: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Text(label.uppercased())
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(V2Theme.tertiaryText)
                 .tracking(0.5)
             Text("\(count)")
-                .font(.system(size: 10, weight: .medium))
+                .scaledSystem(10, weight: .medium)
                 .foregroundStyle(V2Theme.mutedText)
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .background(V2Theme.panelBackground)
@@ -1451,7 +1451,7 @@ struct V2InvestigationWorkspace: View {
                         .stroke(trace.severityHint.chipKind.color, lineWidth: 1.4)
                         .frame(width: 22, height: 22)
                     Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 10, weight: .semibold))
+                        .scaledSystem(10, weight: .semibold)
                         .foregroundStyle(trace.severityHint.chipKind.color)
                 }
                 VStack(alignment: .leading, spacing: 2) {
@@ -1460,7 +1460,7 @@ struct V2InvestigationWorkspace: View {
                             V2StatusChip("DEMO", kind: .ai)
                         }
                         Text(trace.title)
-                            .font(.system(size: 13, weight: isOn ? .semibold : .medium))
+                            .scaledSystem(13, weight: isOn ? .semibold : .medium)
                             .foregroundStyle(V2Theme.primaryText)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -1468,7 +1468,7 @@ struct V2InvestigationWorkspace: View {
                         V2StatusChip(trace.severityHint.label, kind: trace.severityHint.chipKind)
                     }
                     HStack(spacing: 6) {
-                        Image(systemName: "terminal").font(.system(size: 9))
+                        Image(systemName: "terminal").scaledSystem(9)
                             .foregroundStyle(V2Theme.mutedText)
                         Text(trace.rootProcess)
                             .font(V2Theme.mono())
@@ -1505,7 +1505,7 @@ struct V2InvestigationWorkspace: View {
                 }
                 if isOn {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 14, weight: .semibold))
+                        .scaledSystem(14, weight: .semibold)
                         .foregroundStyle(V2Theme.brand)
                         .padding(.top, 2)
                 }
@@ -1554,7 +1554,7 @@ struct V2InvestigationWorkspace: View {
             traceInspectorOpen = true
         } label: {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(V2Theme.mutedText)
                 .frame(width: 22, height: 22)
                 .background(V2Theme.hoverBackground)
@@ -1618,7 +1618,7 @@ struct V2InvestigationWorkspace: View {
                                     }
                                     Spacer()
                                     Image(systemName: "arrow.up.forward")
-                                        .font(.system(size: 10))
+                                        .scaledSystem(10)
                                         .foregroundStyle(V2Theme.mutedText)
                                 }
                                 .padding(10)
@@ -1681,7 +1681,7 @@ struct V2InvestigationWorkspace: View {
                     HStack(spacing: 6) {
                         Image(systemName: "circle.fill")
                             .foregroundStyle(V2Theme.dataAccent)
-                            .font(.system(size: 6))
+                            .scaledSystem(6)
                         Text(step).font(V2Theme.mono()).foregroundStyle(V2Theme.primaryText)
                     }
                 }
@@ -1739,7 +1739,7 @@ struct V2InvestigationWorkspace: View {
     private var agentTracesExplainer: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "wand.and.stars")
-                .font(.system(size: 16, weight: .semibold))
+                .scaledSystem(16, weight: .semibold)
                 .foregroundStyle(V2Theme.aiAccent)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
@@ -1904,14 +1904,14 @@ private struct DraggableMemberNode: View {
                     .stroke(m.isAnchor ? V2Theme.high : V2Theme.dataAccent,
                             lineWidth: m.isAnchor ? 2 : 1)
                 Image(systemName: m.isAnchor ? "flame.fill" : iconForType(m.entityType))
-                    .font(.system(size: m.isAnchor ? 14 : 11,
-                                  weight: m.isAnchor ? .bold : .regular))
+                    .scaledSystem(m.isAnchor ? 14 : 11,
+                                  weight: m.isAnchor ? .bold : .regular)
                     .foregroundStyle(m.isAnchor ? V2Theme.high : V2Theme.dataAccent)
             }
             .frame(width: m.isAnchor ? 36 : 26, height: m.isAnchor ? 36 : 26)
             .opacity(dim ? 0.35 : 1.0)
             Text(m.displayName)
-                .font(.system(size: 10, weight: m.isAnchor ? .semibold : .regular))
+                .scaledSystem(10, weight: m.isAnchor ? .semibold : .regular)
                 .foregroundStyle(dim ? V2Theme.tertiaryText : V2Theme.primaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)

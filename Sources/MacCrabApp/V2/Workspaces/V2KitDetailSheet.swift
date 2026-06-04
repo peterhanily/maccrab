@@ -42,7 +42,7 @@ struct V2KitDetailSheet: View {
     private var header: some View {
         HStack(spacing: 14) {
             Image(systemName: kit.category.sfSymbol)
-                .font(.system(size: 22))
+                .scaledSystem(22)
                 .foregroundStyle(.tint)
                 .padding(8)
                 .background(Color.accentColor.opacity(0.12))
@@ -51,12 +51,12 @@ struct V2KitDetailSheet: View {
                 Text(kit.name).font(.title3).fontWeight(.semibold)
                 HStack(spacing: 6) {
                     Text(kit.category.displayName)
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .foregroundStyle(.secondary)
                     if kit.encrypted {
                         Label("Encrypted", systemImage: "lock.fill")
                             .labelStyle(.titleAndIcon)
-                            .font(.system(size: 10, weight: .medium))
+                            .scaledSystem(10, weight: .medium)
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Color.purple.opacity(0.15))
                             .foregroundStyle(.purple)
@@ -76,11 +76,11 @@ struct V2KitDetailSheet: View {
     private var kitOverview: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("What this kit does")
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary)
                 .textCase(.uppercase)
             Text(kit.description)
-                .font(.system(size: 13))
+                .scaledSystem(13)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -91,9 +91,9 @@ struct V2KitDetailSheet: View {
                 .foregroundStyle(.purple)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Encrypted scan")
-                    .font(.system(size: 12, weight: .semibold))
+                    .scaledSystem(12, weight: .semibold)
                 Text("Some scanners in this kit extract personal data (messages, mail, call history). MacCrab stores those rows encrypted on disk and asks for your Keychain password once to unlock the encryption key. The plaintext data never leaves your Mac.")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -109,7 +109,7 @@ struct V2KitDetailSheet: View {
     private var scannerList: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Scanners in this kit (\(kit.plugins.count))")
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary)
                 .textCase(.uppercase)
             ForEach(kit.plugins, id: \.pluginID) { ref in
@@ -123,10 +123,10 @@ struct V2KitDetailSheet: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(ScannerDisplay.name(forPluginID: ref.pluginID))
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledSystem(13, weight: .semibold)
                 if !ref.required {
                     Text("Optional")
-                        .font(.system(size: 9, weight: .medium))
+                        .scaledSystem(9, weight: .medium)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Color.secondary.opacity(0.15))
                         .foregroundStyle(.secondary)
@@ -134,13 +134,13 @@ struct V2KitDetailSheet: View {
                 }
                 Spacer()
                 Text(ref.pluginID)
-                    .font(.system(size: 9, design: .monospaced))
+                    .scaledSystem(9, design: .monospaced)
                     .foregroundStyle(.tertiary)
                     .textSelection(.enabled)
             }
             if let fact {
                 Text(fact.purpose)
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 detailRow("Reads", fact.dataSources)
@@ -150,20 +150,20 @@ struct V2KitDetailSheet: View {
                 detailRow("Emits", fact.emits.map { ScannerDisplay.name(forContentType: $0) })
                 HStack(spacing: 4) {
                     Image(systemName: fact.privacyClass == .metadata ? "checkmark.shield" : "lock.fill")
-                        .font(.system(size: 9))
+                        .scaledSystem(9)
                         .foregroundStyle(fact.privacyClass == .metadata ? .green : .purple)
                     Text(fact.privacyClass.label)
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.top, 2)
             } else {
                 Text("\(ref.role)")
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Detailed reference not yet documented — see the plugin manifest.")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.tertiary)
                     .italic()
             }
@@ -177,13 +177,13 @@ struct V2KitDetailSheet: View {
     private func detailRow(_ label: String, _ values: [String]) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(label)
-                .font(.system(size: 10, weight: .medium))
+                .scaledSystem(10, weight: .medium)
                 .foregroundStyle(.tertiary)
                 .frame(width: 50, alignment: .trailing)
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(values, id: \.self) { v in
                     Text(v)
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -197,7 +197,7 @@ struct V2KitDetailSheet: View {
     private var footer: some View {
         HStack {
             Text("\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s") · v\(kit.version) · \(kit.maintainer)")
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(.tertiary)
             Spacer()
             Button("Run this kit") {

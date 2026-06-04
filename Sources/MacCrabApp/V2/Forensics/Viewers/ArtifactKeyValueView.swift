@@ -56,7 +56,7 @@ struct ArtifactKeyValueView: View {
                                 .fill(severityColor(sev))
                                 .frame(width: 6, height: 6)
                             Text(rowTitle(a))
-                                .font(.system(size: 11))
+                                .scaledSystem(11)
                                 .lineLimit(1)
                             Spacer()
                         }
@@ -68,7 +68,7 @@ struct ArtifactKeyValueView: View {
                 }
                 if artifacts.count > 200 {
                     Text("Showing first 200 of \(artifacts.count)")
-                        .font(.system(size: 9))
+                        .scaledSystem(9)
                         .foregroundStyle(.tertiary)
                         .padding(8)
                 }
@@ -97,13 +97,13 @@ struct ArtifactKeyValueView: View {
                 .font(.headline)
             HStack(spacing: 6) {
                 Text(a.record.contentType)
-                    .font(.system(size: 10, design: .monospaced))
+                    .scaledSystem(10, design: .monospaced)
                     .foregroundStyle(.tertiary)
                 Text("·")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.tertiary)
                 Text(a.record.observedAt.formatted(date: .abbreviated, time: .standard))
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -121,7 +121,7 @@ struct ArtifactKeyValueView: View {
             let extras = a.record.data.keys.filter { !mapped.contains($0) }.sorted()
             if !extras.isEmpty {
                 Text("Other fields")
-                    .font(.system(size: 9, weight: .semibold))
+                    .scaledSystem(9, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .textCase(.uppercase)
                     .padding(.top, 6)
@@ -151,7 +151,7 @@ struct ArtifactKeyValueView: View {
         let role = hint.fieldRoles[field]
         return HStack(alignment: .top, spacing: 12) {
             Text(humanFieldName(field))
-                .font(.system(size: 10, weight: .medium))
+                .scaledSystem(10, weight: .medium)
                 .foregroundStyle(.tertiary)
                 .frame(width: 110, alignment: .trailing)
             valueText(v, role: role)
@@ -162,23 +162,23 @@ struct ArtifactKeyValueView: View {
     @ViewBuilder
     private func valueText(_ v: ResolvedValue, role: FieldRole?) -> some View {
         if v.isEmpty {
-            Text("—").font(.system(size: 11)).foregroundStyle(.tertiary)
+            Text("—").scaledSystem(11).foregroundStyle(.tertiary)
         } else if case .array(let arr) = v {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(Array(arr.prefix(20).enumerated()), id: \.offset) { _, item in
                     Text(FieldResolver.wrap(item).displayString())
-                        .font(.system(size: 11, design: .monospaced))
+                        .scaledSystem(11, design: .monospaced)
                         .textSelection(.enabled)
                 }
                 if arr.count > 20 {
                     Text("+ \(arr.count - 20) more")
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                 }
             }
         } else {
             Text(v.displayString(format: formatFor(role)))
-                .font(.system(size: 12, design: role == .path || role == .identifier ? .monospaced : .default))
+                .scaledSystem(12, design: role == .path || role == .identifier ? .monospaced : .default)
                 .foregroundStyle(role == .link ? Color.accentColor : .primary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -237,11 +237,11 @@ private struct RawJSONDisclosure: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .scaledSystem(9, weight: .semibold)
                         .foregroundStyle(.secondary)
                         .frame(width: 10)
                     Text("Raw data JSON")
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledSystem(11, weight: .semibold)
                         .foregroundStyle(.secondary)
                     Spacer()
                 }

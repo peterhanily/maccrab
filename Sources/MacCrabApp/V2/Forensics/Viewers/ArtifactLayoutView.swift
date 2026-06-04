@@ -29,7 +29,7 @@ struct ArtifactLayoutView: View {
         Group {
             if template == nil {
                 Text("Plugin selected viewer=.layout but didn't supply a template. Falling back to JSON tree.")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.orange)
                     .padding(10)
                 JSONTreeView(artifacts: artifacts)
@@ -60,7 +60,7 @@ struct ArtifactLayoutView: View {
                         selectedID = a.id
                     } label: {
                         Text(a.record.summary ?? a.record.contentType)
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 10).padding(.vertical, 6)
@@ -95,7 +95,7 @@ struct LayoutNodeView: View {
             VStack(alignment: .leading, spacing: 6) {
                 if let t = title {
                     Text(t)
-                        .font(.system(size: 10, weight: .semibold))
+                        .scaledSystem(10, weight: .semibold)
                         .foregroundStyle(.tertiary)
                         .textCase(.uppercase)
                 }
@@ -110,7 +110,7 @@ struct LayoutNodeView: View {
         case .row(let label, let field, let format):
             HStack(alignment: .top, spacing: 12) {
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .scaledSystem(11, weight: .medium)
                     .foregroundStyle(.tertiary)
                     .frame(width: 110, alignment: .trailing)
                 Text(FieldResolver.resolve(artifact, field: field).displayString(format: format))
@@ -123,11 +123,11 @@ struct LayoutNodeView: View {
         case .headerKV(let label, let field, let format):
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.system(size: 10, weight: .semibold))
+                    .scaledSystem(10, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .textCase(.uppercase)
                 Text(FieldResolver.resolve(artifact, field: field).displayString(format: format))
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .scaledSystem(18, weight: .semibold, design: .rounded)
                     .textSelection(.enabled)
             }
             .padding(.bottom, 4)
@@ -135,7 +135,7 @@ struct LayoutNodeView: View {
         case .list(let label, let field):
             VStack(alignment: .leading, spacing: 3) {
                 Text(label)
-                    .font(.system(size: 10, weight: .semibold))
+                    .scaledSystem(10, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .textCase(.uppercase)
                 listItems(forField: field)
@@ -144,10 +144,10 @@ struct LayoutNodeView: View {
         case .badge(let label, let field, let colorName):
             HStack(spacing: 6) {
                 Text(label)
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.secondary)
                 Text(FieldResolver.resolve(artifact, field: field).displayString())
-                    .font(.system(size: 10, weight: .medium))
+                    .scaledSystem(10, weight: .medium)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(badgeBackground(colorName))
                     .foregroundStyle(badgeForeground(colorName))
@@ -156,7 +156,7 @@ struct LayoutNodeView: View {
 
         case .text(let content):
             Text(content)
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(.secondary)
         }
     }
@@ -167,15 +167,15 @@ struct LayoutNodeView: View {
         if case .array(let arr) = v {
             ForEach(Array(arr.prefix(50).enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .top, spacing: 4) {
-                    Text("•").font(.system(size: 11)).foregroundStyle(.tertiary)
+                    Text("•").scaledSystem(11).foregroundStyle(.tertiary)
                     Text(FieldResolver.wrap(item).displayString())
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .textSelection(.enabled)
                 }
             }
         } else {
             Text("(not a list)")
-                .font(.system(size: 10))
+                .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }
     }

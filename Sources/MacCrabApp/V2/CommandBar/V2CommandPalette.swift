@@ -50,12 +50,12 @@ public struct V2CommandPalette: View {
     private var queryRow: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
+                .scaledSystem(14, weight: .medium)
                 .foregroundStyle(V2Theme.mutedText)
             TextField("Jump to anything (workspaces, tabs, verbs, alert: rule: ip: trace:…)",
                       text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 14))
+                .scaledSystem(14)
                 .foregroundStyle(V2Theme.primaryText)
                 .focused($fieldFocused)
                 .onSubmit { applySelected() }
@@ -143,12 +143,12 @@ public struct V2CommandPalette: View {
         Button { apply(item) } label: {
             HStack(spacing: 12) {
                 Image(systemName: item.icon)
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledSystem(13, weight: .medium)
                     .foregroundStyle(isSelected ? V2Theme.primaryText : V2Theme.mutedText)
                     .frame(width: 22, alignment: .center)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(item.title)
-                        .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                        .scaledSystem(13, weight: isSelected ? .semibold : .medium)
                         .foregroundStyle(V2Theme.primaryText)
                         .lineLimit(1)
                     if let subtitle = item.subtitle {

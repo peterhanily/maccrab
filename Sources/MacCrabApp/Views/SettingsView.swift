@@ -424,10 +424,10 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(String(localized: "settings.notificationsDenied",
                                                 defaultValue: "Notifications are turned off for MacCrab in System Settings."))
-                                        .font(.system(size: 12, weight: .medium))
+                                        .scaledSystem(12, weight: .medium)
                                     Text(String(localized: "settings.notificationsDeniedHint",
                                                 defaultValue: "MacCrab can't show alert banners until you allow notifications. Detections are still recorded and visible in the dashboard."))
-                                        .font(.system(size: 11))
+                                        .scaledSystem(11)
                                         .foregroundStyle(.secondary)
                                     Button(String(localized: "settings.openNotificationSettings",
                                                   defaultValue: "Open System Settings → Notifications")) {
@@ -435,7 +435,7 @@ struct SettingsView: View {
                                             NSWorkspace.shared.open(url)
                                         }
                                     }
-                                    .font(.system(size: 11))
+                                    .scaledSystem(11)
                                 }
                                 Spacer()
                             }
@@ -608,7 +608,7 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                         TextField("https://rave.maccrab.com/", text: $forensicsCatalogBaseURL)
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .scaledSystem(12, design: .monospaced)
                         HStack(spacing: 8) {
                             Button {
                                 forensicsCatalogBaseURL = ""
@@ -631,7 +631,7 @@ struct SettingsView: View {
                             HStack(alignment: .top, spacing: 6) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundStyle(.orange)
-                                    .font(.system(size: 11))
+                                    .scaledSystem(11)
                                     .padding(.top, 1)
                                 Text(String(localized: "settings.nonOfficialWarn", defaultValue: "Custom catalog source set. Plugins fetched here haven't been vetted by the official rave team. The Catalog tab will show a warning banner. Use only for local development and testing."))
                                     .font(.caption)
@@ -1511,7 +1511,7 @@ struct SettingsView: View {
                 Spacer()
 
                 Text("🦀")
-                    .font(.system(size: 64))
+                    .scaledSystem(64)
 
                 Text("MacCrab")
                     .font(.title)

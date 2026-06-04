@@ -452,10 +452,10 @@ public struct V2DetectionWorkspace: View {
                             icon: String, iconColor: Color) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(iconColor).font(.system(size: 11, weight: .semibold))
+                Image(systemName: icon).foregroundStyle(iconColor).scaledSystem(11, weight: .semibold)
                 Text(title.uppercased()).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.mutedText)
             }
-            Text(value).font(.system(size: 22, weight: .bold)).foregroundStyle(V2Theme.primaryText)
+            Text(value).scaledSystem(22, weight: .bold).foregroundStyle(V2Theme.primaryText)
             V2StatusChip(trend, kind: trendKind)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -466,7 +466,7 @@ public struct V2DetectionWorkspace: View {
         HStack(spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(V2Theme.mutedText).font(.system(size: 12))
+                    .foregroundStyle(V2Theme.mutedText).scaledSystem(12)
                 TextField("Filter rules (id, MITRE, category)…", text: ruleQuery)
                     .textFieldStyle(.plain).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
             }
@@ -525,11 +525,11 @@ public struct V2DetectionWorkspace: View {
                 .foregroundStyle(V2Theme.mutedText)
             VStack(alignment: .leading, spacing: 3) {
                 Text("No editable rule matches “\(debouncedRuleQuery)”.")
-                    .font(.system(size: 12, weight: .medium))
+                    .scaledSystem(12, weight: .medium)
                 Text(compositeTitle.map {
                     "“\($0)” is a multi-step correlation detection — a sequence or trace-graph rule evaluated across several events, not a single-event Sigma rule. There's nothing to edit or tune for it on this screen."
                 } ?? "Alerts with a `maccrab.*` ID (e.g. AI Guard, campaign correlation, behavioral scoring, threat intel, forensic scanners, cross-process correlation, DNS analysis) come from MacCrab's built-in detection engines — not Sigma YAML rules, so there's nothing to edit or tune here.")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -552,7 +552,7 @@ public struct V2DetectionWorkspace: View {
                 V2DataColumn(id: "on", title: "On", width: .fixed(50)) { r in
                     Image(systemName: r.isEnabled ? "circle.fill" : "circle")
                         .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
-                        .font(.system(size: 8))
+                        .scaledSystem(8)
                 },
                 V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 240)) { r in
                     VStack(alignment: .leading, spacing: 1) {
@@ -609,7 +609,7 @@ public struct V2DetectionWorkspace: View {
             V2InspectorSection("MITRE") {
                 ForEach(r.mitre, id: \.self) { code in
                     HStack(spacing: 6) {
-                        Image(systemName: "doc.plaintext").font(.system(size: 11))
+                        Image(systemName: "doc.plaintext").scaledSystem(11)
                             .foregroundStyle(V2Theme.mutedText)
                         Text(code).font(V2Theme.mono()).foregroundStyle(V2Theme.primaryText)
                     }
@@ -841,7 +841,7 @@ public struct V2DetectionWorkspace: View {
                                     .foregroundStyle(dangerousPermissions.contains(perm)
                                                      ? V2Theme.high
                                                      : V2Theme.mutedText)
-                                    .font(.system(size: 10))
+                                    .scaledSystem(10)
                                 Text(perm)
                                     .font(V2Theme.mono())
                                     .foregroundStyle(V2Theme.primaryText)
@@ -1086,7 +1086,7 @@ private struct RuleYAMLEditorSheet: View {
                     }
                 } label: {
                     Image(systemName: "questionmark.circle")
-                        .font(.system(size: 14))
+                        .scaledSystem(14)
                 }
                 .buttonStyle(.borderless)
                 .help("Open Sigma rule reference (sigmahq.io)")

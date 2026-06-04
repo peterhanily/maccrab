@@ -93,13 +93,13 @@ struct V2ForensicsFindingsView: View {
                 Text("Findings")
                     .font(.title2).fontWeight(.semibold)
                 Text("What scans have found on this Mac, grouped by scan.")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if !groups.isEmpty {
                 Text("\(totalCount) total")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -113,7 +113,7 @@ struct V2ForensicsFindingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("No findings yet.").font(.headline)
             Text("Run a scan from the Scans tab. Findings will appear here when scanners commit them.")
-                .font(.system(size: 12))
+                .scaledSystem(12)
                 .foregroundStyle(.secondary)
         }
         .padding(20)
@@ -137,7 +137,7 @@ struct V2ForensicsFindingsView: View {
             scannerFilter = value
         } label: {
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .scaledSystem(11, weight: .medium)
                 .padding(.horizontal, 10).padding(.vertical, 4)
                 .background(scannerFilter == value ? Color.accentColor.opacity(0.18) : Color.clear)
                 .foregroundStyle(scannerFilter == value ? Color.accentColor : .secondary)
@@ -150,16 +150,16 @@ struct V2ForensicsFindingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(g.scanName)
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledSystem(13, weight: .semibold)
                 Spacer()
                 Text("\(g.findings.count) finding\(g.findings.count == 1 ? "" : "s")")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.tertiary)
                 Text("·")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.tertiary)
                 Text(g.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.tertiary)
             }
             Divider()
@@ -168,7 +168,7 @@ struct V2ForensicsFindingsView: View {
             }
             if g.findings.count > 25 {
                 Text("+ \(g.findings.count - 25) more · open the scan detail to see all")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
             }
@@ -184,24 +184,24 @@ struct V2ForensicsFindingsView: View {
         let seen = isSeen(a.id)
         return HStack(alignment: .top, spacing: 8) {
             Image(systemName: sev.sfSymbol)
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(color(for: sev))
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(a.record.summary ?? friendlyContentType(a.record.contentType))
-                    .font(.system(size: 12, weight: seen ? .regular : .medium))
+                    .scaledSystem(12, weight: seen ? .regular : .medium)
                     .foregroundStyle(seen ? .secondary : .primary)
                 HStack(spacing: 6) {
                     Text(sev.displayName)
-                        .font(.system(size: 9, weight: .medium))
+                        .scaledSystem(9, weight: .medium)
                         .foregroundStyle(color(for: sev))
-                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text("·").scaledSystem(10).foregroundStyle(.tertiary)
                     Text(friendlyScannerName(a.record.pluginID))
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.secondary)
-                    Text("·").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text("·").scaledSystem(10).foregroundStyle(.tertiary)
                     Text(a.record.observedAt.formatted(date: .omitted, time: .shortened))
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -220,7 +220,7 @@ struct V2ForensicsFindingsView: View {
                 .disabled(seen)
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
+                    .scaledSystem(13)
                     .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)
@@ -232,7 +232,7 @@ struct V2ForensicsFindingsView: View {
         .overlay(alignment: .trailing) {
             if copiedFindingID == a.id {
                 Text("Copied")
-                    .font(.system(size: 10, weight: .medium))
+                    .scaledSystem(10, weight: .medium)
                     .foregroundStyle(.green)
                     .padding(.trailing, 36)
             }
@@ -280,7 +280,7 @@ struct V2ForensicsFindingsView: View {
             Spacer()
             if severityFilter != nil {
                 Button("Clear filter") { severityFilter = nil }
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .buttonStyle(.borderless)
             }
         }
@@ -295,10 +295,10 @@ struct V2ForensicsFindingsView: View {
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 Text("\(count)")
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .scaledSystem(18, weight: .semibold, design: .rounded)
                     .foregroundStyle(count == 0 ? Color.secondary.opacity(0.6) : color)
                 Text(label)
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.secondary)
             }
             .padding(8)

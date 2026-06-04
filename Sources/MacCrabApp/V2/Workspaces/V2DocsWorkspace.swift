@@ -28,10 +28,10 @@ public struct V2DocsWorkspace: View {
                     HStack(spacing: 8) {
                         Image(systemName: entry.icon)
                             .foregroundStyle(isOn ? V2Theme.primaryText : V2Theme.mutedText)
-                            .font(.system(size: 11, weight: .medium))
+                            .scaledSystem(11, weight: .medium)
                             .frame(width: 18)
                         Text(entry.title)
-                            .font(.system(size: 12, weight: isOn ? .semibold : .medium))
+                            .scaledSystem(12, weight: isOn ? .semibold : .medium)
                             .foregroundStyle(isOn ? V2Theme.primaryText : V2Theme.neutral)
                             .lineLimit(1)
                         Spacer()
@@ -94,7 +94,7 @@ public struct V2DocsWorkspace: View {
                                 if let entry = V2DocEntry.allCases.first(where: { $0.title == rel }) {
                                     Button { selectedDoc = entry } label: {
                                         HStack(spacing: 6) {
-                                            Image(systemName: entry.icon).font(.system(size: 11))
+                                            Image(systemName: entry.icon).scaledSystem(11)
                                             Text(rel).font(V2Theme.body())
                                         }
                                         .foregroundStyle(V2Theme.dataAccent)

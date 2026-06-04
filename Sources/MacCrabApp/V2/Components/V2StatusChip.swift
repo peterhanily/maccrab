@@ -44,7 +44,7 @@ public struct V2StatusChip: View {
         HStack(spacing: 4) {
             if let icon {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .semibold))
+                    .scaledSystem(10, weight: .semibold)
             }
             Text(label.localizedUppercase)
                 .font(V2Theme.chip())
@@ -115,7 +115,7 @@ public struct V2SeverityDot: View {
         // sometimes the SOLE severity indicator in a row (was a plain Circle +
         // accessibilityHidden). Footprint kept at ~8pt.
         Image(systemName: kind.shapeSymbol)
-            .font(.system(size: 8))
+            .scaledSystem(8)
             .foregroundStyle(kind.color)
             .frame(width: 9, height: 9)
             .accessibilityLabel(kind.accessibilityName)

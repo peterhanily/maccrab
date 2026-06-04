@@ -100,12 +100,12 @@ struct V2RaveCatalogBrowserView: View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
-                .font(.system(size: 12))
+                .scaledSystem(12)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Using a non-official catalog")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledSystem(11, weight: .semibold)
                 Text("Source: \(baseURL.isEmpty ? "(unknown)" : baseURL) · plugins fetched here haven't been vetted by the official rave team. Use only for local development + testing.")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -115,7 +115,7 @@ struct V2RaveCatalogBrowserView: View {
                     NSWorkspace.shared.open(url)
                 }
             }
-            .font(.system(size: 11))
+            .scaledSystem(11)
             .buttonStyle(.bordered)
             .controlSize(.small)
         }
@@ -126,7 +126,7 @@ struct V2RaveCatalogBrowserView: View {
     private var header: some View {
         HStack(spacing: 14) {
             Image(systemName: "shippingbox.fill")
-                .font(.system(size: 22))
+                .scaledSystem(22)
                 .foregroundStyle(.tint)
                 .padding(8)
                 .background(Color.accentColor.opacity(0.12))
@@ -135,7 +135,7 @@ struct V2RaveCatalogBrowserView: View {
                 Text("Plugin catalog")
                     .font(.title2).fontWeight(.semibold)
                 Text(baseURL.isEmpty ? "rave.maccrab.com" : baseURL)
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -189,7 +189,7 @@ struct V2RaveCatalogBrowserView: View {
 
     private func sidebarHeader(_ s: String) -> some View {
         Text(s)
-            .font(.system(size: 10, weight: .semibold))
+            .scaledSystem(10, weight: .semibold)
             .foregroundStyle(.tertiary)
             .textCase(.uppercase)
             .padding(.bottom, 4)
@@ -199,12 +199,12 @@ struct V2RaveCatalogBrowserView: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .frame(width: 14)
-                Text(label).font(.system(size: 12))
+                Text(label).scaledSystem(12)
                 Spacer()
                 Text("\(count)")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
@@ -242,24 +242,24 @@ struct V2RaveCatalogBrowserView: View {
                         ))
                         .frame(height: 80)
                     Text(monogram(e.id))
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .scaledSystem(32, weight: .bold, design: .rounded)
                         .foregroundStyle(.white)
                 }
                 .cornerRadius(6)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(friendlyName(e.id))
-                            .font(.system(size: 13, weight: .semibold))
+                            .scaledSystem(13, weight: .semibold)
                             .lineLimit(1)
                         trustBadge(e.trustTier)
                     }
                     if let cat = e.category {
                         Text(cat.capitalized)
-                            .font(.system(size: 10))
+                            .scaledSystem(10)
                             .foregroundStyle(.secondary)
                     }
                     Text("v\(e.currentVersion)")
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -291,13 +291,13 @@ struct V2RaveCatalogBrowserView: View {
     private var placeholderDetail: some View {
         VStack(spacing: 8) {
             Image(systemName: "arrow.left.circle")
-                .font(.system(size: 30))
+                .scaledSystem(30)
                 .foregroundStyle(.tertiary)
             Text("Select a scanner")
-                .font(.system(size: 13, weight: .medium))
+                .scaledSystem(13, weight: .medium)
                 .foregroundStyle(.secondary)
             Text("Click a card on the left to see what it does + how to install.")
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
@@ -316,7 +316,7 @@ struct V2RaveCatalogBrowserView: View {
                         ))
                         .frame(height: 120)
                     Text(monogram(e.id))
-                        .font(.system(size: 48, weight: .bold, design: .rounded))
+                        .scaledSystem(48, weight: .bold, design: .rounded)
                         .foregroundStyle(.white)
                 }
                 .cornerRadius(8)
@@ -329,7 +329,7 @@ struct V2RaveCatalogBrowserView: View {
                         channelBadge(e.channel)
                     }
                     Text(e.id)
-                        .font(.system(size: 10, design: .monospaced))
+                        .scaledSystem(10, design: .monospaced)
                         .foregroundStyle(.tertiary)
                         .textSelection(.enabled)
                 }
@@ -354,21 +354,21 @@ struct V2RaveCatalogBrowserView: View {
 
     private func detailSection<V: View>(_ title: String, view: V) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 10, weight: .semibold))
+            Text(title).scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
             view
         }
     }
 
     private func detailSection(_ title: String, body: String) -> some View {
-        detailSection(title, view: Text(body).font(.system(size: 12)))
+        detailSection(title, view: Text(body).scaledSystem(12))
     }
 
     private func tagWrap(_ tags: [String]) -> some View {
         FlowLayout(spacing: 4) {
             ForEach(tags, id: \.self) { t in
                 Text(t)
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color.secondary.opacity(0.12))
                     .cornerRadius(3)
@@ -379,11 +379,11 @@ struct V2RaveCatalogBrowserView: View {
     private func installCommand(_ e: RaveCatalogEntry) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Install")
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
             HStack(spacing: 6) {
                 Text("maccrabctl plugin install \(e.id)")
-                    .font(.system(size: 10, design: .monospaced))
+                    .scaledSystem(10, design: .monospaced)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.black.opacity(0.06))
@@ -408,7 +408,7 @@ struct V2RaveCatalogBrowserView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
             Text("In-dashboard install is coming. Run this in Terminal to install today.")
-                .font(.system(size: 10))
+                .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }
     }
@@ -419,7 +419,7 @@ struct V2RaveCatalogBrowserView: View {
         VStack(spacing: 10) {
             ProgressView()
             Text("Fetching catalog…")
-                .font(.system(size: 12))
+                .scaledSystem(12)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -428,16 +428,16 @@ struct V2RaveCatalogBrowserView: View {
     private func errorView(_ err: String) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 40))
+                .scaledSystem(40)
                 .foregroundStyle(.orange)
             Text("Catalog not reachable")
                 .font(.headline)
             Text("The rave plugin catalog at \(baseURL.isEmpty ? "rave.maccrab.com" : baseURL) couldn't be fetched. This usually means the catalog is still being built out, or you're offline.")
-                .font(.system(size: 12))
+                .scaledSystem(12)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
-            Text(err).font(.system(size: 10, design: .monospaced))
+            Text(err).scaledSystem(10, design: .monospaced)
                 .foregroundStyle(.tertiary).padding(.top, 8)
             Button("Try again") { Task { await reload() } }
                 .padding(.top, 8)
@@ -448,9 +448,9 @@ struct V2RaveCatalogBrowserView: View {
 
     private var emptyView: some View {
         VStack(spacing: 10) {
-            Image(systemName: "shippingbox").font(.system(size: 36)).foregroundStyle(.tertiary)
+            Image(systemName: "shippingbox").scaledSystem(36).foregroundStyle(.tertiary)
             Text("Catalog has no scanners yet.")
-                .font(.system(size: 13, weight: .medium))
+                .scaledSystem(13, weight: .medium)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -467,7 +467,7 @@ struct V2RaveCatalogBrowserView: View {
             }
         }()
         return Text(label)
-            .font(.system(size: 9, weight: .medium))
+            .scaledSystem(9, weight: .medium)
             .padding(.horizontal, 5).padding(.vertical, 1)
             .background(color.opacity(0.18))
             .foregroundStyle(color)
@@ -476,7 +476,7 @@ struct V2RaveCatalogBrowserView: View {
 
     private func channelBadge(_ ch: String) -> some View {
         Text(ch.capitalized)
-            .font(.system(size: 9))
+            .scaledSystem(9)
             .padding(.horizontal, 5).padding(.vertical, 1)
             .background(Color.secondary.opacity(0.12))
             .cornerRadius(3)
@@ -701,14 +701,14 @@ private struct ComingSoonCatalogView: View {
                     .frame(width: 180, height: 150)
                 VStack(spacing: 8) {
                     Text("Rave catalog")
-                        .font(.system(size: 12, weight: .semibold))
+                        .scaledSystem(12, weight: .semibold)
                         .tracking(2)
                         .foregroundStyle(raveCrabOrange)
                     Text("Coming soon")
-                        .font(.system(size: 30, weight: .bold))
+                        .scaledSystem(30, weight: .bold)
                         .foregroundStyle(Color(red: 0.957, green: 0.957, blue: 0.961)) // #f4f4f5
                     Text("A signed, vetted catalog of forensic plugins you'll browse and install right from MacCrab. We're polishing it for launch — your existing scanners and kits keep working in the meantime.")
-                        .font(.system(size: 13))
+                        .scaledSystem(13)
                         .foregroundStyle(Color(red: 0.63, green: 0.63, blue: 0.67)) // #a1a1aa
                         .multilineTextAlignment(.center)
                         .lineSpacing(2)

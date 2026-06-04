@@ -73,7 +73,7 @@ struct V2PreventionWorkspace: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "gearshape.fill")
                 .foregroundStyle(V2Theme.dataAccent)
-                .font(.system(size: 14))
+                .scaledSystem(14)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Configure prevention").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
@@ -135,7 +135,7 @@ struct V2PreventionWorkspace: View {
                                 }
                                 Spacer()
                                 Image(systemName: "arrow.up.forward")
-                                    .font(.system(size: 10))
+                                    .scaledSystem(10)
                                     .foregroundStyle(V2Theme.mutedText)
                             }
                             .padding(10)
@@ -155,10 +155,10 @@ struct V2PreventionWorkspace: View {
                             icon: String, iconColor: Color) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(iconColor).font(.system(size: 11, weight: .semibold))
+                Image(systemName: icon).foregroundStyle(iconColor).scaledSystem(11, weight: .semibold)
                 Text(title.uppercased()).font(V2Theme.cardTitle()).foregroundStyle(V2Theme.mutedText)
             }
-            Text(value).font(.system(size: 22, weight: .bold)).foregroundStyle(V2Theme.primaryText)
+            Text(value).scaledSystem(22, weight: .bold).foregroundStyle(V2Theme.primaryText)
             V2StatusChip(trend, kind: trendKind)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

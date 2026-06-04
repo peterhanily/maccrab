@@ -50,10 +50,10 @@ struct ArtifactNetworkView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             Text("\(graph.sources.count) source\(graph.sources.count == 1 ? "" : "s") → \(graph.targets.count) target\(graph.targets.count == 1 ? "" : "s")")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSystem(12, weight: .semibold)
             Spacer()
             Text("\(graph.edges.count) edge\(graph.edges.count == 1 ? "" : "s")")
-                .font(.system(size: 10))
+                .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }
     }
@@ -62,7 +62,7 @@ struct ArtifactNetworkView: View {
         Text(chartHint?.edgeField == nil
              ? "No edgeField declared in this plugin's chart hint."
              : "Not enough nodes + edges to render a graph.")
-            .font(.system(size: 11))
+            .scaledSystem(11)
             .foregroundStyle(.tertiary)
             .padding(.vertical, 20)
     }
@@ -128,7 +128,7 @@ struct ArtifactNetworkView: View {
 
     private func nodeView(label: String, color: Color, position: CGPoint) -> some View {
         Text(label)
-            .font(.system(size: 10, weight: .medium))
+            .scaledSystem(10, weight: .medium)
             .lineLimit(1)
             .truncationMode(.middle)
             .padding(.horizontal, 6).padding(.vertical, 3)

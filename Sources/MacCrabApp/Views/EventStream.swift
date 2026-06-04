@@ -158,7 +158,7 @@ struct EventStream: View {
             VStack(spacing: 12) {
                 Spacer()
                 Image(systemName: "tray")
-                    .font(.system(size: 48))
+                    .scaledSystem(48)
                     .foregroundColor(.secondary.opacity(0.5))
                     .accessibilityHidden(true)
                 Text(String(
@@ -420,7 +420,7 @@ struct EventStream: View {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "list.bullet.rectangle")
-                        .font(.system(size: 48))
+                        .scaledSystem(48)
                         .foregroundColor(.secondary.opacity(0.5))
                         .accessibilityHidden(true)
                     Text(String(localized: "events.noMatch", defaultValue: "No events matching current filters"))
@@ -532,7 +532,7 @@ struct EventStream: View {
                 } else {
                     Image(systemName: "circle.fill")
                         .foregroundColor(.green)
-                        .font(.system(size: 6))
+                        .scaledSystem(6)
                         .accessibilityHidden(true)
                     Text(String(localized: "events.live", defaultValue: "Live"))
                         .foregroundColor(.green)

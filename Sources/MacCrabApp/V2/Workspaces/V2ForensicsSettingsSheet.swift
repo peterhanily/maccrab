@@ -49,7 +49,7 @@ struct V2ForensicsSettingsSheet: View {
                     pluginsRootSection
                     if let msg = actionMessage {
                         Text(msg)
-                            .font(.system(size: 12))
+                            .scaledSystem(12)
                             .foregroundStyle(.secondary)
                             .padding(.top, 6)
                     }
@@ -68,7 +68,7 @@ struct V2ForensicsSettingsSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Forensics settings").font(.headline)
                 Text("Manage installed scanners + trusted publishers.")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -101,9 +101,9 @@ struct V2ForensicsSettingsSheet: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(friendlyName(p.pluginID))
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledSystem(13, weight: .semibold)
                 Text("Publisher key: \(p.publicKeyHex.prefix(16))…")
-                    .font(.system(size: 10, design: .monospaced))
+                    .scaledSystem(10, design: .monospaced)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
@@ -143,7 +143,7 @@ struct V2ForensicsSettingsSheet: View {
         VStack(alignment: .leading, spacing: 3) {
             ForEach(keys, id: \.self) { k in
                 Text(k)
-                    .font(.system(size: 10, design: .monospaced))
+                    .scaledSystem(10, design: .monospaced)
                     .foregroundStyle(tint)
                     .textSelection(.enabled)
                     .padding(.vertical, 2)
@@ -160,9 +160,9 @@ struct V2ForensicsSettingsSheet: View {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                         Text(id)
-                            .font(.system(size: 12, design: .monospaced))
+                            .scaledSystem(12, design: .monospaced)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -183,7 +183,7 @@ struct V2ForensicsSettingsSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionHeader("On-disk location", "")
             Text(installer.pluginsRootPath)
-                .font(.system(size: 11, design: .monospaced))
+                .scaledSystem(11, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
             Button("Open in Finder") {
@@ -197,15 +197,15 @@ struct V2ForensicsSettingsSheet: View {
 
     private func sectionHeader(_ title: String, _ subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(title).font(.system(size: 13, weight: .semibold))
+            Text(title).scaledSystem(13, weight: .semibold)
             if !subtitle.isEmpty {
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(subtitle).scaledSystem(11).foregroundStyle(.secondary)
             }
         }
     }
 
     private func emptyHint(_ s: String) -> some View {
-        Text(s).font(.system(size: 11)).foregroundStyle(.secondary)
+        Text(s).scaledSystem(11).foregroundStyle(.secondary)
             .padding(.vertical, 4)
     }
 

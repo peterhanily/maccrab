@@ -155,7 +155,7 @@ struct V2ForensicsScansView: View {
             Text("Forensics")
                 .font(.title2).fontWeight(.semibold)
             Text("Check this Mac for signs of compromise.")
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(.secondary)
         }
     }
@@ -165,13 +165,13 @@ struct V2ForensicsScansView: View {
     private var fdaBanner: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "lock.shield.fill")
-                .font(.system(size: 18))
+                .scaledSystem(18)
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 4) {
                 Text("MacCrab doesn't have Full Disk Access")
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledSystem(13, weight: .semibold)
                 Text("Most scanners read system databases (Messages, Mail, Safari, TCC, KnowledgeC) that macOS protects behind Full Disk Access. Without it your scans will come back with 'X scanners didn't run' for those entries.")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
@@ -179,14 +179,14 @@ struct V2ForensicsScansView: View {
                         PermissionsProbe.openSystemSettingsFullDiskAccess()
                     } label: {
                         Label("Open System Settings", systemImage: "arrow.up.right.square")
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     Button("Re-check") {
                         fdaStatus = PermissionsProbe.fullDiskAccess()
                     }
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     Spacer()
@@ -194,7 +194,7 @@ struct V2ForensicsScansView: View {
                         fdaBannerDismissed = true
                     } label: {
                         Text("Hide")
-                            .font(.system(size: 10))
+                            .scaledSystem(10)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.borderless)
@@ -220,7 +220,7 @@ struct V2ForensicsScansView: View {
                         onShowAllScans?()
                     } label: {
                         Text("See all \(scans.count) past scans →")
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                     }
                     .buttonStyle(.borderless)
                 }
@@ -254,7 +254,7 @@ struct V2ForensicsScansView: View {
                     .font(.headline)
                 Spacer()
                 Text("\(kits.count) kit\(kits.count == 1 ? "" : "s")")
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.tertiary)
             }
             VStack(spacing: 10) {
@@ -268,15 +268,15 @@ struct V2ForensicsScansView: View {
     private func kitCard(_ kit: Kit) -> some View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: kit.category.sfSymbol)
-                .font(.system(size: 22))
+                .scaledSystem(22)
                 .foregroundStyle(.tint)
                 .frame(width: 28, alignment: .center)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(kit.name)
-                        .font(.system(size: 13, weight: .semibold))
+                        .scaledSystem(13, weight: .semibold)
                     Text(kit.category.displayName)
-                        .font(.system(size: 10, weight: .medium))
+                        .scaledSystem(10, weight: .medium)
                         .padding(.horizontal, 6).padding(.vertical, 1)
                         .background(Color.accentColor.opacity(0.15))
                         .foregroundStyle(.tint)
@@ -284,7 +284,7 @@ struct V2ForensicsScansView: View {
                     if kit.encrypted {
                         Label("Encrypted", systemImage: "lock.fill")
                             .labelStyle(.titleAndIcon)
-                            .font(.system(size: 10, weight: .medium))
+                            .scaledSystem(10, weight: .medium)
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Color.purple.opacity(0.15))
                             .foregroundStyle(.purple)
@@ -292,10 +292,10 @@ struct V2ForensicsScansView: View {
                     }
                 }
                 Text(kit.description)
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
                     .foregroundStyle(.secondary)
                 Text("\(kit.plugins.count) scanner\(kit.plugins.count == 1 ? "" : "s")\(kit.encrypted ? " · asks for your Keychain password" : "")")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.tertiary)
             }
             Spacer()
@@ -303,7 +303,7 @@ struct V2ForensicsScansView: View {
                 detailKit = kit
             } label: {
                 Image(systemName: "info.circle")
-                    .font(.system(size: 14))
+                    .scaledSystem(14)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -348,31 +348,31 @@ struct V2ForensicsScansView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Running \(kitName)…").font(.system(size: 13, weight: .semibold))
+                        Text("Running \(kitName)…").scaledSystem(13, weight: .semibold)
                         Spacer()
                         Text("Scanner \(completed + 1) / \(total)")
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                             .foregroundStyle(.secondary)
                     }
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 10))
+                            .scaledSystem(10)
                             .foregroundStyle(.tint)
                         Text(friendlyScannerName(currentPlugin))
-                            .font(.system(size: 11, weight: .medium))
+                            .scaledSystem(11, weight: .medium)
                         if rows > 0 {
                             Text("· \(rows) row\(rows == 1 ? "" : "s") collected so far")
-                                .font(.system(size: 11))
+                                .scaledSystem(11)
                                 .foregroundStyle(.secondary)
                         } else {
                             Text("· starting…")
-                                .font(.system(size: 11))
+                                .scaledSystem(11)
                                 .foregroundStyle(.tertiary)
                         }
                     }
                     if let sources = scannerSources(currentPlugin), !sources.isEmpty {
                         Text("Reading: \(sources.first ?? "")")
-                            .font(.system(size: 10))
+                            .scaledSystem(10)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                     }
@@ -384,7 +384,7 @@ struct V2ForensicsScansView: View {
             } else if case .starting(let n) = runner.state {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Starting \(n)…").font(.system(size: 13))
+                    Text("Starting \(n)…").scaledSystem(13)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -412,12 +412,12 @@ struct V2ForensicsScansView: View {
             HStack(spacing: 10) {
                 Image(systemName: iconName)
                     .foregroundStyle(headlineColor)
-                    .font(.system(size: 18))
+                    .scaledSystem(18)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(kitName) finished")
-                        .font(.system(size: 13, weight: .semibold))
+                        .scaledSystem(13, weight: .semibold)
                     Text(tally.bannerSummary)
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -445,17 +445,17 @@ struct V2ForensicsScansView: View {
     private func skippedList(_ skipped: [KitRunner.SkippedPlugin]) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("\(skipped.count) scanner\(skipped.count == 1 ? "" : "s") didn't run:")
-                .font(.system(size: 10, weight: .medium))
+                .scaledSystem(10, weight: .medium)
                 .foregroundStyle(.secondary)
             ForEach(skipped, id: \.pluginID) { s in
                 HStack(spacing: 6) {
                     Image(systemName: "minus.circle")
-                        .font(.system(size: 9))
+                        .scaledSystem(9)
                         .foregroundStyle(.secondary)
                     Text(friendlyScannerName(s.pluginID))
-                        .font(.system(size: 10, weight: .medium))
+                        .scaledSystem(10, weight: .medium)
                     Text("— \(s.reason)")
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -468,12 +468,12 @@ struct V2ForensicsScansView: View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
-                .font(.system(size: 18))
+                .scaledSystem(18)
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(kitName) failed")
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledSystem(13, weight: .semibold)
                 Text(err)
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }

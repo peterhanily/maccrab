@@ -146,11 +146,11 @@ struct V2OverviewWorkspace: View {
                         .frame(width: 38, height: 38)
                     Image(systemName: icon)
                         .foregroundStyle(color)
-                        .font(.system(size: 18, weight: .bold))
+                        .scaledSystem(18, weight: .bold)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .scaledSystem(14, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
                     Text(body)
                         .font(V2Theme.meta())
@@ -158,7 +158,7 @@ struct V2OverviewWorkspace: View {
                 }
                 Spacer()
                 Image(systemName: "chevron.forward")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledSystem(11, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText.opacity(0.5))
             }
             .padding(.horizontal, 14)
@@ -423,7 +423,7 @@ struct V2OverviewWorkspace: View {
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.tertiaryText)
                 Image(systemName: "chevron.forward")
-                    .font(.system(size: 9, weight: .semibold))
+                    .scaledSystem(9, weight: .semibold)
                     .foregroundStyle(V2Theme.tertiaryText)
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
@@ -474,11 +474,11 @@ struct V2OverviewWorkspace: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledSystem(13, weight: .medium)
                     .foregroundStyle(V2Theme.dataAccent)
                     .frame(width: 18, alignment: .center)
                 Text(label)
-                    .font(.system(size: 12, weight: .medium))
+                    .scaledSystem(12, weight: .medium)
                     .foregroundStyle(V2Theme.primaryText)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -505,7 +505,7 @@ struct V2OverviewWorkspace: View {
                 ZStack {
                     Circle().fill(securityGradeIconColor.opacity(0.18))
                     Text(appState.securityGrade.isEmpty ? "?" : appState.securityGrade)
-                        .font(.system(size: 22, weight: .bold))
+                        .scaledSystem(22, weight: .bold)
                         .foregroundStyle(securityGradeIconColor)
                 }
                 .frame(width: 56, height: 56)
@@ -544,7 +544,7 @@ struct V2OverviewWorkspace: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack {
                                         Text(f.name)
-                                            .font(.system(size: 13, weight: .semibold))
+                                            .scaledSystem(13, weight: .semibold)
                                             .foregroundStyle(V2Theme.primaryText)
                                         Spacer()
                                         Text("\(f.score)/\(f.maxScore)")
@@ -653,7 +653,7 @@ fileprivate struct V2AlertHistogram: View {
                 let v = steps[i]
                 let y = chartFrame.minY + chartFrame.height * (1 - CGFloat(v) / CGFloat(maxCount))
                 Text("\(v)")
-                    .font(.system(size: 10, weight: .medium))
+                    .scaledSystem(10, weight: .medium)
                     .foregroundStyle(V2Theme.tertiaryText)
                     .monospacedDigit()
                     .frame(width: yAxisWidth - 8, alignment: .trailing)
@@ -792,11 +792,11 @@ fileprivate struct V2AlertHistogram: View {
                 let secondary = i == labelCount - 1 ? "now" : V2AlertHistogram.relative(seconds: -t.timeIntervalSinceNow)
                 VStack(spacing: 0) {
                     Text(primary)
-                        .font(.system(size: 10, weight: .medium))
+                        .scaledSystem(10, weight: .medium)
                         .foregroundStyle(V2Theme.mutedText)
                         .monospacedDigit()
                     Text(secondary)
-                        .font(.system(size: 8))
+                        .scaledSystem(8)
                         .foregroundStyle(V2Theme.tertiaryText)
                 }
                 .frame(width: 60)
@@ -834,21 +834,21 @@ fileprivate struct V2AlertHistogram: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "clock")
-                    .font(.system(size: 9))
+                    .scaledSystem(9)
                     .foregroundStyle(V2Theme.mutedText)
                 Text("\(dayStr) · \(startStr) – \(endStr)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledSystem(11, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
                     .monospacedDigit()
             }
             Divider().background(V2Theme.panelBorder)
             HStack {
                 Text("Total")
-                    .font(.system(size: 10, weight: .medium))
+                    .scaledSystem(10, weight: .medium)
                     .foregroundStyle(V2Theme.mutedText)
                 Spacer()
                 Text("\(bucket.total) \(bucket.total == 1 ? "alert" : "alerts")")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledSystem(11, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
                     .monospacedDigit()
             }
@@ -857,7 +857,7 @@ fileprivate struct V2AlertHistogram: View {
             severityRow("Medium",   count: bucket.medium,   color: V2Theme.medium)
             severityRow("Low",      count: bucket.low,      color: V2Theme.low)
             Text("Click bar to open these alerts")
-                .font(.system(size: 9))
+                .scaledSystem(9)
                 .foregroundStyle(V2Theme.tertiaryText)
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
@@ -878,11 +878,11 @@ fileprivate struct V2AlertHistogram: View {
                 .fill(color)
                 .frame(width: 8, height: 8)
             Text(label)
-                .font(.system(size: 10, weight: .medium))
+                .scaledSystem(10, weight: .medium)
                 .foregroundStyle(count > 0 ? V2Theme.neutral : V2Theme.tertiaryText)
             Spacer()
             Text("\(count)")
-                .font(.system(size: 10, weight: .medium))
+                .scaledSystem(10, weight: .medium)
                 .foregroundStyle(count > 0 ? V2Theme.primaryText : V2Theme.tertiaryText)
                 .monospacedDigit()
         }

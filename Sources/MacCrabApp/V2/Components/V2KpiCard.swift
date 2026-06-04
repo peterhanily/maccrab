@@ -61,7 +61,7 @@ public struct V2KpiCard: View {
             HStack(spacing: 6) {
                 if let icon {
                     Image(systemName: icon)
-                        .font(.system(size: 10, weight: .semibold))
+                        .scaledSystem(10, weight: .semibold)
                         .foregroundStyle(iconColor ?? V2Theme.mutedText)
                 }
                 Text(title)
@@ -72,7 +72,7 @@ public struct V2KpiCard: View {
                 Spacer()
                 if showArrow {
                     Image(systemName: "arrow.up.forward")
-                        .font(.system(size: 9, weight: .semibold))
+                        .scaledSystem(9, weight: .semibold)
                         .foregroundStyle(V2Theme.tertiaryText)
                 }
             }

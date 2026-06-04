@@ -80,7 +80,7 @@ struct ArtifactTableView: View {
                     }
                     if filtered.count > 500 {
                         Text("Showing first 500 of \(filtered.count). Use search to narrow.")
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                             .foregroundStyle(.tertiary)
                             .padding(.vertical, 8)
                     }
@@ -96,13 +96,13 @@ struct ArtifactTableView: View {
     private var searchBar: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
+                .scaledSystem(11)
                 .foregroundStyle(.tertiary)
             TextField("Search rows", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .scaledSystem(12)
             Text("\(filtered.count) row\(filtered.count == 1 ? "" : "s")")
-                .font(.system(size: 10))
+                .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -121,11 +121,11 @@ struct ArtifactTableView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Text(humanColumnName(col))
-                            .font(.system(size: 10, weight: .semibold))
+                            .scaledSystem(10, weight: .semibold)
                             .foregroundStyle(.secondary)
                         if sortField == col {
                             Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 8))
+                                .scaledSystem(8)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -160,7 +160,7 @@ struct ArtifactTableView: View {
             }
         }()
         return Text(v.displayString(format: format))
-            .font(.system(size: 11, design: role == .path || role == .identifier ? .monospaced : .default))
+            .scaledSystem(11, design: role == .path || role == .identifier ? .monospaced : .default)
             .foregroundStyle(role == .link ? Color.accentColor : .primary)
             .lineLimit(1)
             .truncationMode(role == .path ? .middle : .tail)

@@ -39,7 +39,7 @@ struct V2ForensicsWorkspace: View {
                     state.selectedTabs[.forensics] = tab
                 } label: {
                     Text(tab.title)
-                        .font(.system(size: 13, weight: .medium))
+                        .scaledSystem(13, weight: .medium)
                         .foregroundColor(currentTab == tab ? .primary : .secondary)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -62,7 +62,7 @@ struct V2ForensicsWorkspace: View {
                 settingsOpen = true
             } label: {
                 Image(systemName: "gearshape.fill")
-                    .font(.system(size: 13))
+                    .scaledSystem(13)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 10)

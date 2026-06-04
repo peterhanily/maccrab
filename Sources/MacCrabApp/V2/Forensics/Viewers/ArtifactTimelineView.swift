@@ -51,7 +51,7 @@ struct ArtifactTimelineView: View {
                 }
                 if artifacts.isEmpty {
                     Text("No events for this content type.")
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .foregroundStyle(.tertiary)
                         .padding(20)
                 }
@@ -67,7 +67,7 @@ struct ArtifactTimelineView: View {
     private func dayBlock(_ day: Date, items: [TimelineItem]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(day.formatted(date: .complete, time: .omitted))
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary)
                 .textCase(.uppercase)
                 .padding(.horizontal, 14)
@@ -77,7 +77,7 @@ struct ArtifactTimelineView: View {
                 }
                 if items.count > 200 {
                     Text("+ \(items.count - 200) more on this day")
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, 60)
                         .padding(.vertical, 4)
@@ -91,7 +91,7 @@ struct ArtifactTimelineView: View {
         return HStack(alignment: .top, spacing: 10) {
             VStack(spacing: 2) {
                 Text(timeOnly(it.when))
-                    .font(.system(size: 10, design: .monospaced))
+                    .scaledSystem(10, design: .monospaced)
                     .foregroundStyle(.secondary)
                 Circle()
                     .fill(severityColor(sev))
@@ -105,10 +105,10 @@ struct ArtifactTimelineView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(resolvedTitle(it.artifact))
-                    .font(.system(size: 12, weight: .medium))
+                    .scaledSystem(12, weight: .medium)
                     .lineLimit(2)
                 Text(resolvedSubtitle(it.artifact))
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }

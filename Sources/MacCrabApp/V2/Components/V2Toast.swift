@@ -53,10 +53,10 @@ public struct V2ToastView: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: toast.icon)
                 .foregroundStyle(toast.color)
-                .font(.system(size: 16, weight: .semibold))
+                .scaledSystem(16, weight: .semibold)
             VStack(alignment: .leading, spacing: 2) {
                 Text(toast.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledSystem(13, weight: .semibold)
                     .foregroundStyle(V2Theme.primaryText)
                 if let detail = toast.detail {
                     Text(detail)
@@ -67,7 +67,7 @@ public struct V2ToastView: View {
             Spacer(minLength: 12)
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
+                    .scaledSystem(10, weight: .semibold)
                     .foregroundStyle(V2Theme.mutedText)
                     .frame(width: 20, height: 20)
                     .background(V2Theme.panelBackground)

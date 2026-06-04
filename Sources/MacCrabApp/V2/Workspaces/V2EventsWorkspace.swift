@@ -63,7 +63,7 @@ struct V2EventsWorkspace: View {
         return HStack(spacing: 8) {
             Image(systemName: "scope")
                 .foregroundStyle(V2Theme.brand)
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSystem(12, weight: .semibold)
             Text("Filtered to events matching")
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)
@@ -87,7 +87,7 @@ struct V2EventsWorkspace: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
+                        .scaledSystem(9, weight: .semibold)
                     Text("Clear filter")
                         .font(V2Theme.meta())
                 }
@@ -119,7 +119,7 @@ struct V2EventsWorkspace: View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(V2Theme.warning)
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSystem(12, weight: .semibold)
             Text("Mock data — no daemon detected. Start the System Extension or `swift run maccrabd` to see live events.")
                 .font(V2Theme.meta())
                 .foregroundStyle(V2Theme.primaryText)

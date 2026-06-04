@@ -61,11 +61,11 @@ struct ArtifactHistogramView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             Text("\(artifacts.count) event\(artifacts.count == 1 ? "" : "s") · per \(bucketLabel)")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSystem(12, weight: .semibold)
             Spacer()
             if let first = buckets.first?.start, let last = buckets.last?.start {
                 Text("\(first.formatted(date: .abbreviated, time: .omitted)) → \(last.formatted(date: .abbreviated, time: .omitted))")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -73,7 +73,7 @@ struct ArtifactHistogramView: View {
 
     private var emptyState: some View {
         Text("No timestamped events for this content type.")
-            .font(.system(size: 11))
+            .scaledSystem(11)
             .foregroundStyle(.tertiary)
             .padding(.vertical, 20)
     }

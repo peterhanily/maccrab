@@ -60,7 +60,7 @@ struct V2ForensicsScanDetailView: View {
                 ProgressView("Loading…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let err = error {
-                Text(err).foregroundStyle(.red).font(.system(size: 12)).padding(20)
+                Text(err).foregroundStyle(.red).scaledSystem(12).padding(20)
             } else if ctCounts.isEmpty {
                 emptyEvidence.padding(20)
             } else {
@@ -92,7 +92,7 @@ struct V2ForensicsScanDetailView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(scanName).font(.headline)
                 Text(createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -149,8 +149,8 @@ struct V2ForensicsScanDetailView: View {
 
     private func metric(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(value).font(.system(size: 18, weight: .semibold, design: .rounded))
-            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(value).scaledSystem(18, weight: .semibold, design: .rounded)
+            Text(label).scaledSystem(10).foregroundStyle(.secondary)
         }
     }
 
@@ -162,15 +162,15 @@ struct V2ForensicsScanDetailView: View {
         case .exporting:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Exporting…").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("Exporting…").scaledSystem(10).foregroundStyle(.secondary)
             }
         case .exported(let url):
             HStack(spacing: 4) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                    .font(.system(size: 11))
+                    .scaledSystem(11)
                 Text("Saved to ~/Downloads/\(url.lastPathComponent)")
-                    .font(.system(size: 10))
+                    .scaledSystem(10)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -179,8 +179,8 @@ struct V2ForensicsScanDetailView: View {
             HStack(spacing: 4) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
-                    .font(.system(size: 11))
-                Text(msg).font(.system(size: 10)).foregroundStyle(.red)
+                    .scaledSystem(11)
+                Text(msg).scaledSystem(10).foregroundStyle(.red)
             }
         }
     }
@@ -191,7 +191,7 @@ struct V2ForensicsScanDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Content types")
-                    .font(.system(size: 10, weight: .semibold))
+                    .scaledSystem(10, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .textCase(.uppercase)
                     .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
@@ -216,19 +216,19 @@ struct V2ForensicsScanDetailView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(ScannerDisplay.name(forContentType: ct))
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                        .scaledSystem(12, weight: isSelected ? .semibold : .regular)
                         .lineLimit(1)
                     Spacer()
                     Text("\(count)")
-                        .font(.system(size: 10))
+                        .scaledSystem(10)
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 4) {
                     Image(systemName: iconFor(viewer: kind))
-                        .font(.system(size: 8))
+                        .scaledSystem(8)
                         .foregroundStyle(.tertiary)
                     Text(kind)
-                        .font(.system(size: 9))
+                        .scaledSystem(9)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -280,10 +280,10 @@ struct V2ForensicsScanDetailView: View {
             HStack(spacing: 8) {
                 Image(systemName: "lock.fill").foregroundStyle(.tint)
                 Text("This scan is encrypted")
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledSystem(13, weight: .semibold)
             }
             Text("Unlocking reads the scan's data encryption key from your macOS Keychain. macOS will ask for your password the first time MacCrab accesses it.")
-                .font(.system(size: 12))
+                .scaledSystem(12)
                 .foregroundStyle(.secondary)
             Button("Unlock + show evidence") {
                 Task {
@@ -301,7 +301,7 @@ struct V2ForensicsScanDetailView: View {
 
     private var emptyEvidence: some View {
         Text("This scan didn't commit any evidence rows. The scanners ran but found nothing to record, or finished before producing output.")
-            .font(.system(size: 12))
+            .scaledSystem(12)
             .foregroundStyle(.secondary)
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -232,7 +232,7 @@ struct V2AlertsWorkspace: View {
                 let allSelected = selectedCampaignIds.count == campaigns.count
                 Image(systemName: allSelected ? "checkmark.square.fill" : "square")
                     .foregroundStyle(allSelected ? V2Theme.brand : V2Theme.mutedText)
-                    .font(.system(size: 14))
+                    .scaledSystem(14)
             }
             .buttonStyle(.plain)
             .help(selectedCampaignIds.count == campaigns.count ? "Deselect all" : "Select all campaigns")
@@ -654,7 +654,7 @@ struct V2AlertsWorkspace: View {
                         .foregroundStyle(V2Theme.mutedText)
                 }
                 Text("\(count)")
-                    .font(.system(size: 26, weight: .bold))
+                    .scaledSystem(26, weight: .bold)
                     .foregroundStyle(V2Theme.primaryText)
                 Text(count == 1 ? "1 alert" : "\(count) alerts")
                     .font(V2Theme.meta())
@@ -680,7 +680,7 @@ struct V2AlertsWorkspace: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(V2Theme.mutedText)
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
                 TextField("Search alerts (rule, process, MITRE…)", text: query)
                     .textFieldStyle(.plain)
                     .font(V2Theme.body())
@@ -743,7 +743,7 @@ struct V2AlertsWorkspace: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(V2Theme.mutedText)
-                    .font(.system(size: 12))
+                    .scaledSystem(12)
                 TextField("Search alerts (rule, process, MITRE…)", text: query)
                     .textFieldStyle(.plain)
                     .font(V2Theme.body())
@@ -918,7 +918,7 @@ struct V2AlertsWorkspace: View {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(V2Theme.healthy)
-                                .font(.system(size: 11))
+                                .scaledSystem(11)
                             Text(act).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
                         }
                     }
@@ -969,7 +969,7 @@ struct V2AlertsWorkspace: View {
                                     // RTL locales.
                                     Image(systemName: "arrow.forward.circle.fill")
                                         .foregroundStyle(V2Theme.aiAccent)
-                                        .font(.system(size: 11))
+                                        .scaledSystem(11)
                                         .padding(.top, 2)
                                     Text(a)
                                         .font(V2Theme.body())
@@ -1205,7 +1205,7 @@ struct V2AlertsWorkspace: View {
                 } label: {
                     Image(systemName: isSelected ? "checkmark.square.fill" : "square")
                         .foregroundStyle(isSelected ? V2Theme.brand : V2Theme.mutedText)
-                        .font(.system(size: 16))
+                        .scaledSystem(16)
                 }
                 .buttonStyle(.plain)
                 .help(isSelected ? "Deselect this campaign" : "Select for bulk-suppress")
@@ -1214,12 +1214,12 @@ struct V2AlertsWorkspace: View {
                         .fill(c.severity.chipKind.color.opacity(0.18))
                     Image(systemName: "flame.fill")
                         .foregroundStyle(c.severity.chipKind.color)
-                        .font(.system(size: 18, weight: .bold))
+                        .scaledSystem(18, weight: .bold)
                 }
                 .frame(width: 40, height: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(c.name)
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledSystem(15, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
                     // v1.12.6 Wave 9J: revive entity count now that
                     // toV2Campaign populates `entities` from the
@@ -1287,7 +1287,7 @@ struct V2AlertsWorkspace: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                     if i < c.killChainStages.count - 1 {
                         Image(systemName: "arrow.forward")
-                            .font(.system(size: 9))
+                            .scaledSystem(9)
                             .foregroundStyle(V2Theme.tertiaryText)
                             .padding(.horizontal, 4)
                     }
@@ -1389,7 +1389,7 @@ struct V2AlertsWorkspace: View {
                                     } label: {
                                         HStack(spacing: 3) {
                                             Image(systemName: "bell")
-                                                .font(.system(size: 9, weight: .semibold))
+                                                .scaledSystem(9, weight: .semibold)
                                             Text("Unsuppress")
                                                 .font(V2Theme.meta())
                                         }
@@ -1406,7 +1406,7 @@ struct V2AlertsWorkspace: View {
                                 } label: {
                                     HStack(spacing: 3) {
                                         Image(systemName: "trash")
-                                            .font(.system(size: 9, weight: .semibold))
+                                            .scaledSystem(9, weight: .semibold)
                                         Text("Delete")
                                             .font(V2Theme.meta())
                                     }

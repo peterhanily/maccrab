@@ -25,14 +25,14 @@ public struct V2EmptyState: View {
     public var body: some View {
         VStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 36, weight: .light))
+                .scaledSystem(36, weight: .light)
                 .foregroundStyle(V2Theme.mutedText)
                 .padding(20)
                 .background(V2Theme.panelBackground)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(V2Theme.panelBorder, lineWidth: 1))
             Text(title)
-                .font(.system(size: 16, weight: .semibold))
+                .scaledSystem(16, weight: .semibold)
                 .foregroundStyle(V2Theme.primaryText)
             if let message {
                 Text(message)
@@ -82,10 +82,10 @@ public struct V2ErrorState: View {
     public var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 36))
+                .scaledSystem(36)
                 .foregroundStyle(V2Theme.warning)
             Text(title)
-                .font(.system(size: 16, weight: .semibold))
+                .scaledSystem(16, weight: .semibold)
                 .foregroundStyle(V2Theme.primaryText)
             Text(message)
                 .font(V2Theme.body())

@@ -27,7 +27,7 @@ public struct V2Inspector<Content: View>: View {
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledSystem(15, weight: .semibold)
                         .foregroundStyle(V2Theme.primaryText)
                         .lineLimit(2)
                     if let subtitle {
@@ -40,7 +40,7 @@ public struct V2Inspector<Content: View>: View {
                 if let onClose {
                     Button(action: onClose) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .semibold))
+                            .scaledSystem(11, weight: .semibold)
                             .foregroundStyle(V2Theme.mutedText)
                             .frame(width: 22, height: 22)
                             .background(V2Theme.panelBackground)

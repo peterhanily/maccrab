@@ -55,7 +55,7 @@ struct V2Sidebar: View {
                     ForEach(V2SidebarGroup.allCases) { group in
                         if !collapsed, let label = group.headerLabel {
                             Text(label)
-                                .font(.system(size: 10, weight: .semibold))
+                                .scaledSystem(10, weight: .semibold)
                                 .foregroundStyle(V2Theme.tertiaryText)
                                 .textCase(.uppercase)
                                 .padding(.horizontal, 12)
@@ -126,7 +126,7 @@ struct V2Sidebar: View {
             if collapsed {
                 VStack(spacing: 8) {
                     Text("🦀")
-                        .font(.system(size: 22))
+                        .scaledSystem(22)
                         .frame(width: 36, height: 36)
                         .background(V2Theme.brand.opacity(0.15))
                         .overlay(
@@ -140,7 +140,7 @@ struct V2Sidebar: View {
             } else {
                 HStack(spacing: 10) {
                     Text("🦀")
-                        .font(.system(size: 24))
+                        .scaledSystem(24)
                         .frame(width: 36, height: 36)
                         .background(V2Theme.brand.opacity(0.15))
                         .overlay(
@@ -151,10 +151,10 @@ struct V2Sidebar: View {
 
                     VStack(alignment: .leading, spacing: 1) {
                         Text("MacCrab")
-                            .font(.system(size: 16, weight: .bold))
+                            .scaledSystem(16, weight: .bold)
                             .foregroundStyle(V2Theme.primaryText)
                         Text("v\(MacCrabVersion.current)")
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                             .foregroundStyle(V2Theme.tertiaryText)
                     }
                     Spacer(minLength: 0)
@@ -169,7 +169,7 @@ struct V2Sidebar: View {
             collapsed.toggle()
         } label: {
             Image(systemName: collapsed ? "sidebar.right" : "sidebar.left")
-                .font(.system(size: 12, weight: .medium))
+                .scaledSystem(12, weight: .medium)
                 .foregroundStyle(V2Theme.mutedText)
                 .frame(width: 26, height: 26)
                 .background(V2Theme.hoverBackground)
@@ -206,15 +206,15 @@ struct V2Sidebar: View {
                 if !collapsed {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(title)
-                            .font(.system(size: 13, weight: .semibold))
+                            .scaledSystem(13, weight: .semibold)
                             .foregroundStyle(V2Theme.primaryText)
                         Text(subtitle)
-                            .font(.system(size: 11))
+                            .scaledSystem(11)
                             .foregroundStyle(color)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.forward")
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledSystem(11, weight: .semibold)
                         .foregroundStyle(V2Theme.tertiaryText)
                 }
             }
@@ -286,17 +286,17 @@ private struct V2SidebarItem: View {
         Button(action: onSelect) {
             HStack(spacing: 10) {
                 Image(systemName: workspace.systemImage)
-                    .font(.system(size: 14, weight: .medium))
+                    .scaledSystem(14, weight: .medium)
                     .foregroundStyle(iconColor)
                     .frame(width: 18, alignment: .center)
 
                 if !collapsed {
                     Text(workspace.title)
-                        .font(.system(size: 13.5, weight: isActive ? .semibold : .medium))
+                        .scaledSystem(13.5, weight: isActive ? .semibold : .medium)
                         .foregroundStyle(textColor)
                     Spacer(minLength: 0)
                     Text("⌘\(workspace.keyboardIndex)")
-                        .font(.system(size: 11))
+                        .scaledSystem(11)
                         .foregroundStyle(isActive ? V2Theme.mutedText : V2Theme.tertiaryText)
                         .monospacedDigit()
                 }
