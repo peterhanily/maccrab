@@ -47,8 +47,13 @@ VERSION="${VERSION:-${DEFAULT_VERSION:-1.0.0}}"
 # because both tuples said `1.10.0/1.10.0`. The build number is
 # `<VERSION>.<unix-time>` so every rebuild is distinct; the
 # user-visible marketing version (CFBundleShortVersionString) stays
-# clean. Caller can override with `BUILD_NUMBER=<custom>` if they
-# need a specific value (e.g. CI build numbers).
+# clean. Caller can override with `BUILD_NUMBER=<custom>`: release.sh
+# (v1.18+) exports a DETERMINISTIC `<VERSION>.<commit-count>` so an
+# identical rebuild reuses the same tuple and doesn't orphan a new
+# reboot-pending sysext zombie. The per-second epoch below is the DEV-loop
+# fallback (make dev / standalone build-release.sh): there you rebuild the
+# same VERSION with changed code, so a distinct tuple each time is REQUIRED
+# to force sysextd to swap the active extension.
 if [ -z "${BUILD_NUMBER:-}" ]; then
     export BUILD_NUMBER="${VERSION}.$(date +%s)"
 fi

@@ -68,6 +68,17 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
         isPlatformBinary: p.is_platform_binary
     )
 
+    // v1.18 NOTE (file-event-codesig-fields-partial): only signerType /
+    // teamId / signingId / flags are populated from the raw ES event.
+    // isNotarized / isAdhocSigned / issuerChain / certHashes are left nil
+    // here — they need a separate codesign/Security query that
+    // EventEnricher's NotarizationChecker performs and caches
+    // (enrichments["notarization.*"]). So rules predicating on
+    // NotarizationStatus / IsAdhocSigned / SigningCertIssuer for FILE events
+    // resolve to nil on a cold first-seen process until that cache warms;
+    // SignerType (populated here) is the reliable trust gate on this path.
+    // isAdhocSigned could be cheaply backfilled from the CS_ADHOC bit in
+    // `flags` — deferred (would need the CS_ADHOC constant + an init arg).
     let codeSignature = CodeSignatureInfo(
         signerType: signerType,
         teamId: teamId.isEmpty ? nil : teamId,

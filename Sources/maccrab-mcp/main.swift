@@ -770,7 +770,7 @@ func handleCheckTyposquatScore(_ args: [String: Any]) async -> Any {
     guard let name = args["name"] as? String,
           let registryRaw = args["registry"] as? String,
           let registry = TyposquatDatabase.Registry(rawValue: registryRaw) else {
-        return ["content": [["type": "text", "text": "Error: 'name' and 'registry' (npm|pypi) required"]]]
+        return toolError("Error: 'name' and 'registry' (npm|pypi) required")
     }
     let result = await sharedTyposquatDB.score(candidate: name, registry: registry)
     var lines: [String] = ["Typosquat scan: \(name) (\(registry.rawValue))"]
@@ -789,7 +789,7 @@ func handleScanPackageContent(_ args: [String: Any]) async -> Any {
     guard let path = args["path"] as? String,
           let ecosystemRaw = args["ecosystem"] as? String,
           let ecosystem = PackageContentAnalyzer.Ecosystem(rawValue: ecosystemRaw) else {
-        return ["content": [["type": "text", "text": "Error: 'path' and 'ecosystem' (npm|pypi|homebrew) required"]]]
+        return toolError("Error: 'path' and 'ecosystem' (npm|pypi|homebrew) required")
     }
     let analyzer = PackageContentAnalyzer()
     let result = await analyzer.analyze(packagePath: URL(fileURLWithPath: path), ecosystem: ecosystem)
@@ -817,7 +817,7 @@ func handleAnalyzePackageMetadata(_ args: [String: Any]) async -> Any {
     guard let name = args["name"] as? String,
           let registryRaw = args["registry"] as? String,
           let registry = PackageMetadataAnalyzer.Registry(rawValue: registryRaw) else {
-        return ["content": [["type": "text", "text": "Error: 'name' and 'registry' (npm|pypi) required"]]]
+        return toolError("Error: 'name' and 'registry' (npm|pypi) required")
     }
     let analyzer = PackageMetadataAnalyzer()
     guard let result = await analyzer.analyze(packageName: name, registry: registry) else {
@@ -839,7 +839,7 @@ func handleVerifyPackageAttestation(_ args: [String: Any]) async -> Any {
           let version = args["version"] as? String,
           let registryRaw = args["registry"] as? String,
           let registry = AttestationEnricher.Registry(rawValue: registryRaw) else {
-        return ["content": [["type": "text", "text": "Error: 'name', 'version', and 'registry' (npm|pypi) required"]]]
+        return toolError("Error: 'name', 'version', and 'registry' (npm|pypi) required")
     }
     let priorBuilder = args["prior_builder"] as? String
     let enricher = AttestationEnricher()
@@ -856,7 +856,7 @@ func handleVerifyPackageAttestation(_ args: [String: Any]) async -> Any {
 func handleClassifyPackageIntent(_ args: [String: Any]) async -> Any {
     guard let packageName = args["package_name"] as? String,
           let registry = args["registry"] as? String else {
-        return ["content": [["type": "text", "text": "Error: 'package_name' and 'registry' required"]]]
+        return toolError("Error: 'package_name' and 'registry' required")
     }
     let brief = IntentClassifier.BehaviorBrief(
         packageName: packageName,
@@ -888,12 +888,12 @@ func handleClassifyPackageIntent(_ args: [String: Any]) async -> Any {
 
 func handlePredictNextTechnique(_ args: [String: Any]) async -> Any {
     guard let prefix = args["tactic_prefix"] as? [String], !prefix.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'tactic_prefix' (array of ATT&CK TA00xx ids) required"]]]
+        return toolError("Error: 'tactic_prefix' (array of ATT&CK TA00xx ids) required")
     }
     let topN = min(14, max(1, (args["top_n"] as? Int) ?? 3))
     let tactics = prefix.compactMap { NextTechniquePredictor.Tactic(rawValue: $0) }
     guard !tactics.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: no recognised ATT&CK tactic IDs in prefix"]]]
+        return toolError("Error: no recognised ATT&CK tactic IDs in prefix")
     }
     let predictions = await sharedNextPredictor.predictNext(after: tactics, topN: topN)
     var lines: [String] = ["Next-tactic predictions after \(prefix.joined(separator: " → "))"]
@@ -905,10 +905,10 @@ func handlePredictNextTechnique(_ args: [String: Any]) async -> Any {
 
 func handleScoreTextStyle(_ args: [String: Any]) async -> Any {
     guard let text = args["text"] as? String, !text.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'text' required"]]]
+        return toolError("Error: 'text' required")
     }
     guard text.count <= 100_000 else {
-        return ["content": [["type": "text", "text": "Error: text too long (max 100KB)"]]]
+        return toolError("Error: text too long (max 100KB)")
     }
     let llmScore = await sharedStylometric.llmTextScore(text)
     let urgency = await sharedStylometric.urgencyScore(text)
@@ -932,7 +932,7 @@ func handleScoreTextStyle(_ args: [String: Any]) async -> Any {
 
 func handleGetIntentPosterior(_ args: [String: Any]) async -> Any {
     guard let treeKey = args["tree_key"] as? String, !treeKey.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'tree_key' required"]]]
+        return toolError("Error: 'tree_key' required")
     }
     guard let posterior = await sharedIntentEngine.posterior(treeKey: treeKey) else {
         return ["content": [["type": "text", "text": "No posterior found for tree '\(treeKey)' — no evidence has been observed yet"]]]
@@ -1107,7 +1107,7 @@ func handleGetAlerts(_ args: [String: Any]) async -> Any {
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error reading alerts: \(error.localizedDescription)"]]]
+        return toolError("Error reading alerts: \(error.localizedDescription)")
     }
 }
 
@@ -1171,7 +1171,7 @@ func handleGetEvents(_ args: [String: Any]) async -> Any {
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error reading events: \(error.localizedDescription)"]]]
+        return toolError("Error reading events: \(error.localizedDescription)")
     }
 }
 
@@ -1210,7 +1210,7 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error reading campaigns: \(error.localizedDescription)"]]]
+        return toolError("Error reading campaigns: \(error.localizedDescription)")
     }
 }
 
@@ -1250,12 +1250,12 @@ func handleGetStatus() async -> Any {
 
 func handleHunt(_ args: [String: Any]) async -> Any {
     guard let query = args["query"] as? String, !query.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'query' parameter is required"]]]
+        return toolError("Error: 'query' parameter is required")
     }
 
     // Input validation: cap query length to prevent FTS abuse
     guard query.count <= 1000 else {
-        return ["content": [["type": "text", "text": "Error: query too long (max 1000 characters)"]]]
+        return toolError("Error: query too long (max 1000 characters)")
     }
 
     let limit = min(max(args["limit"] as? Int ?? 50, 1), 100)
@@ -1337,10 +1337,10 @@ func handleSuppressAlert(_ args: [String: Any]) async -> Any {
 
 func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
     guard let alertId = args["alert_id"] as? String, !alertId.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'alert_id' parameter is required"]]]
+        return toolError("Error: 'alert_id' parameter is required")
     }
     guard alertId.count <= 64 else {
-        return ["content": [["type": "text", "text": "Error: invalid alert_id format"]]]
+        return toolError("Error: invalid alert_id format")
     }
 
     do {
@@ -1394,7 +1394,7 @@ func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]]]
+        return toolError("Error: \(error.localizedDescription)")
     }
 }
 
@@ -1469,16 +1469,16 @@ func handleGetAIAlerts(_ args: [String: Any]) async -> Any {
 
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]]]
+        return toolError("Error: \(error.localizedDescription)")
     }
 }
 
 func handleScanText(_ args: [String: Any]) async -> Any {
     guard let text = args["text"] as? String, !text.isEmpty else {
-        return ["content": [["type": "text", "text": "Error: 'text' parameter is required"]]]
+        return toolError("Error: 'text' parameter is required")
     }
     guard text.count <= 10_000 else {
-        return ["content": [["type": "text", "text": "Error: text too long (max 10000 characters)"]]]
+        return toolError("Error: text too long (max 10000 characters)")
     }
 
     let scanner = PromptInjectionScanner()
@@ -1582,7 +1582,7 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
         }
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error reading traces: \(error.localizedDescription)"]]]
+        return toolError("Error reading traces: \(error.localizedDescription)")
     }
 }
 
@@ -1622,7 +1622,7 @@ func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
         }
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error reading trace: \(error.localizedDescription)"]]]
+        return toolError("Error reading trace: \(error.localizedDescription)")
     }
 }
 
@@ -1646,7 +1646,7 @@ func handleHuntTrace(_ args: [String: Any]) async -> Any {
         }
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error hunting traces: \(error.localizedDescription)"]]]
+        return toolError("Error hunting traces: \(error.localizedDescription)")
     }
 }
 
@@ -1749,7 +1749,7 @@ func handleTraceFromEvent(_ args: [String: Any]) async -> Any {
         lines.append("Updated:  \(isoFormatter.string(from: trace.updatedAt))")
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
-        return ["content": [["type": "text", "text": "Error looking up trace: \(error.localizedDescription)"]]]
+        return toolError("Error looking up trace: \(error.localizedDescription)")
     }
 }
 

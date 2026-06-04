@@ -133,6 +133,17 @@ fi
 
 # Step 3: Build DMG
 echo "Step 3/5: Building DMG..."
+# v1.18 (sysext-zombie fix): give SHIPPED builds a DETERMINISTIC, monotonic
+# CFBundleVersion (VERSION + commit count) instead of build-release.sh's
+# per-second epoch. Re-running a release on the same commit then reuses the
+# same (version, build) tuple, so sysextd does not orphan a fresh
+# "terminated waiting to uninstall on reboot" zombie for an identical
+# rebuild (the audit found ~50 such never-reaped entries). The per-second
+# epoch stays as build-release.sh's fallback for the dev loop (`make dev`
+# rebuilds the SAME VERSION with changed code and needs a distinct tuple
+# each time to force sysextd to replace the active extension).
+export BUILD_NUMBER="${VERSION}.$(git rev-list --count HEAD)"
+echo "  Deterministic CFBundleVersion: $BUILD_NUMBER"
 VERSION="$VERSION" ./scripts/build-release.sh
 
 # (v1.6.11) PKG build removed — productbuild's distribution-XML

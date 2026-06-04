@@ -145,14 +145,20 @@ cask "maccrab" do
             # Deactivate the system extension BEFORE the .app is removed.
             # Without this step sysextd's ledger keeps a "pending" entry
             # forever (visible via `systemextensionsctl list`) since the
-            # bundle it references gets deleted out from under it. The
-            # script may prompt for the user's password — that's fine
-            # for an uninstall flow.
+            # bundle it references gets deleted out from under it.
+            #
+            # v1.18: an ACTIVE ES sysext can't be reliably torn down by
+            # `systemextensionsctl uninstall` from a shell — it is SIP-gated
+            # and scripts/uninstall.sh documents that OSSystemExtensionRequest
+            # deactivation must be submitted by the SIGNED app. So drive it
+            # via the `maccrab://deactivate` deep link (the app submits the
+            # request; the user approves the macOS modal), with
+            # `systemextensionsctl uninstall` only as a best-effort fallback.
+            # NOT sudo: `open` must run in the user's GUI session.
             early_script:  {
-              executable:   "/usr/bin/systemextensionsctl",
-              args:         ["uninstall", "79S425CW99", "com.maccrab.agent"],
+              executable:   "/bin/sh",
+              args:         ["-c", "open 'maccrab://deactivate' >/dev/null 2>&1; sleep 3; /usr/bin/systemextensionsctl uninstall 79S425CW99 com.maccrab.agent >/dev/null 2>&1 || true"],
               must_succeed: false,
-              sudo:         true,
             },
             launchctl:     [
               "com.maccrab.agent",
@@ -198,7 +204,12 @@ cask "maccrab" do
     was removed automatically. Approve the new extension in System
     Settings to restart protection.
 
-    To uninstall the extension completely:
-      systemextensionsctl uninstall 79S425CW99 com.maccrab.agent
+    Uninstall removes the app and deactivates the extension via MacCrab's
+    own deactivate flow (you'll approve a brief macOS modal; on SIP-enabled
+    Macs the shell `systemextensionsctl` fallback is expected to no-op).
+
+    Your data (alerts, baselines, settings) is preserved at
+    /Library/Application Support/MacCrab so upgrades don't wipe it. To
+    remove it too:  brew uninstall --zap maccrab
   EOS
 end
