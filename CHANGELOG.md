@@ -5,11 +5,31 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [1.17.5] — 2026-06-04
 
-A security and detection-precision release on top of v1.17.4: closes a
-local exfiltration gap in the engine's LLM-configuration path, completes
-credential-read coverage, sharpens several rules against evasion and
-false positives, and fixes a Homebrew upgrade that could disturb the
-system extension.
+A feature and hardening release on top of v1.17.4: adds ClickFix
+detection and three dashboard improvements, closes a local exfiltration
+gap in the engine's LLM-configuration path, completes credential-read
+coverage, sharpens several rules against evasion and false positives,
+and fixes a Homebrew upgrade that could disturb the system extension.
+
+### Added
+
+- **ClickFix detection.** Flags when a shell command pasted from the
+  clipboard (e.g. `curl … | bash`) is then executed — the dominant 2026
+  macOS infostealer delivery technique, which sidesteps Gatekeeper
+  because nothing is downloaded and launched. The app bridges the GUI
+  clipboard to the root engine over the privileged inbox so the
+  notify-only system extension can correlate paste→exec.
+- **Sortable / filterable tables.** Any table header sorts; a search
+  field filters rows — across Alerts, Detection rules, Intelligence, and
+  the other tabular views.
+- **Tunable built-in detections.** The built-in `maccrab.*` detections
+  now appear in the Rules list and can be muted (alert suppressed) or
+  have their severity overridden from the dashboard, without editing the
+  rule body.
+- **Surrounding events survive pruning.** An alert's detail shows the
+  events captured when it fired, falling back to the alert's stored
+  evidence even after the originating events have aged out of the live
+  store.
 
 ### Fixed
 
