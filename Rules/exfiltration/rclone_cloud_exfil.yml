@@ -41,4 +41,4 @@ detection:
 falsepositives:
     - Authorized cloud backup workflows using rclone
     - DevOps automation pipelines that sync build artifacts
-level: high
+level: medium

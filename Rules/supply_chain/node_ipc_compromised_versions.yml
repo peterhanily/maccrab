@@ -53,4 +53,5 @@ falsepositives:
     - A security researcher intentionally pinning to a compromised version for analysis on the same host (the alert is the correct outcome)
     - Backup / restore of historical project archives whose committed lockfile referenced one of these versions — review the project's lockfile and pin away from the bad version
     - Documentation snippets / IOC corpora bundled as a package — extremely rare given the FileContent allowlist gating; investigate the package identity
-level: critical
+suppressible: false
+level: high

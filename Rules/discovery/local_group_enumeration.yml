@@ -34,4 +34,4 @@ detection:
 falsepositives:
     - System administration scripts
     - Directory service management tools
-level: medium
+level: low

@@ -1,6 +1,12 @@
 title: MDM Profile Removal Attempt
 id: d1a2b3c4-0221-4000-a000-000000000221
-status: stable
+# v1.18: DEPRECATED — superseded by mdm_profile_removed.yml (id ...0331).
+# 0331 has the same /profiles + remove/-R/uninstall selection plus '-D',
+# the identical filter_system, AND extra filter_mdm_agents / filter_apple_signed
+# false-positive filters. Every genuine detection here is also caught by 0331;
+# the only events this rule adds are the benign MDM-agent / Apple-signed parents
+# that 0331 deliberately filters out. Parked disabled to avoid double-firing.
+status: deprecated
 description: Detects attempts to remove MDM (Mobile Device Management) profiles via the profiles command. Adversaries may attempt to remove MDM profiles to escape enterprise security controls and monitoring.
 author: MacCrab Community
 date: 2026/03/30
@@ -28,4 +34,4 @@ detection:
 falsepositives:
     - IT administrators managing profiles
     - Legitimate profile rotation during enrollment changes
-level: high
+level: medium

@@ -38,4 +38,4 @@ detection:
 falsepositives:
     - Legitimate data encoding for API transfers
     - Development and testing workflows
-level: medium
+level: low

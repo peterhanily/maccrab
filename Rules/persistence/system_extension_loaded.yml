@@ -32,4 +32,4 @@ detection:
 falsepositives:
     - Legitimate security software installation (CrowdStrike, SentinelOne)
     - VPN clients installing network extensions
-level: high
+level: medium

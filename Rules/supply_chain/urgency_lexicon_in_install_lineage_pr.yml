@@ -60,4 +60,4 @@ detection:
 falsepositives:
     - Legitimate CVE-disclosure release notes containing genuine urgency text (covered automatically — the urgency phrase alone is not the alert; combined with a fresh package install lineage in the supply_chain tactic is what triggers escalation)
     - Security-tooling packages that include urgency-related test fixtures in their CHANGELOG
-level: medium
+level: low

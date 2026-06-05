@@ -65,11 +65,12 @@ detection:
             - '/tar'
             - '/cp'
             - '/ditto'
+    filter_backup_apps:
         Image|contains:
             - '/backupd'
             - 'TimeMachine'
-    condition: selection and not filter_calendar and not filter_third_party_calendar and not filter_system and not filter_apple and not filter_spotlight and not filter_backup
+    condition: selection and not filter_calendar and not filter_third_party_calendar and not filter_system and not filter_apple and not filter_spotlight and not filter_backup and not filter_backup_apps
 falsepositives:
     - Calendar sync utilities not yet in the allowlist
     - Meeting / focus-time productivity apps
-level: medium
+level: low

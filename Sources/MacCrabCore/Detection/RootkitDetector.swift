@@ -87,19 +87,49 @@ public actor RootkitDetector {
         let verifyProc = getPidsViaProcList()
         let verifySysctl = getPidsViaSysctl()
 
-        for pid in procOnly where suspects.contains(pid) {
-            guard verifyProc.contains(pid), !verifySysctl.contains(pid) else { continue }
-            let event = HiddenProcess(pid: pid, source: "proc_only", timestamp: Date())
-            continuation.yield(event)
-            logger.critical("Hidden process detected: PID \(pid) visible to proc_listallpids but not sysctl (verified)")
+        for c in Self.confirmedHidden(initialProc: procPids, initialSysctl: sysctlPids,
+                                      verifyProc: verifyProc, verifySysctl: verifySysctl,
+                                      selfPid: myPid) {
+            continuation.yield(HiddenProcess(pid: c.pid, source: c.source, timestamp: Date()))
+            if c.source == "proc_only" {
+                logger.critical("Hidden process detected: PID \(c.pid) visible to proc_listallpids but not sysctl (verified)")
+            } else {
+                logger.critical("Hidden process detected: PID \(c.pid) visible to sysctl but not proc_listallpids (verified)")
+            }
         }
+    }
 
-        for pid in sysctlOnly where suspects.contains(pid) {
-            guard verifySysctl.contains(pid), !verifyProc.contains(pid) else { continue }
-            let event = HiddenProcess(pid: pid, source: "sysctl_only", timestamp: Date())
-            continuation.yield(event)
-            logger.critical("Hidden process detected: PID \(pid) visible to sysctl but not proc_listallpids (verified)")
+    /// A PID confirmed hidden after the de-race verify pass.
+    public struct ConfirmedHidden: Equatable, Sendable {
+        public let pid: Int32
+        public let source: String   // "proc_only" or "sysctl_only"
+    }
+
+    /// Pure de-race decision — the v1.6.22 fix as testable set algebra. A PID
+    /// present in only one of the two enumeration APIs is reported ONLY if the
+    /// discrepancy PERSISTS in the verify pass: a real userland rootkit hides a
+    /// process for its whole lifetime, whereas one that merely exited/started in
+    /// the gap between the back-to-back initial scans does not. `selfPid` and
+    /// pid 0 are never reported. Extracted from `scan()` so the algebra is
+    /// unit-tested without live `proc_listallpids` / `sysctl` syscalls.
+    static func confirmedHidden(initialProc: Set<Int32>, initialSysctl: Set<Int32>,
+                                verifyProc: Set<Int32>, verifySysctl: Set<Int32>,
+                                selfPid: Int32) -> [ConfirmedHidden] {
+        let procOnly = initialProc.subtracting(initialSysctl)
+        let sysctlOnly = initialSysctl.subtracting(initialProc)
+        let suspects = procOnly.union(sysctlOnly).filter { $0 != 0 && $0 != selfPid }
+        var out: [ConfirmedHidden] = []
+        for pid in procOnly where suspects.contains(pid) {
+            if verifyProc.contains(pid), !verifySysctl.contains(pid) {
+                out.append(ConfirmedHidden(pid: pid, source: "proc_only"))
+            }
         }
+        for pid in sysctlOnly where suspects.contains(pid) {
+            if verifySysctl.contains(pid), !verifyProc.contains(pid) {
+                out.append(ConfirmedHidden(pid: pid, source: "sysctl_only"))
+            }
+        }
+        return out.sorted { $0.pid < $1.pid }
     }
 
     // MARK: - Process Enumeration

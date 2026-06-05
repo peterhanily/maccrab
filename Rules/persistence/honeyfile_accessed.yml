@@ -33,4 +33,5 @@ detection:
 falsepositives:
     - First-party allowlisted backup agents indexing the home directory — these should be explicitly suppressed per process path in the allowlist rather than ignored at rule level
     - Spotlight initial indexing on a fresh user profile (brief, rare)
+suppressible: false
 level: high

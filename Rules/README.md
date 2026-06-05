@@ -36,26 +36,33 @@ Rules are organized by [MITRE ATT&CK](https://attack.mitre.org/) tactic:
 
 | Directory | Tactic | Rules |
 |-----------|--------|:-----:|
-| `defense_evasion/` | Defense Evasion (TA0005) | 62 |
-| `credential_access/` | Credential Access (TA0006) | 35 |
-| `persistence/` | Persistence (TA0003) | 34 |
-| `supply_chain/` | Supply Chain (macOS-specific) | 31 |
-| `execution/` | Execution (TA0002) | 31 |
-| `discovery/` | Discovery (TA0007) | 24 |
+| `defense_evasion/` | Defense Evasion (TA0005) | 69 |
+| `supply_chain/` | Supply Chain (macOS-specific) | 53 |
+| `credential_access/` | Credential Access (TA0006) | 39 |
+| `persistence/` | Persistence (TA0003) | 39 |
+| `execution/` | Execution (TA0002) | 33 |
+| `ai_safety/` | AI Agent Safety (macOS-specific) | 32 |
+| `discovery/` | Discovery (TA0007) | 26 |
 | `privilege_escalation/` | Privilege Escalation (TA0004) | 21 |
-| `ai_safety/` | AI Agent Safety (macOS-specific) | 19 |
-| `command_and_control/` | Command and Control (TA0011) | 17 |
-| `lateral_movement/` | Lateral Movement (TA0008) | 16 |
-| `collection/` | Collection (TA0009) | 15 |
-| `exfiltration/` | Exfiltration (TA0010) | 12 |
-| `initial_access/` | Initial Access (TA0001) | 11 |
-| `tcc/` | TCC Abuse (macOS-specific) | 9 |
-| `container/` | Container Security (macOS-specific) | 8 |
-| `impact/` | Impact (TA0040) | 8 |
-| `sequences/` | Temporal sequence rules (multi-tactic) | 27 |
-| **Total** | | **380** |
+| `command_and_control/` | Command and Control (TA0011) | 20 |
+| `lateral_movement/` | Lateral Movement (TA0008) | 18 |
+| `exfiltration/` | Exfiltration (TA0010) | 17 |
+| `impact/` | Impact (TA0040) | 16 |
+| `collection/` | Collection (TA0009) | 13 |
+| `initial_access/` | Initial Access (TA0001) | 13 |
+| `container/` | Container Security (macOS-specific) | 12 |
+| `tcc/` | TCC Abuse (macOS-specific) | 8 |
+| `wireless/` | Wireless / RF (macOS-specific) | 8 |
+| **Single-event subtotal** | | **437** |
+| `sequences/` | Temporal multi-step (SequenceEngine) | 41 |
+| `graph/` | Multi-entity TraceGraph (JSON predicates) | 6 |
+| **Total** | | **484** |
 
-Sequence rules in `sequences/` span multiple tactics. They are stored separately because they use the extended sequence format and are processed by the `SequenceEngine` rather than the standard `RuleEngine`.
+Sequence rules in `sequences/` span multiple tactics and use the extended
+`type: sequence` format, processed by the `SequenceEngine` rather than the
+standard `RuleEngine`. Graph rules in `graph/` are authored directly as JSON
+(`*.json`) and evaluated by the TraceGraph engine against materialized
+multi-entity causal traces — they are not compiled from YAML.
 
 ---
 

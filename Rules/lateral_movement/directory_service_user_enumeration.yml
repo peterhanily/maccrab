@@ -46,4 +46,4 @@ falsepositives:
     - IT administration tools querying directory services
     - MDM/endpoint management agents (Jamf, Mosyle, Kandji)
     - Login/authentication frameworks
-level: medium
+level: low

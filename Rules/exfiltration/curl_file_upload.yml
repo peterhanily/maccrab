@@ -35,4 +35,4 @@ falsepositives:
     - Legitimate file upload services
     - CI/CD artifact uploads
     - Cloud backup tools
-level: medium
+level: low

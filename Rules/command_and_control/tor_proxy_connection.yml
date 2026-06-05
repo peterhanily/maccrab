@@ -33,4 +33,4 @@ falsepositives:
     - Legitimate Tor usage for privacy
     - OnionShare or SecureDrop clients
     - Applications explicitly configured to use a local Tor SOCKS proxy
-level: high
+level: medium

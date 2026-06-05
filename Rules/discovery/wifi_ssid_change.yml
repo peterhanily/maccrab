@@ -39,4 +39,4 @@ detection:
 falsepositives:
     - User manually changing Wi-Fi networks
     - Network management scripts
-level: medium
+level: low

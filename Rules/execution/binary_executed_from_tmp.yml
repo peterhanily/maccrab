@@ -41,4 +41,5 @@ detection:
 falsepositives:
     - Hand-built local binaries copied to /tmp for ad-hoc testing — add allowlist if your workflow needs this
     - Compiler toolchains writing temporary self-tests under /tmp before exec — filter on parent if observed
+suppressible: false
 level: medium

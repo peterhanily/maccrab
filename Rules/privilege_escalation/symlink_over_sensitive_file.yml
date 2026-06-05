@@ -36,4 +36,4 @@ detection:
 falsepositives:
     - Dotfile management tools (stow, rcm, yadm)
     - System provisioning scripts
-level: high
+level: medium

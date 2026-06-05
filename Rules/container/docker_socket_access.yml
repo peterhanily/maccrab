@@ -37,4 +37,4 @@ falsepositives:
     - Container orchestration tools (Portainer, Rancher)
     - Docker management GUIs
     - Docker Compose
-level: high
+level: medium

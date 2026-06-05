@@ -41,4 +41,4 @@ detection:
 falsepositives:
     - IT help desk tools connecting to user machines
     - Remote work software (BeyondTrust, TeamViewer, AnyDesk)
-level: medium
+level: low

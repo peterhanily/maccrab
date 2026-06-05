@@ -45,4 +45,4 @@ falsepositives:
     - VoIP or conferencing tools not in the filter list
     - Audio recording and podcast applications
     - AI voice assistants (Siri third-party integrations)
-level: high
+level: low

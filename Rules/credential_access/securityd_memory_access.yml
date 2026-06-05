@@ -55,4 +55,4 @@ falsepositives:
     - Security research tools used in controlled testing environments
     - Apple diagnostic utilities with proper entitlements
     - Documentation / source-code grep / ls in compiled_rules dir (filtered)
-level: high
+level: low

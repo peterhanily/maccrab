@@ -29,4 +29,4 @@ detection:
     condition: selection and selection_suspicious
 falsepositives:
     - Legitimate automation using inline AppleScript
-level: high
+level: medium

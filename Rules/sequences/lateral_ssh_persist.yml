@@ -49,4 +49,4 @@ falsepositives:
     - Ansible, Chef, or Puppet workflows using SSH to configure shell profiles or crontabs on LAN hosts
     - Developers running configuration scripts over SSH that edit .zshrc or install LaunchAgents on dev VMs
     - IT provisioning scripts pushing shell dotfile changes to lab or test machines
-level: high
+level: medium

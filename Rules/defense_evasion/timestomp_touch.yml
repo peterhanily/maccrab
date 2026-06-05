@@ -36,4 +36,4 @@ detection:
 falsepositives:
     - Build systems and package managers adjusting file timestamps
     - Backup restoration tools preserving original timestamps
-level: medium
+level: low

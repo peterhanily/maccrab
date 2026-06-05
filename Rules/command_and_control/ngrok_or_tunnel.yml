@@ -54,4 +54,4 @@ detection:
 falsepositives:
     - Developers testing webhooks or sharing local services
     - Legitimate Cloudflare Tunnel deployments
-level: high
+level: medium

@@ -108,4 +108,4 @@ falsepositives:
     - Security researchers running proof-of-concept exploits in sandboxed environments
     - Virtualization software that uses Mach APIs for hypervisor access
     - Documentation / source-code grep / man lookups (filtered)
-level: high
+level: medium

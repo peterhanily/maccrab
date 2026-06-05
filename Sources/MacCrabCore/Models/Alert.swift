@@ -26,8 +26,9 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
     /// Human-readable title of the detection rule.
     public let ruleTitle: String
 
-    /// Severity level of the alert.
-    public let severity: Severity
+    /// Severity level of the alert. `var` so AlertSink can apply a built-in-rule
+    /// severity override at the single submit chokepoint (v1.18).
+    public var severity: Severity
 
     /// The event that triggered this alert.
     public let eventId: String

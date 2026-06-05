@@ -56,4 +56,5 @@ detection:
 falsepositives:
     - A security researcher analysing the honey-prompt mechanism on the same machine MacCrab is running on — that's the correct outcome and the alert should be triaged manually
     - Documentation copies of this rule or the deception README cached by an editor's indexer; the rule scopes to process exec so static file content alone does not trigger it
+suppressible: false
 level: critical

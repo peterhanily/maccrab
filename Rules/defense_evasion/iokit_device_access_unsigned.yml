@@ -27,7 +27,7 @@ detection:
     selection_unsigned:
         SignerType:
             - 'unsigned'
-            - 'adhoc'
+            - 'adHoc'
     filter_known_paths:
         Image|contains:
             - '/usr/libexec/'
@@ -38,4 +38,5 @@ falsepositives:
     - Custom hardware monitoring tools compiled from source
     - Homebrew-installed system utilities
     - Hardware diagnostic tools
-level: medium
+suppressible: false
+level: high

@@ -54,4 +54,4 @@ detection:
 falsepositives:
     - MDM/Jamf deployment scripts loading from a shared volume — filter on signed parent or extend `filter_apple_parent`
     - Legitimate installers that ship a verification script at the DMG root (rare; review first)
-level: high
+level: medium

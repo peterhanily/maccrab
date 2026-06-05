@@ -43,4 +43,4 @@ falsepositives:
     - Accessibility tools (Voice Control, Switch Control)
     - UI automation testing frameworks (XCUITest, Appium)
     - Keyboard remapping utilities (Karabiner)
-level: high
+level: medium

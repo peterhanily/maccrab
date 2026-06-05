@@ -36,4 +36,5 @@ detection:
 falsepositives:
     - Penetration testing activities
     - CTF challenges
+suppressible: false
 level: critical

@@ -45,4 +45,4 @@ falsepositives:
     - System administrators editing hosts for legitimate DNS overrides
     - Development tools that add local hostname mappings (docker, vagrant)
     - VPN clients that modify hosts during connection
-level: high
+level: medium

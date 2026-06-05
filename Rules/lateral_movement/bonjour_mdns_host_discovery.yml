@@ -49,4 +49,4 @@ falsepositives:
     - Network administrators using dns-sd for legitimate service discovery debugging
     - Development tools that probe for local services during setup
     - Xcode and developer SDKs that use Bonjour for simulator discovery
-level: medium
+level: low

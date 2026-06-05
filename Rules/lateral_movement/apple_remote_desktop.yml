@@ -39,4 +39,4 @@ detection:
 falsepositives:
     - IT administrators enabling remote management
     - Enterprise deployment workflows
-level: high
+level: medium

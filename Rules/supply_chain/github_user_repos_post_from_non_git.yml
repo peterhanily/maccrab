@@ -68,4 +68,4 @@ falsepositives:
     - Developer scripts that legitimately automate repo creation (terraform-github, custom dev-portal tooling) — should be allowlisted by Image or repo project boundary
     - GitHub Actions runners running locally via act; parent will be /act
     - Internal CI/CD tools (CircleCI, Jenkins) running with a service account
-level: high
+level: medium

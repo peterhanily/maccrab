@@ -37,4 +37,4 @@ detection:
 falsepositives:
     - IT administrators adjusting firewall settings for troubleshooting
     - MDM profiles reconfiguring firewall rules
-level: high
+level: medium

@@ -49,4 +49,5 @@ detection:
 falsepositives:
     - macOS OS updates and firmware updaters executed by softwareupdate (filtered)
     - EFI integrity checks run by security scanning tools
+suppressible: false
 level: high

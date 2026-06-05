@@ -47,4 +47,4 @@ detection:
 falsepositives:
     - Authorized Slack bots and integration scripts that post files to channels
     - DevOps notification scripts uploading build artifacts or test results
-level: high
+level: medium

@@ -31,4 +31,4 @@ detection:
     condition: selection_hook and selection_suspicious_path and not filter_system and not filter_apple_signed
 falsepositives:
     - Legitimate development workflows in temporary directories
-level: high
+level: medium

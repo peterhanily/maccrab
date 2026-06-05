@@ -32,4 +32,4 @@ detection:
     condition: selection_download and not filter_known
 falsepositives:
     - Downloading from private registries or internal CDNs
-level: medium
+level: low

@@ -78,4 +78,5 @@ falsepositives:
     - A maintained corpus of community-contributed workflow templates whose filename overlaps with an IOC (e.g., a legitimate `discussion.yaml` template for GitHub Discussions automation) — review the workflow body and allowlist via project boundary
     - A workflow-generator npm package whose published purpose is to scaffold `.github/workflows/discussion.yaml` — extend filter list by package basename once observed
     - Rule depends on filename-IOC detection only; live worms that rotate to new filenames will not fire. Promote this rule once FileContentEnricher.shouldScan extends to `.github/workflows/`.
-level: critical
+suppressible: false
+level: high

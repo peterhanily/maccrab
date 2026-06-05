@@ -28,4 +28,4 @@ detection:
 falsepositives:
     - Legitimate application installations that include Dock tile plugins
     - Xcode plugin development
-level: high
+level: medium

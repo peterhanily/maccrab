@@ -32,4 +32,4 @@ detection:
 falsepositives:
     - Developer debugging tools
     - Some legitimate application frameworks
-level: high
+level: medium

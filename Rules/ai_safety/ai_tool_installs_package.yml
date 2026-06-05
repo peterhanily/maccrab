@@ -90,4 +90,4 @@ falsepositives:
     - Legitimate AI-assisted dependency installation of less-popular
       packages — pair with the slopsquatting sequence detector for
       higher-confidence alerts
-level: medium
+level: low

@@ -57,4 +57,4 @@ falsepositives:
     - IDE integrated terminals
     - Automation scripts
     - Package managers
-level: medium
+level: low

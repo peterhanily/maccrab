@@ -46,4 +46,4 @@ falsepositives:
     - Package managers creating hidden metadata files
     - Build systems using hidden directories for caches
     - Version control systems creating .git directories
-level: medium
+level: low

@@ -39,4 +39,4 @@ falsepositives:
     - In-house developer builds of system utilities run from /tmp, ~/build, or DerivedData
     - Custom OpenSSH server builds (e.g. Homebrew openssh, MacPorts) shipping their own /sshd
     - QA/test harnesses that ship renamed stub binaries (mock sshd, mock launchd)
-level: high
+level: medium

@@ -31,4 +31,4 @@ detection:
 falsepositives:
     - Legitimate AppleScript automation
     - Finder scripts and Automator workflows
-level: high
+level: medium

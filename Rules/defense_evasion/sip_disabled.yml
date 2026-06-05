@@ -25,4 +25,5 @@ detection:
     condition: selection
 falsepositives:
     - System administrators explicitly disabling SIP for development
+suppressible: false
 level: critical

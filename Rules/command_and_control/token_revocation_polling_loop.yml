@@ -85,4 +85,4 @@ falsepositives:
     - GitHub-aware dev tooling that performs interactive auth checks (gh status, hub auth) — these descend from an interactive shell, not from launchd / a package manager
     - CI runners polling for trigger events; expected to descend from /runner / /Runner.Listener (already filtered downstream by lineage)
     - GitHub Desktop / Tower / Fork polling for repo status — these descend from the GUI app, not from launchd / node
-level: high
+level: medium

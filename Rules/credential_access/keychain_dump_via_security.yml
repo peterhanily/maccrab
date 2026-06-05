@@ -28,9 +28,9 @@ detection:
             - '/usr/libexec/'
             - '/usr/sbin/'
     filter_apple_signed:
-        SignerType: 'apple'
+        ParentSignerType: 'apple'
     condition: selection and selection_dump and not filter_system and not filter_apple_signed
 falsepositives:
     - Legitimate keychain management scripts
     - Backup tools accessing keychain
-level: high
+level: medium

@@ -46,4 +46,4 @@ falsepositives:
     - SSH-based deployment scripts
     - Git over SSH operations
     - Interactive `ssh`, `git`, `ansible`, paramiko, etc. from a terminal session
-level: high
+level: medium

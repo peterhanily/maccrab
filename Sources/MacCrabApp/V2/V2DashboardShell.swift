@@ -142,7 +142,7 @@ struct V2DashboardShell: View {
         case .events:        V2EventsWorkspace(state: state, appState: appState)
         case .investigation: V2InvestigationWorkspace(state: state, appState: appState)
         case .forensics:     V2ForensicsWorkspace(state: state, appState: appState)
-        case .detection:     V2DetectionWorkspace(state: state)
+        case .detection:     V2DetectionWorkspace(state: state, appState: appState)
         case .prevention:    V2PreventionWorkspace(state: state)
         case .intelligence:  V2IntelligenceWorkspace(state: state)
         case .system:        V2SystemWorkspace(state: state)

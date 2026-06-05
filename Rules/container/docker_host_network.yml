@@ -35,4 +35,4 @@ detection:
 falsepositives:
     - Performance-sensitive containers requiring low network latency
     - Network debugging and monitoring containers
-level: medium
+level: low

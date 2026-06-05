@@ -61,4 +61,5 @@ detection:
 falsepositives:
     - Developers running unsigned local builds during iteration (e.g., `.build/debug/foo`) — covered by `filter_known_dev_tools`; extend allowlist as appropriate
     - Browser-automation harnesses launching unsigned helper binaries from `~/Library/Caches/` — filter on the cache path
+suppressible: false
 level: high

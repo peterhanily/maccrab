@@ -24,7 +24,10 @@ public actor GeminiBackend: LLMBackend {
         return s
     }()
 
-    private static func isValidModelName(_ s: String) -> Bool {
+    // `internal` (not private) so the model-name allowlist is unit-tested — an
+    // attacker-controlled `../../admin`-shaped model would alter the request
+    // path (key exfil via redirect / cache poisoning), so this must stay tight.
+    static func isValidModelName(_ s: String) -> Bool {
         guard !s.isEmpty, s.count <= 64 else { return false }
         return s.allSatisfy { Self.modelAllowedChars.contains($0) }
     }

@@ -40,4 +40,4 @@ detection:
 falsepositives:
     - Extension management utilities
     - Enterprise browser extension deployment
-level: high
+level: medium

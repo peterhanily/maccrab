@@ -91,14 +91,15 @@ detection:
             - '/tar'
             - '/cp'
             - '/ditto'
+    filter_backup_apps:
         Image|contains:
             - '/backupd'
             - 'TimeMachine'
             - '/CarbonCopyCloner'
             - '/SuperDuper'
             - '/Arq'
-    condition: selection and not filter_contacts and not filter_mail_clients and not filter_messaging and not filter_sync_clients and not filter_crm and not filter_system and not filter_apple and not filter_spotlight and not filter_backup
+    condition: selection and not filter_contacts and not filter_mail_clients and not filter_messaging and not filter_sync_clients and not filter_crm and not filter_system and not filter_apple and not filter_spotlight and not filter_backup and not filter_backup_apps
 falsepositives:
     - Address book sync tools not yet allowlisted
     - CRM integration apps not yet in filter_crm
-level: high
+level: low

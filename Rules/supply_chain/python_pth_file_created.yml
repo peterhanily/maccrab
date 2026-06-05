@@ -35,4 +35,4 @@ detection:
 falsepositives:
     - Legitimate pip package installation that creates .pth files (setuptools, virtualenv)
     - Development tools installing editable packages (pip install -e)
-level: high
+level: medium

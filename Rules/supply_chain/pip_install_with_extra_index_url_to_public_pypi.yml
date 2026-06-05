@@ -51,4 +51,4 @@ falsepositives:
     - Workflows that deliberately fall back to public PyPI for indirect dependencies not on the private mirror; resolve by hosting full transitive closure on the private index
     - Researcher / reverse-engineering installs that explicitly want both sources
     - Project bootstrap scripts that always set both URLs out of habit; review the per-project pip.conf and remove if unintentional
-level: high
+level: low

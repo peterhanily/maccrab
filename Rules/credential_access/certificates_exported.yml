@@ -29,9 +29,9 @@ detection:
             - '/usr/libexec/'
             - '/usr/sbin/'
     filter_apple_signed:
-        SignerType: 'apple'
+        ParentSignerType: 'apple'
     condition: selection and selection_export and not filter_system and not filter_apple_signed
 falsepositives:
     - Certificate management and renewal scripts
     - VPN configuration tools
-level: high
+level: medium

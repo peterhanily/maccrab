@@ -31,4 +31,4 @@ falsepositives:
     - 1Password, Bitwarden, Dashlane, Keeper, LastPass desktop apps unlocking the system keychain to sync stored items
     - fastlane / `match` / Bitrise xcode_select scripts that wrap `security unlock-keychain` during signing
     - Xcode build scripts unlocking the login keychain before `codesign`
-level: high
+level: medium

@@ -61,4 +61,4 @@ falsepositives:
     - A package that legitimately requires a specific Node runtime version and downloads it at install (`@vercel/node-build`-style tooling) — rare; allowlist by package
     - Self-update flows (`bun upgrade`, `deno upgrade`) accidentally triggered during an install lineage — review parent CommandLine
     - Multi-runtime managers (proto, asdf, mise) installed via npm postinstall — these wrap the legit download and should be allowlisted by Image basename
-level: high
+level: medium

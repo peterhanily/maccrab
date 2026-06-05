@@ -32,4 +32,5 @@ detection:
     condition: selection
 falsepositives:
     - Essentially none — a revoked Developer-ID certificate means Apple pulled it, almost always after the signed software was confirmed malicious. Legitimate software does not run under a revoked certificate.
+suppressible: false
 level: critical

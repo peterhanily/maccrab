@@ -39,4 +39,4 @@ detection:
 falsepositives:
     - Privacy-conscious users clearing history manually
     - Automated cleanup scripts
-level: high
+level: medium

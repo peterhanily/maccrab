@@ -25,4 +25,4 @@ detection:
 falsepositives:
     - Initial git setup
     - AI tools setting user.name or user.email
-level: medium
+level: low

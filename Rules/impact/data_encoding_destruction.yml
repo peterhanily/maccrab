@@ -44,8 +44,9 @@ detection:
         ParentImage|contains:
             - 'Homebrew'
             - '/brew'
-    condition: selection_shred
-        or (selection_dd_source and selection_dd_file_target and not filter_dd_device_target)
+    condition: (selection_shred
+        or (selection_dd_source and selection_dd_file_target and not filter_dd_device_target))
+        and not filter_homebrew
 falsepositives:
     - Security-conscious users using srm/shred for legitimate private file deletion
     - Development workflows that overwrite test data files with dd

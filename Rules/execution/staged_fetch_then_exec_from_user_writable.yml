@@ -101,4 +101,5 @@ detection:
 falsepositives:
     - Browser-automation toolkits (Playwright, Puppeteer, Cypress, Electron) that legitimately cache and execute headless-browser binaries from `~/Library/Caches/` — covered by `filter_known_tool_caches`
     - Native-addon prebuilds (bcrypt, sharp, sqlite3, esbuild, swc) that cache compiled binaries under `~/Library/Caches/<pkg>/` and execute them — extend filter as packages are observed
+suppressible: false
 level: high

@@ -167,6 +167,11 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
     public let title: String
     public let description: String
     public let level: Severity
+    /// v1.18: false = "must-fire" — this match survives the NoiseFilter trust
+    /// gates regardless of severity. Default true. Stored optional so compiled
+    /// JSON predating the field decodes to the safe default rather than failing.
+    private let suppressibleRaw: Bool?
+    public var suppressible: Bool { suppressibleRaw ?? true }
     public let tags: [String]
     public let logsource: LogSource
     public let predicates: [Predicate]
@@ -181,6 +186,7 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
         case id, title, description, level, tags, logsource, predicates
         case condition, falsepositives, enabled
         case conditionTree = "condition_tree"
+        case suppressibleRaw = "suppressible"
     }
 
     public init(
@@ -188,6 +194,7 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
         title: String,
         description: String,
         level: Severity,
+        suppressible: Bool = true,
         tags: [String],
         logsource: LogSource,
         predicates: [Predicate],
@@ -200,6 +207,7 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
         self.title = title
         self.description = description
         self.level = level
+        self.suppressibleRaw = suppressible
         self.tags = tags
         self.logsource = logsource
         self.predicates = predicates
@@ -231,6 +239,13 @@ public actor RuleEngine {
 
     /// All rules keyed by ID for individual lookups.
     private var allRules: [String: CompiledRule] = [:]
+
+    /// Number of rule files that failed to decode on the most recent
+    /// `loadRules`. Surfaced for health checks and, critically, consulted by
+    /// `reloadRules` to enforce last-known-good rollback: a corrupt compiled
+    /// file must not silently shrink the active ruleset (the CrowdStrike
+    /// Channel-File-291 class — content is code; validate before promoting).
+    public private(set) var lastLoadFailedCount: Int = 0
 
     /// LRU cache of compiled `NSRegularExpression` instances keyed by pattern.
     /// On cache hit the entry is promoted; on eviction the least-recently-used
@@ -380,7 +395,43 @@ public actor RuleEngine {
 
     // MARK: Initialization
 
-    public init() {}
+    // v1.18: runtime eval-budget guard against pathological (ReDoS) rules. A
+    // rule whose regex backtracks catastrophically on attacker-influenced fields
+    // stalls the SERIAL event loop; previously such rules were only logged. Now
+    // a single pathological eval, or persistent over-budget cost, auto-disables
+    // the rule so it can't keep stalling ingest. Thresholds are injectable so the
+    // mechanism is deterministically testable without a real multi-second stall.
+    private let slowRuleThresholdNs: UInt64
+    private let autoDisablePathologicalNs: UInt64
+    private let autoDisableMaxBreaches: Int
+    private var ruleBudgetBreaches: [String: Int] = [:]
+    /// Rules auto-disabled at runtime for exceeding the eval budget (suspected
+    /// pathological / ReDoS patterns). Exposed for health/visibility.
+    public private(set) var autoDisabledRules: Set<String> = []
+
+    /// v1.18: a RELOAD that cleanly decodes but yields fewer than this fraction
+    /// of the prior ruleset is rejected as a suspected truncated/partial content
+    /// bundle (the Channel-File-291 COUNT class) — see reloadRules.
+    private let reloadMinCountFraction: Double
+
+    public init(
+        slowRuleThresholdNs: UInt64 = 50_000_000,          // 50ms — an over-budget eval
+        autoDisablePathologicalNs: UInt64 = 1_000_000_000, // 1s — a single catastrophic eval
+        autoDisableMaxBreaches: Int = 20,                  // disable after this many over-budget evals
+        reloadMinCountFraction: Double = 0.7               // reject a reload that drops >30% of rules
+    ) {
+        self.slowRuleThresholdNs = slowRuleThresholdNs
+        self.autoDisablePathologicalNs = autoDisablePathologicalNs
+        self.autoDisableMaxBreaches = max(1, autoDisableMaxBreaches)
+        self.reloadMinCountFraction = reloadMinCountFraction
+    }
+
+    /// Whether a rule whose eval just took `elapsedNs` (with `breaches`
+    /// accumulated over-budget evals) should be auto-disabled: one pathological
+    /// eval (catastrophic backtracking), or persistent over-budget cost.
+    func shouldAutoDisable(elapsedNs: UInt64, breaches: Int) -> Bool {
+        elapsedNs >= autoDisablePathologicalNs || breaches >= autoDisableMaxBreaches
+    }
 
     // MARK: Regex caching
 
@@ -443,6 +494,7 @@ public actor RuleEngine {
 
         let decoder = JSONDecoder()
         var loaded = 0
+        var failed = 0
 
         for file in jsonFiles {
             do {
@@ -452,11 +504,13 @@ public actor RuleEngine {
                 ruleIndex[rule.logsource.category, default: []].append(rule)
                 loaded += 1
             } catch {
+                failed += 1
                 logger.error("Failed to load rule from \(file.lastPathComponent): \(error)")
                 // Print full decode error for debugging
                 print("  RULE LOAD ERROR: \(file.lastPathComponent): \(error)")
             }
         }
+        lastLoadFailedCount = failed
 
         // Pre-compile all regex patterns so that evaluateModifier never has to
         // compile on the hot path.
@@ -518,6 +572,40 @@ public actor RuleEngine {
             throw error
         }
 
+        // Last-known-good (atomic content swap): loadRules is best-effort and
+        // silently SKIPS any file it can't decode, so a single corrupt compiled
+        // rule would otherwise shrink the live ruleset with no error. On RELOAD
+        // — where a known-good prior set exists — treat ANY decode failure as a
+        // failed swap: roll back to the prior set and throw, rather than run
+        // with a silently-reduced detection surface. (Initial boot loadRules
+        // stays best-effort: N-1 rules beat zero on first start.)
+        if lastLoadFailedCount > 0 {
+            let failed = lastLoadFailedCount
+            ruleIndex          = snapshotIndex
+            allRules           = snapshotRules
+            regexCache         = snapshotRegex
+            regexAccessSeq     = snapshotRegexSeq
+            regexAccessCounter = snapshotRegexCounter
+            logger.error("Rule reload rejected: \(failed) file(s) failed to decode; restored \(snapshotRules.count) last-known-good rules")
+            throw RuleEngineError.partialLoadFailure(failed: failed, loaded: count)
+        }
+
+        // v1.18: rule-COUNT regression guard (Channel-File-291 count class).
+        // Even when every file decodes cleanly, a drastically smaller incoming
+        // set — a truncated/partial bundle, a half-synced content dir — collapses
+        // detection silently. Reject a reload that drops below the configured
+        // fraction of the prior set and restore last-known-good. (Skipped when
+        // there was no meaningful prior set, e.g. an empty engine.)
+        if !snapshotRules.isEmpty && Double(count) < Double(snapshotRules.count) * reloadMinCountFraction {
+            ruleIndex          = snapshotIndex
+            allRules           = snapshotRules
+            regexCache         = snapshotRegex
+            regexAccessSeq     = snapshotRegexSeq
+            regexAccessCounter = snapshotRegexCounter
+            logger.fault("Rule reload rejected: incoming \(count) rules is below \(Int(self.reloadMinCountFraction * 100))% of the prior \(snapshotRules.count); restored last-known-good (suspected truncated content bundle)")
+            throw RuleEngineError.ruleCountRegression(loaded: count, previous: snapshotRules.count)
+        }
+
         // Restore enabled state for rules that were previously disabled.
         for (ruleId, wasEnabled) in previousEnabledState {
             if var rule = allRules[ruleId], !wasEnabled {
@@ -541,15 +629,12 @@ public actor RuleEngine {
     ///
     /// Only rules whose logsource category matches the event's category are
     /// tested. Returns an array of `RuleMatch` for every rule that fires.
-    /// Threshold for logging slow rules (nanoseconds). Rules exceeding this
-    /// are logged at warning level to help identify performance bottlenecks.
-    private static let slowRuleThresholdNs: UInt64 = 50_000_000  // 50ms
-
     public func evaluate(_ event: Event) -> [RuleMatch] {
         let category = mapEventCategoryToLogsource(event.eventCategory, eventType: event.eventType)
         guard let rules = ruleIndex[category] else { return [] }
 
         var matches: [RuleMatch] = []
+        var rulesToDisable: [(id: String, title: String, ms: Double, breaches: Int)] = []
 
         for rule in rules where rule.enabled {
             let start = DispatchTime.now()
@@ -562,9 +647,18 @@ public actor RuleEngine {
             // (the typical state for low-fire detection rules).
             recordEvaluation(ruleId: rule.id, elapsedNs: elapsed, fired: fired, eventTimestamp: event.timestamp)
 
-            if elapsed > Self.slowRuleThresholdNs {
+            // v1.18: eval-budget guard. An over-budget eval is logged AND
+            // counted; a single pathological eval or persistent over-budget cost
+            // marks the rule for auto-disable so a ReDoS pattern can't keep
+            // stalling the serial event loop.
+            if elapsed >= slowRuleThresholdNs {
                 let ms = Double(elapsed) / 1_000_000
                 logger.warning("Slow rule: \(rule.title) (\(rule.id)) took \(String(format: "%.1f", ms))ms")
+                let breaches = (ruleBudgetBreaches[rule.id] ?? 0) + 1
+                ruleBudgetBreaches[rule.id] = breaches
+                if shouldAutoDisable(elapsedNs: elapsed, breaches: breaches) {
+                    rulesToDisable.append((rule.id, rule.title, ms, breaches))
+                }
             }
 
             if fired {
@@ -574,10 +668,20 @@ public actor RuleEngine {
                     severity: rule.level,
                     description: rule.description,
                     mitreTechniques: rule.tags.filter { $0.hasPrefix("attack.t") },
-                    tags: rule.tags
+                    tags: rule.tags,
+                    suppressible: rule.suppressible
                 )
                 matches.append(match)
             }
+        }
+
+        // v1.18: apply auto-disables AFTER the loop (setEnabled mutates
+        // ruleIndex). A pathological/ReDoS rule stops stalling ingest once
+        // disabled; it can be re-enabled after the rule is fixed.
+        for r in rulesToDisable where !autoDisabledRules.contains(r.id) {
+            setEnabled(r.id, enabled: false)
+            autoDisabledRules.insert(r.id)
+            logger.fault("Auto-DISABLED rule \(r.title) (\(r.id)) — \(r.breaches) over-budget evals (last \(String(format: "%.1f", r.ms))ms); suspected pathological/ReDoS pattern.")
         }
 
         return matches
@@ -1145,6 +1249,8 @@ public actor RuleEngine {
 public enum RuleEngineError: Error, LocalizedError {
     case directoryNotFound(String)
     case invalidRuleFormat(String)
+    case partialLoadFailure(failed: Int, loaded: Int)
+    case ruleCountRegression(loaded: Int, previous: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -1152,6 +1258,10 @@ public enum RuleEngineError: Error, LocalizedError {
             return "Rule directory not found: \(path)"
         case .invalidRuleFormat(let detail):
             return "Invalid rule format: \(detail)"
+        case .partialLoadFailure(let failed, let loaded):
+            return "Rule reload rejected: \(failed) file(s) failed to decode (\(loaded) decoded); restored last-known-good ruleset"
+        case .ruleCountRegression(let loaded, let previous):
+            return "Rule reload rejected: incoming \(loaded) rules far below the prior \(previous); restored last-known-good ruleset"
         }
     }
 }

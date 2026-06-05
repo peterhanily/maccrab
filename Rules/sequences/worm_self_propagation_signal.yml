@@ -109,4 +109,5 @@ falsepositives:
     - An interactive developer publish flow (`npm publish` / `twine upload`) that legitimately reads ~/.npmrc or ~/.pypirc before pushing — the parent will be an interactive shell (zsh/bash) rather than a package-manager process and so will not match step 1
     - Legitimate maintainer-enumeration tooling (npm-audit, npm whoami) used interactively from a shell
     - AWS CLI / gcloud running inside a Python venv whose install was triggered moments ago; verify the operator instigated the credential read
+suppressible: false
 level: high

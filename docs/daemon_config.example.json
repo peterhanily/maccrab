@@ -33,9 +33,24 @@
   "_comment_prompt_injection": "Minimum confidence (0-100) for prompt-injection patterns in AIGuard to alert.",
   "prompt_injection_confidence": 40,
 
-  "_comment_storage": "Database ceiling and retention. Events older than retention_days are candidates for pruning.",
-  "max_database_size_mb": 500,
-  "retention_days": 30,
+  "_comment_storage": "Per-tier retention + size caps (since v1.8; tracegraph_*/traces_* tunable since v1.18). All keys optional; omitted keys use the in-source default shown.",
+  "storage": {
+    "events_hot_tier_minutes": 30,
+    "events_max_size_mb": 200,
+    "events_size_cap_interval_minutes": 60,
+    "aggregate_days": 90,
+    "alerts_retention_days": 365,
+    "alerts_max_size_mb": 100,
+    "campaigns_retention_days": 365,
+    "campaigns_max_size_mb": 50,
+    "tracegraph_retention_days": 90,
+    "tracegraph_max_size_mb": 250,
+    "traces_retention_days": 90,
+    "traces_max_size_mb": 100,
+    "reports_retention_days": 90,
+    "auto_generated_rules_max": 200
+  },
+  "_comment_storage_legacy": "Legacy v1.7 top-level keys still decode (folded onto the storage block at load): max_database_size_mb and retention_days.",
 
   "_comment_llm": "LLM reasoning backend. Matches the MACCRAB_LLM_PROVIDER env var.",
   "_comment_llm2": "Keys here override env vars. Leave null to use env-var config.",

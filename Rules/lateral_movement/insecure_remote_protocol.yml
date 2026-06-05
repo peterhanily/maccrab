@@ -31,4 +31,4 @@ detection:
 falsepositives:
     - Legacy network device management (Cisco IOS, old switches without SSH)
     - Network diagnostic testing in isolated labs
-level: high
+level: medium

@@ -38,8 +38,15 @@ public actor ClipboardMonitor {
         "eyJ",  // JWT prefix (base64 of {"...)
     ]
 
-    public init(pollInterval: TimeInterval = 2.0) {
+    /// v1.18: ClickFix correlator. When set, clipboard payloads that look like a
+    /// fetch-piped-to-shell one-liner are recorded so a later shell/Terminal
+    /// exec carrying the same command can be flagged (the dominant macOS
+    /// ClickFix delivery, which sidesteps Gatekeeper). nil = feature off.
+    private let clickFix: ClickFixDetector?
+
+    public init(pollInterval: TimeInterval = 2.0, clickFix: ClickFixDetector? = nil) {
         self.pollInterval = pollInterval
+        self.clickFix = clickFix
         var capturedContinuation: AsyncStream<ClipboardEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) { c in
             capturedContinuation = c
@@ -84,6 +91,13 @@ public actor ClipboardMonitor {
         var isSensitive = false
         if let content = NSPasteboard.general.string(forType: .string) {
             isSensitive = Self.sensitivePatterns.contains { content.contains($0) }
+            // v1.18: feed ClickFix delivery-shaped payloads to the correlator
+            // so a subsequent paste-and-run can be flagged. record() self-filters
+            // to fetch-piped-to-shell text, so this is cheap on normal copies.
+            if let clickFix {
+                let ts = Date()
+                Task { await clickFix.recordClipboard(content, at: ts) }
+            }
         }
 
         let event = ClipboardEvent(

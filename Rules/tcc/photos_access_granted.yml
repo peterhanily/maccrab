@@ -40,4 +40,4 @@ falsepositives:
     - Photo editing tools distributed outside the App Store
     - Backup utilities that sync photo libraries
     - Developer-signed photo management tools
-level: medium
+level: low

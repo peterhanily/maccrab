@@ -359,14 +359,17 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, URLSessionTas
         guard let chain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate],
               !chain.isEmpty else { return false }
         return chain.contains { cert in
-            guard let hash = extractSPKIHash(from: cert) else { return false }
+            guard let hash = Self.extractSPKIHash(from: cert) else { return false }
             return expectedPins.contains(hash)
         }
     }
 
     /// Extracts the SHA-256 hash of the Subject Public Key Info (SPKI) from
-    /// a certificate and returns it as a base64-encoded string.
-    private func extractSPKIHash(from certificate: SecCertificate) -> String? {
+    /// a certificate and returns it as a base64-encoded string. `static` +
+    /// `internal` (not private) so the SPKI-pin computation — the ASN.1
+    /// wrapping + SHA-256 that must match an OpenSSL-produced pin — is unit
+    /// tested against a known certificate without a live TLS handshake.
+    static func extractSPKIHash(from certificate: SecCertificate) -> String? {
         guard let publicKey = SecCertificateCopyKey(certificate),
               let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else {
             return nil
@@ -374,14 +377,14 @@ public final class SecureURLSession: NSObject, URLSessionDelegate, URLSessionTas
         // Prepend the ASN.1 SPKI header for RSA-2048/ECDSA-256/ECDSA-384 keys.
         // The raw key data from SecKeyCopyExternalRepresentation lacks the
         // AlgorithmIdentifier wrapper that makes it a proper SPKI structure.
-        let spkiData = asn1SPKIWrapped(publicKeyData, key: publicKey)
+        let spkiData = Self.asn1SPKIWrapped(publicKeyData, key: publicKey)
         let digest = SHA256.hash(data: spkiData)
         return Data(digest).base64EncodedString()
     }
 
     /// Wrap raw key bytes in the minimal ASN.1 SubjectPublicKeyInfo structure.
     /// This matches what OpenSSL produces for the SPKI hash used in pins.
-    private func asn1SPKIWrapped(_ keyData: Data, key: SecKey) -> Data {
+    static func asn1SPKIWrapped(_ keyData: Data, key: SecKey) -> Data {
         guard let attrs = SecKeyCopyAttributes(key) as? [String: Any],
               let keyType = attrs[kSecAttrKeyType as String] as? String,
               let keySize = attrs[kSecAttrKeySizeInBits as String] as? Int else {

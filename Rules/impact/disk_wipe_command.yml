@@ -41,4 +41,5 @@ falsepositives:
     - IT administrators securely wiping drives before decommission
     - Security researchers using dd in controlled test environments
     - Forensic investigators acquiring disk images
+suppressible: false
 level: critical

@@ -5,6 +5,7 @@
 // Reads real data from the daemon's SQLite database.
 
 import Foundation
+import AppKit
 import Combine
 import CSQLCipher
 import MacCrabCore
@@ -1236,6 +1237,88 @@ final class AppState: ObservableObject {
             }
     }
 
+    // MARK: - ClickFix clipboard bridge (v1.18)
+    //
+    // The root System Extension cannot read the GUI pasteboard (no Aqua session),
+    // so the user-context app polls it and forwards delivery-shaped payloads
+    // (curl|bash, etc.) to the sysext's ClickFixDetector via the inbox IPC, where
+    // the exec-correlation half raises the paste-and-run alert. Tied to the poll
+    // lifecycle (foreground only). 3 s cadence so a fast copy→paste→run is caught
+    // well inside the detector's 60 s window. The `changeCount` gate makes the
+    // common case (clipboard unchanged) a single cheap integer read.
+    private var clipboardTimer: AnyCancellable?
+    private var lastClipboardChangeCount: Int = -1
+
+    /// Process-lifetime: started once at launch by the AppDelegate (NOT gated on
+    /// the dashboard window's scenePhase), so ClickFix records delivery-shaped
+    /// clipboard payloads whenever the LSUIElement menubar app is running.
+    func startClipboardBridge() {
+        guard clipboardTimer == nil else { return }
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        clipboardTimer = Timer.publish(every: 3.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.pollClipboardForClickFix() }
+    }
+
+    private func stopClipboardBridge() {
+        clipboardTimer?.cancel()
+        clipboardTimer = nil
+    }
+
+    private func pollClipboardForClickFix() {
+        let pb = NSPasteboard.general
+        let count = pb.changeCount
+        guard count != lastClipboardChangeCount else { return }
+        lastClipboardChangeCount = count
+        guard let text = pb.string(forType: .string), !text.isEmpty,
+              ClickFixDetector.looksLikeShellDelivery(text) else { return }
+        writeClickFixPayloadToInbox(String(text.prefix(8192)))
+    }
+
+    private func writeClickFixPayloadToInbox(_ payload: String) {
+        let obj: [String: Any] = [
+            "schema_version": 1,
+            "payload": payload,
+            "timestamp": Date().timeIntervalSince1970,
+            "source": "MacCrabApp"
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        let inboxDir = "/Library/Application Support/MacCrab/inbox"
+        let userInboxDir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
+        for dir in [inboxDir, userInboxDir] {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let path = "\(dir)/record-clipboard-\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8)).json"
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    // MARK: - Built-in rule overrides (v1.18)
+    //
+    // The hardcoded maccrab.* rules are tunable via builtin_rules_settings.json,
+    // which the ROOT daemon owns (the app can't write the system support dir).
+    // Route the change through the inbox IPC; the daemon writes the file and
+    // AlertSink applies it at the submit chokepoint.
+    func setBuiltinRuleEnabled(ruleId: String, enabled: Bool) {
+        dropBuiltinRuleSetting(["ruleId": ruleId, "enabled": enabled])
+    }
+    /// `severityRaw == nil` clears the override (revert to the catalog default).
+    func setBuiltinRuleSeverity(ruleId: String, severityRaw: String?) {
+        dropBuiltinRuleSetting(["ruleId": ruleId, "severityOverride": severityRaw ?? NSNull()])
+    }
+    private func dropBuiltinRuleSetting(_ fields: [String: Any]) {
+        var obj = fields
+        obj["schema_version"] = 1
+        obj["requester"] = "MacCrabApp"
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        let inboxDir = "/Library/Application Support/MacCrab/inbox"
+        let userInboxDir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
+        for dir in [inboxDir, userInboxDir] {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let path = "\(dir)/builtin-rule-setting-\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8)).json"
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
     /// Stop the poll timer and release its subscription. Called from the
     /// dashboard window's `.onChange(of: scenePhase)` when the window is
     /// hidden / the app is backgrounded. Saves one SQLite sweep every
@@ -1243,6 +1326,10 @@ final class AppState: ObservableObject {
     func stopPolling() {
         pollTimer?.cancel()
         pollTimer = nil
+        // NOTE: the ClickFix clipboard bridge is deliberately NOT stopped here.
+        // It's process-lifetime (started once at launch by the AppDelegate), so
+        // ClickFix keeps watching the clipboard whenever the menubar app is
+        // alive — not only while the dashboard window is foregrounded.
     }
 
     /// Get or create cached alert store.

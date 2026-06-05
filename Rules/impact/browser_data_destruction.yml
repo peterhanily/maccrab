@@ -53,4 +53,4 @@ detection:
 falsepositives:
     - Privacy-focused users intentionally clearing browser history via scripts
     - IT provisioning scripts that factory-reset browser state before device handoff
-level: high
+level: medium

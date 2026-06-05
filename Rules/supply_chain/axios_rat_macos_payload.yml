@@ -29,4 +29,5 @@ detection:
     condition: selection_file
 falsepositives:
     - None expected - this is a specific malware IOC
+suppressible: false
 level: critical

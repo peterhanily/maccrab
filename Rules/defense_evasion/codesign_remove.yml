@@ -22,4 +22,4 @@ falsepositives:
     - Fastlane / xcodebuild release pipelines that strip then re-apply signatures
     - Homebrew bottle install scripts that remove a stale ad-hoc signature before re-signing for arm64
     - Reverse engineering tooling (Hopper, IDA, Ghidra workflows) inspecting macOS binaries
-level: high
+level: medium

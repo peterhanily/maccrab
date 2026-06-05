@@ -5,6 +5,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import MacCrabCore
 
 struct V2AlertsWorkspace: View {
     // v1.11.1 (audit perf LOW): hoisted formatter for the JSON-export
@@ -803,16 +804,19 @@ struct V2AlertsWorkspace: View {
     /// label closures on every keystroke.
     private var alertsTableColumns: [V2DataColumn<V2MockAlert>] {
         [
-            V2DataColumn(id: "sev", title: "Severity", width: .fixed(96)) { a in
+            V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),
+                         sortKey: { .number(Double($0.severity.sortOrder)) }) { a in
                 V2StatusChip(a.severity.label, kind: a.severity.chipKind)
             },
-            V2DataColumn(id: "title", title: "Alert", width: .flexible(min: 200)) { a in
+            V2DataColumn(id: "title", title: "Alert", width: .flexible(min: 200),
+                         sortKey: { .text($0.title) }) { a in
                 VStack(alignment: .leading, spacing: 1) {
                     V2TableCellText(a.title, primary: true, lineLimit: 1)
                     V2TableCellText(a.ruleId, primary: false, mono: true, lineLimit: 1)
                 }
             },
-            V2DataColumn(id: "process", title: "Process", width: .flexible(min: 120, max: 220)) { a in
+            V2DataColumn(id: "process", title: "Process", width: .flexible(min: 120, max: 220),
+                         sortKey: { .text($0.process) }) { a in
                 VStack(alignment: .leading, spacing: 1) {
                     V2TableCellText(a.process)
                     // v1.10.2 (audit functionality HIGH): pid is
@@ -826,15 +830,18 @@ struct V2AlertsWorkspace: View {
                     }
                 }
             },
-            V2DataColumn(id: "category", title: "Category", width: .fixed(110)) { a in
+            V2DataColumn(id: "category", title: "Category", width: .fixed(110),
+                         sortKey: { .text($0.category) }) { a in
                 V2TableCellText(a.category, primary: false)
             },
-            V2DataColumn(id: "mitre", title: "MITRE", width: .fixed(120)) { a in
+            V2DataColumn(id: "mitre", title: "MITRE", width: .fixed(120),
+                         sortKey: { .text($0.mitre.first ?? "") }) { a in
                 Text(a.mitre.first ?? "—")
                     .font(V2Theme.mono())
                     .foregroundStyle(V2Theme.mutedText)
             },
-            V2DataColumn(id: "when", title: "When", width: .fixed(90)) { a in
+            V2DataColumn(id: "when", title: "When", width: .fixed(90),
+                         sortKey: { .date($0.timestamp) }) { a in
                 V2TableCellText(V2TimeFormat.relative(a.timestamp), primary: false)
             },
         ]
@@ -1010,7 +1017,7 @@ struct V2AlertsWorkspace: View {
                 }
             }
             V2InspectorSection("Surrounding events (±2 min)") {
-                surroundingEventsList(for: alert)
+                SurroundingEventsView(alert: alert, appState: appState)
             }
             V2InspectorSection("Trace context") {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1128,39 +1135,74 @@ struct V2AlertsWorkspace: View {
         }
     }
 
-    /// recent window of events from EventStore, so this is a free
-    /// in-memory filter — no extra DB round-trip.
-    @ViewBuilder
-    private func surroundingEventsList(for alert: V2MockAlert) -> some View {
-        let window: TimeInterval = 120
-        let lo = alert.timestamp.addingTimeInterval(-window)
-        let hi = alert.timestamp.addingTimeInterval(+window)
-        let nearby = appState.events
-            .filter { $0.timestamp >= lo && $0.timestamp <= hi }
-            .sorted { $0.timestamp < $1.timestamp }
-            .prefix(8)
-        if nearby.isEmpty {
-            Text("No events from the in-memory window match. Open the Events workspace and zoom to the alert's timestamp for the full surrounding context.")
-                .font(V2Theme.meta())
-                .foregroundStyle(V2Theme.mutedText)
-        } else {
+    /// Renders the events surrounding an alert. Prefers the in-memory recent
+    /// window (free, no DB round-trip); when that is empty — the common case
+    /// once an alert is older than the events.db hot tier — it falls back to the
+    /// `alert_evidence` snapshot the daemon captured at fire time, which survives
+    /// pruning. Pre-fix this only read the in-memory cache, so "show events" on
+    /// an aged-out alert was always blank.
+    private struct SurroundingEventsView: View {
+        let alert: V2MockAlert
+        @ObservedObject var appState: AppState
+        @State private var evidence: [Event] = []
+        @State private var loaded = false
+
+        var body: some View {
+            let window: TimeInterval = 120
+            let lo = alert.timestamp.addingTimeInterval(-window)
+            let hi = alert.timestamp.addingTimeInterval(+window)
+            let nearby = appState.events
+                .filter { $0.timestamp >= lo && $0.timestamp <= hi }
+                .sorted { $0.timestamp < $1.timestamp }
+                .prefix(8)
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(nearby), id: \.id) { ev in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(V2TimeFormat.short(ev.timestamp))
-                            .font(V2Theme.mono())
-                            .foregroundStyle(V2Theme.tertiaryText)
-                            .frame(width: 70, alignment: .leading)
-                        Text(ev.processName)
-                            .font(V2Theme.body())
-                            .foregroundStyle(V2Theme.primaryText)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(ev.category.rawValue)
-                            .font(V2Theme.meta())
-                            .foregroundStyle(V2Theme.mutedText)
+                if !nearby.isEmpty {
+                    ForEach(Array(nearby), id: \.id) { ev in
+                        row(time: ev.timestamp, name: ev.processName, cat: ev.category.rawValue)
                     }
+                } else if !evidence.isEmpty {
+                    Text("From the snapshot captured when the alert fired — the live events have since been pruned:")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                    ForEach(Array(evidence.prefix(8)), id: \.id) { ev in
+                        row(time: ev.timestamp, name: ev.process.name, cat: ev.eventCategory.rawValue)
+                    }
+                } else if loaded {
+                    Text("No surrounding events were captured for this alert.")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
+                } else {
+                    Text("Loading captured events…")
+                        .font(V2Theme.meta())
+                        .foregroundStyle(V2Theme.mutedText)
                 }
+            }
+            .task(id: alert.id) {
+                loaded = false
+                evidence = []
+                // Only hit the DB when the free in-memory window has nothing.
+                if nearby.isEmpty {
+                    evidence = await appState.fetchEvidence(alertId: alert.id)
+                }
+                loaded = true
+            }
+        }
+
+        @ViewBuilder
+        private func row(time: Date, name: String, cat: String) -> some View {
+            HStack(alignment: .top, spacing: 6) {
+                Text(V2TimeFormat.short(time))
+                    .font(V2Theme.mono())
+                    .foregroundStyle(V2Theme.tertiaryText)
+                    .frame(width: 70, alignment: .leading)
+                Text(name)
+                    .font(V2Theme.body())
+                    .foregroundStyle(V2Theme.primaryText)
+                    .lineLimit(1)
+                Spacer()
+                Text(cat)
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
             }
         }
     }

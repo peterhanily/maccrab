@@ -30,4 +30,4 @@ detection:
 falsepositives:
     - Legacy system administration scripts
     - Very old configuration management tools
-level: high
+level: medium

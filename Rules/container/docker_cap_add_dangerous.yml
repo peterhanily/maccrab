@@ -45,4 +45,4 @@ detection:
 falsepositives:
     - Containers requiring ptrace for debugging (e.g., strace, gdb)
     - System containers managing host resources
-level: high
+level: medium

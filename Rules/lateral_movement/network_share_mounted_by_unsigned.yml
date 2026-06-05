@@ -34,4 +34,4 @@ detection:
 falsepositives:
     - Backup software mounting NAS shares
     - Time Machine, CCC, or similar backup tools
-level: medium
+level: low

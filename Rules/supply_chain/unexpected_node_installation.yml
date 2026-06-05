@@ -35,4 +35,4 @@ detection:
     condition: selection and not filter_nvm
 falsepositives:
     - Developers manually downloading and extracting Node.js tarballs to their home directory
-level: high
+level: medium

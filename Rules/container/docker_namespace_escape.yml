@@ -41,4 +41,4 @@ detection:
 falsepositives:
     - Security researchers testing container isolation
     - Container orchestration tools performing legitimate operations
-level: high
+level: medium

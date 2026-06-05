@@ -37,4 +37,4 @@ detection:
 falsepositives:
     - Legacy formulas with intentional HTTP-only upstreams (rare in modern Homebrew); verify the tap and formula before assuming compromise
     - Internal/self-hosted Homebrew mirrors on private networks (DestinationIsPrivate=true filters these via downstream enrichment)
-level: high
+level: medium

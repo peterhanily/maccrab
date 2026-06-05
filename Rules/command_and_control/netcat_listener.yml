@@ -46,4 +46,4 @@ detection:
 falsepositives:
     - Network debugging and troubleshooting
     - Development testing of network services
-level: high
+level: medium

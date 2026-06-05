@@ -93,4 +93,5 @@ detection:
 falsepositives:
     - Legitimate clean-up scripts in postinstall that prune temporary build artifacts under `/Users/<u>/Library/Caches/<pkg>/` — these should target specific cache subdirs, not $HOME root, so a real fire is high-confidence
     - Test fixtures that intentionally use `rm -rf` in user directories during package CI; should never run on a non-CI workstation
+suppressible: false
 level: high

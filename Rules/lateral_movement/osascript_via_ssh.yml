@@ -37,4 +37,4 @@ detection:
 falsepositives:
     - Legitimate remote administration scripts via SSH
     - IT automation tools (Ansible, Chef, Puppet) using SSH + osascript
-level: high
+level: medium

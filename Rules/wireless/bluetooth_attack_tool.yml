@@ -56,4 +56,4 @@ detection:
 falsepositives:
     - Bluetooth security researchers and penetration testers (authorized)
     - IoT developers legitimately testing BLE devices during development
-level: high
+level: medium

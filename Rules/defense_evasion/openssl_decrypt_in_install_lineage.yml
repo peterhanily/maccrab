@@ -69,4 +69,4 @@ detection:
 falsepositives:
     - Encryption utilities legitimately used during package install (rare); a maintainer-distributed certificate decrypt flow may match
     - Test fixtures for crypto libraries that exercise the openssl CLI; allowlist by package name
-level: high
+level: medium

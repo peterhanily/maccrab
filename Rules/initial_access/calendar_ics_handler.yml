@@ -38,4 +38,4 @@ detection:
 falsepositives:
     - Calendar plugins with legitimate automation
     - Calendar-based workflow triggers
-level: high
+level: medium

@@ -44,4 +44,4 @@ detection:
 falsepositives:
     - Packages that download prebuilt binaries (esbuild, sharp, sqlite3)
     - Node-gyp downloading build headers
-level: high
+level: medium

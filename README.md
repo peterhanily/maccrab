@@ -73,7 +73,7 @@ make app
 Once running, MacCrab gives you:
 
 - **Real-time alerts** -- macOS notifications and a live alert dashboard when suspicious activity is detected (shell spawned by browser, unsigned binary persistence, credential access, etc.)
-- **A SwiftUI menubar dashboard** with 15 views -- security overview, alert triage with bulk actions, live event stream, campaign timelines, rule browser, AI Guard status, and more
+- **A SwiftUI menubar dashboard** with 10 workspaces -- security overview, alert triage with bulk actions, live event stream, campaign timelines, rule browser, AI Guard status, and more
 - **CLI threat hunting** -- `maccrabctl hunt "show processes connecting to unusual ports"` for natural-language queries against your event data
 - **Behavioral scoring** -- even if no single rule fires at critical severity, accumulated suspicious indicators across a process tree will still trigger an alert
 - **Campaign detection** -- multi-step attack chains (download, execute, persist, call home) are correlated across process lineage and time windows
@@ -504,8 +504,8 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **476 rules** (435 single-event + 41 sequence)
-covering **169 unique MITRE ATT&CK techniques** across the macOS-relevant
+release ships **484 rules** (437 single-event + 41 sequence + 6 graph)
+covering **170 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 
 | MITRE ID | Tactic | Rule count |
@@ -547,7 +547,7 @@ breakdown. To regenerate this section after editing rules: `make readme-coverage
 
 ## SwiftUI Dashboard
 
-A native status bar application with a sidebar navigation layout across 15 views:
+A native status bar application with a sidebar navigation layout across 10 workspaces:
 
 <details>
 <summary><strong>All dashboard views (click to expand)</strong></summary>
@@ -1051,7 +1051,7 @@ On first launch, macOS may block the ad-hoc-signed `maccrabd` binary. Go to **Sy
 Release DMGs are produced by `scripts/build-release.sh` (gitignored -- contains local paths and identities). The pipeline:
 
 1. Compile rules to JSON with `Compiler/compile_rules.py`
-2. Build all 7 SPM targets (`MacCrabCore`, `MacCrabAgentKit`, `MacCrabAgent`, `maccrabd`, `maccrabctl`, `maccrab-mcp`, `MacCrabApp`) with `swift build -c release`
+2. Build all 8 SPM targets (`MacCrabCore`, `MacCrabForensics`, `MacCrabAgentKit`, `MacCrabAgent`, `maccrabd`, `maccrabctl`, `maccrab-mcp`, `MacCrabApp`) with `swift build -c release`
 3. Wrap `MacCrabAgent` into a `.systemextension` bundle with `Info.plist` carrying `CFBundlePackageType=SYSX` and `NSSystemExtensionPointIdentifier=com.apple.system_extension.endpoint_security`
 4. Sign the sysext with Developer ID Application + embedded provisioning profile carrying the ES entitlement
 5. Sign `MacCrab.app` with hardened runtime; notarize and staple the DMG

@@ -121,4 +121,48 @@ struct SafeBlockableIPTests {
             #expect(!gw.isEmpty)
         }
     }
+
+    // MARK: - IPv6 CIDR membership (v1.6.21 BLOCKER fix)
+
+    @Test("Rejects an IPv6 one address off a DNS resolver — the v1.6.21 bypass")
+    func rejectsIPv6OneAddressOffDNS() {
+        // 2001:4860:4860::8889 is one address off Google DNS ::8888. Pre-fix
+        // only exact-match was checked, so this slipped through and PF-blocking
+        // it would silently break IPv6 DNS resolution. It lives inside Google's
+        // protected ::/48 and must now be rejected.
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2001:4860:4860::8889") == false)
+        // Likewise one off Cloudflare ::1111 — inside 2606:4700:4700::/48.
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2606:4700:4700::8889") == false)
+    }
+
+    @Test("Rejects the full provider /48 IPv6 DNS ranges")
+    func rejectsIPv6DNSRanges() {
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2606:4700:4700::dead") == false) // Cloudflare /48
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2001:4860:4860::beef") == false) // Google /48
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2620:fe::abcd") == false)        // Quad9 /48
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2620:119::1") == false)          // OpenDNS /48
+    }
+
+    @Test("Rejects IPv6 link-local fe80::/10 and multicast ff00::/8")
+    func rejectsIPv6LinkLocalMulticast() {
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "fe80::1234") == false)  // link-local
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "fe80::1") == false)
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "ff02::1") == false)     // all-nodes multicast
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "ff00::abcd") == false)  // multicast base
+    }
+
+    @Test("Accepts public IPv6 that is NOT infrastructure (real C2 candidate)")
+    func acceptsPublicIPv6() {
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2a01:4f8::1"))   // Hetzner-shaped, unprotected
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2001:db8::1"))  // RFC3849 docs range
+    }
+
+    @Test("IPv6 /48 prefix precision: an address just outside is accepted")
+    func ipv6PrefixBoundary() {
+        // Google DNS is 2001:4860:4860::/48; the adjacent 2001:4860:4861:: differs
+        // in the 48-bit prefix, so it is outside and must NOT be protected.
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2001:4860:4861::1"))
+        // One /48 above Cloudflare's 2606:4700:4700::/48 is likewise outside.
+        #expect(SafeBlockableIP.isSafeToBlock(ip: "2606:4700:4701::1"))
+    }
 }

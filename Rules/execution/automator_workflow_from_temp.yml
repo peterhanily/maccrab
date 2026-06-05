@@ -32,4 +32,4 @@ detection:
 falsepositives:
     - Users manually running downloaded Automator workflows
     - Software installers that use Automator as part of their process
-level: high
+level: medium

@@ -32,4 +32,4 @@ detection:
 falsepositives:
     - Legitimate privileged helper tool installations
     - Application updaters using authorized elevation
-level: high
+level: medium

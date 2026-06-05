@@ -27,7 +27,7 @@ TACTIC_LABEL = {
     "ai_safety":         "AI Safety (MacCrab-specific)",
     "collection":        "Collection (TA0009)",
     "command_and_control": "Command & Control (TA0011)",
-    "container":         "Container (TA0040)",
+    "container":         "Container (MacCrab-specific)",
     "credential_access": "Credential Access (TA0006)",
     "defense_evasion":   "Defense Evasion (TA0005)",
     "discovery":         "Discovery (TA0007)",

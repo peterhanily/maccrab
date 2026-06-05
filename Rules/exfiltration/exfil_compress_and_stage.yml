@@ -49,4 +49,4 @@ detection:
 falsepositives:
     - Backup tools archiving documents to temporary staging area
     - Developer build processes packaging application resources
-level: high
+level: medium

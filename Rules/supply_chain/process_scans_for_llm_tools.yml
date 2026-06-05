@@ -59,4 +59,4 @@ detection:
 falsepositives:
     - Backup utilities that traverse home directory configuration files
     - Security audit tools that enumerate installed software
-level: medium
+level: low

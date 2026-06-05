@@ -871,7 +871,11 @@ enum DaemonSetup {
 
         // Clipboard monitor -- detects sensitive data and injection on clipboard.
         // v1.12.0 RC21 (TURBO): polled monitor, defer .start().
-        let clipboardMonitor = ClipboardMonitor(pollInterval: config.clipboardPollInterval)
+        // v1.18: ClickFix detector, SHARED with the event loop via DaemonState.
+        // The monitor records delivery-shaped clipboard payloads (curl|bash, etc.);
+        // the exec path correlates a subsequent shell/Terminal exec against them.
+        let clickFixDetector = ClickFixDetector()
+        let clipboardMonitor = ClipboardMonitor(pollInterval: config.clipboardPollInterval, clickFix: clickFixDetector)
         Task.detached(priority: .utility) {
             await clipboardMonitor.start()
             print("Clipboard monitor active (deferred, sensitive data + injection detection)")
@@ -1727,7 +1731,8 @@ enum DaemonSetup {
             threatHunter: threatHunter,
             toolIntegrations: toolIntegrations,
             fleetClient: fleetClient,
-            llmService: llmService
+            llmService: llmService,
+            clickFix: clickFixDetector
         )
 
         // v1.6.21: wire AlertSink into ResponseEngine so the

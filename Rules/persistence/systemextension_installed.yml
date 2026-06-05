@@ -24,4 +24,4 @@ detection:
 falsepositives:
     - Legitimate security software installing system extensions
     - Enterprise endpoint protection tools
-level: high
+level: medium

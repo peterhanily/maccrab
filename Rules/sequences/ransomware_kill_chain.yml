@@ -96,4 +96,5 @@ falsepositives:
     - Administrators using tmutil to manage Time Machine snapshots and diskutil to reformat volumes during legitimate system maintenance
     - Disk repurposing or decommissioning workflows where secure-erase follows snapshot cleanup
     - Advanced user scripts that clean up local snapshots and wipe scratch volumes as part of build automation
+suppressible: false
 level: critical

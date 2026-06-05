@@ -54,4 +54,5 @@ falsepositives:
     - Security researchers running miners in controlled lab environments
     - Legitimate cryptocurrency enthusiasts running miners on personal machines
       (though this is increasingly rare on macOS)
+suppressible: false
 level: high

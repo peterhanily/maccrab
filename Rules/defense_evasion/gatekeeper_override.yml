@@ -31,4 +31,5 @@ detection:
 falsepositives:
     - Enterprise deployment scripts
     - Developers testing unsigned builds
+suppressible: false
 level: high

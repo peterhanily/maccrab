@@ -438,11 +438,20 @@ public actor AlertExporter {
 
     // MARK: - Helpers
 
-    private func csvEscape(_ s: String) -> String {
-        if s.contains(",") || s.contains("\"") || s.contains("\n") {
-            return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    /// CSV-escape a cell. Neutralizes spreadsheet formula injection (a cell
+    /// starting with `= + - @`, or a leading tab/CR, is evaluated as a formula
+    /// in Excel/Numbers) by prefixing with a single quote, then applies RFC-4180
+    /// quoting. Alert fields carry attacker-influenceable process args / file
+    /// paths. `nonisolated` + `internal` (not private) for direct unit testing.
+    nonisolated func csvEscape(_ s: String) -> String {
+        var value = s
+        if let first = value.first, "=+-@\t\r".contains(first) {
+            value = "'" + value
         }
-        return s
+        if value.contains(",") || value.contains("\"") || value.contains("\n") {
+            return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        return value
     }
 
     private func cefEscape(_ s: String) -> String {

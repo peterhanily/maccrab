@@ -25,8 +25,10 @@ public actor LLMService {
     private let cache: LLMCache
     private let shouldSanitize: Bool
 
-    /// Rate limiting: minimum interval between calls (seconds).
-    private let minInterval: TimeInterval = 5.0
+    /// Rate limiting: minimum interval between calls (seconds). Injectable
+    /// (default 5.0, production unchanged) so tests can drive multi-call paths
+    /// — circuit breaker, cache — without 5s stalls per call.
+    private let minInterval: TimeInterval
     private var lastCallTime: Date = .distantPast
 
     /// Circuit breaker: disable after consecutive failures.
@@ -49,9 +51,11 @@ public actor LLMService {
     private let modelLabel: String
 
     public init(backend: any LLMBackend, config: LLMConfig,
-                cache: LLMCache = LLMCache()) {
+                cache: LLMCache = LLMCache(),
+                minInterval: TimeInterval = 5.0) {
         self.backend = backend
         self.cache = cache
+        self.minInterval = minInterval
         // Only sanitize for cloud providers; Ollama is local. The host is
         // parsed (strict loopback check) rather than substring-matched: a
         // remote Ollama at `http://127.0.0.1.evil.com` must NOT be treated

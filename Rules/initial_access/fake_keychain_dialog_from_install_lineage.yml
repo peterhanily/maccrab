@@ -72,4 +72,5 @@ falsepositives:
     - A legitimate package whose declared purpose is credential UX (e.g., a developer-facing `keytar`-like dialog helper) — extremely rare; review the package provenance and allowlist by package name
     - A red-team / training package intentionally simulating this attack — investigate the parent CommandLine for `install` to confirm
     - An installer package displaying a generic permissions dialog that happens to mention `keychain` only as a docs reference — extend filter list once observed
-level: critical
+suppressible: false
+level: high

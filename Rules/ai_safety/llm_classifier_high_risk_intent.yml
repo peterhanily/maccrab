@@ -67,4 +67,4 @@ detection:
 falsepositives:
     - LLM classifier produces a high-risk label with ≥ 0.5 confidence on an ambiguous brief — review the BehaviorBrief contents (`maccrabctl alerts show <id> --include-brief`) before suppressing
     - Legitimate package whose install legitimately matches a high-risk profile at moderate confidence (e.g., `awscli` install which legitimately reads `~/.aws/credentials`); allowlist by package name + IntentLabel
-level: high
+level: medium

@@ -36,4 +36,4 @@ detection:
 falsepositives:
     - User intentionally installing a new MCP server
     - AI tool auto-configuration during setup
-level: medium
+level: low

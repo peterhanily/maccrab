@@ -50,4 +50,4 @@ detection:
 falsepositives:
     - Power-user shell snippets that print or echo CGEventTap API names for diagnostics
     - Accessibility / automation software not yet in the allowlist
-level: high
+level: medium

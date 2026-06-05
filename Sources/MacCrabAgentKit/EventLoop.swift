@@ -329,7 +329,16 @@ enum EventLoop {
                     }
 
                     // === Credential Fence: check file access against sensitive paths ===
-                    if let filePath = enrichedEvent.file?.path {
+                    // v1.18 (AI-Guard #4): skip the credential-fence on a deployed
+                    // honeyfile. HoneyfileManager seeds canaries at real
+                    // credential-shaped paths (~/.aws/credentials.bak,
+                    // ~/.ssh/id_rsa.old) which CredentialFence's static /decoys/
+                    // exclusion misses — so without this the AI-credential-fence
+                    // double-fired on a decoy that the dedicated honeyfile_accessed
+                    // detector (keyed on this same IsHoneyfile enrichment) already
+                    // handles. The enricher tags these IsHoneyfile=true.
+                    if let filePath = enrichedEvent.file?.path,
+                       enrichedEvent.enrichments["IsHoneyfile"] != "true" {
                         if let (credType, credDesc) = state.credentialFence.checkAccessDetailed(
                             filePath: filePath,
                             aiToolName: aiType?.displayName ?? "AI tool"
@@ -500,6 +509,38 @@ enum EventLoop {
                             }
                         }
                     }
+                }
+            }
+
+            // === ClickFix: a shell/Terminal exec carrying a recently-copied
+            // delivery payload (curl|bash, etc.) — the dominant 2026 macOS
+            // infostealer vector that sidesteps Gatekeeper (nothing is
+            // downloaded-and-launched; the user pastes and runs). correlateExec
+            // returns nil unless the exec's command line carries a payload the
+            // clipboard monitor recorded as delivery-shaped, so this is cheap on
+            // ordinary execs.
+            if let clickFix = state.clickFix,
+               enrichedEvent.eventCategory == .process, enrichedEvent.eventAction == "exec" {
+                if let match = await clickFix.correlateExec(
+                    commandLine: enrichedEvent.process.commandLine, at: enrichedEvent.timestamp
+                ) {
+                    let alert = Alert(
+                        ruleId: "maccrab.clickfix.paste-and-run",
+                        ruleTitle: "ClickFix: pasted shell command executed",
+                        severity: .high,
+                        eventId: enrichedEvent.id.uuidString,
+                        processPath: enrichedEvent.process.executable,
+                        processName: enrichedEvent.process.name,
+                        description: "Shell exec carried a delivery-shaped payload copied to the clipboard \(String(format: "%.0f", match.ageSeconds))s earlier (ClickFix paste-and-run). Payload: \(match.clipboardPayload.prefix(200))",
+                        mitreTactics: "attack.execution,attack.initial_access",
+                        mitreTechniques: "attack.t1059.004,attack.t1204",
+                        suppressed: false
+                    )
+                    do {
+                        if try await state.alertSink.submit(alert: alert, event: enrichedEvent) {
+                            await state.notifier.notify(alert: alert)
+                        }
+                    } catch { await StorageErrorTracker.shared.recordAlertError(error) }
                 }
             }
 

@@ -41,4 +41,4 @@ falsepositives:
 # conda activation scripts, uv environment introspection). Real
 # reverse-shell payloads still get caught at medium and surface in the
 # campaign engine when paired with network egress.
-level: medium
+level: low

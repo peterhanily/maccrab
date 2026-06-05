@@ -67,4 +67,4 @@ trigger: all
 falsepositives:
     - DevOps automation tools that deploy binaries via SSH and then run health checks
     - Ansible/Chef/Puppet execution over SSH where a freshly deployed binary is executed
-level: high
+level: medium

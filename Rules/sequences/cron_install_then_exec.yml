@@ -63,4 +63,4 @@ falsepositives:
     - Homebrew formulae or MDM profiles deploying legitimate cron/at jobs for services
     - Developer-installed cron jobs for periodic build, backup, or sync automation
     - Package-manager post-install hooks that register periodic tasks (e.g., log rotation)
-level: high
+level: medium

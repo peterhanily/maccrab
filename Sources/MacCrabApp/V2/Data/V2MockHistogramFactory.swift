@@ -1,7 +1,8 @@
 // V2MockHistogramFactory.swift
-// Procedural histogram data for the Overview chart, used by the
-// mock provider AND as the fallback inside V2AlertHistogram when
-// the live provider returns empty data.
+// Procedural histogram data for the Overview chart. Used ONLY by
+// V2MockDataProvider (mock mode = no daemon writing data). The live
+// path renders V2DataProvider.alertHistogram verbatim — when that is
+// empty the chart renders empty; it never falls back to synthetic data.
 
 import Foundation
 

@@ -29,4 +29,4 @@ detection:
 falsepositives:
     - Build systems using /tmp for intermediate artifacts
     - Package managers creating temporary symlinks
-level: medium
+level: low

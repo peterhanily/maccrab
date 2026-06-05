@@ -28,4 +28,5 @@ detection:
     condition: selection
 falsepositives:
     - Legitimate cryptocurrency mining by the system owner
+suppressible: false
 level: high

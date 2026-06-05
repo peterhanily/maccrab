@@ -49,4 +49,4 @@ detection:
 falsepositives:
     - Legitimate remote Docker management by authorized administrators
     - CI/CD agents connecting to remote Docker build daemons
-level: high
+level: medium

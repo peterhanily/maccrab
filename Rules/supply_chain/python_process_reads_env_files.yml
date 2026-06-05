@@ -43,4 +43,4 @@ detection:
 falsepositives:
     - Python applications using python-dotenv to load local configuration
     - Django/Flask applications loading environment configuration
-level: medium
+level: low

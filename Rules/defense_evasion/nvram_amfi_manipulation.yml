@@ -27,4 +27,5 @@ detection:
     condition: selection
 falsepositives:
     - Security researchers testing AMFI enforcement
+suppressible: false
 level: critical

@@ -38,12 +38,17 @@ public enum NoiseFilter {
         // is the overwhelming majority of events on a healthy system.
         guard !matches.isEmpty else { return }
 
-        // Fast path: any match that is already critical survives
-        // every gate, so if the only work the gates do is "drop non-
-        // critical", we can skip all 7 if every remaining match is
-        // critical. Rare, but the check is cheap and the win is
-        // bypassing ancestor walks on critical-only events.
-        if matches.allSatisfy({ $0.severity == .critical }) { return }
+        // Fast path: the gates drop SUPPRESSIBLE matches and keep must-fire ones.
+        // A match is must-fire when it declared `suppressible: false` OR is
+        // `.critical` (see RuleMatch.isMustFire). So if every remaining match is
+        // must-fire, there is nothing for any gate to drop; skip them (and their
+        // ancestor walks) entirely.
+        // (v1.18 decoupled the explicit `suppressible` flag from severity so a
+        // mis-rated-critical SINGLE-EVENT rule is not a blanket bypass; the
+        // `.critical` clause is retained as the must-fire floor for the
+        // Sequence/Baseline/behavior streams that do not yet carry the flag, so
+        // a completed critical kill chain is never silently suppressed.)
+        if matches.allSatisfy({ $0.isMustFire }) { return }
 
         // Gate ordering rationale (v1.6.9 reorder):
         //
@@ -68,7 +73,7 @@ public enum NoiseFilter {
         // Gate 7 — Apple platform binary. Hot: the majority of events
         // on a healthy Mac. See `isAppleSystemBinary` for signals.
         if isAppleSystemBinary(event: event) {
-            matches.removeAll { $0.severity != .critical }
+            matches.removeAll { !$0.isMustFire }
             if matches.isEmpty { return }
         }
 
@@ -77,7 +82,7 @@ public enum NoiseFilter {
         // fail open in that case. Dropping non-critical matches
         // means we never alert on activity we cannot triage.
         if event.process.name == "unknown" || event.process.executable.isEmpty {
-            matches.removeAll { $0.severity != .critical }
+            matches.removeAll { !$0.isMustFire }
             if matches.isEmpty { return }
         }
 
@@ -85,7 +90,7 @@ public enum NoiseFilter {
         // in the first 60s and produce a one-shot burst that isn't
         // live-threat signal. Critical still fires.
         if isWarmingUp {
-            matches.removeAll { $0.severity != .critical }
+            matches.removeAll { !$0.isMustFire }
             if matches.isEmpty { return }
         }
 
@@ -112,7 +117,7 @@ public enum NoiseFilter {
         // critical on any mixed-severity batch, since the critical-only
         // fast path above never fired.)
         if isMacCrabManagedFile(event: event) {
-            matches.removeAll { $0.severity != .critical }
+            matches.removeAll { !$0.isMustFire }
             if matches.isEmpty { return }
         }
 
@@ -120,7 +125,7 @@ public enum NoiseFilter {
         // spawn large helper trees that fire individual Sigma rules
         // in isolation. Single bundle-prefix short-circuit.
         if isTrustedBrowserHelper(path: event.process.executable) {
-            matches.removeAll { $0.severity != .critical }
+            matches.removeAll { !$0.isMustFire }
             if matches.isEmpty { return }
         }
 
@@ -129,7 +134,7 @@ public enum NoiseFilter {
         // Short-circuits on basename check so non-admin-CLI subjects
         // exit before the ancestor walk.
         if isInteractiveAdminCommand(event: event) {
-            matches.removeAll { $0.severity != .critical }
+            matches.removeAll { !$0.isMustFire }
             if matches.isEmpty { return }
         }
 
@@ -139,8 +144,62 @@ public enum NoiseFilter {
         // launcher → GoogleUpdater → profiles get caught regardless
         // of nesting depth.
         if isAutoUpdaterOrAncestor(event: event) {
-            matches.removeAll { $0.severity != .critical }
+            matches.removeAll { !$0.isMustFire }
+            if matches.isEmpty { return }
         }
+
+        // Gate 8 — trusted non-Apple signer (v1.18). The ~370 signer-negating
+        // heuristic rules (notarization, LOLBin, masquerade, injection) flood on
+        // legitimately-signed third-party dev tools and our own first-party
+        // builds. Trust the SIGNED SUBJECT, not its caller (mirrors the Gate 7
+        // split): drop suppressible matches when the subject is a NOTARIZED
+        // Developer-ID binary or a MacCrab first-party (team 79S425CW99) binary.
+        // Must-fire rules (revoked cert, known-bad hash, SIP/AMFI disable) are
+        // `suppressible: false` and survive — that is the point of the decoupling.
+        //
+        // EXCEPTION — credential theft. A notarized Developer-ID binary reading
+        // password stores / keychains / browser logins / wallets / private keys
+        // is the AMOS / Banshee signed-stealer pattern; Gate 8 must NOT hide it.
+        // Credential-theft matches survive here REGARDLESS of `suppressible`.
+        // (Gate 7 still suppresses the same read by an APPLE platform binary —
+        // securityd, etc. — so first-party credential access is not re-noised.)
+        if isTrustedSigner(event: event) {
+            matches.removeAll { !$0.isMustFire && !isCredentialTheftMatch($0) }
+        }
+    }
+
+    /// Credential-theft ATT&CK techniques whose matches survive the Gate-8
+    /// trusted-signer suppressor (prefix match catches sub-techniques like
+    /// `attack.t1555.001`).
+    static let credentialTheftTechniquePrefixes: [String] = [
+        "attack.t1555",   // Credentials from Password Stores (keychain, browser logins, wallets)
+        "attack.t1003",   // OS Credential Dumping (shadow hashes, securityd memory)
+        "attack.t1552",   // Unsecured Credentials (private keys, cloud creds)
+        "attack.t1539",   // Steal Web Session Cookie
+    ]
+
+    /// True when a match is a credential-theft detection — used to exempt it
+    /// from the Gate-8 trusted-signer suppressor (the AMOS/Banshee hole).
+    static func isCredentialTheftMatch(_ match: RuleMatch) -> Bool {
+        match.mitreTechniques.contains { tech in
+            let t = tech.lowercased()
+            return credentialTheftTechniquePrefixes.contains { t.hasPrefix($0) }
+        }
+    }
+
+    /// MacCrab's Apple Developer team identifier (first-party trust).
+    public static let macCrabTeamId = "79S425CW99"
+
+    /// True when the event's subject is a NOTARIZED Developer-ID binary or a
+    /// MacCrab first-party binary. Subject-only (no ancestor walk) — we trust
+    /// the signed binary, not whoever launched it. `isNotarized` warms from the
+    /// NotarizationChecker enrichment on the same cadence the notarization rules
+    /// fire, so the gate sees it when those heuristics fire.
+    public static func isTrustedSigner(event: Event) -> Bool {
+        guard let sig = event.process.codeSignature else { return false }
+        if sig.teamId == macCrabTeamId { return true }
+        if sig.signerType == .devId && sig.isNotarized { return true }
+        return false
     }
 
     /// True when an event's subject is a MacCrab process, a MacCrab file,

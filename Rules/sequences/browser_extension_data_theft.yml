@@ -69,4 +69,4 @@ falsepositives:
     - Browser sync features reading local databases before uploading to legitimate
       sync services (filtered by known-good destination list above)
     - Password manager extensions reading browser storage before syncing to their own backend
-level: high
+level: medium

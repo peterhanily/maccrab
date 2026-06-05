@@ -30,4 +30,4 @@ detection:
 falsepositives:
     - Legitimate network engineering and debugging
     - Development environments using socat for port forwarding
-level: high
+level: medium

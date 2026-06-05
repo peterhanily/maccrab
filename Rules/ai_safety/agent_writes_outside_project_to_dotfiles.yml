@@ -61,4 +61,4 @@ detection:
 falsepositives:
     - User explicitly asked the AI to set up their shell environment
     - Project-local zsh hooks configured via the AI tool
-level: high
+level: medium

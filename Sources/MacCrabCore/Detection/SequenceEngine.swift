@@ -176,6 +176,14 @@ public struct SequenceRule: Codable, Sendable, Identifiable {
     /// Whether this rule is active.
     public var enabled: Bool
 
+    /// v1.18: carried from the YAML. `false` = must-fire — the completed-sequence
+    /// match survives the NoiseFilter trust/suppression gates. Optional + decode-
+    /// safe (a compiled rule predating the key, or one without it, decodes to nil
+    /// → treated as `true`/suppressible at the match site). The 9 high-value kill
+    /// chains declare `suppressible: false`; before this was plumbed those matches
+    /// defaulted suppressible and were silently gate-dropped on platform binaries.
+    public let suppressible: Bool?
+
     public init(
         id: String,
         title: String,
@@ -187,7 +195,8 @@ public struct SequenceRule: Codable, Sendable, Identifiable {
         ordered: Bool,
         steps: [SequenceStep],
         trigger: TriggerCondition,
-        enabled: Bool = true
+        enabled: Bool = true,
+        suppressible: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -200,6 +209,7 @@ public struct SequenceRule: Codable, Sendable, Identifiable {
         self.steps = steps
         self.trigger = trigger
         self.enabled = enabled
+        self.suppressible = suppressible
     }
 }
 
@@ -649,7 +659,8 @@ public actor SequenceEngine {
                             severity: rule.level,
                             description: buildDescription(rule: rule, partial: updated),
                             mitreTechniques: rule.tags.filter { $0.hasPrefix("attack.t") },
-                            tags: rule.tags
+                            tags: rule.tags,
+                            suppressible: rule.suppressible ?? true
                         )
                         completedMatches.append(match)
                     }
@@ -725,7 +736,8 @@ public actor SequenceEngine {
                         severity: rule.level,
                         description: buildDescription(rule: rule, partial: newPartial),
                         mitreTechniques: rule.tags.filter { $0.hasPrefix("attack.t") },
-                        tags: rule.tags
+                        tags: rule.tags,
+                        suppressible: rule.suppressible ?? true
                     )
                     completedMatches.append(match)
                     // Don't store the partial -- it's already complete.

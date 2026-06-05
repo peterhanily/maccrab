@@ -50,4 +50,4 @@ falsepositives:
     - Legitimate removable media usage outside Finder (CLI-driven workflows)
     - Software installer scripts that attach DMGs
     - Backup tooling mounting sparse bundles
-level: low
+level: informational

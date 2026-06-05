@@ -710,7 +710,7 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
     case "tierb.verify":
         return await handleTierBVerify()
     default:
-        return ["content": [["type": "text", "text": "Unknown tool: \(name)"]]]
+        return toolError("Unknown tool: \(name)")
     }
 }
 
@@ -1346,7 +1346,7 @@ func handleGetAlertDetail(_ args: [String: Any]) async -> Any {
     do {
         let store = try AlertStore(directory: dataDir)
         guard let alert = try await store.alert(id: alertId) else {
-            return ["content": [["type": "text", "text": "Alert \(alertId) not found."]]]
+            return toolError("Alert \(alertId) not found.")
         }
 
         var lines: [String] = []
@@ -1486,11 +1486,11 @@ func handleScanText(_ args: [String: Any]) async -> Any {
 
     let scanner = PromptInjectionScanner()
     guard await scanner.isAvailable else {
-        return ["content": [["type": "text", "text": "Prompt injection scanner not available. Install forensicate to enable this tool:\n  pip install forensicate-ai"]]]
+        return toolError("Prompt injection scanner not available. Install forensicate to enable this tool:\n  pip install forensicate-ai")
     }
 
     guard let result = await scanner.scan(text) else {
-        return ["content": [["type": "text", "text": "Scan returned no result (possible timeout or parse error)."]]]
+        return toolError("Scan returned no result (possible timeout or parse error).")
     }
 
     var lines: [String] = ["Prompt Injection Scan"]
@@ -1596,7 +1596,7 @@ func handleGetTraceDetail(_ args: [String: Any]) async -> Any {
     do {
         let store = try await SQLiteCausalGraphStore(databasePath: traceGraphPath)
         guard let pair = try await store.loadTrace(id: traceId) else {
-            return ["content": [["type": "text", "text": "Trace \(traceId) not found."]]]
+            return toolError("Trace \(traceId) not found.")
         }
         let (trace, members) = pair
         let chainEntry = try? await store.latestHashChainEntry(for: traceId)
@@ -1886,7 +1886,7 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
 
 func handleForensicsSearchArtifacts(_ args: [String: Any]) async -> Any {
     guard let caseID = args["case_id"] as? String else {
-        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+        return toolError("missing required argument: case_id")
     }
     let contentType = args["content_type"] as? String
     let limit = (args["limit"] as? Int) ?? 100
@@ -1897,7 +1897,7 @@ func handleForensicsSearchArtifacts(_ args: [String: Any]) async -> Any {
         let mgr = forensicsCaseManager()
         let handle = try await mgr.openCase(id: caseID)
         guard let row = try await handle.store.fetchCase(id: caseID) else {
-            return ["content": [["type": "text", "text": "case not found"]]]
+            return toolError("case not found")
         }
         // Apply privacy gate: cap result class at metadata unless the
         // case has granted AI content access, in which case raise the
@@ -1931,7 +1931,7 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
         let mgr = forensicsCaseManager()
         let handle = try await mgr.openCase(id: caseID)
         guard let row = try await handle.store.fetchCase(id: caseID) else {
-            return ["content": [["type": "text", "text": "case not found"]]]
+            return toolError("case not found")
         }
         let ceiling: PrivacyClass = row.aiContentAllowed ? .content : .metadata
         // Cheap path: query by case + take the artifact id locally.
@@ -1964,7 +1964,7 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
                 classRaw: blocked.record.privacyClass.rawValue
             )
         }
-        return ["content": [["type": "text", "text": "artifact not found in case"]]]
+        return toolError("artifact not found in case")
     } catch {
         return toolError("get_artifact failed: \(error)")
     }
@@ -1972,7 +1972,7 @@ func handleForensicsGetArtifact(_ args: [String: Any]) async -> Any {
 
 func handleForensicsTimeline(_ args: [String: Any]) async -> Any {
     guard let caseID = args["case_id"] as? String else {
-        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+        return toolError("missing required argument: case_id")
     }
     let limit = (args["limit"] as? Int) ?? 200
     do {
@@ -1980,7 +1980,7 @@ func handleForensicsTimeline(_ args: [String: Any]) async -> Any {
         let mgr = forensicsCaseManager()
         let handle = try await mgr.openCase(id: caseID)
         guard let row = try await handle.store.fetchCase(id: caseID) else {
-            return ["content": [["type": "text", "text": "case not found"]]]
+            return toolError("case not found")
         }
         let ceiling: PrivacyClass = row.aiContentAllowed ? .content : .metadata
         let q = ArtifactQuery(
@@ -1998,14 +1998,14 @@ func handleForensicsTimeline(_ args: [String: Any]) async -> Any {
 
 func handleForensicsExplainCase(_ args: [String: Any]) async -> Any {
     guard let caseID = args["case_id"] as? String else {
-        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+        return toolError("missing required argument: case_id")
     }
     do {
         try await ForensicsMCPBootstrapper.shared.ensure()
         let mgr = forensicsCaseManager()
         let handle = try await mgr.openCase(id: caseID)
         guard let row = try await handle.store.fetchCase(id: caseID) else {
-            return ["content": [["type": "text", "text": "case not found"]]]
+            return toolError("case not found")
         }
         // Aggregate artifact counts by content type.
         // Cheap: pull everything and bucket. Future iteration can
@@ -2037,7 +2037,7 @@ func handleForensicsExplainCase(_ args: [String: Any]) async -> Any {
 
 func handleForensicsPostureFindings(_ args: [String: Any]) async -> Any {
     guard let caseID = args["case_id"] as? String else {
-        return ["content": [["type": "text", "text": "missing required argument: case_id"]]]
+        return toolError("missing required argument: case_id")
     }
     // v1.13b: stub. The v1.15 posture Analyzer emits posture.*
     // findings; until that lands, the tool returns an empty array

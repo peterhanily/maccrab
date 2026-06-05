@@ -69,4 +69,4 @@ falsepositives:
     - GPG/OpenSSL encryption tools writing output files with .enc extension from
       a terminal session (filtered above, but custom extension names may vary)
     - Backup tools that use .encrypted as an output extension for encrypted archives
-level: high
+level: medium

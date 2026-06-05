@@ -42,4 +42,4 @@ detection:
     condition: selection_config_files and selection_suspicious_content and selection_mcp_key
 falsepositives:
     - Developer testing a locally-built MCP server from a temporary directory
-level: high
+level: medium

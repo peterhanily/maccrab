@@ -36,4 +36,4 @@ detection:
 falsepositives:
     - Privacy cleaning tools
     - Parental control software
-level: high
+level: low

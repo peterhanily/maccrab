@@ -473,11 +473,23 @@ CATEGORIES=(
 )
 
 ALERT_TEXT=$(sqlite3 "$HOME/Library/Application Support/MacCrab/events.db" "SELECT rule_title || ' ' || COALESCE(description,'') FROM alerts;" 2>/dev/null || echo "")
+
+# v1.18: when the daemon can actually observe process/ES events (running as
+# root, or forced via ASSERT_DETECTIONS=1), a category that does NOT fire is a
+# real FAILURE — not a skip — so a silenced detection can't slip through green.
+# Non-root runs can't trigger ES rules, so they still skip and never fail.
+EXPECT_DETECTIONS=0
+if [ "$(id -u)" -eq 0 ] || [ "${ASSERT_DETECTIONS:-0}" = "1" ]; then
+    EXPECT_DETECTIONS=1
+fi
+
 for cat_check in "${CATEGORIES[@]}"; do
     pattern="${cat_check%%:*}"
     name="${cat_check##*:}"
     if echo "$ALERT_TEXT" | grep -qi "$pattern"; then
         pass "$name"
+    elif [ "$EXPECT_DETECTIONS" = "1" ]; then
+        fail "$name (expected detection did not fire)"
     else
         skip "$name (rule may need ES/root to trigger)"
     fi
@@ -501,3 +513,13 @@ else
     echo -e "\n${YELLOW}No alerts generated. Most rules require root/ES for process events.${NC}"
     echo -e "${YELLOW}Try: sudo make run-root, then run this test in another terminal.${NC}"
 fi
+
+# v1.18: gate on failures — exit non-zero when any assertion failed, instead of
+# always exiting 0 (which let a broken detection report success). Under
+# EXPECT_DETECTIONS (root / ASSERT_DETECTIONS=1) a missed rule is a FAIL and
+# breaks the run; non-root runs only skip, so they still exit 0.
+if [ "$FAIL" -gt 0 ]; then
+    echo -e "\n${RED}$FAIL detection assertion(s) FAILED — failing the run.${NC}"
+    exit 1
+fi
+exit 0

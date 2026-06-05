@@ -299,8 +299,17 @@ public final class ESCollector: @unchecked Sendable {
         self.subscribeIntrospection = subscribeIntrospection
         // Build the AsyncStream and capture the continuation so the
         // ES callback can yield events into it.
+        //
+        // v1.18 Stability: bound this stream. It is the HIGHEST-volume
+        // collector source and was the only one left on the default
+        // `.unbounded` policy — so a bursty execve storm (package install,
+        // build, CI) with a momentarily-delayed consumer could grow the
+        // buffer without limit (the unbounded-memory failure the bounded
+        // traceBindings stream below and the 100K merged stream in
+        // DaemonState already guard against). Newest-wins eviction at 100K
+        // drops the OLDEST events under extreme flood rather than the host.
         var capturedContinuation: AsyncStream<Event>.Continuation!
-        self.events = AsyncStream<Event> { continuation in
+        self.events = AsyncStream<Event>(bufferingPolicy: .bufferingNewest(100_000)) { continuation in
             capturedContinuation = continuation
         }
         self.continuation = capturedContinuation

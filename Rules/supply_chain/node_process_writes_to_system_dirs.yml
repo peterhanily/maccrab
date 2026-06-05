@@ -38,4 +38,4 @@ detection:
 falsepositives:
     - Electron applications that use Node.js and write to /Library/Application Support/
     - Node.js-based system tools installed via Homebrew
-level: high
+level: medium

@@ -78,4 +78,4 @@ falsepositives:
     - Connections to internal/private package registries
     - AI tool updates from vendor CDNs
     - Custom MCP server connections
-level: high
+level: medium

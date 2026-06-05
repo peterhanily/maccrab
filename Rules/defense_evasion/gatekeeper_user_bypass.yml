@@ -30,4 +30,4 @@ detection:
 falsepositives:
     - Developers running their own unsigned builds
     - Users intentionally running open-source software without notarization
-level: medium
+level: low

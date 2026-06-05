@@ -1,0 +1,14 @@
+[
+  { "name": "Xcode strips a signature during a local build", "executable": "/usr/bin/codesign", "commandLine": "codesign --remove-signature /tmp/build/MyApp.app", "signer": "apple", "platform": true, "parentExec": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild" },
+  { "name": "dev runs docker with a socket mount", "executable": "/opt/homebrew/bin/docker", "commandLine": "docker run -v /var/run/docker.sock:/var/run/docker.sock alpine", "signer": "devId", "notarized": true, "parentExec": "/bin/zsh" },
+  { "name": "install_name_tool rewrites a dylib path (CMake)", "executable": "/usr/bin/install_name_tool", "commandLine": "install_name_tool -change @rpath/libfoo.dylib /usr/local/lib/libfoo.dylib bin/app", "signer": "apple", "platform": true, "parentExec": "/opt/homebrew/bin/cmake" },
+  { "name": "notarized tool launched with DYLD_LIBRARY_PATH", "executable": "/opt/homebrew/bin/mytool", "commandLine": "DYLD_LIBRARY_PATH=/opt/homebrew/lib mytool --run", "signer": "devId", "notarized": true, "parentExec": "/bin/bash" },
+  { "name": "xattr clears quarantine recursively in a build dir", "executable": "/usr/bin/xattr", "commandLine": "xattr -cr /tmp/build/output", "signer": "apple", "platform": true, "parentExec": "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild" },
+  { "name": "tccutil reset during local QA", "executable": "/usr/bin/tccutil", "commandLine": "tccutil reset All com.example.app", "signer": "apple", "platform": true, "parentExec": "/bin/zsh" },
+  { "name": "security find-certificate (benign keychain read)", "executable": "/usr/bin/security", "commandLine": "security find-certificate -a -p", "signer": "apple", "platform": true, "parentExec": "/bin/bash" },
+  { "name": "codesign --display on a built binary", "executable": "/usr/bin/codesign", "commandLine": "codesign -dvvv /tmp/build/tool", "signer": "apple", "platform": true, "parentExec": "/opt/homebrew/bin/fastlane" },
+  { "name": "notarized node bundler resigns post-build", "executable": "/opt/homebrew/bin/node", "commandLine": "node scripts/postbuild.js codesign --force", "signer": "devId", "notarized": true, "parentExec": "/opt/homebrew/bin/npm" },
+  { "name": "spctl assess during a local notarization check", "executable": "/usr/sbin/spctl", "commandLine": "spctl -a -vvv /tmp/build/MyApp.app", "signer": "apple", "platform": true, "parentExec": "/bin/zsh" },
+  { "name": "nvram benign read", "executable": "/usr/sbin/nvram", "commandLine": "nvram -p", "signer": "apple", "platform": true, "parentExec": "/bin/zsh" },
+  { "name": "notarized installer writes a helper dylib", "executable": "/opt/homebrew/bin/brew", "commandLine": "brew install --build-from-source foo", "signer": "devId", "notarized": true, "parentExec": "/bin/zsh" }
+]

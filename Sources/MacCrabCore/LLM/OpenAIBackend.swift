@@ -9,7 +9,10 @@ import os.log
 
 public actor OpenAIBackend: LLMBackend {
     public let providerName = "OpenAI"
-    private let baseURL: URL
+    // `nonisolated` + `internal` (not private) so the baseURL allowlist +
+    // cleartext-scheme guard is unit-tested synchronously. Immutable Sendable,
+    // safe to expose without actor isolation.
+    nonisolated let baseURL: URL
     private let apiKey: String
     private let model: String
     private let logger = Logger(subsystem: "com.maccrab.llm", category: "openai")
@@ -39,7 +42,10 @@ public actor OpenAIBackend: LLMBackend {
         ".openai.azure.com",
     ]
 
-    private static func isHostAllowed(_ host: String) -> Bool {
+    // `internal` (not private) so the allow/reject matrix is unit-tested — this
+    // is the RC27 key-exfil guard: a non-allowlisted baseURL host must never
+    // carry the API key off to an attacker domain.
+    static func isHostAllowed(_ host: String) -> Bool {
         let lower = host.lowercased()
         if allowedExactHosts.contains(lower) { return true }
         return allowedDotSuffixes.contains { suffix in
@@ -53,7 +59,12 @@ public actor OpenAIBackend: LLMBackend {
         let parsed = URL(string: baseURL)
         if let parsed,
            let host = parsed.host,
-           Self.isHostAllowed(host) {
+           Self.isHostAllowed(host),
+           // RC27 leak guard (mirrors OllamaBackend.isPlaintextRemote): an
+           // `http://` base URL to a non-loopback host — e.g. `http://api.openai.com`
+           // or a spoofed `http://127.0.0.1.evil.com` — would send the Bearer API
+           // key in cleartext. Reject it; loopback over http stays allowed.
+           !OllamaBackend.isPlaintextRemote(parsed) {
             self.baseURL = parsed
         } else {
             // Log the rejected URL at .public privacy — operators need to

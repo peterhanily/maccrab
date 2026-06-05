@@ -59,4 +59,4 @@ falsepositives:
     - IT administrators performing legitimate profile rotation
     - Device decommissioning or re-enrollment workflows
     - MDM migration from one vendor to another
-level: high
+level: medium

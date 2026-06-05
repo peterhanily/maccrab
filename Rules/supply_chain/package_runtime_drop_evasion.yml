@@ -55,4 +55,4 @@ detection:
 falsepositives:
     - A meta-installer like proto / asdf / mise that legitimately manages multiple runtimes; allowlist by Image basename
     - Bun's own self-update path (`bun upgrade`) when triggered interactively
-level: high
+level: medium

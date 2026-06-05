@@ -48,4 +48,4 @@ falsepositives:
     - Authorized AirPlay receiver software (Reflector, LonelyScreen, AirServer) for presentations
     - Home automation setups using open-source AirPlay receivers
     - Development and testing of AirPlay-compatible applications
-level: medium
+level: low

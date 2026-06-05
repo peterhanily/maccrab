@@ -33,4 +33,4 @@ detection:
 falsepositives:
     - Development containers mounting project directories under /var
     - Containers requiring access to host certificate stores
-level: high
+level: medium

@@ -28,4 +28,4 @@ detection:
     condition: selection and not filter_system and not filter_signed
 falsepositives:
     - Third-party applications that include Spotlight importers
-level: high
+level: medium

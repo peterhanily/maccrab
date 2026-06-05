@@ -39,4 +39,4 @@ detection:
 falsepositives:
     - Legitimate backup operations to remote servers
     - File synchronization workflows
-level: high
+level: medium

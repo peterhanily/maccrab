@@ -36,4 +36,4 @@ detection:
     condition: selection_parent_pipe and selection_target and not filter_system and not filter_apple_signed
 falsepositives:
     - Legitimate Tcl scripting from development environments
-level: high
+level: low

@@ -55,4 +55,4 @@ falsepositives:
     - Developers cleaning build artifacts or temporary directories
     - IT scripts performing legitimate system cleanup
     - Package managers removing old installations
-level: high
+level: medium

@@ -61,4 +61,4 @@ detection:
 falsepositives:
     - The user clearing the quarantine attribute on one app they trust manually — that's a single-target xattr call and is naturally rare to trigger the "bulk" framing
     - Build systems intentionally stripping quarantine on a tree of downloaded build inputs; covered by `filter_xcode` for Xcode-driven builds; extend filter for other build orchestrators (Bazel, Buck)
-level: high
+level: medium

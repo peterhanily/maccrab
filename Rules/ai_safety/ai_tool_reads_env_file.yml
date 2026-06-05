@@ -24,4 +24,4 @@ detection:
 falsepositives:
     - Application startup reading its own .env file
     - Development tools loading environment configuration
-level: medium
+level: low

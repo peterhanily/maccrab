@@ -25,4 +25,4 @@ detection:
     condition: selection
 falsepositives:
     - AI tools legitimately modifying shell configuration at user request
-level: high
+level: medium

@@ -43,4 +43,4 @@ falsepositives:
     - Paramiko or Fabric SSH libraries used for legitimate automation
     - Ansible running locally
     - SSH key management scripts written in Python
-level: high
+level: medium

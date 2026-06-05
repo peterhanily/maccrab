@@ -62,4 +62,4 @@ detection:
 falsepositives:
     - IT support sessions
     - Remote collaboration
-level: medium
+level: low

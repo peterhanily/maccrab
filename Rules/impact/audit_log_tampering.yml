@@ -55,4 +55,5 @@ detection:
 falsepositives:
     - System administrators rotating logs with custom scripts
     - Disk-space management scripts pruning old log files (should use newsyslog/aslmanager)
+suppressible: false
 level: high

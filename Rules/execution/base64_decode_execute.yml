@@ -49,4 +49,4 @@ detection:
 falsepositives:
     - CI/CD pipeline scripts decoding configuration
     - Legitimate build scripts
-level: high
+level: medium

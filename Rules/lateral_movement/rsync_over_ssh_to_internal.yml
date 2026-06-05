@@ -55,4 +55,4 @@ detection:
 falsepositives:
     - Backup solutions using rsync (Arq, Carbon Copy Cloner, rsnapshot)
     - Legitimate deployment pipelines
-level: medium
+level: low

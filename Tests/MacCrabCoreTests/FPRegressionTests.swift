@@ -323,8 +323,7 @@ struct SanityPositiveTests {
                 severity: .critical,
                 description: "",
                 mitreTechniques: [],
-                tags: []
-            )
+                tags: [], suppressible: false)
         ]
         let event = fsEventsFileWrite(path: "/etc/passwd")
         NoiseFilter.apply(&matches, event: event, isWarmingUp: true)
@@ -340,8 +339,7 @@ struct SanityPositiveTests {
                 severity: .critical,
                 description: "",
                 mitreTechniques: [],
-                tags: []
-            )
+                tags: [], suppressible: false)
         ]
         let event = fsEventsFileWrite(path: "/etc/passwd")
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
@@ -495,8 +493,7 @@ struct MacCrabSelfTests {
                 severity: .critical,
                 description: "",
                 mitreTechniques: [],
-                tags: []
-            )
+                tags: [], suppressible: false)
         ]
         let event = attributedFileWrite(
             path: "/Applications/MacCrab.app/Contents/MacOS/MacCrab",
@@ -522,8 +519,7 @@ struct MacCrabSelfTests {
                 severity: .critical,
                 description: "",
                 mitreTechniques: [],
-                tags: []
-            ),
+                tags: [], suppressible: false),
             RuleMatch(
                 ruleId: "test.file-write",
                 ruleName: "Suspicious File Write",
@@ -556,8 +552,7 @@ struct MacCrabSelfTests {
                 severity: .critical,
                 description: "",
                 mitreTechniques: [],
-                tags: []
-            ),
+                tags: [], suppressible: false),
             RuleMatch(
                 ruleId: "test.db-read",
                 ruleName: "Sensitive DB Read",
@@ -662,7 +657,7 @@ struct InteractiveAdminGateTests {
             RuleMatch(ruleId: "critical.daemon-exec",
                       ruleName: "Rare Daemon-Spawned Recon",
                       severity: .critical, description: "",
-                      mitreTechniques: [], tags: [])
+                      mitreTechniques: [], tags: [], suppressible: false)
         ]
         let event = interactiveAdminExec(
             basename: "ps",
@@ -677,7 +672,7 @@ struct InteractiveAdminGateTests {
     func criticalAdminStillFires() async throws {
         var matches = [
             RuleMatch(ruleId: "critical.admin-misuse", ruleName: "Admin Misuse",
-                      severity: .critical, description: "", mitreTechniques: [], tags: [])
+                      severity: .critical, description: "", mitreTechniques: [], tags: [], suppressible: false)
         ]
         let event = interactiveAdminExec(
             basename: "csrutil",
@@ -859,7 +854,7 @@ struct AutoUpdaterAncestorGateTests {
         // still alert at critical.
         var matches = [
             RuleMatch(ruleId: "critical.ransomware_note", ruleName: "Ransomware Note Created",
-                      severity: .critical, description: "", mitreTechniques: [], tags: [])
+                      severity: .critical, description: "", mitreTechniques: [], tags: [], suppressible: false)
         ]
         let event = execUnderAncestors(
             processPath: "/Users/phanily/Library/Application Support/Google/GoogleUpdater/148.0.7730.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater",
@@ -883,7 +878,10 @@ struct AutoUpdaterAncestorGateTests {
             processPath: "/tmp/unknown_tool",
             ancestors: [
                 ProcessAncestor(pid: 600, executable: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome"),
-            ]
+            ],
+            // an unknown /tmp tool is unsigned — isolates this Gate-6 counter-test
+            // from the v1.18 Gate-8 trusted-signer suppressor
+            signerType: nil
         )
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
         #expect(matches.count == 1,
@@ -1010,7 +1008,7 @@ struct ApplePlatformBinaryGateTests {
     func criticalSurvives() {
         var matches = [
             RuleMatch(ruleId: "critical.ransomware", ruleName: "Ransomware Note",
-                      severity: .critical, description: "", mitreTechniques: [], tags: [])
+                      severity: .critical, description: "", mitreTechniques: [], tags: [], suppressible: false)
         ]
         let event = execWithSigner(path: "/bin/ps", signerType: .apple, isPlatformBinary: true)
         NoiseFilter.apply(&matches, event: event, isWarmingUp: false)
@@ -1075,9 +1073,9 @@ struct ApplePlatformBinaryGateTests {
     func criticalOnlyShortCircuit() {
         var matches = [
             RuleMatch(ruleId: "r1", ruleName: "R1", severity: .critical,
-                      description: "", mitreTechniques: [], tags: []),
+                      description: "", mitreTechniques: [], tags: [], suppressible: false),
             RuleMatch(ruleId: "r2", ruleName: "R2", severity: .critical,
-                      description: "", mitreTechniques: [], tags: []),
+                      description: "", mitreTechniques: [], tags: [], suppressible: false),
         ]
         // Event would normally trigger several gates, but every
         // match is already critical — apply() short-circuits.

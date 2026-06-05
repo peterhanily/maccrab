@@ -68,4 +68,5 @@ detection:
 falsepositives:
     - User opening a `.canary` file directly in an editor out of curiosity — investigate the parent process; should be rare
     - Spotlight / mds indexer touching the user's home; already filtered by the platform's default exclusion of `.maccrab` paths, but extend `filter_apple_indexers` if FPs appear
+suppressible: false
 level: critical

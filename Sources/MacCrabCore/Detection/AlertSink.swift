@@ -29,6 +29,12 @@ public actor AlertSink {
     private let deduplicator: AlertDeduplicator
     private let logger = Logger(subsystem: "com.maccrab.detection", category: "AlertSink")
 
+    /// Support dir holding `builtin_rules_settings.json`. nil disables built-in
+    /// rule gating (tests). v1.18.
+    private let builtinSettingsDir: String?
+    private var cachedBuiltinSettings = BuiltinRuleSettings()
+    private var builtinSettingsMtime: Date?
+
     /// Counter of suppressed alerts since the sink was created. Useful for
     /// the metrics file and diagnostic surfaces.
     private(set) public var suppressedCount: Int = 0
@@ -37,11 +43,35 @@ public actor AlertSink {
     public init(
         alertStore: AlertStore,
         deduplicator: AlertDeduplicator,
-        eventStore: EventStore? = nil
+        eventStore: EventStore? = nil,
+        builtinSettingsDir: String? = nil
     ) {
         self.alertStore = alertStore
         self.eventStore = eventStore
         self.deduplicator = deduplicator
+        self.builtinSettingsDir = builtinSettingsDir
+    }
+
+    /// Built-in `maccrab.*` rule gating (v1.18). Returns the (possibly
+    /// severity-overridden) alert, or nil when the operator has muted it via
+    /// `builtin_rules_settings.json`. Non-built-in alerts pass through unchanged.
+    /// The settings file is mtime-cached so the common path is one cheap stat.
+    private func applyBuiltinSettings(_ alert: Alert) -> Alert? {
+        guard alert.ruleId.hasPrefix("maccrab."), let dir = builtinSettingsDir else { return alert }
+        let path = BuiltinRuleSettings.path(inDir: dir)
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if mtime != builtinSettingsMtime {
+            cachedBuiltinSettings = mtime == nil ? BuiltinRuleSettings() : BuiltinRuleSettings.load(fromDir: dir)
+            builtinSettingsMtime = mtime
+        }
+        guard let setting = cachedBuiltinSettings.setting(forRuleId: alert.ruleId) else { return alert }
+        if !setting.enabled { return nil }
+        if let override = setting.severityOverride, override != alert.severity {
+            var copy = alert
+            copy.severity = override
+            return copy
+        }
+        return alert
     }
 
     // v1.8.0: when an alert is committed, snapshot the surrounding ±60s of
@@ -79,6 +109,8 @@ public actor AlertSink {
     /// pre-release-audit.sh: only one place writes to alerts.db).
     @discardableResult
     public func submit(alert: Alert, event: Event) async throws -> Bool {
+        // v1.18: built-in maccrab.* rule mute / severity override.
+        guard let alert = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
         let dedupKey = event.process.executable
         // Atomic check+record closes the TOCTOU window where two concurrent
         // submits with the same key could both pass shouldSuppress between
@@ -106,6 +138,8 @@ public actor AlertSink {
     /// dashboards consolidating multiple hosts' alerts.
     @discardableResult
     public func submit(alert: Alert) async throws -> Bool {
+        // v1.18: built-in maccrab.* rule mute / severity override.
+        guard let alert = applyBuiltinSettings(alert) else { suppressedCount += 1; return false }
         let dedupKey = alert.processPath ?? alert.ruleId
         // Atomic check+record closes the TOCTOU window where two concurrent
         // submits with the same key could both pass shouldSuppress between

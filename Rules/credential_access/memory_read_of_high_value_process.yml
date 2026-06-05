@@ -1,5 +1,5 @@
 title: Memory Read / Trace of a High-Value Credential Process
-id: d1a2b3c4-0432-4000-a000-000000000432
+id: d1a2b3c4-0471-4000-a000-000000000471
 status: experimental
 description: >
     Detects an untrusted process acquiring read access to (get_task_read) or
@@ -63,4 +63,5 @@ detection:
 falsepositives:
     - A password manager reading its OWN helper (excluded via same-team/self)
     - Apple credential daemons cross-reading during auth flows (Apple-signed, excluded)
+suppressible: false
 level: high

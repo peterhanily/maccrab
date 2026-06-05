@@ -30,4 +30,4 @@ detection:
 falsepositives:
     - Developers clearing quarantine on their own builds
     - Enterprise software deployment scripts
-level: high
+level: medium

@@ -41,4 +41,5 @@ detection:
 falsepositives:
     - A defender or red-team operator running a controlled replay of the IOC on the monitored host — investigate parent lineage; the alert is the correct outcome
     - A defender pinning the IP into a local DNS sinkhole for analysis (rare; the network-connection event still fires once the resolution is attempted)
+suppressible: false
 level: critical

@@ -98,4 +98,4 @@ falsepositives:
     - Git merge operations resolving lockfile conflicts
     - Editors auto-saving lockfiles after manual edits
     - Monorepo tools (Lerna, Nx) orchestrating package installations
-level: high
+level: medium

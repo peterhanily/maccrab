@@ -24,7 +24,6 @@ detection:
     selection:
         TargetFilename|contains:
             - '/Caches/com.apple.LaunchServices'
-            - '.csstore'
     filter_system:
         Image|startswith:
             - '/System/'

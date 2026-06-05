@@ -27,4 +27,4 @@ detection:
 falsepositives:
     - Legacy x86-only applications that haven't been updated for ARM
     - Some Homebrew packages compiled for x86_64
-level: medium
+level: low

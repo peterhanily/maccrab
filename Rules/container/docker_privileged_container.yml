@@ -33,4 +33,4 @@ detection:
 falsepositives:
     - Legitimate development containers requiring hardware access
     - CI/CD pipelines building Docker images inside Docker
-level: high
+level: medium

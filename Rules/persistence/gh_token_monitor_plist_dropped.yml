@@ -53,4 +53,5 @@ detection:
 falsepositives:
     - A defender or red-team operator deploying a same-named honeyfile to study attacker reuse of the literal — extremely rare; the alert is the correct outcome
     - A user manually copying the IOC plist for forensic analysis on the monitored host (review process lineage; investigator handlers should be allowlisted by parent image)
+suppressible: false
 level: critical

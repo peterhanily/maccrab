@@ -32,4 +32,4 @@ detection:
 falsepositives:
     - Software installers loading temporary LaunchAgents
     - Enterprise deployment tools
-level: high
+level: medium

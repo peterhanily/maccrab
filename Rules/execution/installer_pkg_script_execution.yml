@@ -47,4 +47,4 @@ detection:
 falsepositives:
     - Legitimate software installers (Homebrew cask, Adobe, Microsoft)
     - System software updates
-level: high
+level: medium

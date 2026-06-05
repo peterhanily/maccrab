@@ -642,10 +642,28 @@ DMG_PATH="$PROJECT_DIR/.build/$DMG_NAME"
 
 ln -s /Applications "$STAGING_DIR/Applications"
 
-hdiutil create -volname "MacCrab v$VERSION" \
-    -srcfolder "$STAGING_DIR" \
-    -ov -format UDZO \
-    "$DMG_PATH" 2>/dev/null
+# v1.18: build the DMG via attach + ditto + convert rather than
+# `hdiutil create -srcfolder`. The latter's internal copy fails with
+# "could not access .../MacCrab.app - Operation not permitted" once MacCrab is
+# INSTALLED on the build host (macOS App-Management protects the registered
+# com.maccrab.app from the diskimages-helper copy) — which is the normal
+# developer situation, and silently bricked the build the moment the dev dog-
+# fooded a prior RC. `ditto` into an explicitly-attached RW image is unaffected
+# and preserves the bundle + the /Applications symlink. The mountpoint is under
+# /tmp (not /Volumes) so a crash can't leave a stale /Volumes/MacCrab… volume.
+STAGE_KB=$(du -sk "$STAGING_DIR" | cut -f1)
+RW_DMG="${DMG_PATH%.dmg}.rw.dmg"
+DMG_MNT="/tmp/maccrab-dmg-mnt-$$"
+rm -f "$RW_DMG"
+hdiutil create -size "$(( STAGE_KB / 1024 + 150 ))m" -volname "MacCrab v$VERSION" \
+    -fs HFS+ -ov "$RW_DMG" >/dev/null
+mkdir -p "$DMG_MNT"
+hdiutil attach "$RW_DMG" -nobrowse -mountpoint "$DMG_MNT" >/dev/null
+ditto "$STAGING_DIR/" "$DMG_MNT/"
+hdiutil detach "$DMG_MNT" -force >/dev/null
+rmdir "$DMG_MNT" 2>/dev/null || true
+hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
+rm -f "$RW_DMG"
 
 # Sign and notarize if credentials are available
 if [ -n "${DEVELOPER_ID:-}" ] || [ -n "${APPLE_ID:-}" ]; then

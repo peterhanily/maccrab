@@ -95,4 +95,4 @@ falsepositives:
     - Debugging tools and profilers
     - Security research tools
     - Documentation / source-code grep / man lookups (filtered)
-level: high
+level: low

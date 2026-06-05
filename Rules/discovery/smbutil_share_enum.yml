@@ -43,4 +43,4 @@ detection:
 falsepositives:
     - Network troubleshooting by administrators
     - File sharing utilities
-level: medium
+level: low

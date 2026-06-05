@@ -1168,6 +1168,10 @@ def compile_rule(rule_data: dict, source_file: str):
     _current_compile_rule_title = title
     description = rule_data.get("description", "")
     level = rule_data.get("level", "medium").lower()
+    # v1.18: suppressible (default True) — False = "must-fire", survives the
+    # NoiseFilter trust gates regardless of severity (decouples suppression from
+    # severity, which was the CRITICAL-as-bypass-key design flaw).
+    suppressible = bool(rule_data.get("suppressible", True))
     tags = rule_data.get("tags", [])
     falsepositives = rule_data.get("falsepositives", [])
     if falsepositives is None:
@@ -1281,6 +1285,7 @@ def compile_rule(rule_data: dict, source_file: str):
         "title": title,
         "description": description,
         "level": level,
+        "suppressible": suppressible,
         "tags": tags,
         "logsource": {
             "category": category,
@@ -1431,6 +1436,11 @@ def compile_sequence_rule(rule_data: dict, source_file: str):
         "steps": compiled_steps,
         "trigger": trigger,
         "enabled": True,
+        # v1.18: carry the must-fire flag so a completed sequence with
+        # `suppressible: false` survives the NoiseFilter trust gates. Default
+        # True (suppressible) to match single-event rules; the 9 kill-chain
+        # YAMLs set it false explicitly.
+        "suppressible": bool(rule_data.get("suppressible", True)),
     }
 
 

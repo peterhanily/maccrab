@@ -58,4 +58,4 @@ falsepositives:
     - IT administrators manually installing profiles during initial device setup
     - Enterprise enrollment scripts run outside standard MDM agents
     - Developer provisioning profile installation via Xcode tools
-level: high
+level: medium

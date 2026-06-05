@@ -63,4 +63,5 @@ detection:
 falsepositives:
     - Python packages that legitimately ship bundled web assets (Jupyter widget bundles, Sphinx theme JavaScript, Plotly / Bokeh / ipywidgets static JS) — these typically land in `package_name/static/` or `package_name/js/`; the `_runtime/` and `bun_*` filenames are the Lightning-specific tell
     - dev-side build tools wrapping a JS bundler (rstudio, datasette plugins) — allowlist by package
+suppressible: false
 level: critical

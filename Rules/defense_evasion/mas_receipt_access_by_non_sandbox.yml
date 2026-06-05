@@ -58,4 +58,4 @@ falsepositives:
     - Backup tooling (Time Machine helper `backupd`, Backblaze, Carbon Copy Cloner, Arq) reading every file in `/Applications/`; filter by Image basename and allowlist these
     - Spotlight / mds / mdworker indexing app bundles; covered by filter_apple_system
     - The user explicitly running `codesign -dvv` against an MAS app; investigate the parent shell
-level: high
+level: medium

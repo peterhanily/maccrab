@@ -33,4 +33,4 @@ detection:
 falsepositives:
     - Audio editing applications
     - Backup utilities
-level: high
+level: low

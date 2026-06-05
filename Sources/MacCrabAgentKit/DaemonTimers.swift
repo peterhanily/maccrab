@@ -397,7 +397,17 @@ enum DaemonTimers {
         let tracegraphPruneTimer: DispatchSourceTimer?
         if let causalStore = state.causalStore {
             let t = DispatchSource.makeTimerSource(queue: .global())
-            t.schedule(deadline: .now() + 3600, repeating: 86400)
+            // v1.18: first sweep at +180 s (not +3600), then hourly (not daily).
+            // tracegraph.db is the per-event-growing "worst offender" and was the
+            // only size-capped store still on a 1h-first / daily cadence — so a
+            // sysext that inherited an over-cap substrate from the previous
+            // session sat at 438 MB+ for a full hour every boot, and on a busy
+            // host drifted back over the 250 MB cap between daily sweeps. Match
+            // the events.db size-cap philosophy (+60 s / hourly). Now cheap:
+            // auto_vacuum=INCREMENTAL (set in openDatabase) makes the post-prune
+            // incremental_vacuum a real freelist reclaim, so full VACUUM only
+            // runs on the rare occasion incremental can't fit the budget.
+            t.schedule(deadline: .now() + 180, repeating: 3600)
             t.setEventHandler {
                 Task {
                     // v1.18: retention + size cap are now operator-tunable
@@ -428,10 +438,18 @@ enum DaemonTimers {
                             let dropTarget = max(50, count / 10)
                             let droppedTraces = (try? await causalStore.pruneOldestTraces(count: dropTarget)) ?? 0
                             let droppedGraph = (try? await causalStore.pruneOldestGraph(count: 50_000)) ?? (edges: 0, entities: 0)
-                            logger.warning("TraceGraph size cap: pruned \(droppedTraces) oldest traces + \(droppedGraph.edges) edges + \(droppedGraph.entities) entities (\(size / 1024 / 1024) MB > \(capBytes / 1024 / 1024) MB cap)")
                             if droppedTraces == 0 && droppedGraph.edges == 0 && droppedGraph.entities == 0 { break }
-                            let nowSize = await causalStore.databaseSizeBytes()
-                            if nowSize < capBytes { break }
+                            // Break on LIVE data size (page_count − freelist), NOT the
+                            // file footprint: DELETEs free pages onto the freelist but
+                            // the file doesn't shrink until the post-loop
+                            // incremental_vacuum, so a databaseSizeBytes() check never
+                            // tripped and this loop over-pruned ~10× past the cap
+                            // (field-observed 476 MB → 36 MB at a 250 MB cap). liveSize
+                            // tracks the prune in real time, so we stop near the cap and
+                            // let the vacuum below shrink the file to match.
+                            let liveSize = await causalStore.liveDataSizeBytes()
+                            logger.warning("TraceGraph size cap: pruned \(droppedTraces) oldest traces + \(droppedGraph.edges) edges + \(droppedGraph.entities) entities (live \(liveSize / 1024 / 1024) MB vs \(capBytes / 1024 / 1024) MB cap)")
+                            if liveSize < capBytes { break }
                         }
 
                         // Wave 9B (v1.12.6): tracegraph.db is the
@@ -440,11 +458,11 @@ enum DaemonTimers {
                         // first (no scratch disk needed), then full
                         // VACUUM only if disk has 1.3× headroom.
                         //
-                        // KNOWN GAP: this DB doesn't currently set
-                        // auto_vacuum=INCREMENTAL on creation, so
-                        // incrementalVacuum is a no-op until a
-                        // future migration. The runtime mode probe
-                        // logs the gap when triggered.
+                        // auto_vacuum=INCREMENTAL is set in openDatabase
+                        // (Wave 9B.1), so incremental_vacuum is a real
+                        // freelist reclaim here; full VACUUM below is the
+                        // rare fallback for when incremental can't fit the
+                        // budget (or a pre-Wave-9B.1 mode-0 file).
                         let cgPath = state.supportDir + "/tracegraph.db"
                         let postPruneMB = measureDatabaseFootprintMB(dbPath: cgPath)
                         let mode = await causalStore.autoVacuumMode()
@@ -481,7 +499,11 @@ enum DaemonTimers {
         let tracesPruneTimer: DispatchSourceTimer?
         if let traceStore = state.traceStore {
             let t = DispatchSource.makeTimerSource(queue: .global())
-            t.schedule(deadline: .now() + 3600, repeating: 86400)
+            // v1.18: first sweep at +180 s so an inherited over-cap traces.db
+            // reconciles shortly after boot instead of an hour in. OTLP spans
+            // aren't a per-event offender like the graph substrate, so the
+            // steady cadence stays daily.
+            t.schedule(deadline: .now() + 180, repeating: 86400)
             t.setEventHandler {
                 Task {
                     // v1.18: operator-tunable (storage.tracesRetentionDays /
@@ -493,27 +515,30 @@ enum DaemonTimers {
                     if pruned > 0 {
                         logger.info("OTLP traces retention sweep: \(pruned) spans older than \(days)d pruned")
                     }
-                    let size = await traceStore.databaseSizeBytes()
+                    // v1.18 over-prune fix (the traces.db sibling of the
+                    // tracegraph fix): break on LIVE data size, not the file
+                    // footprint. traces.db is auto_vacuum=INCREMENTAL, so DELETEs
+                    // go to the freelist and `databaseSizeBytes()` (file size)
+                    // does not shrink until the post-loop vacuum — keying the
+                    // break on it ran all 5 iterations and over-pruned ~41% of
+                    // spans every sweep.
+                    let size = await traceStore.liveDataSizeBytes()
                     if size > capBytes {
                         for _ in 0..<5 {
                             let count = (try? await traceStore.count()) ?? 0
                             let dropTarget = max(500, count / 10)
                             let dropped = (try? await traceStore.pruneOldest(count: dropTarget)) ?? 0
-                            logger.warning("OTLP traces size cap: pruned \(dropped) oldest spans (\(size / 1024 / 1024) MB > \(capBytes / 1024 / 1024) MB cap)")
+                            logger.warning("OTLP traces size cap: pruned \(dropped) oldest spans (\(size / 1024 / 1024) MB live > \(capBytes / 1024 / 1024) MB cap)")
                             if dropped == 0 { break }
-                            let nowSize = await traceStore.databaseSizeBytes()
+                            let nowSize = await traceStore.liveDataSizeBytes()
                             if nowSize < capBytes { break }
                         }
 
                         // Wave 9B (v1.12.6): incremental_vacuum +
                         // low-disk-safe full VACUUM. Same pattern as
-                        // the tracegraph.db enforcer above.
-                        //
-                        // KNOWN GAP: traces.db doesn't currently set
-                        // auto_vacuum=INCREMENTAL on creation, so
-                        // incrementalVacuum is a no-op until a
-                        // future migration. The mode probe logs the
-                        // gap on the first triggered sweep.
+                        // the tracegraph.db enforcer above. traces.db
+                        // is auto_vacuum=INCREMENTAL (since v1.12.6 RC2),
+                        // so incrementalVacuum reclaims freed pages.
                         let tsPath = state.supportDir + "/traces.db"
                         let postPruneMB = measureDatabaseFootprintMB(dbPath: tsPath)
                         let mode = await traceStore.autoVacuumMode()
@@ -1284,6 +1309,12 @@ enum DaemonTimers {
                 let reloadRulesReqs = files.filter { $0.hasPrefix("reload-rules-") && $0.hasSuffix(".json") }
                 let llmConfigReqs = files.filter { $0.hasPrefix("llm-config-") && $0.hasSuffix(".json") }
                 let flushRequests = files.filter { $0.hasPrefix("flush-request-") && $0.hasSuffix(".json") }
+                // v1.18: ClickFix clipboard payloads recorded in USER context (the
+                // menubar app can read the GUI pasteboard; the root sysext cannot)
+                // and dropped here for the exec-correlation half to use.
+                let recordClipboardReqs = files.filter { $0.hasPrefix("record-clipboard-") && $0.hasSuffix(".json") }
+                // v1.18: per-built-in-rule enable/disable + severity override.
+                let builtinRuleReqs = files.filter { $0.hasPrefix("builtin-rule-setting-") && $0.hasSuffix(".json") }
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
                 await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
@@ -1292,6 +1323,8 @@ enum DaemonTimers {
                 await handleRefreshIntelRequests(refreshIntelReqs, inboxDir: inboxDir, state: state)
                 await handleReloadRulesRequests(reloadRulesReqs, inboxDir: inboxDir, state: state)
                 await handleLLMConfigRequests(llmConfigReqs, inboxDir: inboxDir, state: state)
+                await handleRecordClipboardRequests(recordClipboardReqs, inboxDir: inboxDir, state: state)
+                await handleBuiltinRuleSettingRequests(builtinRuleReqs, inboxDir: inboxDir, state: state)
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
             }
         }
@@ -1332,13 +1365,34 @@ enum DaemonTimers {
     ) async {
         guard !names.isEmpty else { return }
         let fm = FileManager.default
-        print("[inbox] flush: \(names.count) request(s) — running enforceDatabaseSizeCapNow")
+        // Authorization gate (parity with every other inbox verb). The inbox dir
+        // is mode 1777 — any local user can drop a file — and a flush DELETES the
+        // oldest events (anti-forensics value to an attacker erasing early-
+        // intrusion telemetry). Flush carries no id and is a single global sweep,
+        // so we run it iff at least one request is from an authorized uid (root or
+        // the GUI console user); symlink/hardlink-forged files resolve to uid -1
+        // and are rejected. Every request is audit-logged; all files are removed.
+        var anyAuthorized = false
+        for name in names {
+            let path = inboxDir + "/" + name
+            let uid = requestOwnerUID(at: path)
+            if isAuthorizedInboxRequest(uid: uid) {
+                anyAuthorized = true
+                auditLogInbox(state: state, prefix: "flush", id: name, uid: uid, result: "ok")
+            } else {
+                print("[inbox] flush \(name) REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "flush", id: name, uid: uid, result: "rejected_uid")
+            }
+            try? fm.removeItem(atPath: path)
+        }
+        guard anyAuthorized else {
+            print("[inbox] flush: no authorized request — sweep skipped")
+            return
+        }
+        print("[inbox] flush: running enforceDatabaseSizeCapNow")
         let beforeBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
         let started = Date()
         let didRun = await enforceDatabaseSizeCapNow(state: state)
-        for name in names {
-            try? fm.removeItem(atPath: inboxDir + "/" + name)
-        }
         if didRun {
             let afterBytes = StorageFlushStatus.fileSize(at: state.supportDir + "/events.db")
             let status = StorageFlushStatus(
@@ -1349,6 +1403,88 @@ enum DaemonTimers {
             print("[inbox] flush sweep done: \(beforeBytes / 1_000_000) MB → \(afterBytes / 1_000_000) MB")
         } else {
             print("[inbox] flush sweep skipped — another already in progress")
+        }
+    }
+
+    /// v1.18: ClickFix clipboard payloads from the user-context app. The root
+    /// sysext cannot read the GUI pasteboard (no Aqua session), so the menubar
+    /// app records delivery-shaped clipboard text (curl|bash, etc.) and drops it
+    /// here; we feed it into the shared ClickFixDetector whose exec-correlation
+    /// half runs in the event loop. Same uid/symlink auth gate as every verb.
+    private static func handleRecordClipboardRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)   // lstat — rejects symlink/hardlink forgery
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] record-clipboard REJECTED uid=\(uid) (not console-user or root)")
+                auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let payload = json["payload"] as? String, !payload.isEmpty else {
+                print("[inbox] record-clipboard \(name): malformed payload")
+                continue
+            }
+            // Cap so a giant clipboard can't bloat the detector buffer.
+            let capped = String(payload.prefix(8192))
+            if let clickFix = state.clickFix {
+                let recorded = await clickFix.recordClipboard(capped, at: Date())
+                auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: uid,
+                              result: recorded ? "recorded" : "filtered_by_shape")
+            } else {
+                auditLogInbox(state: state, prefix: "record-clipboard", id: "-", uid: uid, result: "clickfix_disabled")
+            }
+        }
+    }
+
+    /// v1.18: per-built-in-rule operator overrides (enable/disable + severity)
+    /// written by the user-context app. The root daemon owns the support dir, so
+    /// it (not the unprivileged app) writes `builtin_rules_settings.json`, which
+    /// AlertSink reads at the submit chokepoint. Same auth gate as every verb.
+    private static func handleBuiltinRuleSettingRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                print("[inbox] builtin-rule-setting REJECTED uid=\(uid)")
+                auditLogInbox(state: state, prefix: "builtin-rule-setting", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let ruleId = json["ruleId"] as? String, ruleId.hasPrefix("maccrab.") else {
+                print("[inbox] builtin-rule-setting \(name): malformed")
+                continue
+            }
+            var settings = BuiltinRuleSettings.load(fromDir: state.supportDir)
+            var entry = settings.rules[ruleId] ?? BuiltinRuleSetting()
+            if let enabled = json["enabled"] as? Bool { entry.enabled = enabled }
+            if json.keys.contains("severityOverride") {
+                if let raw = json["severityOverride"] as? String, let sev = Severity(rawValue: raw) {
+                    entry.severityOverride = sev
+                } else {
+                    entry.severityOverride = nil   // explicit null = clear to default
+                }
+            }
+            settings.rules[ruleId] = entry
+            do {
+                try settings.save(toDir: state.supportDir)
+                auditLogInbox(state: state, prefix: "builtin-rule-setting", id: sanitizeAuditField(ruleId), uid: uid,
+                              result: "enabled=\(entry.enabled) sev=\(entry.severityOverride?.rawValue ?? "default")")
+            } catch {
+                print("[inbox] builtin-rule-setting \(ruleId) save failed: \(error)")
+            }
         }
     }
 
@@ -1665,7 +1801,10 @@ enum DaemonTimers {
     /// hardlink a root-owned file into the inbox either.
     /// Returns -1 on stat failure or any rejection condition — that
     /// value never satisfies the gate.
-    private static func requestOwnerUID(at path: String) -> Int {
+    // `internal` (not private) so the symlink/hardlink forgery rejection is
+    // unit-tested against real on-disk files — this is the gate that stops a
+    // local user from forging root ownership of an inbox request.
+    static func requestOwnerUID(at path: String) -> Int {
         var st = stat()
         guard lstat(path, &st) == 0 else { return -1 }
         // Refuse symlinks outright — too easy to forge root ownership.
@@ -1702,7 +1841,7 @@ enum DaemonTimers {
     ///   - the GUI console user: the human at the keyboard, who is
     ///     also the user running MacCrab.app
     /// Anything else is rejected and audit-logged.
-    private static func isAuthorizedInboxRequest(uid: Int) -> Bool {
+    static func isAuthorizedInboxRequest(uid: Int) -> Bool {
         if uid < 0 { return false }                  // stat failed
         if uid == 0 { return true }                  // root
         if let console = consoleUserUID(), Int(console) == uid { return true }
@@ -1728,7 +1867,7 @@ enum DaemonTimers {
     /// returns / non-printable ASCII; cap length at 128 (alert ids
     /// are UUIDs, well under that). Replacement makes the truncation
     /// visible to operators tailing the log.
-    private static func sanitizeAuditField(_ s: String, max: Int = 128) -> String {
+    static func sanitizeAuditField(_ s: String, max: Int = 128) -> String {
         let scrubbed = String(s.unicodeScalars.prefix(max).map { scalar -> Character in
             if scalar == "\n" || scalar == "\r" { return "_" }
             if !scalar.isASCII { return "?" }

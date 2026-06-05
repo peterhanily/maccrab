@@ -38,4 +38,4 @@ detection:
 falsepositives:
     - Legitimate application installations adding preview plugins
     - Developer tools adding source code preview handlers
-level: high
+level: medium

@@ -389,7 +389,10 @@ public actor DNSCollector {
     }
 
     /// Parse a DNS domain name from wire format (handles compression pointers).
-    private static func parseDomainName(_ data: Data, offset: Int) -> (String, Int)? {
+    /// `internal` (not private) so the compression-pointer cycle guard and
+    /// length bounds can be fuzzed with hand-built adversarial packets — a
+    /// self-referential pointer must terminate, not hang the BPF read loop.
+    static func parseDomainName(_ data: Data, offset: Int) -> (String, Int)? {
         var labels: [String] = []
         var pos = offset
         var bytesConsumed = 0

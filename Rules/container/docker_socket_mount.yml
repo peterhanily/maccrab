@@ -33,4 +33,4 @@ detection:
 falsepositives:
     - Docker-in-Docker CI/CD pipelines
     - Container management tools like Portainer
-level: high
+level: medium

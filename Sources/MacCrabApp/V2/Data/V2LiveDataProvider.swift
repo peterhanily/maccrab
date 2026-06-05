@@ -261,11 +261,32 @@ public final class V2LiveDataProvider: V2DataProvider {
             }
         }.value
 
-        rulesCache = mapped
+        // v1.18: surface the hardcoded maccrab.* built-in detections in the
+        // Rules view (read-only content) with their operator overrides applied.
+        // Settings are written by the daemon (root) via the inbox IPC; the
+        // dashboard reads the same file for display.
+        let builtinSettings = dataDir.map { BuiltinRuleSettings.load(fromDir: $0) } ?? BuiltinRuleSettings()
+        let builtins: [V2MockRule] = BuiltinRuleCatalog.all.map { def in
+            let s = builtinSettings.setting(forRuleId: def.id)
+            return V2MockRule(
+                id: def.id,
+                title: def.title,
+                category: def.category,
+                severity: V2LiveDataProvider.toV2Severity(s?.severityOverride ?? def.defaultSeverity),
+                mitre: def.techniques.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty },
+                isEnabled: s?.enabled ?? true,
+                lastFired: nil,
+                firesLastWeek: 0,
+                isCustom: false,
+                description: def.description
+            )
+        }
+        let merged = mapped + builtins
+        rulesCache = merged
         rulesCacheDirMtime = dirMtime
         rulesCacheTelemetryMtime = teleMtime
         rulesCacheUserRulesMtime = userMtime
-        return mapped
+        return merged
     }
 
     public func compositeRuleLabels() async -> [String: String] {

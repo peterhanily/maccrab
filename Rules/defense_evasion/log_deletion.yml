@@ -18,7 +18,6 @@ detection:
         CommandLine|contains:
             - '/var/log/'
             - '/Library/Logs/'
-            - '.log'
             - '/private/var/log/'
     selection_truncate:
         CommandLine|contains:

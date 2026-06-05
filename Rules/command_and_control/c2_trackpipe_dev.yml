@@ -35,4 +35,5 @@ detection:
 falsepositives:
     - A defender or red-team operator deliberately replaying the IOC on the monitored host — investigate parent lineage; the alert is the correct outcome
     - The domain being repurposed for a benign legitimate service in the future (review WHOIS and registrant before triaging away)
+suppressible: false
 level: critical

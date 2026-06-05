@@ -56,4 +56,5 @@ falsepositives:
     - System administrators legitimately disabling Time Machine on managed devices
     - IT provisioning scripts that configure backup exclusions
     - csrutil operations during legitimate OS recovery/reinstall
+suppressible: false
 level: high

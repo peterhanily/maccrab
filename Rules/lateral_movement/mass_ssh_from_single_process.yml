@@ -69,4 +69,4 @@ falsepositives:
     - Ansible, Fabric, Paramiko-based automation scripts run from a deployment host
     - Legitimate parallel SSH tools (pssh, cssh)
     - CI runners and remote-build steps that SSH to fleet hosts
-level: medium
+level: low

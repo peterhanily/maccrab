@@ -74,14 +74,15 @@ detection:
             - '/tar'
             - '/cp'
             - '/ditto'
+    filter_backup_apps:
         Image|contains:
             - '/backupd'
             - 'TimeMachine'
             - '/CarbonCopyCloner'
             - '/SuperDuper'
             - '/Arq'
-    condition: selection and not filter_photos and not filter_sync_clients and not filter_photo_editors and not filter_system and not filter_apple and not filter_spotlight and not filter_backup
+    condition: selection and not filter_photos and not filter_sync_clients and not filter_photo_editors and not filter_system and not filter_apple and not filter_spotlight and not filter_backup and not filter_backup_apps
 falsepositives:
     - Photo editing / management apps not yet in the allowlist
     - Cloud photo sync services not yet in filter_sync_clients
-level: high
+level: low

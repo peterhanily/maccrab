@@ -34,4 +34,4 @@ detection:
 falsepositives:
     - System management tools writing cron entries directly
     - Configuration management agents (Ansible, Puppet, Chef)
-level: high
+level: medium

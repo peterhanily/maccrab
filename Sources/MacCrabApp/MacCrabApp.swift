@@ -418,6 +418,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await self?.alertNotifier?.tick() }
         }
         updateStatusBarIcon()
+        // ClickFix clipboard bridge: process-lifetime (like the timer above), so
+        // it watches the clipboard whenever the menubar app is running — not only
+        // while the dashboard window is open.
+        appState.startClipboardBridge()
     }
 
     /// Upgrade-handoff gate for banner posting (see

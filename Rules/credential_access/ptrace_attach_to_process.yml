@@ -1,5 +1,5 @@
 title: ptrace Attach to Another Process by Untrusted Tool
-id: d1a2b3c4-0431-4000-a000-000000000431
+id: d1a2b3c4-0470-4000-a000-000000000470
 status: experimental
 description: >
     Detects a process attaching to ANOTHER process via ptrace(PT_ATTACH)

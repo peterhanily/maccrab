@@ -101,4 +101,4 @@ detection:
 falsepositives:
     - Complex shell scripts calling sub-shells outside the build-system / env-manager lineage — extend filters as you observe new tooling
     - Terminal multiplexers (tmux, screen, zellij) with nested sessions — already filtered
-level: medium
+level: low

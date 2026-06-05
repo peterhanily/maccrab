@@ -25,4 +25,4 @@ detection:
     condition: selection
 falsepositives:
     - Installing system packages that legitimately require sudo
-level: high
+level: medium

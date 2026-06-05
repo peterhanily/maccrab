@@ -164,16 +164,22 @@ public actor EsloggerCollector {
             let selfPid = Int32(self.selfPid)
 
             readTask = Task.detached { [weak self] in
+                // Bind the weak capture to a `let` once. The nested `Task`s below
+                // run concurrently; capturing the `[weak self]` var directly trips
+                // Swift-6 strict concurrency ("reference to captured var 'self' in
+                // concurrently-executing code"). A `let` actor reference is Sendable
+                // and capture-safe.
+                let weakSelf = self
                 Self.readLoop(
                     fileHandle: fileHandle,
                     continuation: continuation,
                     selfPid: selfPid,
                     onGap: { dropped in
-                        Task { await self?.recordDropped(dropped) }
+                        Task { await weakSelf?.recordDropped(dropped) }
                     }
                 )
                 // eslogger exited — trigger watchdog
-                Task { await self?.handleEsloggerExit() }
+                Task { await weakSelf?.handleEsloggerExit() }
             }
         } catch {
             logger.error("Failed to launch eslogger: \(error.localizedDescription)")
@@ -254,12 +260,10 @@ public actor EsloggerCollector {
                         return
                     }
 
-                    // Sequence gap detection
+                    // Sequence gap detection (math lifted to Self.sequenceGap for testability)
                     if let globalSeq = json["global_seq_num"] as? UInt64 {
-                        if lastGlobalSeq > 0 && globalSeq > lastGlobalSeq + 1 {
-                            let gap = globalSeq - lastGlobalSeq - 1
-                            onGap(gap)
-                        }
+                        let gap = Self.sequenceGap(previous: lastGlobalSeq, current: globalSeq)
+                        if gap > 0 { onGap(gap) }
                         lastGlobalSeq = globalSeq
                     }
 
@@ -312,6 +316,16 @@ public actor EsloggerCollector {
             self.backoffSeconds = min(self.backoffSeconds * 2, 30.0)
             self.launchEslogger()
         }
+    }
+
+    /// Pure sequence-gap math, lifted out of the FileHandle read loop so it is
+    /// unit-testable. Given the previously-seen `global_seq_num` and the current
+    /// one, returns the number of events dropped in between — 0 for the first
+    /// observation, a contiguous step, a duplicate, or an out-of-order arrival
+    /// (never a negative/underflowed count).
+    static func sequenceGap(previous: UInt64, current: UInt64) -> UInt64 {
+        guard previous > 0, current > previous + 1 else { return 0 }
+        return current - previous - 1
     }
 
     private func recordDropped(_ count: UInt64) {

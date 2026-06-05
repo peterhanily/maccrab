@@ -1,0 +1,44 @@
+[
+  {
+    "name": "nvram AMFI manipulation fires",
+    "category": "process_creation",
+    "ruleId": "d1a2b3c4-0342-4000-a000-000000000342",
+    "shouldFire": true,
+    "process": { "executable": "/usr/sbin/nvram", "commandLine": "nvram boot-args=amfi_get_out_of_my_way=1" }
+  },
+  {
+    "name": "benign nvram read does not fire AMFI",
+    "category": "process_creation",
+    "ruleId": "d1a2b3c4-0342-4000-a000-000000000342",
+    "shouldFire": false,
+    "process": { "executable": "/usr/sbin/nvram", "commandLine": "nvram -p" }
+  },
+  {
+    "name": "docker socket mount fires",
+    "category": "process_creation",
+    "ruleId": "d1a2b3c4-0421-4000-a000-000000000421",
+    "shouldFire": true,
+    "process": { "executable": "/usr/local/bin/docker", "commandLine": "docker run -v /var/run/docker.sock:/var/run/docker.sock alpine" }
+  },
+  {
+    "name": "docker benign volume does not fire socket mount",
+    "category": "process_creation",
+    "ruleId": "d1a2b3c4-0421-4000-a000-000000000421",
+    "shouldFire": false,
+    "process": { "executable": "/usr/local/bin/docker", "commandLine": "docker run -v /data:/data alpine" }
+  },
+  {
+    "name": "security dump-keychain fires",
+    "category": "process_creation",
+    "ruleId": "d1a2b3c4-0030-4000-a000-000000000030",
+    "shouldFire": true,
+    "process": { "executable": "/usr/bin/security", "commandLine": "security dump-keychain -d", "signer": "unsigned", "parentExec": "/bin/bash" }
+  },
+  {
+    "name": "benign security subcommand does not fire keychain dump",
+    "category": "process_creation",
+    "ruleId": "d1a2b3c4-0030-4000-a000-000000000030",
+    "shouldFire": false,
+    "process": { "executable": "/usr/bin/security", "commandLine": "security list-keychains", "signer": "unsigned", "parentExec": "/bin/bash" }
+  }
+]

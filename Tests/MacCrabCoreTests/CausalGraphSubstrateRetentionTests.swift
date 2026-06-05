@@ -168,4 +168,42 @@ struct CausalGraphSubstrateRetentionTests {
         #expect(try await store.entity(id: "m") != nil)    // guard beats oldest-first
         await store.close()
     }
+
+    @Test("liveDataSizeBytes tracks prunes so the size-cap loop self-terminates (over-prune guard)")
+    func liveSizeTracksPrunes() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        for i in 0..<5000 { try await store.upsertEntity(ent("e\(i)", lastSeen: old)) }
+
+        let liveBefore = await store.liveDataSizeBytes()
+        #expect(liveBefore > 0)
+
+        // Evict ~90% of the substrate (all orphans, oldest-first).
+        var dropped = 0
+        for _ in 0..<5 {
+            let r = try await store.pruneOldestGraph(count: 1000)
+            dropped += r.entities
+            if r.entities == 0 { break }
+            if dropped >= 4500 { break }
+        }
+        #expect(dropped >= 4000)
+
+        // With ~90% of the substrate gone, liveDataSizeBytes — (page_count −
+        // freelist) × page_size — MUST read substantially smaller, even though
+        // the file is NOT vacuumed yet (freed pages sit on the freelist, so
+        // databaseSizeBytes / the file footprint is unchanged). The size-cap
+        // loop breaks on liveDataSizeBytes; before this fix it broke on the
+        // file footprint, which never moved pre-vacuum, so the loop ran all 5
+        // iterations and over-pruned the substrate to near-empty.
+        let liveAfter = await store.liveDataSizeBytes()
+        #expect(liveAfter < liveBefore * 7 / 10, "live size must track the prune (got \(liveAfter) vs \(liveBefore))")
+
+        // The freed pages are reclaimable: auto_vacuum=INCREMENTAL is set in
+        // openDatabase, so incremental_vacuum shrinks the live/page accounting
+        // without a full VACUUM (validates the corrected Wave-9B.1 comment).
+        _ = try await store.incrementalVacuum(maxPages: 200_000)
+        #expect(await store.liveDataSizeBytes() <= liveAfter)
+
+        await store.close()
+    }
 }

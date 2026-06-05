@@ -41,4 +41,4 @@ detection:
 falsepositives:
     - Legitimate screen sharing sessions
     - Remote support tools
-level: high
+level: medium

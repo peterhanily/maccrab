@@ -37,4 +37,4 @@ detection:
 falsepositives:
     - VPN clients using SSH tunnels
     - Legitimate development/devops tools (iTerm2 SSH profiles, VS Code Remote)
-level: medium
+level: low

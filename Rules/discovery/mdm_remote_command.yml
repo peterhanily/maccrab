@@ -68,4 +68,4 @@ detection:
 falsepositives:
     - Standard enterprise MDM operations
     - Scheduled policy runs and inventory updates
-level: medium
+level: low

@@ -54,4 +54,4 @@ detection:
 falsepositives:
     - Network engineers setting up controlled test environments
     - macOS servers with intentionally configured Internet Sharing via admin tools
-level: high
+level: medium

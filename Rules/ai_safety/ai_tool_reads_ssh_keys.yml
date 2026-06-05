@@ -22,4 +22,4 @@ detection:
 falsepositives:
     - Git operations that use SSH authentication
     - scp/rsync file transfers
-level: high
+level: medium

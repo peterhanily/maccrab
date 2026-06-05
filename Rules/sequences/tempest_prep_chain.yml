@@ -67,4 +67,4 @@ falsepositives:
     - Amateur radio operators using SDR tools and legitimate remote logging services
     - SDR-based weather satellite reception with cloud upload of imagery
     - Security researchers testing TEMPEST countermeasures with authorized remote logging
-level: high
+level: low

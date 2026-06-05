@@ -53,4 +53,4 @@ detection:
 falsepositives:
     - Authorized penetration testers performing wireless security assessments
     - Network engineers testing AP failover by forcing client reconnects
-level: high
+level: medium

@@ -46,4 +46,4 @@ detection:
 falsepositives:
     - Legacy enterprise management tools that still use login hooks
     - IT administrators configuring login scripts
-level: high
+level: medium

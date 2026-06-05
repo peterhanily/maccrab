@@ -42,4 +42,4 @@ detection:
 falsepositives:
     - Legitimate automation posting alerts to Slack/Discord
     - Deployment pipelines notifying webhooks with logs
-level: high
+level: medium

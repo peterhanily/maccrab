@@ -57,4 +57,4 @@ detection:
 falsepositives:
     - Sparkle / Updater frameworks re-staping a delta upgrade; covered by filter_known_updaters
     - Developers re-signing apps locally for testing (rare but possible); investigate parent shell + recent Xcode activity
-level: high
+level: medium

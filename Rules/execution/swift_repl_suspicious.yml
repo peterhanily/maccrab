@@ -75,4 +75,4 @@ detection:
 falsepositives:
     - CI/CD agents shelling into `swift -e` from inside a container (rare on macOS) — filter on parent if observed
     - Editor-integrated playgrounds that pipe via `swift -` (Nova, BBEdit) — extend `filter_terminal` to include the editor
-level: medium
+level: low

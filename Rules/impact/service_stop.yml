@@ -48,4 +48,5 @@ detection:
 falsepositives:
     - System administrators explicitly stopping services for maintenance
     - macOS OS upgrade scripts that restart core daemons as part of installation
+suppressible: false
 level: high

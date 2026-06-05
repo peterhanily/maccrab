@@ -43,4 +43,5 @@ falsepositives:
     - Encryption utilities writing .enc output files legitimately
     - Password managers or secure note apps using .encrypted extensions
     - Test/development environments generating these filenames
-level: critical
+suppressible: false
+level: high

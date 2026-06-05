@@ -59,4 +59,4 @@ falsepositives:
     - Authorized cloud backup and DR workflows
     - CI/CD pipelines deploying from developer machines
     - Data engineers syncing datasets to cloud storage
-level: high
+level: medium

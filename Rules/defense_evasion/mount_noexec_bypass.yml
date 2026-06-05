@@ -55,4 +55,4 @@ detection:
 falsepositives:
     - Admins manually remounting a filesystem with exec enabled for legitimate troubleshooting
     - Disk imaging utilities that explicitly toggle the noexec attach flag
-level: low
+level: medium

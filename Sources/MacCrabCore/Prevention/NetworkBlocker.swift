@@ -24,7 +24,11 @@ public actor NetworkBlocker {
     /// Google, Quad9, …) — and reject malformed entries, so a poisoned threat
     /// feed or a single false positive can't sever the host's own connectivity.
     /// Mirrors the gate ManualResponse/ResponseAction already apply.
-    private func safeSubset(_ ips: Set<String>) -> Set<String> {
+    // `internal` (not private) so the protected-IP filter is unit-tested
+    // directly without triggering enable()'s pfctl side effects. This is the
+    // gate that keeps a poisoned threat-intel feed from PF-blocking DNS / the
+    // gateway and bricking the host's network.
+    func safeSubset(_ ips: Set<String>) -> Set<String> {
         var safe = Set<String>()
         var rejected = 0
         for ip in ips {

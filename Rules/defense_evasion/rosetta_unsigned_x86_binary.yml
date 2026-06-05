@@ -42,4 +42,4 @@ falsepositives:
     - Legacy x86-only applications not yet ported to ARM64
     - Development tools with x86-only dependencies
     - Homebrew packages compiled for x86_64
-level: high
+level: medium

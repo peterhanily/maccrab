@@ -39,4 +39,4 @@ detection:
 falsepositives:
     - Legitimate npm packages with postinstall build scripts (node-gyp, esbuild)
     - Packages compiling native addons during installation
-level: medium
+level: low

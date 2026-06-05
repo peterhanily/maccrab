@@ -36,4 +36,4 @@ detection:
 falsepositives:
     - Key management tools
     - IDE SSH integrations
-level: high
+level: medium

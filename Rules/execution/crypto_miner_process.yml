@@ -48,4 +48,5 @@ detection:
 falsepositives:
     - Legitimate cryptocurrency mining by the system owner
     - Security research and testing
+suppressible: false
 level: high

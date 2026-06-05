@@ -4,7 +4,7 @@ status: experimental
 description: >
     Detects URL strings to well-known no-auth exfil destinations
     (webhook.site, Discord webhooks, Telegram bot API, Pastebin,
-    ngrok, trycloudflare, api.ipify.org, request-bin variants)
+    ngrok, trycloudflare, request-bin variants)
     inside files written during a package-install lineage. The
     September 2025 Shai-Hulud worm embedded
     `https://webhook.site/bb8ca5f6-4175-45d2-b042-fc9ebb8170b7`
@@ -87,4 +87,5 @@ falsepositives:
     - Security research / IOC datasets shipped as a package (rare but possible — e.g., a maintained YARA / Sigma corpus) — allowlist by package name
     - Telegram or Slack notification libraries whose source code legitimately contains the API base URL for documentation purposes; in practice these are usually in test fixtures only and the rule fires once at install
     - Debugging samples in Jupyter notebooks bundled into a Python wheel
+suppressible: false
 level: high

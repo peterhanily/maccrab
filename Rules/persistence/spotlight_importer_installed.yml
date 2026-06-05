@@ -25,4 +25,4 @@ detection:
 falsepositives:
     - Developer-signed applications installing Spotlight importers for custom file types
     - Homebrew packages that include mdimporter plugins
-level: high
+level: medium

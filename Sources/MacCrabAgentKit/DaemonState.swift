@@ -105,6 +105,11 @@ final class DaemonState {
     let mcpMonitor: MCPMonitor
     let usbMonitor: USBMonitor
     let clipboardMonitor: ClipboardMonitor
+    /// Shared with `clipboardMonitor` (which records delivery-shaped clipboard
+    /// payloads) so the event loop can correlate a subsequent shell/Terminal
+    /// exec against them — the ClickFix paste-and-run detection. Optional: nil
+    /// disables the correlation (e.g. in tests / non-clipboard daemons).
+    let clickFix: ClickFixDetector?
     let clipboardInjectionDetector: ClipboardInjectionDetector
     let browserExtMonitor: BrowserExtensionMonitor
     let ultrasonicMonitor: UltrasonicMonitor
@@ -423,7 +428,8 @@ final class DaemonState {
         threatHunter: ThreatHunter,
         toolIntegrations: SecurityToolIntegrations,
         fleetClient: FleetClient?,
-        llmService: LLMService?
+        llmService: LLMService?,
+        clickFix: ClickFixDetector? = nil
     ) {
         self.isRoot = isRoot
         self.supportDir = supportDir
@@ -444,7 +450,8 @@ final class DaemonState {
         self.alertSink = AlertSink(
             alertStore: alertStore,
             deduplicator: deduplicator,
-            eventStore: eventStore
+            eventStore: eventStore,
+            builtinSettingsDir: supportDir
         )
         self.enricher = enricher
         self.ruleEngine = ruleEngine
@@ -540,6 +547,7 @@ final class DaemonState {
         self.toolIntegrations = toolIntegrations
         self.fleetClient = fleetClient
         self.llmService = llmService
+        self.clickFix = clickFix
     }
 
     private let mergedStreamLogger = Logger(subsystem: "com.maccrab.agent", category: "EventStream")
@@ -561,79 +569,66 @@ final class DaemonState {
     /// after a 2-second back-off so the source recovers without a daemon restart.
     func mergedEventStream() -> AsyncStream<Event> {
         AsyncStream<Event>(bufferingPolicy: .bufferingNewest(Self.mergedStreamCap)) { continuation in
-            // Source 1a: Native Endpoint Security events (if available)
+            let logger = mergedStreamLogger
+            let yield: @Sendable (Event) -> Void = { continuation.yield($0) }
+            // v1.18: each source runs an independent backoff + escalation loop.
+            // A source whose AsyncStream ends PERMANENTLY (ES client invalidated,
+            // eslogger subprocess gone) no longer hot-spins at a fixed 2s logging
+            // a warning forever while the heartbeat stays green — it backs off
+            // exponentially and escalates ONCE to a CRITICAL fault, so the host
+            // can't go silently blind on its highest-fidelity sensor.
+            // (Re-establishing the underlying client — es_new_client — remains a
+            // deeper follow-up; this stops the silent-spin + raises the alarm.)
             if let es = collector {
-                Task {
-                    while true {
-                        for await event in es.events {
-                            continuation.yield(event)
-                        }
-                        mergedStreamLogger.warning("ESCollector stream ended — restarting in 2s")
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    }
-                }
+                Task { await driveSource("ESCollector", logger: logger, events: { es.events }, yield: yield) }
             }
-
-            // Source 1b: kdebug events (fallback when ES entitlement unavailable)
             if let kdebug = kdebugCollector {
-                Task {
-                    while true {
-                        for await event in kdebug.events {
-                            continuation.yield(event)
-                        }
-                        mergedStreamLogger.warning("KdebugCollector stream ended — restarting in 2s")
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    }
-                }
+                Task { await driveSource("KdebugCollector", logger: logger, events: { kdebug.events }, yield: yield) }
             }
-
-            // Source 1c: eslogger proxy events
             if let eslogger = esloggerCollector {
-                Task {
-                    while true {
-                        for await event in eslogger.events {
-                            continuation.yield(event)
-                        }
-                        mergedStreamLogger.warning("EsloggerCollector stream ended — restarting in 2s")
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    }
-                }
+                Task { await driveSource("EsloggerCollector", logger: logger, events: { eslogger.events }, yield: yield) }
             }
-
-            // Source 2: Unified Log events
             if let ul = ulCollector {
-                Task {
-                    while true {
-                        for await event in ul.events {
-                            continuation.yield(event)
-                        }
-                        mergedStreamLogger.warning("UnifiedLogCollector stream ended — restarting in 2s")
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    }
-                }
+                Task { await driveSource("UnifiedLogCollector", logger: logger, events: { ul.events }, yield: yield) }
             }
-
-            // Source 3: TCC permission change events
-            Task {
-                while true {
-                    for await event in tccMonitor.events {
-                        continuation.yield(event)
-                    }
-                    mergedStreamLogger.warning("TCCMonitor stream ended — restarting in 2s")
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                }
-            }
-
-            // Source 4: Network connection events
-            Task {
-                while true {
-                    for await event in networkCollector.events {
-                        continuation.yield(event)
-                    }
-                    mergedStreamLogger.warning("NetworkCollector stream ended — restarting in 2s")
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                }
-            }
+            let tcc = tccMonitor
+            Task { await driveSource("TCCMonitor", logger: logger, events: { tcc.events }, yield: yield) }
+            let net = networkCollector
+            Task { await driveSource("NetworkCollector", logger: logger, events: { net.events }, yield: yield) }
         }
+    }
+}
+
+/// Drive one collector stream with exponential backoff + one-shot down
+/// escalation (SourceRestartState), replacing the fixed-2s re-iterate-forever
+/// spin. A re-attach that yields ≥1 event resets the backoff; repeated empty
+/// re-attaches back off (capped) and, past the threshold, escalate once to a
+/// CRITICAL fault so a permanently-dead source can't go unnoticed.
+private func driveSource(
+    _ name: String,
+    logger: Logger,
+    policy: SourceRestartPolicy = SourceRestartPolicy(),
+    events: @escaping @Sendable () -> AsyncStream<Event>,
+    yield: @escaping @Sendable (Event) -> Void
+) async {
+    var state = SourceRestartState(policy: policy)
+    while !Task.isCancelled {
+        var produced = false
+        for await event in events() {
+            produced = true
+            yield(event)
+        }
+        let delay: TimeInterval
+        switch state.record(produced: produced) {
+        case .retry(let d):
+            delay = d
+        case .recovered(let d):
+            delay = d
+            logger.notice("\(name) RECOVERED — event source producing again")
+        case .escalate(let d):
+            delay = d
+            logger.fault("\(name) is DOWN — \(state.consecutiveEmpty) consecutive empty re-attaches; host detection degraded on this source")
+        }
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 }

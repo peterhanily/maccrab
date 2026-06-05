@@ -56,4 +56,4 @@ detection:
 falsepositives:
     - Legitimate system administration tasks
     - Enterprise management tools
-level: high
+level: medium

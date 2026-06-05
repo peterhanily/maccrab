@@ -22,4 +22,4 @@ detection:
 falsepositives:
     - Legitimate screen sharing and recording applications
     - Video conferencing tools
-level: medium
+level: low

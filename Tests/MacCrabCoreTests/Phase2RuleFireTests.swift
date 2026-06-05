@@ -216,10 +216,8 @@ struct Phase2RuleFireTests {
         let matches = await engine.evaluate(event)
         // Other rules may fire (generic keychain detection), but the SSH-specific
         // one should not.
-        #expect(!matches.contains {
-            $0.ruleId.contains("ssh_launched_security_dump") ||
-            $0.ruleId.contains("ssh-launched-security-dump")
-        }, "SSH-specific rule should not fire on local terminal session")
+        #expect(!matches.contains { $0.ruleId == "c4f6a9b2-3e5d-4c1a-8d90-1b2e3f4a5c60" },
+                "ssh_launched_security_dump must not fire on a local terminal session; matches: \(matches.map(\.ruleId))")
     }
 
     // MARK: - staged_fetch_then_exec_from_user_writable (v1.17.1 interp lineage)

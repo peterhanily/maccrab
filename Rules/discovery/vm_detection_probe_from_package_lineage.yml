@@ -66,4 +66,4 @@ detection:
     condition: selection_vm_probe and selection_lineage
 falsepositives:
     - Cross-platform native build tooling that legitimately probes hardware capabilities (e.g., `node-sass` / `sharp` build scripts checking arch + Rosetta) — these read `hw.optional.arm64` and `sysctl machdep` which are softer signals; the `hw.model`/`SPHardwareDataType` strings are more specifically VM-discriminating
-level: high
+level: medium

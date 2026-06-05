@@ -73,4 +73,4 @@ falsepositives:
     - Project scaffold tools (create-react-app, vite init, `dotnet new`) that lay down `.vscode/` in fresh projects; investigate the parent shell and confirm
     - Migration scripts that update tasks.json across a monorepo; allowlist the script's Image
     - The user editing tasks.json via vim/nvim/emacs outside VS Code — these editors should be allowlisted at the project level if used regularly
-level: high
+level: medium

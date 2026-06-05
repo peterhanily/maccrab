@@ -24,4 +24,4 @@ detection:
 falsepositives:
     - Legitimate remote access for development
     - System administrators using SSH tunnels
-level: high
+level: medium

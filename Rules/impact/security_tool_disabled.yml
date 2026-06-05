@@ -43,4 +43,5 @@ falsepositives:
     - Security penetration testers with explicit authorization
     - System administrators in locked-down lab or testing environments
     - macOS Recovery Mode operations (csrutil commands only run in Recovery)
+suppressible: false
 level: high

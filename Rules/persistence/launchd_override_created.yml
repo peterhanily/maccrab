@@ -28,4 +28,4 @@ detection:
 falsepositives:
     - System preference changes
     - Legitimate service management tools
-level: high
+level: medium

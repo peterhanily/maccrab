@@ -65,4 +65,4 @@ detection:
 falsepositives:
     - i18n / l10n tooling whose postinstall step inspects the system locale to choose a translation bundle (rare but possible); allowlist by package name on first FP
     - Locale-aware Node packages run inside an interactive shell; the rule requires a package-manager parent, not interactive shell, so this is naturally filtered
-level: medium
+level: high

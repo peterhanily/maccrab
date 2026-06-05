@@ -38,4 +38,4 @@ falsepositives:
     - CRM applications (Salesforce, HubSpot native apps)
     - Email clients with contact sync
     - Calendar applications with contact lookup
-level: medium
+level: low

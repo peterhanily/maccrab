@@ -28,7 +28,7 @@ detection:
         TargetFilename|re: '^/Users/[^/]+/init\.json$'
     selection_process:
         Image|contains:
-            - 'Code'
+            - '/Code'
             - 'code-server'
             - '/node'
             - 'extensionHost'

@@ -35,6 +35,7 @@ detection:
             - '/filecoder'
             - '/keranger'
             - '/com.apple.finder.plist'
+    selection_known_name_substrings:
         Image|contains:
             - 'EvilQuest'
             - 'ThiefQuest'
@@ -54,7 +55,8 @@ detection:
         Image|contains:
             - '/questd'
             - '/patch'
-    condition: selection_known_names or selection_lockbit_macos or selection_evilquest_patterns
+    condition: selection_known_names or selection_known_name_substrings or selection_lockbit_macos or selection_evilquest_patterns
 falsepositives:
     - None expected — these names are specific to known malware families
+suppressible: false
 level: critical

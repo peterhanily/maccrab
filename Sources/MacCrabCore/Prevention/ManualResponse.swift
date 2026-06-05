@@ -191,6 +191,15 @@ public enum ManualResponse {
     private static let blockedListPath =
         "\(NSHomeDirectory())/Library/Application Support/MacCrab/dashboard_blocked_ips.txt"
 
+    /// Re-validate a persisted blocklist before re-applying it to PF. A
+    /// tampered or stale `dashboard_blocked_ips.txt` must not re-inject a
+    /// malformed entry or a now-protected IP (gateway / DNS) into the PF
+    /// anchor. Pure + `internal` (not inline) so it is unit-tested directly.
+    /// (v1.17.1)
+    static func sanitizePersistedIPs(_ ips: [String]) -> [String] {
+        ips.filter { isValidIP($0) && SafeBlockableIP.reasonToReject(ip: $0) == nil }
+    }
+
     /// Add an IP to the dashboard's PF anchor so outbound traffic to it is
     /// dropped. Uses AppleScript `with administrator privileges` so the
     /// user authorizes once; pfctl requires root.
@@ -213,7 +222,7 @@ public enum ManualResponse {
         // v1.17.1: re-validate persisted entries before re-applying them to PF —
         // a tampered/stale list must not re-inject a malformed or now-protected
         // IP (gateway/DNS). The freshly-passed `trimmed` was already gated above.
-        ips = ips.filter { isValidIP($0) && SafeBlockableIP.reasonToReject(ip: $0) == nil }
+        ips = sanitizePersistedIPs(ips)
         if !ips.contains(trimmed) {
             ips.append(trimmed)
             let dir = (blockedListPath as NSString).deletingLastPathComponent

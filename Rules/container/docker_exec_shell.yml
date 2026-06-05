@@ -36,4 +36,4 @@ detection:
 falsepositives:
     - Developers debugging containers during development
     - Automated health check scripts
-level: medium
+level: low

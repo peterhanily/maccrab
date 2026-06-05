@@ -35,4 +35,4 @@ detection:
 falsepositives:
     - Message backup and export utilities
     - Forensic analysis tools
-level: high
+level: medium

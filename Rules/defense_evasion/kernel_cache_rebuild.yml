@@ -30,4 +30,4 @@ detection:
 falsepositives:
     - System updates rebuilding kernel cache
     - Legitimate kext management by administrators
-level: high
+level: medium

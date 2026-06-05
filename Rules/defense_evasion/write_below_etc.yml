@@ -36,10 +36,11 @@ detection:
             - '/brew'
             - '/port'
             - '/installer'
+    filter_package_manager_paths:
         Image|contains:
             - '/Homebrew/'
             - '/MacPorts/'
-    condition: selection and not filter_apple and not filter_system_processes and not filter_package_managers
+    condition: selection and not filter_apple and not filter_system_processes and not filter_package_managers and not filter_package_manager_paths
 falsepositives:
     - Package managers (Homebrew, MacPorts) modifying /etc
     - Configuration management tools (Ansible, Puppet, Chef)

@@ -53,4 +53,4 @@ detection:
 falsepositives:
     - VS Code extensions that connect to third-party APIs (linters, formatters, AI assistants)
     - Extensions connecting to self-hosted services
-level: medium
+level: low

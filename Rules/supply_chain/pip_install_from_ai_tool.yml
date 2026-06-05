@@ -45,4 +45,4 @@ detection:
 falsepositives:
     - Developers intentionally running pip install via AI tool integrated terminals
     - AI coding assistants installing well-known, verified packages
-level: medium
+level: low

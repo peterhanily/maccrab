@@ -65,4 +65,4 @@ detection:
     condition: selection_proofpoint or selection_forcepoint or selection_teramind or selection_activtrak or selection_veriato or selection_hubstaff or selection_desktime or selection_interguard
 falsepositives:
     - Legitimately deployed by employer IT department
-level: medium
+level: low

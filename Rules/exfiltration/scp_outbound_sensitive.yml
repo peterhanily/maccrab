@@ -35,4 +35,4 @@ detection:
 falsepositives:
     - Legitimate file transfers to known servers
     - Backup operations
-level: high
+level: medium

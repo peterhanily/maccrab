@@ -38,4 +38,4 @@ detection:
 falsepositives:
     - Email backup tools
     - Mail migration utilities
-level: high
+level: medium

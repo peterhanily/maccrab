@@ -50,4 +50,4 @@ detection:
 falsepositives:
     - Web applications that legitimately fetch remote resources via curl or wget
     - Health check scripts executed by the web server
-level: high
+level: medium

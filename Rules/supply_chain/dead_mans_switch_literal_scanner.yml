@@ -37,4 +37,5 @@ detection:
 falsepositives:
     - A security researcher analysing the worm on the same machine MacCrab is monitoring (in which case the alert is the correct outcome and should be triaged manually)
     - Documentation copies of this brief or the rule itself loaded into an editor with content indexing
+suppressible: false
 level: critical

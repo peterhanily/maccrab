@@ -44,4 +44,4 @@ detection:
 falsepositives:
     - Legitimate applications using DoH for privacy
     - VPN clients that route DNS through DoH
-level: high
+level: medium

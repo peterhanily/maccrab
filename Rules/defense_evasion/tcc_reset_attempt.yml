@@ -20,4 +20,4 @@ detection:
 falsepositives:
     - IT administration resetting permissions during troubleshooting
     - Privacy-focused utilities
-level: high
+level: low

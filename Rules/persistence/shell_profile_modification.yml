@@ -56,4 +56,4 @@ detection:
 falsepositives:
     - Package managers (Homebrew, nvm) modifying shell profiles
     - IDE configuration
-level: medium
+level: low

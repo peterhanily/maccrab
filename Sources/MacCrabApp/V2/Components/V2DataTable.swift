@@ -8,12 +8,44 @@
 
 import SwiftUI
 
+/// A type-correct sort key for a `V2DataColumn`. Strings compare
+/// case-insensitively, numbers/dates compare naturally (so "10" sorts after
+/// "9", not before). Also yields a `filterText` so a single per-column closure
+/// powers BOTH column sorting and the table's text filter.
+public enum V2Sortable: Comparable {
+    case text(String)
+    case number(Double)
+    case date(Date)
+
+    private var rank: Int { switch self { case .text: return 0; case .number: return 1; case .date: return 2 } }
+
+    public static func < (l: V2Sortable, r: V2Sortable) -> Bool {
+        switch (l, r) {
+        case let (.text(a), .text(b)):     return a.localizedCaseInsensitiveCompare(b) == .orderedAscending
+        case let (.number(a), .number(b)): return a < b
+        case let (.date(a), .date(b)):     return a < b
+        default:                           return l.rank < r.rank
+        }
+    }
+
+    public var filterText: String {
+        switch self {
+        case .text(let s):   return s
+        case .number(let n): return n == n.rounded() ? String(Int(n)) : String(n)
+        case .date(let d):   return V2TimeFormat.short(d)
+        }
+    }
+}
+
 public struct V2DataColumn<Item> {
     public let id: String
     public let title: String
     public let width: V2DataColumn<Item>.Width
     public let alignment: HorizontalAlignment
     public let cell: (Item) -> AnyView
+    /// When non-nil the column header becomes a click-to-sort button and the
+    /// value participates in the table's text filter. nil = not sortable.
+    public let sortKey: ((Item) -> V2Sortable)?
 
     public enum Width {
         case fixed(CGFloat)
@@ -25,12 +57,14 @@ public struct V2DataColumn<Item> {
         title: String,
         width: Width = .flexible(min: 80),
         alignment: HorizontalAlignment = .leading,
+        sortKey: ((Item) -> V2Sortable)? = nil,
         @ViewBuilder cell: @escaping (Item) -> Cell
     ) {
         self.id = id
         self.title = title
         self.width = width
         self.alignment = alignment
+        self.sortKey = sortKey
         self.cell = { AnyView(cell($0)) }
     }
 }
@@ -39,25 +73,57 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     public let columns: [V2DataColumn<Item>]
     public let items: [Item]
     @Binding public var selection: Item?
+    /// When set, a filter field appears above the table that narrows rows by any
+    /// sortable column's value. Leave nil for views that already have their own
+    /// search box (Alerts, Rules) so there is no duplicate filter.
+    public let searchPrompt: String?
     @State private var hoveredId: Item.ID?
+    @State private var sortColumnId: String?
+    @State private var sortAscending = true
+    @State private var filterQuery = ""
 
     public init(
         columns: [V2DataColumn<Item>],
         items: [Item],
-        selection: Binding<Item?>
+        selection: Binding<Item?>,
+        searchPrompt: String? = nil
     ) {
         self.columns = columns
         self.items = items
         self._selection = selection
+        self.searchPrompt = searchPrompt
+    }
+
+    /// Filter (by any sortable column's text) then sort (by the active column).
+    private var displayItems: [Item] {
+        var result = items
+        let q = filterQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        if !q.isEmpty {
+            let keys = columns.compactMap { $0.sortKey }
+            result = result.filter { item in
+                keys.contains { $0(item).filterText.lowercased().contains(q) }
+            }
+        }
+        if let sid = sortColumnId,
+           let key = columns.first(where: { $0.id == sid })?.sortKey {
+            result = result.sorted { a, b in
+                sortAscending ? key(a) < key(b) : key(b) < key(a)
+            }
+        }
+        return result
     }
 
     public var body: some View {
         VStack(spacing: 0) {
+            if let prompt = searchPrompt {
+                filterField(prompt)
+                Divider().background(V2Theme.panelBorder)
+            }
             headerRow
             Divider().background(V2Theme.panelBorder)
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(items) { item in
+                    ForEach(displayItems) { item in
                         rowView(item)
                     }
                 }
@@ -66,15 +132,58 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         .v2Panel(padding: 0)
     }
 
+    private func filterField(_ prompt: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .foregroundStyle(V2Theme.mutedText)
+            TextField(prompt, text: $filterQuery)
+                .textFieldStyle(.plain)
+                .font(V2Theme.body())
+            if !filterQuery.isEmpty {
+                Button { filterQuery = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(V2Theme.mutedText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(V2Theme.sidebarBackground.opacity(0.4))
+    }
+
+    private func toggleSort(_ id: String) {
+        if sortColumnId == id { sortAscending.toggle() }
+        else { sortColumnId = id; sortAscending = true }
+    }
+
     private var headerRow: some View {
         HStack(spacing: 0) {
             ForEach(columns.indices, id: \.self) { idx in
                 let col = columns[idx]
                 cell(width: col.width, alignment: col.alignment) {
-                    Text(col.title)
-                        .font(V2Theme.cardTitle())
-                        .foregroundStyle(V2Theme.mutedText)
-                        .textCase(.uppercase)
+                    if col.sortKey != nil {
+                        Button { toggleSort(col.id) } label: {
+                            HStack(spacing: 3) {
+                                Text(col.title)
+                                    .font(V2Theme.cardTitle())
+                                    .foregroundStyle(sortColumnId == col.id ? V2Theme.primaryText : V2Theme.mutedText)
+                                    .textCase(.uppercase)
+                                if sortColumnId == col.id {
+                                    Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(V2Theme.brand)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Sort by \(col.title)")
+                    } else {
+                        Text(col.title)
+                            .font(V2Theme.cardTitle())
+                            .foregroundStyle(V2Theme.mutedText)
+                            .textCase(.uppercase)
+                    }
                 }
             }
         }

@@ -55,4 +55,4 @@ detection:
 falsepositives:
     - Authorized wireless security auditors performing network assessment
     - Network engineers capturing traffic for legitimate troubleshooting
-level: high
+level: medium

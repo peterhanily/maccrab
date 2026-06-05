@@ -152,4 +152,4 @@ falsepositives:
 # MacCrab's own files/plist), which observes real tampering instead of guessing
 # from a shell command line. The filters below are retained for the rare
 # non-Apple-actor case and for forensic hunting.
-level: high
+level: medium

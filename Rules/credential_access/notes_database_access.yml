@@ -33,4 +33,4 @@ detection:
 falsepositives:
     - Backup utilities
     - Notes migration or export tools
-level: high
+level: medium

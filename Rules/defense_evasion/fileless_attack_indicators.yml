@@ -88,4 +88,4 @@ falsepositives:
     - Legitimate JXA automation scripts
     - Python scientific computing using ctypes/cffi
     - DevOps installation scripts (curl | bash pattern for installers)
-level: high
+level: medium

@@ -52,4 +52,4 @@ detection:
 falsepositives:
     - Packages that install data files or configuration templates to standard locations
     - Packages that create wrapper scripts in /usr/local/bin
-level: high
+level: medium

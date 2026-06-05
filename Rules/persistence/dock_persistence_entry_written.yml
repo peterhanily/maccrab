@@ -62,4 +62,4 @@ detection:
 falsepositives:
     - Dock-customization utilities (Dockey, uBar) — verify the exact parent binary
     - Enterprise MDM Dock-preset scripts dispatched via profiles
-level: high
+level: low

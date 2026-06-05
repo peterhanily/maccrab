@@ -51,4 +51,4 @@ falsepositives:
     - Legitimate DNS debugging against long encoded subdomains
     - DNSSEC trust-chain verification tooling
     - DKIM rotation testing against unusually long selectors
-level: low
+level: medium

@@ -63,4 +63,4 @@ detection:
 falsepositives:
     - IT management and MDM solutions (Jamf, Mosyle, Kandji)
     - System administrators enabling remote access intentionally
-level: high
+level: medium

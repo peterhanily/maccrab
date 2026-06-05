@@ -66,4 +66,4 @@ detection:
 falsepositives:
     - New VPN or endpoint-security vendors not in the allow-list
     - Enterprise MDM rollouts of custom network profiles — verify provenance
-level: high
+level: medium

@@ -518,20 +518,35 @@ public actor TraceStore {
         return (attrs?[.size] as? Int64) ?? 0
     }
 
-    // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
+    /// Live (non-freelist) data size = (page_count − freelist_count) × page_size.
+    /// Unlike `databaseSizeBytes()` (the on-disk file footprint), this drops the
+    /// moment rows are DELETEd. Because traces.db runs `auto_vacuum = INCREMENTAL`
+    /// (set in openDatabase), freed pages sit on the freelist until a vacuum, so
+    /// the FILE size does NOT shrink mid-prune-loop. The size-cap enforcer must
+    /// break on THIS — breaking on the file size makes the loop run to its
+    /// iteration cap and over-prune (the v1.18 traces.db sibling of the
+    /// tracegraph over-prune fix).
+    public func liveDataSizeBytes() -> Int64 {
+        guard let db = db else { return 0 }
+        func pragmaInt(_ name: String) -> Int64 {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "PRAGMA \(name)", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0
+        }
+        let pages = pragmaInt("page_count")
+        let free = pragmaInt("freelist_count")
+        let pageSize = pragmaInt("page_size")
+        return max(0, (pages - free) * pageSize)
+    }
+
+    // MARK: - Incremental vacuum (Wave 9B, v1.12.6; auto_vacuum=INCREMENTAL since RC2)
     //
-    // KNOWN GAP: TraceStore does NOT set `auto_vacuum = INCREMENTAL`
-    // on fresh DBs (see openDatabase above — only journal_mode, cache,
-    // mmap, and busy_timeout are set). The Wave 9B helper detects
-    // this at runtime via `PRAGMA auto_vacuum` and short-circuits to
-    // a no-op (returns 0) when the file is in mode 0, which is the
-    // current behaviour for all existing traces.db files.
-    //
-    // Switching this would require a v1.13 ALTER PRAGMA + one-shot
-    // full VACUUM on existing DBs, which we explicitly avoid in
-    // v1.12.6. The gap is logged by the caller (DaemonTimers) so
-    // operators can see "incremental_vacuum: skipped — DB not in
-    // INCREMENTAL mode" in the structured log.
+    // traces.db sets `auto_vacuum = INCREMENTAL` in openDatabase (before
+    // journal_mode — SQLite refuses to flip it once the header is written), so
+    // `incrementalVacuum` reclaims freelist pages to the OS. (Pre-RC2 the mode
+    // was NONE and this was a no-op; any traces.db created then stays in mode 0
+    // until a one-shot full VACUUM, which the caller handles on low disk.)
     @discardableResult
     public func incrementalVacuum(maxPages: Int) async throws -> Int {
         guard let db = db else { return 0 }

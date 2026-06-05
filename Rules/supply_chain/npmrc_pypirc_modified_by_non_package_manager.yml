@@ -79,4 +79,4 @@ falsepositives:
     - First-time setup wizards (devcontainer init, project scaffold) that legitimately write a fresh config
     - CI bootstrap scripts that drop a `.npmrc` with `_authToken` before publish; allowlist by Image or restrict to interactive sessions
     - Internal corporate tooling that auto-rotates registry tokens; allowlist the rotation binary
-level: high
+level: medium

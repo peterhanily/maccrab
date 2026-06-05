@@ -49,4 +49,4 @@ falsepositives:
     - Legitimate VS Code extensions running build tasks or linters
     - Language server protocol extensions spawning processes
     - VS Code integrated terminal
-level: medium
+level: low

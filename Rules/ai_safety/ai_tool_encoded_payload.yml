@@ -27,4 +27,4 @@ detection:
     condition: selection_decode and selection_ai_parent
 falsepositives:
     - Legitimate encoding/decoding operations during development
-level: high
+level: low

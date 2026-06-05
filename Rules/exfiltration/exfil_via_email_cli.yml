@@ -39,4 +39,4 @@ falsepositives:
     - Automated backup notification scripts
     - CI/CD pipelines sending build artifacts
     - Legitimate scripted reporting tools
-level: high
+level: medium

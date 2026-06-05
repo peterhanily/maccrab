@@ -50,4 +50,4 @@ detection:
 falsepositives:
     - Developers using Python HTTP server for local testing
     - Documentation tooling that serves static files
-level: medium
+level: low

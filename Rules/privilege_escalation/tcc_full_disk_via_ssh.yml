@@ -29,4 +29,4 @@ detection:
 falsepositives:
     - Legitimate remote administration via SSH
     - Backup scripts running over SSH
-level: high
+level: medium

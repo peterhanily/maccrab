@@ -46,4 +46,5 @@ detection:
 falsepositives:
     - CGI scripts that legitimately spawn shell processes
     - Web-based administration panels
+suppressible: false
 level: high

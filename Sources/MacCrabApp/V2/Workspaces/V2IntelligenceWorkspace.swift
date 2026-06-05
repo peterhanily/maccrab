@@ -506,31 +506,38 @@ public struct V2IntelligenceWorkspace: View {
             }
             V2DataTable(
                 columns: [
-                    V2DataColumn(id: "name", title: "Feed", width: .flexible(min: 220)) { f in
+                    V2DataColumn(id: "name", title: "Feed", width: .flexible(min: 220),
+                                 sortKey: { .text($0.name) }) { f in
                         V2TableCellText(f.name)
                     },
-                    V2DataColumn(id: "kind", title: "Kind", width: .fixed(140)) { f in
+                    V2DataColumn(id: "kind", title: "Kind", width: .fixed(140),
+                                 sortKey: { .text($0.kind) }) { f in
                         V2TableCellText(f.kind, primary: false)
                     },
-                    V2DataColumn(id: "entries", title: "Entries", width: .fixed(110)) { f in
+                    V2DataColumn(id: "entries", title: "Entries", width: .fixed(110),
+                                 sortKey: { .number(Double($0.entries)) }) { f in
                         V2TableCellText("\(f.entries)", mono: true)
                     },
-                    V2DataColumn(id: "fetch", title: "Last fetch", width: .fixed(120)) { f in
+                    V2DataColumn(id: "fetch", title: "Last fetch", width: .fixed(120),
+                                 sortKey: { .date($0.lastFetch) }) { f in
                         V2TableCellText(V2TimeFormat.relative(f.lastFetch), primary: false)
                     },
-                    V2DataColumn(id: "status", title: "Status", width: .fixed(110)) { f in
+                    V2DataColumn(id: "status", title: "Status", width: .fixed(110),
+                                 sortKey: { .text($0.lastError != nil ? "Failing" : ($0.staleness > 3600 ? "Stale" : "Healthy")) }) { f in
                         let label = f.lastError != nil ? "Failing"
                             : (f.staleness > 60 * 60 ? "Stale" : "Healthy")
                         let kind: V2ChipKind = (f.lastError != nil || f.staleness > 60 * 60)
                             ? .warning : .healthy
                         V2StatusChip(label, kind: kind)
                     },
-                    V2DataColumn(id: "error", title: "Last error", width: .flexible(min: 160)) { f in
+                    V2DataColumn(id: "error", title: "Last error", width: .flexible(min: 160),
+                                 sortKey: { .text($0.lastError ?? "") }) { f in
                         V2TableCellText(f.lastError ?? "—", primary: false)
                     },
                 ],
                 items: feeds,
-                selection: .constant(nil)
+                selection: .constant(nil),
+                searchPrompt: "Filter feeds…"
             )
             .frame(minHeight: 280)
         }
@@ -583,24 +590,30 @@ public struct V2IntelligenceWorkspace: View {
             } else {
                 V2DataTable(
                     columns: [
-                        V2DataColumn(id: "hit", title: "What it hit", width: .flexible(min: 200)) { m in
+                        V2DataColumn(id: "hit", title: "What it hit", width: .flexible(min: 200),
+                                     sortKey: { .text($0.title) }) { m in
                             V2TableCellText(m.title)
                         },
-                        V2DataColumn(id: "type", title: "Type", width: .fixed(90)) { m in
+                        V2DataColumn(id: "type", title: "Type", width: .fixed(90),
+                                     sortKey: { .text(iocType(forRuleId: $0.ruleId)) }) { m in
                             V2StatusChip(iocType(forRuleId: m.ruleId), kind: .data)
                         },
-                        V2DataColumn(id: "indicator", title: "Indicator / source", width: .flexible(min: 220)) { m in
+                        V2DataColumn(id: "indicator", title: "Indicator / source", width: .flexible(min: 220),
+                                     sortKey: { .text($0.description) }) { m in
                             V2TableCellText(m.description, primary: false, mono: true, lineLimit: 2)
                         },
-                        V2DataColumn(id: "process", title: "Process", width: .fixed(180)) { m in
+                        V2DataColumn(id: "process", title: "Process", width: .fixed(180),
+                                     sortKey: { .text($0.process) }) { m in
                             V2TableCellText(m.process, primary: false)
                         },
-                        V2DataColumn(id: "when", title: "When", width: .fixed(120)) { m in
+                        V2DataColumn(id: "when", title: "When", width: .fixed(120),
+                                     sortKey: { .date($0.timestamp) }) { m in
                             V2TableCellText(V2TimeFormat.relative(m.timestamp), primary: false)
                         },
                     ],
                     items: matches,
-                    selection: .constant(nil)
+                    selection: .constant(nil),
+                    searchPrompt: "Filter matches…"
                 )
                 .frame(minHeight: 220)
             }
@@ -792,31 +805,38 @@ public struct V2IntelligenceWorkspace: View {
         ZStack(alignment: .topTrailing) {
             V2DataTable(
                 columns: [
-                    V2DataColumn(id: "name", title: "Package", width: .flexible(min: 200)) { p in
+                    V2DataColumn(id: "name", title: "Package", width: .flexible(min: 200),
+                                 sortKey: { .text($0.name) }) { p in
                         V2TableCellText(p.name)
                     },
-                    V2DataColumn(id: "manager", title: "Manager", width: .fixed(100)) { p in
+                    V2DataColumn(id: "manager", title: "Manager", width: .fixed(100),
+                                 sortKey: { .text($0.manager) }) { p in
                         V2StatusChip(p.manager, kind: .data)
                     },
-                    V2DataColumn(id: "installed", title: "Installed", width: .fixed(120)) { p in
+                    V2DataColumn(id: "installed", title: "Installed", width: .fixed(120),
+                                 sortKey: { .text($0.installed) }) { p in
                         V2TableCellText(p.installed, primary: false, mono: true)
                     },
-                    V2DataColumn(id: "latest", title: "Latest", width: .fixed(120)) { p in
+                    V2DataColumn(id: "latest", title: "Latest", width: .fixed(120),
+                                 sortKey: { .text($0.latest) }) { p in
                         V2TableCellText(p.latest, primary: false, mono: true)
                     },
-                    V2DataColumn(id: "vuln", title: "Vulns", width: .fixed(80)) { p in
+                    V2DataColumn(id: "vuln", title: "Vulns", width: .fixed(80),
+                                 sortKey: { .number(Double($0.vulnCount)) }) { p in
                         if p.vulnCount > 0 {
                             V2StatusChip("\(p.vulnCount)", kind: .high)
                         } else {
                             Text("0").foregroundStyle(V2Theme.tertiaryText).font(V2Theme.meta())
                         }
                     },
-                    V2DataColumn(id: "stale", title: "Behind", width: .fixed(110)) { p in
+                    V2DataColumn(id: "stale", title: "Behind", width: .fixed(110),
+                                 sortKey: { .number($0.staleness) }) { p in
                         V2TableCellText(V2TimeFormat.staleness(p.staleness), primary: false)
                     },
                 ],
                 items: packages,
-                selection: $selectedPackage
+                selection: $selectedPackage,
+                searchPrompt: "Filter packages…"
             )
             .frame(minHeight: 360, maxHeight: .infinity)
             if let pkg = selectedPackage {

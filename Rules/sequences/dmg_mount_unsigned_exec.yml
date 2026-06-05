@@ -45,4 +45,4 @@ falsepositives:
     - Developers mounting internal-build DMGs containing ad-hoc signed or unsigned test binaries
     - Legacy open-source apps distributed via DMG without Developer ID signing
     - QA or release engineers validating pre-notarization builds from disk images
-level: high
+level: medium

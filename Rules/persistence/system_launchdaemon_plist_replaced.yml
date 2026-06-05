@@ -38,4 +38,5 @@ detection:
 falsepositives:
     - macOS system updates staged outside the signed installer path (rare)
     - Third-party disk tools with signed-installer manipulation (verify SIP state)
+suppressible: false
 level: critical

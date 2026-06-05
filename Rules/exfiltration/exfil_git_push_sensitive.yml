@@ -39,4 +39,4 @@ detection:
 falsepositives:
     - Developers pushing personal projects from Documents
     - Legitimate backup repositories
-level: medium
+level: low

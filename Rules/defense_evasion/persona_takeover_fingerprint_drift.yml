@@ -62,4 +62,4 @@ falsepositives:
     - User legitimately changes their signing key after rotating a GPG key — this fires once and is correctly suppressible by the analyst
     - First-laptop-setup wizards (chezmoi, yadm, dotbot) writing a fresh `~/.gitconfig`; allowlist these by Image
     - Git itself (`git config --global user.signingkey ...`) writing the field through the user's interactive shell — investigate the parent shell history before suppression
-level: medium
+level: low

@@ -71,4 +71,4 @@ falsepositives:
     - Legitimate maintainer working night shifts; user can suppress the rule per-tool basis
     - CI agents running locally (act, dagger) — already filtered if parent matches /runner, /buildkite-agent etc.; extend filter if a local runner basename appears
     - Auto-publish via Renovate / Dependabot triggered by a webhook from launchd; allowlist by parent Image when the workflow is established
-level: medium
+level: low

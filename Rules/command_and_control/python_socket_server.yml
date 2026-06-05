@@ -72,4 +72,4 @@ detection:
 falsepositives:
     - Self-hosted internal services intentionally bound to all interfaces
     - Container or CI runners using Python servers on 0.0.0.0
-level: medium
+level: low

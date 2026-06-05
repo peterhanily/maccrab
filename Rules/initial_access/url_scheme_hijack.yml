@@ -37,4 +37,4 @@ detection:
 falsepositives:
     - Legitimate app installations registering their URL schemes
     - Developer testing custom URL handlers
-level: medium
+level: low

@@ -188,12 +188,24 @@ public enum ArtifactExporter {
         }
     }
 
-    private static func csvEscape(_ s: String) -> String {
-        if s.contains(",") || s.contains("\"") || s.contains("\n") {
-            let escaped = s.replacingOccurrences(of: "\"", with: "\"\"")
+    /// CSV-escape a cell. Beyond RFC-4180 quoting, neutralizes spreadsheet
+    /// formula injection: a cell beginning with `= + - @` (or a leading tab/CR,
+    /// which Excel strips before parsing) is evaluated as a live formula when the
+    /// evidence CSV is opened in Excel/Numbers. Artifact values are harvested
+    /// from a potentially-compromised host (filenames, hosts entries, process
+    /// args), so an attacker-chosen `=cmd|'/C ...'` cell must not execute on the
+    /// analyst's machine. Prefix such a cell with a single quote so the
+    /// spreadsheet reads it as text. `internal` (not private) for unit testing.
+    static func csvEscape(_ s: String) -> String {
+        var value = s
+        if let first = value.first, "=+-@\t\r".contains(first) {
+            value = "'" + value
+        }
+        if value.contains(",") || value.contains("\"") || value.contains("\n") {
+            let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
             return "\"\(escaped)\""
         }
-        return s
+        return value
     }
 
     /// Reveal the exported file in Finder.

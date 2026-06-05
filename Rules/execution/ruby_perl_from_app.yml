@@ -56,4 +56,4 @@ detection:
 falsepositives:
     - Development IDEs that launch Ruby/Perl
     - Legitimate automation tools
-level: medium
+level: low

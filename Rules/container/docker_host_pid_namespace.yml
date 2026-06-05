@@ -31,4 +31,4 @@ detection:
 falsepositives:
     - Monitoring containers that legitimately need host process visibility
     - Debugging containers during development
-level: high
+level: medium

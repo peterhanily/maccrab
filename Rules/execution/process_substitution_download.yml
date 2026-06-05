@@ -37,4 +37,4 @@ detection:
 falsepositives:
     - Legitimate installation scripts using process substitution
     - Homebrew formula installation
-level: high
+level: medium

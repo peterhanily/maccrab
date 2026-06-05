@@ -43,4 +43,4 @@ detection:
 falsepositives:
     - Python Kubernetes client library (kubernetes-client) used for legitimate cluster management
     - Helm plugins written in Python
-level: high
+level: medium

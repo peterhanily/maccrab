@@ -40,4 +40,4 @@ detection:
 falsepositives:
     - Administrators manually scheduling one-time maintenance tasks
     - Legacy backup scripts using at for delayed execution
-level: high
+level: medium

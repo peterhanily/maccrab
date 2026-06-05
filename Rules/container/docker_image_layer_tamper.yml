@@ -46,4 +46,4 @@ falsepositives:
     - Legitimate image backup and migration workflows
     - DevOps pipelines exporting images for scanning
     - Developers building custom base images
-level: medium
+level: low

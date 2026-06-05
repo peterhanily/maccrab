@@ -83,7 +83,7 @@ struct SSHRuleWithEnricherTests {
 
         // The SSH-specific rule ID must not appear.
         let matches = await engine.evaluate(enriched)
-        #expect(!matches.contains { $0.ruleId.contains("ssh_launched_security_dump") },
+        #expect(!matches.contains { $0.ruleId == "c4f6a9b2-3e5d-4c1a-8d90-1b2e3f4a5c60" },
                 "ssh_launched_security_dump should not fire for Terminal-launched process; matches: \(matches.map(\.ruleId))")
     }
 }

@@ -34,4 +34,4 @@ detection:
 falsepositives:
     - Cloud SDKs running locally that attempt IMDS checks before falling back to file-based credentials
     - Docker containers with metadata emulation
-level: high
+level: medium

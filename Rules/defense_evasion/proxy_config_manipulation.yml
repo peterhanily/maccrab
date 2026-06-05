@@ -41,8 +41,8 @@ detection:
         SignerType: 'apple'
         ParentImage|startswith:
             - '/System/'
-    condition: selection_networksetup or selection_scutil or selection_pac_file
+    condition: (selection_networksetup or selection_scutil or selection_pac_file) and not filter_system
 falsepositives:
     - Corporate VPN clients configuring proxy
     - Network management tools
-level: high
+level: medium

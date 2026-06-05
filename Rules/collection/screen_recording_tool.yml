@@ -24,4 +24,4 @@ detection:
 falsepositives:
     - Legitimate screen recording for tutorials or presentations
     - Bug reporting workflows
-level: high
+level: medium

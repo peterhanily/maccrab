@@ -1293,6 +1293,30 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return (attrs?[.size] as? Int64) ?? 0
     }
 
+    /// In-use data size = (page_count − freelist_count) × page_size.
+    ///
+    /// Unlike `databaseSizeBytes()` — the on-disk FILE footprint, which does
+    /// NOT shrink until `incremental_vacuum`/`VACUUM` returns freelist pages to
+    /// the OS — this DROPS as DELETEs move pages onto the freelist. A size-cap
+    /// prune loop must measure its progress with THIS, not the file size:
+    /// pruning frees pages but the file stays large until the post-loop vacuum,
+    /// so a file-size break-condition never trips and the loop over-prunes the
+    /// substrate ~10× past the cap (field-observed 476 MB → 36 MB at a 250 MB
+    /// cap, because all 5 iterations ran before the single end-of-loop vacuum).
+    public func liveDataSizeBytes() -> Int64 {
+        guard let db else { return 0 }
+        func pragmaInt(_ name: String) -> Int64 {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "PRAGMA \(name)", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0
+        }
+        let pages = pragmaInt("page_count")
+        let free = pragmaInt("freelist_count")
+        let pageSize = pragmaInt("page_size")
+        return max(0, (pages - free) * pageSize)
+    }
+
     // MARK: - Substrate (entity/edge) retention  (v1.18.0)
     //
     // trace_entities + trace_edges are the GLOBAL causal-graph substrate:
@@ -1412,19 +1436,13 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
 
     // MARK: - Incremental vacuum (Wave 9B, v1.12.6)
     //
-    // KNOWN GAP: tracegraph.db does NOT set `auto_vacuum = INCREMENTAL`
-    // on fresh DBs (see openDatabase — only journal_mode, cache, mmap,
-    // wal_autocheckpoint, busy_timeout, foreign_keys are set). Field-
-    // observed: tracegraph.db is the WORST offender of the four
-    // stores, hitting 11 GB on a daily-Claude-Code dev box before any
-    // Wave 9B mitigation. The runtime helper detects mode 0 and
-    // short-circuits to a no-op so this method is harmless on
-    // existing files but does nothing useful either.
-    //
-    // For new INCREMENTAL-mode DBs (post-v1.13 conversion) this will
-    // reclaim freelist pages in place exactly like EventStore. Until
-    // then operators must run `maccrabctl maintenance vacuum
-    // tracegraph` to convert.
+    // tracegraph.db is the WORST offender of the four stores, field-
+    // observed at 11 GB on a daily-Claude-Code dev box before any
+    // Wave 9B mitigation. Since Wave 9B.1 (v1.12.6) openDatabase sets
+    // `auto_vacuum = INCREMENTAL` BEFORE journal_mode, so fresh DBs run
+    // in mode 2 and this reclaims freelist pages in place exactly like
+    // EventStore. Pre-Wave-9B.1 files still in mode 0 can be converted
+    // once with `maccrabctl maintenance vacuum tracegraph`.
     @discardableResult
     public func incrementalVacuum(maxPages: Int) async throws -> Int {
         guard let db = db else { return 0 }

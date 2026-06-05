@@ -28,4 +28,4 @@ falsepositives:
     - Legitimate input remapping tools (Karabiner-Elements, SteerMouse)
     - Accessibility software
     - Remote desktop applications
-level: high
+level: medium

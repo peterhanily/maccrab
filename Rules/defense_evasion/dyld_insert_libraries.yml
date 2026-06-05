@@ -35,4 +35,4 @@ detection:
 falsepositives:
     - Debugging tools injecting diagnostic libraries
     - Some legitimate application frameworks
-level: high
+level: medium

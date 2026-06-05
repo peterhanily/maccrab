@@ -21,4 +21,5 @@ detection:
     condition: selection
 falsepositives:
     - System administrators intentionally disabling Gatekeeper
+suppressible: false
 level: critical

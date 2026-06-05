@@ -44,4 +44,5 @@ detection:
 falsepositives:
     - Self-built developer tools that haven't been signed yet
     - Custom in-house deployment scripts
+suppressible: false
 level: high

@@ -62,4 +62,4 @@ falsepositives:
     - System administrators scheduling or performing controlled reboots
     - Automated maintenance scripts performing patch-and-reboot workflows
     - Software update agents rebooting after installing OS updates
-level: medium
+level: low

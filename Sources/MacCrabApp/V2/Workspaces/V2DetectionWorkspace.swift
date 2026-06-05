@@ -9,6 +9,7 @@ import MacCrabCore
 
 public struct V2DetectionWorkspace: View {
     @ObservedObject var state: V2DashboardState
+    @ObservedObject var appState: AppState
     @State private var selectedRule: V2MockRule?
     /// Cached lowercased haystack per rule, computed once when
     /// `rules` is loaded. Each rule's haystack is the concat of
@@ -51,7 +52,10 @@ public struct V2DetectionWorkspace: View {
     /// the rules-load task. See `builtInDetectionNote`.
     @State private var compositeRuleLabels: [String: String] = [:]
 
-    public init(state: V2DashboardState) { self.state = state }
+    init(state: V2DashboardState, appState: AppState) {
+        self.state = state
+        self.appState = appState
+    }
 
     /// Lowercased search haystack for one rule — id + title (= the alert
     /// name) + category + MITRE + description. The single source of truth
@@ -240,6 +244,18 @@ public struct V2DetectionWorkspace: View {
     /// chmod'd 0775 root:admin during bootstrap so any admin user can
     /// edit overrides without re-prompting.
     private func toggleRuleDisabled(_ rule: V2MockRule) async {
+        // Built-in maccrab.* rules: enable/disable (mute) via the inbox IPC —
+        // the root daemon owns builtin_rules_settings.json. Detection + any
+        // protective action still run; only the alert is muted.
+        if rule.id.hasPrefix("maccrab.") {
+            appState.setBuiltinRuleEnabled(ruleId: rule.id, enabled: !rule.isEnabled)
+            state.showToast(V2Toast(
+                kind: .info,
+                title: rule.isEnabled ? "Built-in rule muted" : "Built-in rule enabled",
+                detail: rule.title + " — applies in ~5 s (detection still runs)"
+            ))
+            return
+        }
         let currentlyDisabled = userDisabledRuleIDs.contains(rule.id) || !rule.isEnabled
         if currentlyDisabled {
             await removeUserOverride(rule: rule)
@@ -549,31 +565,38 @@ public struct V2DetectionWorkspace: View {
         let items = debouncedRuleQuery.isEmpty ? rules : filteredRules
         return V2DataTable(
             columns: [
-                V2DataColumn(id: "on", title: "On", width: .fixed(50)) { r in
+                V2DataColumn(id: "on", title: "On", width: .fixed(50),
+                             sortKey: { .number($0.isEnabled ? 0 : 1) }) { r in
                     Image(systemName: r.isEnabled ? "circle.fill" : "circle")
                         .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
                         .scaledSystem(8)
                 },
-                V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 240)) { r in
+                V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 240),
+                             sortKey: { .text($0.title) }) { r in
                     VStack(alignment: .leading, spacing: 1) {
                         V2TableCellText(r.title)
                         V2TableCellText(r.id, primary: false, mono: true)
                     }
                 },
-                V2DataColumn(id: "category", title: "Category", width: .fixed(140)) { r in
+                V2DataColumn(id: "category", title: "Category", width: .fixed(140),
+                             sortKey: { .text($0.category) }) { r in
                     V2TableCellText(r.category, primary: false)
                 },
-                V2DataColumn(id: "sev", title: "Severity", width: .fixed(96)) { r in
+                V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),
+                             sortKey: { .number(Double($0.severity.sortOrder)) }) { r in
                     V2StatusChip(r.severity.label, kind: r.severity.chipKind)
                 },
-                V2DataColumn(id: "mitre", title: "MITRE", width: .fixed(110)) { r in
+                V2DataColumn(id: "mitre", title: "MITRE", width: .fixed(110),
+                             sortKey: { .text($0.mitre.first ?? "") }) { r in
                     Text(r.mitre.first ?? "—")
                         .font(V2Theme.mono()).foregroundStyle(V2Theme.mutedText)
                 },
-                V2DataColumn(id: "fires", title: "Fires (7d)", width: .fixed(90)) { r in
+                V2DataColumn(id: "fires", title: "Fires (7d)", width: .fixed(90),
+                             sortKey: { .number(Double($0.firesLastWeek)) }) { r in
                     V2TableCellText("\(r.firesLastWeek)", primary: false, mono: true)
                 },
-                V2DataColumn(id: "custom", title: "Source", width: .fixed(80)) { r in
+                V2DataColumn(id: "custom", title: "Source", width: .fixed(80),
+                             sortKey: { .text($0.isCustom ? "Custom" : "Builtin") }) { r in
                     V2StatusChip(r.isCustom ? "Custom" : "Builtin",
                                  kind: r.isCustom ? .ai : .neutral)
                 },
@@ -621,28 +644,90 @@ public struct V2DetectionWorkspace: View {
                 V2InspectorKeyValue("Fires (7d)", "\(r.firesLastWeek)")
                 V2InspectorKeyValue("Category", r.category)
             }
-            V2InspectorSection("Actions") {
-                V2ActionButton("View YAML", icon: "doc.text", style: .secondary,
-                               tooltip: "Show the rule's source YAML in-app") {
-                    yamlViewerRule = r
+            if r.id.hasPrefix("maccrab.") {
+                // Built-in detection: logic isn't editable, but it can be muted
+                // or have its severity overridden (applied at the daemon's
+                // AlertSink chokepoint via the inbox IPC).
+                BuiltinRuleSettingsSection(rule: r, appState: appState, state: state)
+                V2InspectorSection("Actions") {
+                    V2ActionButton(
+                        r.isEnabled ? "Mute rule" : "Enable rule",
+                        icon: r.isEnabled ? "minus.circle" : "checkmark.circle",
+                        style: .secondary,
+                        tooltip: "Built-in rule: mute the alert (the detection + any protective action still run)."
+                    ) {
+                        Task { await toggleRuleDisabled(r) }
+                    }
+                    V2ActionButton("View fires", icon: "list.bullet", style: .secondary) {
+                        state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                    }
                 }
-                V2ActionButton("Edit YAML", icon: "pencil", style: .secondary,
-                               tooltip: "Open the YAML in an in-app editor. Save writes a user-rule override that survives Sparkle updates.") {
-                    yamlEditorRule = r
+            } else {
+                V2InspectorSection("Actions") {
+                    V2ActionButton("View YAML", icon: "doc.text", style: .secondary,
+                                   tooltip: "Show the rule's source YAML in-app") {
+                        yamlViewerRule = r
+                    }
+                    V2ActionButton("Edit YAML", icon: "pencil", style: .secondary,
+                                   tooltip: "Open the YAML in an in-app editor. Save writes a user-rule override that survives Sparkle updates.") {
+                        yamlEditorRule = r
+                    }
+                    let isDisabled = userDisabledRuleIDs.contains(r.id) || !r.isEnabled
+                    V2ActionButton(
+                        isDisabled ? "Enable rule" : "Disable rule",
+                        icon: isDisabled ? "checkmark.circle" : "minus.circle",
+                        style: .secondary,
+                        tooltip: isDisabled
+                            ? "Re-enable this rule (removes the user override)"
+                            : "Disable this rule without editing the bundled YAML. First disable in this session may prompt for your admin password to create the override directory; subsequent disables don't."
+                    ) {
+                        Task { await toggleRuleDisabled(r) }
+                    }
+                    V2ActionButton("View fires", icon: "list.bullet", style: .secondary) {
+                        state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                    }
                 }
-                let isDisabled = userDisabledRuleIDs.contains(r.id) || !r.isEnabled
-                V2ActionButton(
-                    isDisabled ? "Enable rule" : "Disable rule",
-                    icon: isDisabled ? "checkmark.circle" : "minus.circle",
-                    style: .secondary,
-                    tooltip: isDisabled
-                        ? "Re-enable this rule (removes the user override)"
-                        : "Disable this rule without editing the bundled YAML. First disable in this session may prompt for your admin password to create the override directory; subsequent disables don't."
-                ) {
-                    Task { await toggleRuleDisabled(r) }
-                }
-                V2ActionButton("View fires", icon: "list.bullet", style: .secondary) {
-                    state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+            }
+        }
+    }
+
+    /// Severity-override control for a built-in maccrab.* rule. The picker sends
+    /// the chosen severity (or clears the override) through the inbox; the chip
+    /// above already shows the current EFFECTIVE severity.
+    private struct BuiltinRuleSettingsSection: View {
+        let rule: V2MockRule
+        @ObservedObject var appState: AppState
+        @ObservedObject var state: V2DashboardState
+        @State private var severitySel = "default"
+
+        var body: some View {
+            V2InspectorSection("Built-in settings") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("This detection's logic isn't editable. You can override its severity or mute it; the detection still runs.")
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Text("Override severity").font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                        Spacer()
+                        Picker("", selection: $severitySel) {
+                            Text("Default").tag("default")
+                            Text("Critical").tag("critical")
+                            Text("High").tag("high")
+                            Text("Medium").tag("medium")
+                            Text("Low").tag("low")
+                            Text("Info").tag("informational")
+                        }
+                        .labelsHidden()
+                        .frame(width: 140)
+                        .onChange(of: severitySel) { new in
+                            appState.setBuiltinRuleSeverity(ruleId: rule.id, severityRaw: new == "default" ? nil : new)
+                            state.showToast(V2Toast(
+                                kind: .info,
+                                title: new == "default" ? "Severity reverted to default" : "Severity override sent",
+                                detail: rule.title + " — applies in ~5 s"
+                            ))
+                        }
+                    }
                 }
             }
         }
@@ -736,30 +821,37 @@ public struct V2DetectionWorkspace: View {
                 HStack(alignment: .top, spacing: 0) {
                     V2DataTable(
                         columns: [
-                            V2DataColumn(id: "name", title: "Extension", width: .flexible(min: 200)) { x in
+                            V2DataColumn(id: "name", title: "Extension", width: .flexible(min: 200),
+                                         sortKey: { .text($0.name) }) { x in
                                 V2TableCellText(x.name)
                             },
-                            V2DataColumn(id: "browser", title: "Browser", width: .fixed(100)) { x in
+                            V2DataColumn(id: "browser", title: "Browser", width: .fixed(100),
+                                         sortKey: { .text($0.browser) }) { x in
                                 V2StatusChip(x.browser, kind: .data)
                             },
-                            V2DataColumn(id: "version", title: "Version", width: .fixed(90)) { x in
+                            V2DataColumn(id: "version", title: "Version", width: .fixed(90),
+                                         sortKey: { .text($0.version) }) { x in
                                 V2TableCellText(x.version, primary: false, mono: true)
                             },
-                            V2DataColumn(id: "perms", title: "Permissions", width: .fixed(110)) { x in
+                            V2DataColumn(id: "perms", title: "Permissions", width: .fixed(110),
+                                         sortKey: { .number(Double($0.permissions.count)) }) { x in
                                 Text("\(x.permissions.count)")
                                     .font(V2Theme.mono())
                                     .foregroundStyle(V2Theme.mutedText)
                             },
-                            V2DataColumn(id: "signed", title: "Signed", width: .fixed(80)) { x in
+                            V2DataColumn(id: "signed", title: "Signed", width: .fixed(80),
+                                         sortKey: { .text($0.signed ? "Yes" : "No") }) { x in
                                 V2StatusChip(x.signed ? "Yes" : "No",
                                              kind: x.signed ? .healthy : .high)
                             },
-                            V2DataColumn(id: "risk", title: "Risk", width: .fixed(80)) { x in
+                            V2DataColumn(id: "risk", title: "Risk", width: .fixed(80),
+                                         sortKey: { .number(Double($0.riskScore)) }) { x in
                                 riskPill(x.riskScore)
                             },
                         ],
                         items: extensions,
-                        selection: $selectedExtension
+                        selection: $selectedExtension,
+                        searchPrompt: "Filter extensions…"
                     )
                     .frame(minHeight: 320, maxHeight: .infinity)
                     if let ext = selectedExtension {

@@ -198,6 +198,7 @@ let package = Package(
             // working unchanged.
             resources: [
                 .copy("LLMEvalFixtures"),
+                .copy("fixtures"),
             ]
         ),
         .testTarget(

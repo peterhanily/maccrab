@@ -29,4 +29,4 @@ falsepositives:
     - Developer debugging builds with DYLD injection tooling (lldb, Instruments targets)
     - Legitimate profilers (e.g., sample, leaks, guardmalloc) launching with DYLD injection
     - Crash reporter symbolication pipelines
-level: high
+level: medium

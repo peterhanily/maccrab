@@ -33,4 +33,5 @@ detection:
 falsepositives:
     - Security researchers examining TCC state
     - MDM tools managing permissions
+suppressible: false
 level: high

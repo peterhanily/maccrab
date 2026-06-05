@@ -44,65 +44,62 @@ func esFileToPath(_ file: UnsafePointer<es_file_t>) -> String {
 ///
 /// Uses `audit_token_to_pid` and `audit_token_to_euid` from the BSM
 /// library to extract the numeric pid and effective uid from the audit token.
-func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
-    let p = proc.pointee
+/// The primitive, decoded ES process fields MacCrab consumes. This is the
+/// TESTABLE SEAM between the raw `es_process_t` (which only the kernel can
+/// build, at euid 0 + entitlement, so it can't be synthesized in a unit test)
+/// and the `ProcessInfo` mapping. `processFromESProcess` extracts these from
+/// the live struct; `esProcessInfo(from:)` does the pure mapping so the field
+/// logic (signer classification, responsible-pid, codesig) is unit-testable.
+struct ESProcessFields {
+    var pid: Int32
+    var ppid: Int32
+    /// Responsible pid (from `responsible_audit_token`) — the originator macOS
+    /// attributes this process to, vs `ppid` (launchd/xpcproxy for GUI/agent
+    /// launches). Parity field with the eslogger path.
+    var rpid: Int32
+    var euid: uid_t
+    var executablePath: String
+    var signingId: String
+    var teamId: String
+    var codesigningFlags: UInt32
+    var isPlatformBinary: Bool
+}
 
-    let pid = audit_token_to_pid(p.audit_token)
-    let uid = audit_token_to_euid(p.audit_token)
-    let ppid = p.ppid
-
-    let executablePath = esFileToPath(p.executable)
-    let processName = (executablePath as NSString).lastPathComponent
-
-    // Code signing info
-    let signingId = esStringToSwift(p.signing_id)
-    let teamId = esStringToSwift(p.team_id)
+/// Pure, unit-testable mapping from decoded ES fields to `ProcessInfo`. Mirrors
+/// the field set the eslogger path produces (EsloggerParser) so the two
+/// collectors can't silently diverge on what reaches detection.
+func esProcessInfo(from f: ESProcessFields) -> ProcessInfo {
+    let processName = (f.executablePath as NSString).lastPathComponent
 
     // v1.17.1: classify via the shared SignerType.classify so the ES and
     // eslogger paths can't drift. See SignerType.classify for the trust model
     // (kernel platform-binary + team-gated com.apple.* identifier).
     let signerType = SignerType.classify(
-        codesigningFlags: p.codesigning_flags,
-        teamId: teamId,
-        signingId: signingId,
-        isPlatformBinary: p.is_platform_binary
+        codesigningFlags: f.codesigningFlags,
+        teamId: f.teamId,
+        signingId: f.signingId,
+        isPlatformBinary: f.isPlatformBinary
     )
 
     // v1.18 NOTE (file-event-codesig-fields-partial): only signerType /
     // teamId / signingId / flags are populated from the raw ES event.
     // isNotarized / isAdhocSigned / issuerChain / certHashes are left nil
-    // here — they need a separate codesign/Security query that
-    // EventEnricher's NotarizationChecker performs and caches
-    // (enrichments["notarization.*"]). So rules predicating on
-    // NotarizationStatus / IsAdhocSigned / SigningCertIssuer for FILE events
-    // resolve to nil on a cold first-seen process until that cache warms;
-    // SignerType (populated here) is the reliable trust gate on this path.
-    // isAdhocSigned could be cheaply backfilled from the CS_ADHOC bit in
-    // `flags` — deferred (would need the CS_ADHOC constant + an init arg).
+    // here — EventEnricher's NotarizationChecker backfills them via a cached
+    // Security query. SignerType (populated here) is the reliable trust gate.
     let codeSignature = CodeSignatureInfo(
         signerType: signerType,
-        teamId: teamId.isEmpty ? nil : teamId,
-        signingId: signingId.isEmpty ? nil : signingId,
-        flags: p.codesigning_flags
+        teamId: f.teamId.isEmpty ? nil : f.teamId,
+        signingId: f.signingId.isEmpty ? nil : f.signingId,
+        flags: f.codesigningFlags
     )
 
-    // Build a minimal ancestor entry from the responsible process if available.
-    // The `responsible_audit_token` gives us the responsible parent; for a
-    // deeper ancestry chain we'd need to walk /proc or cache earlier events.
+    // ppid recorded as a minimal ancestor; name/path are filled by enrichment.
     var ancestors: [ProcessAncestor] = []
-    if ppid > 0 {
-        // We record ppid but without an es_process_t pointer for the parent
-        // we cannot resolve name/path here — enrichment fills those in later.
-        ancestors.append(ProcessAncestor(
-            pid: ppid,
-            executable: "",
-            name: ""
-        ))
+    if f.ppid > 0 {
+        ancestors.append(ProcessAncestor(pid: f.ppid, executable: "", name: ""))
     }
 
-    // Determine architecture from compile-time target.
-    // A proper implementation would inspect the Mach-O header of the executable,
-    // but the ES framework doesn't expose the CPU type directly.
+    // Architecture from compile-time target (ES doesn't expose CPU type).
     let architecture: String? = {
         #if arch(arm64)
         return "arm64"
@@ -114,23 +111,43 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
     }()
 
     return ProcessInfo(
-        pid: pid,
-        ppid: ppid,
-        rpid: 0,
+        pid: f.pid,
+        ppid: f.ppid,
+        rpid: f.rpid,
         name: processName,
-        executable: executablePath,
+        executable: f.executablePath,
         commandLine: "",
         args: [],            // Populated separately for exec events
         workingDirectory: "",
-        userId: uid,
+        userId: f.euid,
         userName: "",        // Resolved later by enrichment
         groupId: 0,
         startTime: Date(),
         codeSignature: codeSignature,
         ancestors: ancestors,
         architecture: architecture,
-        isPlatformBinary: p.is_platform_binary
+        isPlatformBinary: f.isPlatformBinary
     )
+}
+
+/// Build a `ProcessInfo` from an `es_process_t`. Thin adapter: extract the
+/// primitive fields (the part that genuinely needs the live kernel struct)
+/// then delegate to the pure, testable `esProcessInfo(from:)`. The
+/// `responsible_audit_token` → `rpid` extraction here is the parity fix that
+/// restores responsible-originator lineage on the shipping sysext (was 0).
+func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
+    let p = proc.pointee
+    return esProcessInfo(from: ESProcessFields(
+        pid: audit_token_to_pid(p.audit_token),
+        ppid: p.ppid,
+        rpid: audit_token_to_pid(p.responsible_audit_token),
+        euid: audit_token_to_euid(p.audit_token),
+        executablePath: esFileToPath(p.executable),
+        signingId: esStringToSwift(p.signing_id),
+        teamId: esStringToSwift(p.team_id),
+        codesigningFlags: p.codesigning_flags,
+        isPlatformBinary: p.is_platform_binary
+    ))
 }
 
 // MARK: - Exec Argument Extraction

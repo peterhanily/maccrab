@@ -35,4 +35,4 @@ detection:
 falsepositives:
     - Developers testing with temporary key files
     - CI/CD systems storing keys in build directories
-level: high
+level: medium

@@ -62,4 +62,4 @@ detection:
 falsepositives:
     - User intentionally AirDropping a credential file to another device they own
     - Backup utilities staging dotfile bundles via Finder's AirDrop UI
-level: high
+level: medium
