@@ -24,11 +24,11 @@ core for load-bearing decisions.
 
 | Module | Status | Summary |
 |---|---|---|
-| Rule engine | **stable** | Sigma-compatible YAML → JSON predicates. 380+ rules indexed by category. |
+| Rule engine | **stable** | Sigma-compatible YAML → JSON predicates. 484 rules (437 single-event + 41 sequence + 6 graph) indexed by category. |
 | Endpoint Security collector | **stable** | Native ES client for exec/fork/exit/file/network/signal events. |
 | Alert + campaign storage | **stable** | Per-tier SQLite stores with retention + size-cap discipline. |
 | Alert deduplicator | **stable** | Single-sink chokepoint for alert insertion. Per-rule dismissal feedback. |
-| Sequence engine | experimental | 38 multi-step sequence rules with bounded windows. |
+| Sequence engine | experimental | 41 multi-step sequence rules with bounded windows. |
 | Campaign detector | experimental | Kill chain, alert storm, AI compromise, lateral movement clustering. |
 | Behavioral scoring | experimental | 70+ weighted indicators with feedback-adjusted weights. |
 | Baseline anomaly | experimental | Welford z-score + 2nd-order Markov process tree anomaly. |

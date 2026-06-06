@@ -5,11 +5,12 @@ Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [1.17.6] — 2026-06-06
 
-A usability and control release on top of v1.17.5: makes the built-in
-detections visible and tunable, enriches alerts with what actually
-happened, cuts notification noise, makes dashboard rule creation install
-rules directly, recovers event sources after an update, and adds an
-opt-in agent control surface to the MCP server.
+A usability, control, and hardening release on top of v1.17.5: makes the
+built-in detections visible and tunable, enriches alerts with what
+actually happened, cuts notification noise, makes dashboard rule creation
+install rules directly, recovers event sources after an update, adds an
+opt-in agent control surface to the MCP server, and tightens the
+built-in-rule settings file permissions.
 
 ### Added
 
@@ -47,6 +48,14 @@ opt-in agent control surface to the MCP server.
 - **Event sources recovering after an update.** Event sources that
   stalled at 0 ev/s following an in-place update now recover
   automatically instead of needing a restart.
+- **Built-in-rule settings hardening.** The built-in-rule settings file is
+  now written read-only to non-root users (it's set only by the engine
+  through the audited control path), so a local process can't mute a
+  detection by editing it directly.
+- **Detection-rule validation + docs.** Rule validation now accepts the
+  standard Sigma / MITRE tag namespaces (including D3FEND); a malformed
+  rule identifier was corrected and the documented rule/test counts were
+  refreshed.
 
 ## [1.17.5] — 2026-06-04
 

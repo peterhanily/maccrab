@@ -209,7 +209,7 @@ MacCrab ships a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 Build the MCP binary with `swift build --target maccrab-mcp`.
 
-**Available tools (25):**
+**Available tools (43):**
 
 | Tool | Purpose |
 |------|---------|
@@ -504,7 +504,7 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **484 rules** (437 single-event + 41 sequence + 6 graph)
+release ships **478 rules** (437 single-event + 41 sequence)
 covering **170 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 
@@ -514,8 +514,8 @@ tactics:
 | `TA0002` | Execution | 94 |
 | `TA0003` | Persistence | 101 |
 | `TA0004` | Privilege Escalation | 43 |
-| `TA0005` | Defense Evasion | 126 |
-| `TA0006` | Credential Access | 84 |
+| `TA0005` | Defense Evasion | 127 |
+| `TA0006` | Credential Access | 86 |
 | `TA0007` | Discovery | 37 |
 | `TA0008` | Lateral Movement | 26 |
 | `TA0009` | Collection | 38 |
@@ -523,7 +523,7 @@ tactics:
 | `TA0011` | Command and Control | 53 |
 | `TA0040` | Impact | 27 |
 | — | **Sequences** (temporal multi-step) | **41** |
-| — | **Total** | **476** |
+| — | **Total** | **478** |
 
 Counts are derived from the YAML tree at release time — see
 [`docs/COVERAGE.md`](docs/COVERAGE.md) for the rule-by-technique
@@ -683,7 +683,7 @@ v1.3 is the biggest architectural change since v1.0. MacCrab now runs as a nativ
 - **SystemExtension activation** -- no more `sudo maccrabd`; open MacCrab.app and click Enable Protection. `sysextd` manages the lifecycle from there.
 - **Native ES client** -- `com.apple.developer.endpoint-security.client` approved under bundle ID `com.maccrab.agent`. The 3-level fallback chain (eslogger → kdebug → FSEvents) is still first-class for developer builds.
 - **Network-convergence hardening (1.3.4)** -- unresolved destination IPs no longer bucket benign HTTPS traffic under `:443`; new trusted-helper fan-out gate; 49-entry trusted-cloud suffix list.
-- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **643 tests in 138 suites**, FP regressions blocked at CI.
+- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **2139 tests in 396 suites**, FP regressions blocked at CI.
 - **Noise reduction arc (1.2.1 → 1.2.4)** -- reference workstation dropped from 2,856 alerts/24h to ~3/day (99.9% reduction) without degrading detection fidelity.
 - **Notarized Developer ID distribution** -- signed DMG, Homebrew cask tap (`peterhanily/maccrab`), reproducible release pipeline.
 - **Sparkle auto-update (1.3.5)** -- EdDSA-signed `appcast.xml` served from Cloudflare Pages at `maccrab.com`; "Check for Updates…" in the status-bar menu and Settings.

@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (2112 tests in 391 suites)
+swift test                     # Unit tests (2139 tests in 396 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -35,7 +35,7 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **MacCrabForensics** (`Sources/MacCrabForensics/`) -- Mac Context Plugin Platform: forensic case/collector/plugin library. Linked by `maccrabctl`, `MacCrabApp`, and `maccrab-mcp`; intentionally not linked by the sysext or `maccrabd`
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 34 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics.*` plugin tools)
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 43 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics.*` plugin tools)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -64,7 +64,7 @@ Rules/            437 single-event Sigma-compatible YAML rules (19 tactic direct
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (2112 tests in 391 suites)
+Tests/            Swift Testing unit tests (2139 tests in 396 suites)
 ```
 
 ## Detection Stack (5 tiers)
@@ -195,7 +195,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed (34):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools and the `forensics.*` plugin tools)
+**Tools exposed (43):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools and the `forensics.*` plugin tools)
 
 | Tool | Purpose |
 |------|---------|

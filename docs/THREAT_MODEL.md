@@ -36,7 +36,7 @@ residual risk remains.
 - Endpoint Security captures process exec/fork/exit, file create/write/
   rename/unlink, network connect, and TCC permission changes in real
   time.
-- 380+ Sigma-style rules match adversary-known patterns (LaunchAgent
+- 484 Sigma-style rules match adversary-known patterns (LaunchAgent
   drops, suspicious process trees, AMOS/Atomic Stealer wallet paths,
   XCSSET clipboard injection, etc.).
 - Sequence rules correlate multi-step kill chains within bounded
