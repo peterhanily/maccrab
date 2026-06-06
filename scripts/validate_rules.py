@@ -78,12 +78,21 @@ def validate_rule(filepath):
             if 'condition' not in rule['detection']:
                 errors.append("detection block missing 'condition'")
 
-    # Validate tags are attack.* format
+    # Validate tag namespaces. Accept the standard Sigma / MITRE namespaces
+    # (incl. MITRE D3FEND `d3fend.*`, which the previous attack./baseline.-only
+    # check wrongly rejected) plus MacCrab's documented vendor-local namespaces
+    # (`maccrab.*`, `edr.*`). Anything else — including a namespace-less tag —
+    # is still flagged so typos are caught.
+    allowed_tag_prefixes = (
+        'attack.', 'baseline.', 'car.', 'cve.', 'd3fend.',
+        'detection.', 'stp.', 'tlp.', 'maccrab.', 'edr.',
+    )
     if 'tags' in rule:
         for tag in rule['tags']:
-            if not tag.startswith('attack.') and not tag.startswith('baseline.'):
+            if not tag.startswith(allowed_tag_prefixes):
                 errors.append(
-                    f"Tag should start with 'attack.' or 'baseline.': {tag}"
+                    f"Unrecognized tag namespace (expected one of "
+                    f"{', '.join(allowed_tag_prefixes)}): {tag}"
                 )
 
     return errors
