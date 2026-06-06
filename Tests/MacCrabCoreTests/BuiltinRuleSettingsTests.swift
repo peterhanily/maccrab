@@ -54,4 +54,16 @@ struct BuiltinRuleSettingsTests {
         // missing dir → empty defaults (backward compatible)
         #expect(BuiltinRuleSettings.load(fromDir: "/nonexistent/\(UUID().uuidString)").rules.isEmpty)
     }
+
+    @Test("v1.17.6 SECURITY: saved settings file is NOT world-writable (0o644, not 0o666)")
+    func savedFileNotWorldWritable() throws {
+        let dir = NSTemporaryDirectory() + "maccrab-brs-perm-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try BuiltinRuleSettings(rules: ["maccrab.usb": BuiltinRuleSetting(enabled: false)]).save(toDir: dir)
+        let p = BuiltinRuleSettings.path(inDir: dir)
+        let perms = (try FileManager.default.attributesOfItem(atPath: p)[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+        // 0o002 = world-write. A world-writable settings file lets any local
+        // process mute a built-in detection, bypassing the audited inbox path.
+        #expect((perms & 0o002) == 0, "builtin_rules_settings.json must not be world-writable (got \(String(perms, radix: 8)))")
+    }
 }

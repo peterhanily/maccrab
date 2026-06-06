@@ -38,14 +38,19 @@ public struct BuiltinRuleSettings: Codable, Sendable, Equatable {
         return decoded
     }
 
-    /// Atomic write, creating the dir if needed, with 0o666 perms so both the
-    /// user dashboard and the root daemon can read/replace it.
+    /// Atomic write, creating the dir if needed. v1.17.6 SECURITY: 0o644 (was
+    /// 0o666) — written ONLY by the root daemon (via the builtin-rule-setting
+    /// inbox verb), world-READABLE so the uid-501 dashboard can display the
+    /// effective settings. The dashboard never writes this file directly (it
+    /// routes through the inbox), so it must not be world-WRITABLE: at 0o666 a
+    /// local process could mute a built-in detection — including a HIGH IOC
+    /// match — by editing the file directly, bypassing the audited inbox path.
     public func save(toDir dir: String) throws {
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let p = Self.path(inDir: dir)
         let data = try JSONEncoder().encode(self)
         try data.write(to: URL(fileURLWithPath: p), options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: p)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: p)
     }
 
     /// Longest-prefix lookup so a family base id (e.g. `maccrab.git`) governs its

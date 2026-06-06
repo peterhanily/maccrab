@@ -201,22 +201,31 @@ struct EventStorePayloadCapTests {
         let (store, tmp) = try await makeTempStore()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        // Calibrate an arg so the encoded event lands right around the cap.
-        // We binary-search a single-arg size that produces encoded length
-        // == cap, then assert it's NOT truncated.
+        // Calibrate an arg so the encoded event lands right around the cap,
+        // then assert it's NOT truncated.
+        //
+        // Determinism note: the event's timestamp encodes as a Double whose
+        // decimal-string length varies run-to-run (e.g. "…316.2495" vs
+        // "…316.249535"), so an arg calibrated against one timestamp can encode
+        // a few bytes larger when a fresh event is built below. We therefore
+        // calibrate to a small headroom UNDER the cap so that drift can't push
+        // the final instance over — the over-cap side is covered separately by
+        // `boundaryOneByteOver`. Without the margin this test flaked under the
+        // parallel suite (passed in isolation).
         let encoder = JSONEncoder()
+        let target = EventStore.maxRawJsonBytes - 64
         var lo = 1
-        var hi = EventStore.maxRawJsonBytes
+        var hi = target
         var calibratedArg = ""
         for _ in 0..<32 {
             let mid = (lo + hi) / 2
             let candidate = String(repeating: "a", count: mid)
             let event = makeEvent(args: [candidate])
             let size = try encoder.encode(event).count
-            if size == EventStore.maxRawJsonBytes {
+            if size == target {
                 calibratedArg = candidate
                 break
-            } else if size < EventStore.maxRawJsonBytes {
+            } else if size < target {
                 calibratedArg = candidate
                 lo = mid + 1
             } else {
