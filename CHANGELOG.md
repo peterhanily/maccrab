@@ -3,6 +3,51 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.6] — 2026-06-06
+
+A usability and control release on top of v1.17.5: makes the built-in
+detections visible and tunable, enriches alerts with what actually
+happened, cuts notification noise, makes dashboard rule creation install
+rules directly, recovers event sources after an update, and adds an
+opt-in agent control surface to the MCP server.
+
+### Added
+
+- **Agent control for the MCP server.** A Claude/Codex session can tune
+  detection, author rules, and adjust engine config through three opt-in
+  capability tiers (tune / author / defense-affecting), **all off by
+  default** and enabled only from Settings → Agent Control. Every change
+  is routed through the privileged inbox and audit-logged; response
+  actions still never auto-execute. Ships a `maccrab` skill and a
+  `/maccrab-control` command.
+- **Built-in detections in the Rules list.** The built-in `maccrab.*`
+  detections (campaigns, behavioral, sequence/graph, correlation,
+  forensic, and more) now appear in Detection → Rules and can be muted or
+  have their severity overridden — the detection keeps running when an
+  alert is muted.
+- **Richer alert detail.** An alert now leads with what actually happened
+  (the triggering process, full command, destination, code-signing,
+  hashes) rather than only the rule's generic text, and the Events view
+  shows which alerts an event triggered.
+
+### Changed
+
+- **Quieter notifications.** New installs and a one-time migration use a
+  sensible **High** notification floor, with a warning when the floor is
+  set low; several developer-routine AI-tool detections were recalibrated
+  to Medium so they're still recorded without posting a banner at the
+  High floor. (Notification volume is driven by the floor, not by any
+  response-action override.)
+- **Seamless rule creation.** The dashboard rule wizard now validates,
+  compiles, and installs a new rule directly into the engine — it appears
+  in the Rules list and fires immediately — instead of exporting a file.
+
+### Fixed
+
+- **Event sources recovering after an update.** Event sources that
+  stalled at 0 ev/s following an in-place update now recover
+  automatically instead of needing a restart.
+
 ## [1.17.5] — 2026-06-04
 
 A feature and hardening release on top of v1.17.4: adds ClickFix

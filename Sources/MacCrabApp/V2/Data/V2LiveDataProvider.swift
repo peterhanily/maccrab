@@ -281,7 +281,18 @@ public final class V2LiveDataProvider: V2DataProvider {
                 description: def.description
             )
         }
-        let merged = mapped + builtins
+        // v1.18: surface multi-step sequence rules and multi-entity graph
+        // rules as their own rows. They are compiled to single-object JSON
+        // under compiled_rules/{sequences,graph}/ and loaded by the
+        // SequenceEngine / TraceGraph engine (not RuleEngine), so they were
+        // previously only used for alert title lookup (compositeRuleLabels)
+        // and never appeared in the Rules list.
+        let composite = await Task.detached(priority: .userInitiated) {
+            V2LiveDataProvider.loadCompositeRules(
+                sequencesDir: rulesPath + "/sequences",
+                graphDir: rulesPath + "/graph")
+        }.value
+        let merged = mapped + composite + builtins
         rulesCache = merged
         rulesCacheDirMtime = dirMtime
         rulesCacheTelemetryMtime = teleMtime
@@ -335,6 +346,55 @@ public final class V2LiveDataProvider: V2DataProvider {
                 guard let data = try? Data(contentsOf: url),
                       let stub = try? dec.decode(Stub.self, from: data) else { continue }
                 out[stub.id.lowercased()] = stub.title
+            }
+        }
+        return out
+    }
+
+    /// v1.18: read the compiled sequence + graph rules into full Rules-list
+    /// rows (id / title / severity / MITRE / enabled / description), so the
+    /// dashboard's Rules view lists the multi-step ("time sequence") and
+    /// multi-entity detections alongside single-event YAML rules and the
+    /// built-in detections. Read-only display; the engine loads the same
+    /// files. Missing dirs / malformed files are skipped silently.
+    nonisolated static func loadCompositeRules(
+        sequencesDir: String, graphDir: String
+    ) -> [V2MockRule] {
+        struct Stub: Decodable {
+            let id: String
+            let title: String
+            let level: String?
+            let tags: [String]?
+            let description: String?
+            let enabled: Bool?
+        }
+        let fm = FileManager.default
+        let dec = JSONDecoder()
+        var out: [V2MockRule] = []
+        for (sub, category) in [(sequencesDir, "Sequence"), (graphDir, "Graph")] {
+            guard let urls = try? fm.contentsOfDirectory(
+                at: URL(fileURLWithPath: sub),
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for url in urls where url.pathExtension == "json" {
+                guard let data = try? Data(contentsOf: url),
+                      let stub = try? dec.decode(Stub.self, from: data) else { continue }
+                let mitre = (stub.tags ?? [])
+                    .filter { $0.hasPrefix("attack.t") }
+                    .map { String($0.dropFirst("attack.".count)).uppercased() }
+                out.append(V2MockRule(
+                    id: stub.id,
+                    title: stub.title,
+                    category: category,
+                    severity: severityFromString(stub.level ?? "medium"),
+                    mitre: mitre,
+                    isEnabled: stub.enabled ?? true,
+                    lastFired: nil,
+                    firesLastWeek: 0,
+                    isCustom: false,
+                    description: stub.description ?? ""
+                ))
             }
         }
         return out

@@ -39,10 +39,10 @@ public enum BuiltinRuleCatalog {
         // — AI Guard —
         .init("maccrab.ai-guard.credential-access", "AI Tool Accessed Credentials",
               "An AI coding tool (Claude Code, Cursor, …) read credential files / keychains.",
-              .high, "AI Guard", "attack.credential_access", "attack.t1552.001"),
+              .medium, "AI Guard", "attack.credential_access", "attack.t1552.001"),
         .init("maccrab.ai-guard.boundary-violation", "AI Tool Wrote Outside Project",
               "An AI tool wrote outside its project directory boundary.",
-              .high, "AI Guard", "attack.defense_evasion"),
+              .medium, "AI Guard", "attack.defense_evasion"),
         .init("maccrab.ai-guard.prompt-injection", "LLM Prompt Injection",
               "Prompt-injection patterns detected in content an AI tool processed.",
               .high, "AI Guard", "attack.initial_access"),
@@ -51,10 +51,10 @@ public enum BuiltinRuleCatalog {
               .high, "AI Guard"),
         .init("maccrab.ai-guard.network-sandbox", "AI Tool Network Sandbox Violation",
               "An AI tool's subprocess made a network connection outside its sandbox.",
-              .high, "AI Guard", "attack.command_and_control"),
+              .medium, "AI Guard", "attack.command_and_control"),
         .init("maccrab.ai-guard.mcp", "MCP Security Event",
               "An MCP server configuration or runtime anomaly across AI tools.",
-              .high, "AI Guard"),
+              .medium, "AI Guard"),
         // — Supply chain / prevention —
         .init("maccrab.supply-chain.fresh-package", "Fresh Package Installed",
               "A very recently published package was installed (typosquat / supply-chain risk).",
@@ -86,6 +86,9 @@ public enum BuiltinRuleCatalog {
               "An executed binary matched a threat-intel file-hash indicator.",
               .high, "Threat Intel"),
         // — Network —
+        .init("maccrab.network", "Network Beacon / C2",
+              "TLS-fingerprint / beacon analysis flagged a connection (C2 beaconing, suspicious JA3, etc.). Fires at the finding's computed severity.",
+              .high, "Network", "attack.command_and_control"),
         .init("maccrab.network.doh-evasion", "DoH Evasion",
               "DNS-over-HTTPS evasion behavior detected.",
               .medium, "Network", "attack.command_and_control", "attack.t1572"),
@@ -114,7 +117,7 @@ public enum BuiltinRuleCatalog {
               .high, "Deep Security", "attack.collection", "attack.t1056.001"),
         .init("maccrab.clipboard.sensitive-data", "Sensitive Clipboard Data",
               "Sensitive data (keys/tokens) detected on the clipboard.",
-              .high, "Data Leakage", "attack.collection"),
+              .medium, "Data Leakage", "attack.collection"),
         .init("maccrab.usb", "USB Device Event",
               "A USB mass-storage / HID device connected or disconnected.",
               .medium, "USB"),
@@ -132,7 +135,7 @@ public enum BuiltinRuleCatalog {
               .high, "TEMPEST"),
         .init("maccrab.edr", "EDR / RMM Tool",
               "An EDR / RMM / insider-threat / remote-access tool was discovered.",
-              .high, "EDR"),
+              .medium, "EDR"),
         // — Scheduled —
         .init("maccrab.vuln", "Vulnerable Software",
               "An installed application matched a known CVE.",
@@ -144,6 +147,50 @@ public enum BuiltinRuleCatalog {
         .init("maccrab.llm", "LLM Analysis",
               "Advisory LLM analysis output (investigation summary, defense recommendation, scoring).",
               .informational, "LLM Analysis"),
+        .init("maccrab.counterfactual", "Counterfactual Analysis",
+              "Advisory LLM analysis of what a near-miss detection would have required to fire.",
+              .informational, "LLM Analysis"),
+        .init("maccrab.predict.next-technique", "Predicted Next Technique",
+              "Advisory LLM prediction of the likely next ATT&CK technique in an unfolding campaign.",
+              .informational, "LLM Analysis"),
+        // — Campaigns & correlation —
+        .init("maccrab.campaign", "Attack Campaign",
+              "Multiple alerts correlated into a campaign (kill chain, alert storm, AI compromise, coordinated attack, or lateral movement). Fires at the campaign's computed severity.",
+              .high, "Campaigns", "attack.defense_evasion"),
+        .init("maccrab.correlator.network-convergence", "Network Convergence",
+              "Multiple processes converged on the same network destination (possible lateral movement or shared C2).",
+              .high, "Correlation", "attack.command_and_control"),
+        // — Intent —
+        .init("maccrab.prompt-intent", "Prompt / Command Intent",
+              "The intent classifier flagged the semantics of a command or prompt (e.g. slopsquat, vague-destructive).",
+              .medium, "Intent"),
+        // — Self-defense —
+        .init("maccrab.self-defense", "Self-Defense",
+              "MacCrab detected tampering with its own binary or rules, or a degradation of Endpoint Security health. Fires at the event's computed severity.",
+              .high, "Self-Defense", "attack.defense_evasion", "attack.t1562.001"),
+        // — Prevention (response actions) —
+        .init("maccrab.pending-action", "Pending Response Action",
+              "A detection-triggered protective action is queued for operator review. Response actions never auto-execute.",
+              .informational, "Prevention"),
+        // — AI Guard (MCP baseline) —
+        .init("maccrab.mcp.baseline-anomaly", "MCP Baseline Anomaly",
+              "An MCP server deviated from its learned configuration baseline.",
+              .medium, "AI Guard", "attack.command_and_control"),
+        // — Deep security (family base for dynamic policy events) —
+        .init("maccrab.deep", "Deep Security Event",
+              "A deep-security policy event (crypto-token browser extension, sensitive event-tap, etc.). Fires at the event's computed severity.",
+              .medium, "Deep Security"),
+        // — Forensic (specific + family base for periodic scan findings) —
+        .init("maccrab.forensic.injected-library", "Injected Library",
+              "A process loaded a library from an unexpected location (DYLD injection / rootkit indicator).",
+              .high, "Forensic", "attack.defense_evasion", "attack.t1574.006"),
+        .init("maccrab.forensic", "Forensic Scan Finding",
+              "A periodic forensic-scan finding (crash-log exploit traces, power/EMSEC anomalies). Fires at the finding's computed severity.",
+              .medium, "Forensic", "attack.defense_evasion"),
+        // — Reporting —
+        .init("maccrab.scheduled", "Scheduled Report",
+              "A scheduled security-report snapshot. Informational summary, not a threat.",
+              .informational, "Reporting"),
     ]
 
     public static let byId: [String: BuiltinRuleDefinition] =

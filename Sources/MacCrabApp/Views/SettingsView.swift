@@ -28,6 +28,12 @@ struct SettingsView: View {
     // notifies on the most serious detections. Existing installs retain
     // whatever value is already in UserDefaults.
     @AppStorage("minAlertSeverity") var minAlertSeverity: String = "critical"
+    // v1.18 agent control-plane: which MCP capability tiers an AI agent may
+    // use. All OFF by default; only the human flips these. Written to
+    // mcp_capabilities.json which the MCP server reads.
+    @AppStorage("agentCapConfig") private var agentCapConfig: Bool = false
+    @AppStorage("agentCapAuthoring") private var agentCapAuthoring: Bool = false
+    @AppStorage("agentCapResponse") private var agentCapResponse: Bool = false
     @AppStorage("pollIntervalSeconds") var pollIntervalSeconds: Int = 5
     // Launch at login is backed by macOS's ServiceManagement framework —
     // the @AppStorage value mirrors the registration state, so we can
@@ -485,7 +491,54 @@ struct SettingsView: View {
                             Text(String(localized: "settings.severityHelp", defaultValue: "Only alerts at or above this severity will trigger a macOS notification. Daemon picks up changes on next restart or SIGHUP."))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+
+                            // v1.18: warn about the noisy end of the floor.
+                            // "informational"/"low" post an OS banner for nearly
+                            // every detection; every alert still appears in the
+                            // dashboard regardless of this floor.
+                            if minAlertSeverity == "informational" || minAlertSeverity == "low" {
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.orange)
+                                    Text(String(localized: "settings.severityNoiseWarning", defaultValue: "At this level nearly every detection posts a macOS banner. Most users want High. Every alert appears in the dashboard regardless of this setting."))
+                                        .font(.caption)
+                                        .foregroundColor(.orange)
+                                }
+                            }
                         }
+                    }
+                    .padding(8)
+                }
+
+                GroupBox(String(localized: "settings.agentControl", defaultValue: "Agent Control (MCP)")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(String(localized: "settings.agentControlHelp", defaultValue: "Let a Claude/Codex agent on this Mac customise MacCrab through the MCP server. Every tier is off by default and each change is audit-logged. Turn on only what you need."))
+                            .font(.caption).foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Toggle(isOn: $agentCapConfig) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(localized: "settings.agentTier.config", defaultValue: "Tune detection"))
+                                Text(String(localized: "settings.agentTier.configDesc", defaultValue: "Built-in rule settings, reload rules, refresh intel, safe daemon tunables."))
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                        .onChange(of: agentCapConfig) { _ in syncAgentCapabilities() }
+                        Toggle(isOn: $agentCapAuthoring) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(localized: "settings.agentTier.authoring", defaultValue: "Author rules"))
+                                Text(String(localized: "settings.agentTier.authoringDesc", defaultValue: "Create and delete detection rules (validated by the compiler)."))
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                        .onChange(of: agentCapAuthoring) { _ in syncAgentCapabilities() }
+                        Toggle(isOn: $agentCapResponse) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(localized: "settings.agentTier.response", defaultValue: "Change defense-affecting config"))
+                                Text(String(localized: "settings.agentTier.responseDesc", defaultValue: "Toggle ES introspection / file-open subscriptions and ultrasonic. Disabling these reduces detection — grant with care."))
+                                    .font(.caption).foregroundColor(.orange)
+                            }
+                        }
+                        .onChange(of: agentCapResponse) { _ in syncAgentCapabilities() }
                     }
                     .padding(8)
                 }
@@ -1375,6 +1428,30 @@ struct SettingsView: View {
     /// `scheduleWebhookSync` below — rapid Picker tab/click cycles
     /// previously fired one SIGHUP per onChange, and each SIGHUP
     /// runs the retroactive scan + storage reload + rule reload.
+    /// v1.18: persist the agent-control capability grants. SECURITY: the MCP
+    /// server trusts mcp_capabilities.json ONLY when it is root-owned, so the
+    /// dashboard (uid 501) does NOT write it directly — it routes the human's
+    /// choice through the privileged inbox and the ROOT engine writes the file.
+    /// This is what makes "an agent can't grant itself a tier" hold: an agent
+    /// at uid 501 can write a user-owned file, but the MCP ignores any file not
+    /// owned by root.
+    private func syncAgentCapabilities() {
+        let payload: [String: Any] = [
+            "config": agentCapConfig,
+            "authoring": agentCapAuthoring,
+            "response": agentCapResponse,
+            "requester": "MacCrabApp",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        let inboxDir = "/Library/Application Support/MacCrab/inbox"
+        let userInboxDir = NSHomeDirectory() + "/Library/Application Support/MacCrab/inbox"
+        for dir in [inboxDir, userInboxDir] {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let path = "\(dir)/set-agent-capabilities-\(Int(Date().timeIntervalSince1970))-\(getpid())-\(UUID().uuidString.prefix(8)).json"
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
     private func scheduleAlertNotificationSync() {
         pendingAlertNotificationSync?.cancel()
         pendingAlertNotificationSync = Task {

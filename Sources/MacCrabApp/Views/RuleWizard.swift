@@ -6,7 +6,6 @@
 
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 // MARK: - Rule Wizard
 
@@ -16,6 +15,8 @@ struct RuleWizard: View {
     @State private var step: WizardStep = .metadata
     @State private var rule = RuleDraft()
     @State private var savedPath: String? = nil
+    @State private var saving = false
+    @State private var saveError: String? = nil
 
     enum WizardStep: Int, CaseIterable {
         case metadata = 0
@@ -86,7 +87,7 @@ struct RuleWizard: View {
                     case .detection: DetectionStep(rule: $rule)
                     case .filters:   FiltersStep(rule: $rule)
                     case .options:   OptionsStep(rule: $rule)
-                    case .preview:   PreviewStep(rule: $rule, savedPath: $savedPath)
+                    case .preview:   PreviewStep(rule: $rule, savedPath: $savedPath, saveError: $saveError)
                     }
                 }
                 .padding(24)
@@ -111,9 +112,19 @@ struct RuleWizard: View {
                         Button("Done") { dismiss() }
                             .keyboardShortcut(.return)
                     } else {
-                        Button("Save Rule") { saveRule() }
-                            .keyboardShortcut(.return)
-                            .buttonStyle(.borderedProminent)
+                        Button { saveRule() } label: {
+                            if saving {
+                                HStack(spacing: 6) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Installing…")
+                                }
+                            } else {
+                                Text("Save & Install Rule")
+                            }
+                        }
+                        .keyboardShortcut(.return)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(saving)
                     }
                 } else {
                     Button("Next") {
@@ -144,29 +155,25 @@ struct RuleWizard: View {
         }
     }
 
+    /// v1.18: seamless install. Compile the new rule and drop it into the
+    /// engine's user_rules/ overlay (same path the YAML editor uses), then
+    /// the daemon reloads it — so a rule created here actually appears in the
+    /// rules list and fires, instead of being written to ~/Downloads where
+    /// nothing loads it.
     private func saveRule() {
-        let yaml = rule.toYAML()
-
-        let panel = NSSavePanel()
-        panel.title = "Save Detection Rule"
-        panel.nameFieldStringValue = rule.filename
-        panel.allowedContentTypes = [.yaml]
-        panel.canCreateDirectories = true
-
-        // Default to Rules directory
-        let rulesDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("Rules")
-            .appendingPathComponent(rule.tacticDir)
-        if FileManager.default.fileExists(atPath: rulesDir.path) {
-            panel.directoryURL = rulesDir
-        }
-
-        if panel.runModal() == .OK, let url = panel.url {
-            do {
-                try yaml.write(to: url, atomically: true, encoding: .utf8)
-                savedPath = url.path
-            } catch {
+        let ruleId = UUID().uuidString.lowercased()
+        let yaml = rule.toYAML(id: ruleId)
+        saving = true
+        saveError = nil
+        Task { @MainActor in
+            let result = await UserRuleInstaller.install(ruleId: ruleId, yaml: yaml)
+            saving = false
+            switch result {
+            case .success:
+                savedPath = UserRuleInstaller.userRulesDir + "/\(ruleId).yml"
+            case .failure(let message):
                 savedPath = nil
+                saveError = message
             }
         }
     }
@@ -208,13 +215,7 @@ struct RuleDraft {
         return (slug.isEmpty ? "new_rule" : slug) + ".yml"
     }
 
-    var tacticDir: String {
-        let tac = tactic.replacingOccurrences(of: "attack.", with: "")
-        return tac.isEmpty ? "other" : tac
-    }
-
-    func toYAML() -> String {
-        let id = UUID().uuidString.lowercased()
+    func toYAML(id: String = UUID().uuidString.lowercased()) -> String {
         let date = {
             let f = DateFormatter(); f.dateFormat = "yyyy/MM/dd"
             return f.string(from: Date())
@@ -571,24 +572,37 @@ private struct SummaryRow: View {
 private struct PreviewStep: View {
     @Binding var rule: RuleDraft
     @Binding var savedPath: String?
+    @Binding var saveError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if let path = savedPath {
+            if savedPath != nil {
                 HStack {
                     Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.title2)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading) {
-                        Text(String(localized: "wizard.savedTitle", defaultValue: "Rule saved!")).font(.headline)
-                        Text(path).font(.caption).foregroundColor(.secondary)
+                        Text(String(localized: "wizard.savedTitle", defaultValue: "Rule installed")).font(.headline)
+                        Text(String(localized: "wizard.savedSubtitle", defaultValue: "Compiled and loaded into the engine. It now appears in Detection → Rules and fires immediately."))
+                            .font(.caption).foregroundColor(.secondary)
                     }
                 }
                 .padding()
                 .background(Color.green.opacity(0.1))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
 
-                Text(String(localized: "wizard.nextSteps", defaultValue: "Next: run **make compile-rules && make restart** to load the new rule."))
-                    .font(.callout)
+            if let err = saveError {
+                HStack(alignment: .top) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange).font(.title2)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "wizard.saveErrorTitle", defaultValue: "Couldn't install rule")).font(.headline)
+                        Text(err).font(.caption).foregroundColor(.secondary).textSelection(.enabled)
+                    }
+                }
+                .padding()
+                .background(Color.orange.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 
             Text(String(localized: "wizard.yamlLabel", defaultValue: "Generated YAML:"))

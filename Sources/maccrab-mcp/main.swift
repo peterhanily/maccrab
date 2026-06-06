@@ -35,7 +35,7 @@ private let logger = Logger(subsystem: "com.maccrab.mcp", category: "server")
 // sizes that was 50 ms wasted per request, before any actual data
 // formatting. The formatter is stateless once configured, safe to
 // share file-wide.
-private let isoFormatter = ISO8601DateFormatter()
+let isoFormatter = ISO8601DateFormatter()
 
 // MARK: - Security: Parent Process Validation
 
@@ -605,6 +605,82 @@ let tools: [[String: Any]] = [
             "properties": [:] as [String: Any],
         ] as [String: Any],
     ],
+    // ===================================================================
+    // v1.18 — Agent control-plane (customizable skill). All mutating tools
+    // are OFF BY DEFAULT and require a human-enabled capability tier (config
+    // / authoring / response). See AgentControl.swift.
+    // ===================================================================
+    [
+        "name": "agent_capabilities",
+        "description": "Report which MacCrab agent-control capability tiers (config / authoring / response) the human has enabled, and how to enable them. Read-only. Call this first — every other control tool is denied unless its tier is on.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "list_builtin_rules",
+        "description": "List the built-in maccrab.* detections with their category and effective severity (after any operator override), and whether each is muted. Read-only.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "get_audit_log",
+        "description": "Return the tail of the privileged-mutation audit log (every config/rule/suppression change the engine applied). Read-only.",
+        "inputSchema": [
+            "type": "object",
+            "properties": ["limit": ["type": "integer", "description": "max lines (1-500, default 50)"]],
+        ] as [String: Any],
+    ],
+    [
+        "name": "set_builtin_rule_setting",
+        "description": "Mute/enable a built-in maccrab.* detection or override its severity. Requires the 'config' capability. Detection + any protective action still run when an alert is muted; only the alert is suppressed.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "rule_id": ["type": "string", "description": "a maccrab.* rule id (see list_builtin_rules)"],
+                "enabled": ["type": "boolean", "description": "false mutes the alert"],
+                "severity": ["type": "string", "description": "critical|high|medium|low|informational; null clears to default"],
+            ],
+            "required": ["rule_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "reload_rules",
+        "description": "Ask the engine to reload its compiled rules + user rules. Requires the 'config' capability.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "refresh_threat_intel",
+        "description": "Ask the engine to refresh its threat-intel feeds. Requires the 'config' capability.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "set_daemon_config",
+        "description": "Set one allowed daemon_config key. Safe tunables (thresholds, poll intervals) require the 'config' capability; defense-affecting keys (subscribe_introspection_events, subscribe_file_open_events, ultrasonic_enabled) require the higher 'response' capability because turning them off reduces detection coverage.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "key": ["type": "string", "description": "an allowed daemon_config key (call with an invalid key to see the allow-list)"],
+                "value": ["description": "number or boolean matching the key's type"],
+            ],
+            "required": ["key", "value"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "create_rule",
+        "description": "Compile and install a new detection rule from a single Sigma YAML document. Requires the 'authoring' capability. The rule is validated by the bundled compiler before install; on success it appears in Detection → Rules and fires. Returns a compile error if the YAML is malformed.",
+        "inputSchema": [
+            "type": "object",
+            "properties": ["yaml": ["type": "string", "description": "one Sigma YAML rule (≤64 KB). An 'id:' is minted if absent."]],
+            "required": ["yaml"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "delete_rule",
+        "description": "Remove a user-authored rule by id. Requires the 'authoring' capability. Built-in maccrab.* detections cannot be deleted — tune them with set_builtin_rule_setting instead.",
+        "inputSchema": [
+            "type": "object",
+            "properties": ["rule_id": ["type": "string", "description": "the id of a user-authored rule"]],
+            "required": ["rule_id"],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Tool Handlers
@@ -632,7 +708,29 @@ let suppressBudget = SuppressBudget()
 let traceGraphPath = resolveTraceGraphPath()
 
 func handleToolCall(name: String, args: [String: Any]) async -> Any {
+    // v1.18 agent control-plane: deny mutating tools whose capability tier the
+    // human hasn't enabled (all tiers off by default). Read-only tools pass.
+    if let denial = agentCapabilityDenial(forTool: name, args: args) { return denial }
     switch name {
+    // v1.18 agent control-plane (see AgentControl.swift).
+    case "agent_capabilities":
+        return handleAgentCapabilities()
+    case "list_builtin_rules":
+        return handleListBuiltinRules()
+    case "get_audit_log":
+        return handleGetAuditLog(args)
+    case "set_builtin_rule_setting":
+        return handleSetBuiltinRuleSetting(args)
+    case "reload_rules":
+        return handleReloadRules()
+    case "refresh_threat_intel":
+        return handleRefreshThreatIntel()
+    case "set_daemon_config":
+        return handleSetDaemonConfig(args)
+    case "create_rule":
+        return await handleCreateRule(args)
+    case "delete_rule":
+        return handleDeleteRule(args)
     case "get_alerts":
         return await handleGetAlerts(args)
     case "get_events":

@@ -579,14 +579,23 @@ final class DaemonState {
             // can't go silently blind on its highest-fidelity sensor.
             // (Re-establishing the underlying client — es_new_client — remains a
             // deeper follow-up; this stops the silent-spin + raises the alarm.)
+            // v1.18: the primary process/file sensors (ES + its eslogger
+            // fallback) are ESSENTIAL — when one dies permanently (the post-
+            // Sparkle-update case: the kext is replaced out from under the old
+            // process and its es_client_t is invalidated, so the stream ends
+            // and never recovers), driveSource asks for a guarded daemon
+            // relaunch instead of sitting silently at 0 ev/s until the user
+            // reboots. The OS keeps an ES system extension alive, so exiting
+            // yields a fresh process that re-runs es_new_client.
+            let sd = supportDir
             if let es = collector {
-                Task { await driveSource("ESCollector", logger: logger, events: { es.events }, yield: yield) }
+                Task { await driveSource("ESCollector", logger: logger, essential: true, supportDir: sd, events: { es.events }, yield: yield) }
             }
             if let kdebug = kdebugCollector {
                 Task { await driveSource("KdebugCollector", logger: logger, events: { kdebug.events }, yield: yield) }
             }
             if let eslogger = esloggerCollector {
-                Task { await driveSource("EsloggerCollector", logger: logger, events: { eslogger.events }, yield: yield) }
+                Task { await driveSource("EsloggerCollector", logger: logger, essential: true, supportDir: sd, events: { eslogger.events }, yield: yield) }
             }
             if let ul = ulCollector {
                 Task { await driveSource("UnifiedLogCollector", logger: logger, events: { ul.events }, yield: yield) }
@@ -608,6 +617,8 @@ private func driveSource(
     _ name: String,
     logger: Logger,
     policy: SourceRestartPolicy = SourceRestartPolicy(),
+    essential: Bool = false,
+    supportDir: String? = nil,
     events: @escaping @Sendable () -> AsyncStream<Event>,
     yield: @escaping @Sendable (Event) -> Void
 ) async {
@@ -628,7 +639,63 @@ private func driveSource(
         case .escalate(let d):
             delay = d
             logger.fault("\(name) is DOWN — \(state.consecutiveEmpty) consecutive empty re-attaches; host detection degraded on this source")
+            // v1.18: an essential sensor that's confirmed dead can't recover
+            // in-process (the ES client is invalidated). Request a guarded
+            // daemon relaunch so a fresh process re-establishes es_new_client.
+            if essential, let supportDir {
+                recoverEssentialSourceOrStayDegraded(name: name, supportDir: supportDir, logger: logger)
+            }
         }
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
+}
+
+/// Process start time, captured at first reference, for the min-uptime guard.
+private let daemonProcessStart = Date()
+
+/// When an essential event source (ES / eslogger) is confirmed dead, exit so
+/// the OS relaunches a fresh daemon that re-runs the full collector init
+/// (es_new_client). Two guards prevent a crash loop:
+///   • min uptime — never exit within the first 180 s, so a boot-time ES
+///     failure (e.g. entitlement not yet granted) doesn't loop;
+///   • cross-restart rate limit — a marker file records recent relaunches; if
+///     we've already relaunched ≥3 times in the last 10 min, give up and stay
+///     degraded (the CRITICAL fault is already logged) rather than thrash.
+/// NEEDS ON-DEVICE VERIFICATION: relies on the system relaunching the ES
+/// extension after exit (standard for kept-alive security extensions).
+private func recoverEssentialSourceOrStayDegraded(name: String, supportDir: String, logger: Logger) {
+    // Only a supervised, non-interactive process is relaunched on exit (the
+    // sysext / LaunchDaemon). A developer running `swift run maccrabd` from a
+    // terminal would just have it quit — so never exit when stdin is a TTY;
+    // stay degraded instead.
+    guard isatty(STDIN_FILENO) == 0 else {
+        logger.fault("\(name) DOWN in an interactive session — not relaunching (no supervisor); staying degraded")
+        return
+    }
+    let uptime = Date().timeIntervalSince(daemonProcessStart)
+    guard uptime > 180 else {
+        logger.fault("\(name) DOWN \(Int(uptime))s after start — within startup guard window; staying up, not relaunching")
+        return
+    }
+    let markerPath = supportDir + "/.collector_restart"
+    let now = Date().timeIntervalSince1970
+    let recent: [Double] = {
+        guard let text = try? String(contentsOfFile: markerPath, encoding: .utf8) else { return [] }
+        return text.split(whereSeparator: { $0 == "\n" }).compactMap { Double($0) }
+            .filter { now - $0 < 600 }
+    }()
+    guard recent.count < 3 else {
+        logger.fault("\(name) DOWN but already relaunched \(recent.count)× in 10 min — giving up auto-recovery to avoid a restart loop; host stays degraded until manual restart")
+        return
+    }
+    let updated = (recent + [now]).map { String($0) }.joined(separator: "\n") + "\n"
+    // Atomic write (temp + rename): if ES + eslogger escalate concurrently and
+    // both reach here in the same process, the marker can't be left corrupt by
+    // interleaved writes. (Semantically one entry per process death is correct —
+    // exit() below ends the process before a second writer matters.)
+    try? updated.data(using: .utf8)?.write(to: URL(fileURLWithPath: markerPath), options: .atomic)
+    logger.fault("\(name) confirmed dead — exiting for a clean relaunch so a fresh ES client can be established (relaunch \(recent.count + 1) in the last 10 min)")
+    // EX_TEMPFAIL(75): a transient failure; the supervising system should
+    // relaunch us. Flush os_log first.
+    exit(75)
 }

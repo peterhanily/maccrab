@@ -372,6 +372,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("[MacCrab] Forensic scan retention: deleted \(result.deleted.count) scan(s) older than \(days)d")
             }
         }
+        // v1.18: one-time migration off the noisy "informational" notification
+        // floor. The OS-banner floor defaults to "critical" (SettingsView
+        // @AppStorage), but installs that ran an early build could have
+        // persisted "informational" — which posts a banner for essentially
+        // every detection. Bump that single extreme to "high" once (flagged so
+        // we never fight a user who later picks a lower floor deliberately),
+        // then re-sync the daemon config. Every alert still appears in the
+        // dashboard regardless of this floor.
+        Task.detached(priority: .utility) {
+            let defaults = UserDefaults.standard
+            guard !defaults.bool(forKey: "notifFloorMigratedV18") else { return }
+            defaults.set(true, forKey: "notifFloorMigratedV18")
+            guard (defaults.string(forKey: "minAlertSeverity") ?? "critical") == "informational" else { return }
+            defaults.set("high", forKey: "minAlertSeverity")
+            let enabled = (defaults.object(forKey: "alertNotifications") as? Bool) ?? true
+            let configDir = NSHomeDirectory() + "/Library/Application Support/MacCrab"
+            try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+            let path = configDir + "/alert_notifications.json"
+            if let data = try? JSONSerialization.data(
+                withJSONObject: ["enabled": enabled, "min_severity": "high"],
+                options: [.prettyPrinted, .sortedKeys]
+            ) {
+                let tmp = path + ".tmp"
+                try? data.write(to: URL(fileURLWithPath: tmp))
+                _ = try? FileManager.default.removeItem(atPath: path)
+                try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+            }
+            // No cross-uid SIGHUP here: the app (uid 501) can't signal the root
+            // sysext (EPERM). The written file is picked up by the engine on its
+            // next restart (which the version update that triggers this migration
+            // performs) and by the app's own AlertNotifier on next launch. This
+            // is a one-shot migration, so it self-applies without a live signal.
+            NSLog("[MacCrab] Notification floor migrated: informational → high (applies on next engine restart)")
+        }
     }
 
     @MainActor func setupStatusBar(appState: AppState, updater: SPUUpdater? = nil) {

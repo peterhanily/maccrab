@@ -1315,6 +1315,16 @@ enum DaemonTimers {
                 let recordClipboardReqs = files.filter { $0.hasPrefix("record-clipboard-") && $0.hasSuffix(".json") }
                 // v1.18: per-built-in-rule enable/disable + severity override.
                 let builtinRuleReqs = files.filter { $0.hasPrefix("builtin-rule-setting-") && $0.hasSuffix(".json") }
+                // v1.18 agent control-plane (MCP skill): set a whitelisted
+                // daemon_config key, install a compiled user rule, remove a
+                // user rule. Same uid/symlink auth gate + audit as every verb.
+                let setDaemonConfigReqs = files.filter { $0.hasPrefix("set-daemon-config-") && $0.hasSuffix(".json") }
+                let installRuleReqs = files.filter { $0.hasPrefix("install-rule-") && $0.hasSuffix(".json") }
+                let removeRuleReqs = files.filter { $0.hasPrefix("remove-rule-") && $0.hasSuffix(".json") }
+                // v1.18: the human's agent-control grants. The root engine owns
+                // mcp_capabilities.json so an agent (console user) can't grant
+                // itself power; the dashboard routes the human's choice here.
+                let agentCapReqs = files.filter { $0.hasPrefix("set-agent-capabilities-") && $0.hasSuffix(".json") }
 
                 await handleSuppressAlertRequests(suppressAlertReqs, inboxDir: inboxDir, state: state)
                 await handleUnsuppressAlertRequests(unsuppressAlertReqs, inboxDir: inboxDir, state: state)
@@ -1325,6 +1335,10 @@ enum DaemonTimers {
                 await handleLLMConfigRequests(llmConfigReqs, inboxDir: inboxDir, state: state)
                 await handleRecordClipboardRequests(recordClipboardReqs, inboxDir: inboxDir, state: state)
                 await handleBuiltinRuleSettingRequests(builtinRuleReqs, inboxDir: inboxDir, state: state)
+                await handleSetDaemonConfigRequests(setDaemonConfigReqs, inboxDir: inboxDir, state: state)
+                await handleInstallRuleRequests(installRuleReqs, inboxDir: inboxDir, state: state)
+                await handleRemoveRuleRequests(removeRuleReqs, inboxDir: inboxDir, state: state)
+                await handleSetAgentCapabilitiesRequests(agentCapReqs, inboxDir: inboxDir, state: state)
                 await handleFlushRequests(flushRequests, inboxDir: inboxDir, state: state)
             }
         }
@@ -1485,6 +1499,205 @@ enum DaemonTimers {
             } catch {
                 print("[inbox] builtin-rule-setting \(ruleId) save failed: \(error)")
             }
+        }
+    }
+
+    // v1.18 agent control-plane: whitelisted daemon_config keys settable from
+    // the MCP skill. Re-stated here (NOT trusting the MCP) so the daemon is the
+    // authority. Safe tunables vs defense-affecting kill-switches — the MCP
+    // gates the latter behind the higher 'response' tier; the daemon enforces
+    // type + membership regardless.
+    private static let agentSettableConfigKeys: [String: String] = [
+        "behavior_alert_threshold": "double", "behavior_critical_threshold": "double",
+        "statistical_z_threshold": "double", "statistical_min_samples": "int",
+        "usb_poll_interval": "double", "clipboard_poll_interval": "double",
+        "browser_extension_poll_interval": "double", "rootkit_poll_interval": "double",
+        "event_tap_poll_interval": "double", "system_policy_poll_interval": "double",
+        "prompt_injection_confidence": "int", "intent_posterior_threshold": "double",
+        "subscribe_file_open_events": "bool", "subscribe_introspection_events": "bool",
+        "ultrasonic_enabled": "bool",
+    ]
+
+    private static func handleSetDaemonConfigRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let key = json["key"] as? String,
+                  let kind = agentSettableConfigKeys[key] else {
+                auditLogInbox(state: state, prefix: "set-daemon-config", id: "-", uid: uid, result: "rejected_key")
+                continue
+            }
+            // Coerce + validate the value to the declared kind; reject mismatches.
+            let value: Any
+            switch kind {
+            case "bool":
+                guard let b = json["value"] as? Bool else {
+                    auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid, result: "rejected_type")
+                    continue
+                }
+                value = b
+            case "int":
+                guard let i = json["value"] as? Int else {
+                    auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid, result: "rejected_type")
+                    continue
+                }
+                value = i
+            default:
+                if let d = json["value"] as? Double { value = d }
+                else if let i = json["value"] as? Int { value = Double(i) }
+                else {
+                    auditLogInbox(state: state, prefix: "set-daemon-config", id: sanitizeAuditField(key), uid: uid, result: "rejected_type")
+                    continue
+                }
+            }
+            // Merge into daemon_config.json (root-owned). Effect on next config
+            // reload / restart — these keys are read at startup.
+            let cfgPath = state.supportDir + "/daemon_config.json"
+            var cfg: [String: Any] = (try? Data(contentsOf: URL(fileURLWithPath: cfgPath)))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            cfg[key] = value
+            do {
+                let out = try JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys])
+                let tmp = cfgPath + ".tmp"
+                try out.write(to: URL(fileURLWithPath: tmp))
+                _ = try? fm.removeItem(atPath: cfgPath)
+                try fm.moveItem(atPath: tmp, toPath: cfgPath)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cfgPath)
+                auditLogInbox(state: state, prefix: "set-daemon-config",
+                              id: sanitizeAuditField(key), uid: uid, result: "set=\(value)")
+            } catch {
+                print("[inbox] set-daemon-config \(key) write failed: \(error)")
+            }
+        }
+    }
+
+    /// v1.18: write the human's agent-control capability grants to a ROOT-owned
+    /// mcp_capabilities.json. This is the ONLY writer of that file — the MCP
+    /// server trusts it solely because it's root-owned, so an agent (console
+    /// user) can never grant itself a tier. The dashboard (uid 501) drops the
+    /// request here; only the console user / root may (the standard inbox gate).
+    private static func handleSetAgentCapabilitiesRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid, result: "rejected_malformed")
+                continue
+            }
+            let grants: [String: Bool] = [
+                "config": (json["config"] as? Bool) ?? false,
+                "authoring": (json["authoring"] as? Bool) ?? false,
+                "response": (json["response"] as? Bool) ?? false,
+            ]
+            let capPath = state.supportDir + "/mcp_capabilities.json"
+            do {
+                let out = try JSONSerialization.data(withJSONObject: grants, options: [.prettyPrinted, .sortedKeys])
+                let tmp = capPath + ".tmp"
+                try out.write(to: URL(fileURLWithPath: tmp))
+                _ = try? fm.removeItem(atPath: capPath)
+                try fm.moveItem(atPath: tmp, toPath: capPath)
+                // 0644 root-owned (the daemon runs as root): world-readable so the
+                // uid-501 MCP can READ it, but only root can write it.
+                try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: capPath)
+                auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid,
+                              result: "config=\(grants["config"]!) authoring=\(grants["authoring"]!) response=\(grants["response"]!)")
+            } catch {
+                print("[inbox] set-agent-capabilities write failed: \(error)")
+            }
+        }
+    }
+
+    /// Sanitize an agent-supplied rule id to a safe user_rules basename:
+    /// lowercased, only [a-z0-9-_], no path traversal. Returns nil if empty.
+    private static func safeRuleBasename(_ raw: String) -> String? {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-_")
+        let s = String(raw.lowercased().filter { allowed.contains($0) })
+        guard !s.isEmpty, s.count <= 128 else { return nil }
+        return s
+    }
+
+    private static func handleInstallRuleRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "install-rule", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawId = json["ruleId"] as? String, let ruleId = safeRuleBasename(rawId),
+                  let yaml = json["yaml"] as? String, let jsonText = json["json"] as? String,
+                  yaml.utf8.count <= 64 * 1024, jsonText.utf8.count <= 256 * 1024 else {
+                auditLogInbox(state: state, prefix: "install-rule", id: "-", uid: uid, result: "rejected_malformed")
+                continue
+            }
+            let userRulesDir = state.supportDir + "/user_rules"
+            do {
+                try fm.createDirectory(atPath: userRulesDir, withIntermediateDirectories: true)
+                try yaml.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/\(ruleId).yml"))
+                try jsonText.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/\(ruleId).json"))
+                let tick = "\(Date().timeIntervalSince1970)\n"
+                try? tick.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/.reload_tick"))
+                auditLogInbox(state: state, prefix: "install-rule", id: sanitizeAuditField(ruleId), uid: uid, result: "installed")
+            } catch {
+                print("[inbox] install-rule \(ruleId) failed: \(error)")
+                auditLogInbox(state: state, prefix: "install-rule", id: sanitizeAuditField(ruleId), uid: uid, result: "error")
+            }
+        }
+    }
+
+    private static func handleRemoveRuleRequests(
+        _ names: [String], inboxDir: String, state: DaemonState
+    ) async {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        for name in names {
+            let path = inboxDir + "/" + name
+            defer { try? fm.removeItem(atPath: path) }
+            let uid = requestOwnerUID(at: path)
+            guard isAuthorizedInboxRequest(uid: uid) else {
+                auditLogInbox(state: state, prefix: "remove-rule", id: "-", uid: uid, result: "rejected_uid")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawId = json["ruleId"] as? String, let ruleId = safeRuleBasename(rawId) else {
+                auditLogInbox(state: state, prefix: "remove-rule", id: "-", uid: uid, result: "rejected_malformed")
+                continue
+            }
+            let userRulesDir = state.supportDir + "/user_rules"
+            _ = try? fm.removeItem(atPath: userRulesDir + "/\(ruleId).yml")
+            _ = try? fm.removeItem(atPath: userRulesDir + "/\(ruleId).json")
+            let tick = "\(Date().timeIntervalSince1970)\n"
+            try? tick.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/.reload_tick"))
+            auditLogInbox(state: state, prefix: "remove-rule", id: sanitizeAuditField(ruleId), uid: uid, result: "removed")
         }
     }
 

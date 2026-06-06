@@ -878,7 +878,19 @@ struct V2AlertsWorkspace: View {
                     V2StatusChip(code, kind: .neutral, icon: "doc.plaintext")
                 }
             }
-            V2InspectorSection("Description") {
+            // v1.18: parse the snapshotted triggering event(s) once; reused by
+            // the "What happened" summary and the structured detail below.
+            let triggers = parseTriggerEvents(from: alert.triggeringEventsJson)
+            if let summary = contextualSummary(for: alert, events: triggers) {
+                V2InspectorSection("What happened") {
+                    Text(summary)
+                        .font(V2Theme.body())
+                        .foregroundStyle(V2Theme.primaryText)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            V2InspectorSection("Detection rule") {
                 Text(alert.description)
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.primaryText)
@@ -992,23 +1004,17 @@ struct V2AlertsWorkspace: View {
             // Remediation / D3FEND sections above. Returns in v1.11
             // alongside the metadata_json schema column and the
             // inline mutation UI to populate it.
-            // v1.17.2: the EXACT triggering event(s), snapshotted onto the
-            // alert at creation (AlertStore schema v6). Unlike "Surrounding
-            // events", this survives events.db pruning — so even a months-old
-            // alert still shows what actually fired. Only shown when present.
-            // Parse the snapshot ONCE (was parsed 3×: twice in the guard +
-            // once in the ForEach).
-            let triggerLines = alert.triggeringEventsJson.isEmpty
-                ? []
-                : triggeringEventSummaries(from: alert.triggeringEventsJson)
-            if !triggerLines.isEmpty {
+            // v1.17.2 / v1.18: the EXACT triggering event(s), snapshotted onto
+            // the alert at creation (AlertStore schema v6) and rendered as
+            // structured fields. Unlike "Surrounding events", this survives
+            // events.db pruning — so even a months-old alert still shows what
+            // actually fired. `triggers` is parsed once at the top of the
+            // inspector.
+            if !triggers.isEmpty {
                 V2InspectorSection("Triggering event") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(triggerLines.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(V2Theme.meta())
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(triggers.enumerated()), id: \.offset) { _, ev in
+                            triggerEventCard(ev)
                         }
                         Text("Captured at alert time — preserved even after the live event is pruned.")
                             .font(V2Theme.meta())
@@ -1107,31 +1113,107 @@ struct V2AlertsWorkspace: View {
 
     /// List up to 8 events from AppState.events whose timestamp is
     /// within ±2 minutes of the alert. AppState already polls a
-    /// Parse the v6 triggering-event snapshot (a JSON array of event
-    /// raw_json objects) into human-readable one-line summaries for the
-    /// inspector. Pure value transform — no DB round-trip. Tolerant of
-    /// malformed/partial JSON (returns [] so the section simply hides).
-    private func triggeringEventSummaries(from json: String) -> [String] {
-        guard let data = json.data(using: .utf8),
+    /// A structured view of one snapshotted triggering event, parsed from the
+    /// v6 JSON. Only the fields that drive the inspector — kept small.
+    fileprivate struct TriggerEvent {
+        var action: String
+        var processName: String
+        var processPath: String?
+        var commandLine: String?
+        var filePath: String?
+        var fileAction: String?
+        var destination: String?
+        var signer: String?
+        var notarized: Bool?
+        var sha256: String?
+        var parent: String?
+        var user: String?
+    }
+
+    /// Parse the v6 triggering-event snapshot (a JSON array of event raw_json
+    /// objects) into structured events. Pure value transform — no DB round
+    /// trip. Tolerant of malformed/partial JSON (returns [] so the section
+    /// simply hides).
+    private func parseTriggerEvents(from json: String) -> [TriggerEvent] {
+        guard !json.isEmpty, let data = json.data(using: .utf8),
               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
         else { return [] }
-        return arr.compactMap { obj -> String? in
+        func nonEmpty(_ v: Any?) -> String? {
+            guard let s = v as? String, !s.isEmpty else { return nil }
+            return s
+        }
+        return arr.compactMap { obj -> TriggerEvent? in
             // Omitted-oversize marker (see EventSnapshot.encode).
-            if let snap = obj["snapshot"] as? String, snap == "omitted" {
-                return "event omitted (exceeded size cap)"
+            if let snap = obj["snapshot"] as? String, snap == "omitted" { return nil }
+            let proc = obj["process"] as? [String: Any]
+            let sig = proc?["codeSignature"] as? [String: Any]
+            var signer: String? = nil
+            if let st = nonEmpty(sig?["signerType"]) {
+                let team = nonEmpty(sig?["teamId"]).map { " (\($0))" } ?? ""
+                signer = st + team
             }
-            let action = (obj["eventAction"] as? String) ?? (obj["eventType"] as? String) ?? "event"
-            let proc = (obj["process"] as? [String: Any])
-            let name = (proc?["name"] as? String) ?? "—"
-            var parts = ["\(action): \(name)"]
-            if let cmd = proc?["commandLine"] as? String, !cmd.isEmpty { parts.append(cmd) }
-            if let file = (obj["file"] as? [String: Any])?["path"] as? String, !file.isEmpty { parts.append("file: \(file)") }
-            if let net = obj["network"] as? [String: Any],
-               let ip = net["destinationIp"] as? String {
-                let port = (net["destinationPort"] as? Int).map { ":\($0)" } ?? ""
-                parts.append("→ \(ip)\(port)")
+            var dest: String? = nil
+            if let net = obj["network"] as? [String: Any] {
+                let base = nonEmpty(net["destinationHostname"]) ?? nonEmpty(net["destinationIp"])
+                if let base {
+                    let port = (net["destinationPort"] as? Int).map { ":\($0)" } ?? ""
+                    dest = base + port
+                }
             }
-            return parts.joined(separator: "  ·  ")
+            let ancestors = proc?["ancestors"] as? [[String: Any]]
+            return TriggerEvent(
+                action: nonEmpty(obj["eventAction"]) ?? nonEmpty(obj["eventType"]) ?? "event",
+                processName: nonEmpty(proc?["name"]) ?? "—",
+                processPath: nonEmpty(proc?["executable"]),
+                commandLine: nonEmpty(proc?["commandLine"]),
+                filePath: nonEmpty((obj["file"] as? [String: Any])?["path"]),
+                fileAction: nonEmpty((obj["file"] as? [String: Any])?["action"]),
+                destination: dest,
+                signer: signer,
+                notarized: sig?["isNotarized"] as? Bool,
+                sha256: nonEmpty((proc?["hashes"] as? [String: Any])?["sha256"]),
+                parent: nonEmpty(ancestors?.first?["executable"]),
+                user: nonEmpty(proc?["userName"])
+            )
+        }
+    }
+
+    /// Build a factual one-line "what happened" sentence from the first
+    /// triggering event. Tasteful — echoes the real event, no embellishment.
+    private func contextualSummary(for alert: V2MockAlert, events: [TriggerEvent]) -> String? {
+        guard let e = events.first else { return nil }
+        var who = e.processName
+        if let p = e.parent {
+            who += " (via \((p as NSString).lastPathComponent))"
+        }
+        let did: String
+        if let cmd = e.commandLine, cmd != e.processPath {
+            did = "ran  \(cmd)"
+        } else if let f = e.filePath {
+            did = "\(e.fileAction ?? "accessed")  \(f)"
+        } else if let d = e.destination {
+            did = "connected to  \(d)"
+        } else {
+            did = e.action
+        }
+        return "\(who)  \(did)"
+    }
+
+    @ViewBuilder
+    private func triggerEventCard(_ ev: TriggerEvent) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            V2InspectorKeyValue("Action", ev.action)
+            if let p = ev.processPath { V2InspectorKeyValue("Process", p, mono: true) }
+            if let c = ev.commandLine { V2InspectorKeyValue("Command", c, mono: true) }
+            if let f = ev.filePath {
+                V2InspectorKeyValue(ev.fileAction.map { $0.capitalized } ?? "File", f, mono: true)
+            }
+            if let d = ev.destination { V2InspectorKeyValue("Destination", d, mono: true) }
+            if let s = ev.signer { V2InspectorKeyValue("Signer", s) }
+            if let n = ev.notarized { V2InspectorKeyValue("Notarized", n ? "yes" : "no") }
+            if let h = ev.sha256 { V2InspectorKeyValue("SHA-256", h, mono: true) }
+            if let p = ev.parent { V2InspectorKeyValue("Parent", p, mono: true) }
+            if let u = ev.user { V2InspectorKeyValue("User", u) }
         }
     }
 

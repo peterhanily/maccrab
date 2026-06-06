@@ -256,6 +256,19 @@ public struct V2DetectionWorkspace: View {
             ))
             return
         }
+        // v1.18: sequence + graph (composite) rules are loaded by the
+        // SequenceEngine / TraceGraph engine from compiled_rules/{sequences,
+        // graph}/, not via the single-event user_rules overlay — so a disable
+        // override here would be silently ignored by the engine. List them
+        // read-only rather than offer a toggle that does nothing.
+        if rule.category == "Sequence" || rule.category == "Graph" {
+            state.showToast(V2Toast(
+                kind: .info,
+                title: "Read-only rule",
+                detail: rule.title + " — multi-step rules are managed in their rule files"
+            ))
+            return
+        }
         let currentlyDisabled = userDisabledRuleIDs.contains(rule.id) || !rule.isEnabled
         if currentlyDisabled {
             await removeUserOverride(rule: rule)
@@ -1148,7 +1161,6 @@ private struct RuleYAMLEditorSheet: View {
     @State private var showDiscardConfirm: Bool = false
 
     private static let userRulesDir = "/Library/Application Support/MacCrab/user_rules"
-    private static let reloadTickPath = userRulesDir + "/.reload_tick"
 
     /// True when the user has typed edits that aren't yet saved.
     /// `originalContent` is populated by `load()`; if save() succeeds
@@ -1277,19 +1289,11 @@ private struct RuleYAMLEditorSheet: View {
     private func save() async {
         saving = true
         defer { saving = false }
-        guard ensureOverrideDirWritable() else {
-            onError("Admin password is required the first time you save a rule edit.")
-            return
-        }
-        let ymlPath = Self.userRulesDir + "/\(rule.id).yml"
-        guard (try? content.data(using: .utf8)?.write(to: URL(fileURLWithPath: ymlPath))) != nil else {
-            onError("Couldn't write YAML to \(ymlPath)")
-            return
-        }
-        let compileResult = await compileYAMLViaBundledPython()
-        switch compileResult {
+        // v1.18: delegate to the shared installer (same path the rule wizard
+        // uses) so the two never drift on how a rule is compiled + installed.
+        let result = await UserRuleInstaller.install(ruleId: rule.id, yaml: content)
+        switch result {
         case .success:
-            touchReloadTick()
             // v1.12.0 RC27: re-baseline originalContent so a follow-up
             // Cancel doesn't warn about edits we just persisted.
             originalContent = content
@@ -1302,185 +1306,4 @@ private struct RuleYAMLEditorSheet: View {
         }
     }
 
-    private enum CompileResult {
-        case success
-        case failure(String)
-    }
-
-    /// Run the bundled `compile_rules.py` on JUST the rule being saved,
-    /// using a fresh tmp directory as both input AND output so the
-    /// compiler's `_snapshot_previous_output` step (which tries to
-    /// create `<output_dir>.archive/`) doesn't trip over the
-    /// /Library parent dir's root-only write permissions. The
-    /// produced JSON is then copied back into user_rules/.
-    private func compileYAMLViaBundledPython() async -> CompileResult {
-        guard let compilerPath = Bundle.main.path(forResource: "compile_rules", ofType: "py", inDirectory: "Compiler") else {
-            return .failure("Bundled compiler not found in MacCrab.app/Contents/Resources/Compiler/")
-        }
-        let pythonPath = (compilerPath as NSString).deletingLastPathComponent
-        // Stage YAML in a tmp dir so `_snapshot_previous_output` runs
-        // inside a writable parent. Without this the compiler errors
-        // with "PermissionError: '/Library/.../user_rules.archive'"
-        // since /Library/Application Support/MacCrab/ is root-owned.
-        let tmpRoot = NSTemporaryDirectory() + "maccrab-compile-\(UUID().uuidString)"
-        defer { try? FileManager.default.removeItem(atPath: tmpRoot) }
-        do {
-            try FileManager.default.createDirectory(
-                atPath: tmpRoot, withIntermediateDirectories: true
-            )
-        } catch {
-            return .failure("Couldn't create tmp dir: \(error.localizedDescription)")
-        }
-        let ymlSrc = Self.userRulesDir + "/\(rule.id).yml"
-        let ymlStaged = tmpRoot + "/\(rule.id).yml"
-        do {
-            try FileManager.default.copyItem(atPath: ymlSrc, toPath: ymlStaged)
-        } catch {
-            return .failure("Couldn't stage YAML for compile: \(error.localizedDescription)")
-        }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        task.arguments = [
-            compilerPath,
-            "--input-dir", tmpRoot,
-            "--output-dir", tmpRoot,
-        ]
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONPATH"] = pythonPath
-        task.environment = env
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        task.standardOutput = stdoutPipe
-        task.standardError = stderrPipe
-        // v1.12.0 RC27 audit fix (Stab-B3): drain pipes in real time
-        // via readabilityHandler. Pre-fix the code waitUntilExit'd
-        // before reading, which deadlocks if the child writes more
-        // than 64 KB to stderr (macOS pipe buffer is 64 KB; child
-        // blocks on write, parent never wakes from wait). A verbose
-        // PyYAML traceback can exceed that on a malformed rule.
-        var outBytes = Data()
-        var errBytes = Data()
-        let drainLock = NSLock()
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            drainLock.lock(); outBytes.append(chunk); drainLock.unlock()
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            drainLock.lock(); errBytes.append(chunk); drainLock.unlock()
-        }
-        do {
-            try task.run()
-        } catch {
-            return .failure("Couldn't run python3: \(error.localizedDescription)")
-        }
-        // v1.12.0 RC27 audit fix (Stab-B2): 10 s timeout on the
-        // subprocess. Pre-fix a hung compile_rules.py would hang the
-        // editor sheet indefinitely with no cancellation. Compiling
-        // a single rule should take <100 ms; 10 s is 100× safety
-        // margin for cold disk / Python startup / vendored-PyYAML
-        // import latency.
-        let deadline = DispatchTime.now() + .seconds(10)
-        let timeoutQueue = DispatchQueue.global(qos: .utility)
-        let timeoutItem = DispatchWorkItem {
-            if task.isRunning {
-                task.terminate()
-                // Give SIGTERM a second to land; then SIGKILL.
-                DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-                    if task.isRunning { kill(task.processIdentifier, SIGKILL) }
-                }
-            }
-        }
-        timeoutQueue.asyncAfter(deadline: deadline, execute: timeoutItem)
-        task.waitUntilExit()
-        timeoutItem.cancel()
-        // Final flush in case the handlers haven't drained the EOF yet.
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        if let finalOut = try? stdoutPipe.fileHandleForReading.readToEnd() {
-            drainLock.lock(); outBytes.append(finalOut); drainLock.unlock()
-        }
-        if let finalErr = try? stderrPipe.fileHandleForReading.readToEnd() {
-            drainLock.lock(); errBytes.append(finalErr); drainLock.unlock()
-        }
-        if task.terminationStatus != 0 {
-            let errData = errBytes
-            let outData = outBytes
-            let stderr = String(data: errData, encoding: .utf8) ?? ""
-            let stdout = String(data: outData, encoding: .utf8) ?? ""
-            let detail = (stderr + "\n" + stdout)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .components(separatedBy: "\n")
-                .filter { !$0.isEmpty }
-                .suffix(8)
-                .joined(separator: "\n")
-            return .failure(detail.isEmpty ? "compile_rules.py exited \(task.terminationStatus)" : detail)
-        }
-        // Move the produced JSON back into user_rules/ ATOMICALLY.
-        // v1.12.0 RC25 (race fix): pre-fix used removeItem + copyItem,
-        // which created a window where the daemon's mtime watcher could
-        // poll .reload_tick between the two calls and see jsonDst
-        // either missing or partial — leaving the user override un-
-        // loaded on the daemon side. Switch to a single rename, which
-        // is atomic on the same filesystem. Also: ensure .reload_tick
-        // is touched AFTER the JSON is durably in place (handled by
-        // touchReloadTick() being called from save() after compile
-        // returns .success).
-        let jsonStaged = tmpRoot + "/\(rule.id).json"
-        let jsonDst = Self.userRulesDir + "/\(rule.id).json"
-        guard FileManager.default.fileExists(atPath: jsonStaged) else {
-            return .failure("Compiler ran cleanly but produced no JSON at \(jsonStaged) — rule may be malformed or product != macos")
-        }
-        // POSIX rename is atomic when both paths are on the same
-        // filesystem. /tmp and /Library are both on / so this holds.
-        // We use a low-level rename() to avoid Foundation copy-then-
-        // unlink fallback for cross-volume moves.
-        let renamed = jsonStaged.withCString { src in
-            jsonDst.withCString { dst in
-                rename(src, dst) == 0
-            }
-        }
-        guard renamed else {
-            return .failure("Atomic rename failed: \(String(cString: strerror(errno)))")
-        }
-        return .success
-    }
-
-    /// Same bootstrap as the Disable-rule button: if the override dir
-    /// doesn't exist or isn't writable, prompt for admin once and chmod
-    /// it 0775 root:admin so this user (admin group) can write without
-    /// elevation on subsequent saves.
-    private func ensureOverrideDirWritable() -> Bool {
-        let fm = FileManager.default
-        let dir = Self.userRulesDir
-        if fm.isWritableFile(atPath: dir) { return true }
-        let shell = "mkdir -p '\(dir)' && chown root:admin '\(dir)' && chmod 0775 '\(dir)'"
-        let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to create the user-rules directory once so you can save rule edits without entering your password every time.\""
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", script]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0 && fm.isWritableFile(atPath: dir)
-        } catch {
-            return false
-        }
-    }
-
-    private func touchReloadTick() {
-        let data = "\(Date().timeIntervalSince1970)\n".data(using: .utf8) ?? Data()
-        try? data.write(to: URL(fileURLWithPath: Self.reloadTickPath))
-    }
 }

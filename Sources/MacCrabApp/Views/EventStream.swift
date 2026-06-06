@@ -64,6 +64,19 @@ struct EventStream: View {
         self.initialCenterTime = initialCenterTime
         self.centerHalfWindowSeconds = centerHalfWindowSeconds
     }
+
+    /// v1.18: alerts whose triggering event is this event (alert.eventId ==
+    /// the event UUID). Combines the in-memory recent + dashboard alert pools
+    /// (deduped) so the event detail panel can show "this event triggered N
+    /// alerts" — the fuller alert view from the events side.
+    private func triggeredAlerts(for event: EventViewModel) -> [AlertViewModel] {
+        let key = event.id.uuidString
+        var seen = Set<String>()
+        return (appState.recentAlerts + appState.dashboardAlerts)
+            .filter { $0.eventId == key }
+            .filter { seen.insert($0.id).inserted }
+    }
+
     @State private var isPaused: Bool = false
     @State private var autoScroll: Bool = true
     @State private var selectedEventID: EventViewModel.ID? = nil
@@ -477,7 +490,7 @@ struct EventStream: View {
                     if let selectedID = selectedEventID,
                        let event = filteredCache.first(where: { $0.id == selectedID }) {
                         Divider()
-                        EventDetailPanel(event: event)
+                        EventDetailPanel(event: event, triggeredAlerts: triggeredAlerts(for: event))
                             .frame(minWidth: 280, idealWidth: 350, maxWidth: 450)
                             .transition(reduceMotion ? .opacity : .move(edge: .trailing))
                     }
@@ -685,6 +698,7 @@ private struct CategoryBadge: View {
 
 private struct EventDetailPanel: View {
     let event: EventViewModel
+    var triggeredAlerts: [AlertViewModel] = []
 
     var body: some View {
         ScrollView {
@@ -700,6 +714,32 @@ private struct EventDetailPanel: View {
                 Text(event.dateTimeString)
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                // v1.18: surface the alert(s) this event triggered, so the
+                // events panel links forward to the alert rather than dead-
+                // ending at the raw event.
+                if !triggeredAlerts.isEmpty {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(triggeredAlerts) { a in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Circle().fill(a.severityColor)
+                                        .frame(width: 8, height: 8).padding(.top, 5)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(a.ruleTitle).font(.callout).fontWeight(.medium)
+                                        Text(a.ruleId).font(.caption2).foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            Text(String(localized: "eventDetail.openAlerts", defaultValue: "Open the Alerts workspace for full detail and actions."))
+                                .font(.caption2).foregroundColor(.secondary).padding(.top, 2)
+                        }.padding(4)
+                    } label: {
+                        Label("Triggered \(triggeredAlerts.count) alert\(triggeredAlerts.count == 1 ? "" : "s")",
+                              systemImage: "bell.badge.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
 
                 GroupBox(String(localized: "eventDetail.process", defaultValue: "Process")) {
                     VStack(alignment: .leading, spacing: 6) {

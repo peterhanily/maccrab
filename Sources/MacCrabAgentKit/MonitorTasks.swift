@@ -146,7 +146,10 @@ enum MonitorTasks {
                 await state.collectorRegistry.recordTick(name: "MCPMonitor")
                 let severity: Severity = mcpEvent.eventType == .suspicious ? .critical : .high
                 let alert = Alert(
-                    ruleId: "maccrab.ai-guard.mcp-\(mcpEvent.eventType.rawValue)",
+                    // v1.18: dotted suffix (was `mcp-…`) so the
+                    // `maccrab.ai-guard.mcp` catalog/settings base governs the
+                    // whole family via AlertSink's longest-prefix match.
+                    ruleId: "maccrab.ai-guard.mcp.\(mcpEvent.eventType.rawValue)",
                     ruleTitle: "MCP Server \(mcpEvent.eventType.rawValue.replacingOccurrences(of: "_", with: " ").capitalized): \(mcpEvent.serverName)",
                     severity: severity,
                     eventId: UUID().uuidString,

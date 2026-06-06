@@ -346,23 +346,22 @@ enum EventLoop {
                             let alert = Alert(
                                 ruleId: "maccrab.ai-guard.credential-access",
                                 ruleTitle: "🦀 AI Tool Accessed \(credType.rawValue)",
-                                // v1.17.1: was .critical. This is a DIRECT
-                                // emission (alertSink.submit) and never passes
-                                // through NoiseFilter (see AlertSink) — so the
-                                // only effect of the change is the notification
-                                // floor: NotificationGate defaults to .critical,
-                                // so at .high the spurious banner is dropped
-                                // while the alert is still recorded to the DB.
-                                // It fired falsely on benign cp/rm (whole-AI-
-                                // subtree attribution), MacCrab's own honeyfiles,
-                                // and web source files (unanchored substring
-                                // match) — that FP SOURCE lives in
-                                // CredentialFence.checkAccess and is unchanged by
-                                // the severity edit. Follow-up: anchored
-                                // EventLoop.isCredentialShapedPath matcher +
-                                // honeyfile/self exclusion + tighter
-                                // AIProcessTracker.isAIChild.
-                                severity: .high,
+                                // v1.17.1: .critical → .high. v1.18: .high →
+                                // .medium. This is a DIRECT emission
+                                // (alertSink.submit) that never passes through
+                                // NoiseFilter (see AlertSink), so the only
+                                // effect is the notification floor: AI tools
+                                // touch credential-shaped paths constantly in
+                                // normal dev, so this is recorded for the
+                                // dashboard/timeline but should not banner at a
+                                // High floor. The FP SOURCE (benign cp/rm via
+                                // whole-AI-subtree attribution, honeyfiles, web
+                                // source files via unanchored substring match)
+                                // lives in CredentialFence.checkAccess and is
+                                // unchanged by the severity edit. The built-in
+                                // catalog default for this rule is kept in sync
+                                // (BuiltinRuleCatalog).
+                                severity: .medium,
                                 eventId: enrichedEvent.id.uuidString,
                                 processPath: aiProc.executable,
                                 processName: aiProc.name,
@@ -395,7 +394,12 @@ enum EventLoop {
                                 let alert = Alert(
                                     ruleId: "maccrab.ai-guard.boundary-violation",
                                     ruleTitle: "🦀 AI Tool Wrote Outside Project Directory",
-                                    severity: .high,
+                                    // v1.18: .high → .medium. Routine during
+                                    // normal dependency installs / package
+                                    // manager writes; recorded but should not
+                                    // banner at a High floor. Kept in sync with
+                                    // BuiltinRuleCatalog.
+                                    severity: .medium,
                                     eventId: enrichedEvent.id.uuidString,
                                     processPath: aiProc.executable,
                                     processName: aiProc.name,
@@ -667,7 +671,10 @@ enum EventLoop {
                     let alert = Alert(
                         ruleId: "maccrab.ai-guard.network-sandbox",
                         ruleTitle: "AI Tool Connected to Unapproved Destination",
-                        severity: .high,
+                        // v1.18: .high → .medium. Recorded but should not banner
+                        // at a High floor (AI subprocesses make routine outbound
+                        // connections). Kept in sync with BuiltinRuleCatalog.
+                        severity: .medium,
                         eventId: enrichedEvent.id.uuidString,
                         processPath: enrichedEvent.process.executable,
                         processName: enrichedEvent.process.name,
