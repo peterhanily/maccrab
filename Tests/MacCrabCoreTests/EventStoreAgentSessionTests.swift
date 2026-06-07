@@ -110,4 +110,21 @@ struct EventStoreAgentSessionTests {
         #expect(s1?.firstSeen == t0.addingTimeInterval(1))
         #expect(s1?.lastSeen == t0.addingTimeInterval(2))
     }
+
+    @Test("agentSessionForPid returns the most-recent session for a pid (P2b mutation join)")
+    func pidToSessionResolution() async throws {
+        let path = Self.tempPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let store = try EventStore(path: path)
+
+        // makeEvent uses a fixed pid (4242). Two sessions over time on that
+        // pid → the resolver returns the newest (a mutation by that ppid is
+        // attributed to the session it was most recently part of).
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        try await store.insert(event: Self.makeEvent(sessionId: "old", at: t0.addingTimeInterval(1)))
+        try await store.insert(event: Self.makeEvent(sessionId: "new", at: t0.addingTimeInterval(9)))
+
+        #expect(try await store.agentSessionForPid(4242) == "new")
+        #expect(try await store.agentSessionForPid(9999) == nil)   // unknown pid
+    }
 }

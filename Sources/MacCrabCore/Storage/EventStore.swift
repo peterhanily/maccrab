@@ -1116,6 +1116,21 @@ public actor EventStore {
         return try queryEvents(sql: sql, bindings: bindings)
     }
 
+    /// Wave-3 P2b: the most-recent durable session id associated with a
+    /// process pid. Used MCP-side to attribute a mutation (whose only
+    /// correlation handle is the caller's ppid) back to an agent session —
+    /// a medium-confidence join (pids recycle; the MCP host pid may differ
+    /// from the kernel-work AI-tool root), so callers should label it as
+    /// ppid-correlated, not trace-confirmed.
+    public func agentSessionForPid(_ pid: Int32) throws -> String? {
+        let sql = "SELECT ai_tool_session_id FROM events WHERE process_pid = ?1 AND ai_tool_session_id IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, pid)
+        guard sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) else { return nil }
+        return String(cString: c)
+    }
+
     /// One-line summary per durable agent session, derived from the
     /// stamped events (no separate registry table needed for this slice).
     /// Most-recently-active first. Backed by idx_events_ai_session.

@@ -55,8 +55,43 @@ func validateParentProcess() {
 }
 
 /// Audit log for state-modifying operations.
+///
+/// v1.18 Wave-3 P2b: besides the os.log line, append a durable JSON record
+/// to a user-writable mutation log so an agent session's mutations survive
+/// the process and can be surfaced in get_agent_session. We capture only
+/// the caller's `ppid` here (sync path); the ppid→session join happens at
+/// read time. Best-effort: a write failure never blocks the mutation.
 func auditLog(_ operation: String, details: String) {
     logger.notice("MCP AUDIT: \(operation) — \(details)")
+    let line: [String: Any] = [
+        "ts": ISO8601DateFormatter().string(from: Date()),
+        "operation": operation,
+        "details": details,
+        "ppid": Int(getppid()),
+    ]
+    guard JSONSerialization.isValidJSONObject(line),
+          let data = try? JSONSerialization.data(withJSONObject: line),
+          var text = String(data: data, encoding: .utf8) else { return }
+    text += "\n"
+    let path = mcpMutationLogPath()
+    if let fh = FileHandle(forWritingAtPath: path) {
+        defer { try? fh.close() }
+        _ = try? fh.seekToEnd()
+        try? fh.write(contentsOf: Data(text.utf8))
+    } else {
+        try? Data(text.utf8).write(to: URL(fileURLWithPath: path))
+    }
+}
+
+/// Durable MCP mutation log, in the user app-support dir (uid-501-writable
+/// even when the engine's data dir is the root-owned system dir).
+func mcpMutationLogPath() -> String {
+    let fm = FileManager.default
+    let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first.map { $0.appendingPathComponent("MacCrab").path }
+        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+    try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir + "/mcp_mutations.jsonl"
 }
 
 // MARK: - Data Directory Resolution
@@ -1363,6 +1398,37 @@ func handleListAgentSessions(_ args: [String: Any]) async -> Any {
     }
 }
 
+/// Read the durable MCP mutation log and return the mutations whose ppid
+/// resolves to `sessionId` (ppid-correlated, medium confidence). Bounded
+/// to the most recent lines so an unbounded log can't blow up the call.
+func mutationsForSession(_ sessionId: String, store: EventStore) async -> [[String: Any]] {
+    guard let text = try? String(contentsOfFile: mcpMutationLogPath(), encoding: .utf8) else { return [] }
+    var pidToSession: [Int32: String?] = [:]
+    var out: [[String: Any]] = []
+    for raw in text.split(separator: "\n").suffix(2000) {
+        guard let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ppid = obj["ppid"] as? Int else { continue }
+        let key = Int32(ppid)
+        let resolved: String?
+        if let cached = pidToSession[key] {
+            resolved = cached
+        } else {
+            resolved = (try? await store.agentSessionForPid(key)) ?? nil
+            pidToSession[key] = resolved
+        }
+        if resolved == sessionId {
+            out.append([
+                "ts": obj["ts"] ?? "",
+                "operation": obj["operation"] ?? "",
+                "details": obj["details"] ?? "",
+                "confidence": "ppid-correlated",
+            ])
+        }
+    }
+    return out
+}
+
 func handleGetAgentSession(_ args: [String: Any]) async -> Any {
     guard let sessionId = args["session_id"] as? String, !sessionId.isEmpty else {
         return toolError("'session_id' is required (see list_agent_sessions)")
@@ -1401,12 +1467,18 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
                 "suppressed": a.suppressed,
             ]
         }
+        // Wave-3 P2b: the mutation rail — what the agent changed. Read the
+        // durable MCP mutation log and keep the lines whose ppid resolves
+        // (medium-confidence, ppid-correlated) to THIS session.
+        let mutations = await mutationsForSession(sessionId, store: store)
         return ["content": [["type": "text", "text": jsonStringify([
             "session_id": sessionId,
             "event_count": events.count,
             "alert_count": alerts.count,
+            "mutation_count": mutations.count,
             "timeline": timeline,
             "alerts": alerts,
+            "mutations": mutations,
         ] as [String: Any])]]]
     } catch {
         return toolError("get_agent_session failed: \(error)")
