@@ -325,6 +325,12 @@ final class DaemonState {
     //       observation API has no caller.
     var agentLineageService: AgentLineageService = AgentLineageService()
 
+    /// Wave-3 Phase 1: durable agent-session ids. Mints a UUID per
+    /// AI-tool root and resolves it for the root's own events + all
+    /// descendants, so EventLoop can stamp events.ai_tool_session_id
+    /// (today provably always NULL — no producer).
+    var agentSessionRegistry: AgentSessionRegistry = AgentSessionRegistry()
+
     init(
         isRoot: Bool,
         supportDir: String,
