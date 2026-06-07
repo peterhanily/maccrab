@@ -164,6 +164,24 @@ struct MCPProtocolHarnessTests {
         }
     }
 
+    @Test("SEC-1: agent-session output is slash-unescaped + never leaks the raw username")
+    func sessionOutputSanitized() {
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_agent_session","arguments":{"session_id":"00000000-0000-0000-0000-000000000000"}}}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_agent_sessions","arguments":{}}}"#,
+        ])
+        for id in [2, 3] {
+            let text = resultText(objs, id)
+            // jsonStringify must unescape '/' so the sanitizer's /Users/<name>/
+            // regex can match (the escaped '\/' form defeated it — SEC-1).
+            #expect(!text.contains(#"\/"#), "id \(id): output still has escaped slashes — sanitizer can't redact paths")
+            // The agent must never see the raw operator username; any /Users/
+            // path must be redacted to /Users/[USER]/.
+            #expect(!text.contains("/Users/\(NSUserName())/"), "id \(id): raw home path leaked to the agent")
+        }
+    }
+
     @Test("suppress_alert / suppress_campaign are gated by the response tier")
     func suppressGating() {
         let objs = drive([

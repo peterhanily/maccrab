@@ -2763,7 +2763,14 @@ private func jsonStringify(_ obj: Any) -> String {
     ) else {
         return "{}"
     }
-    return String(data: data, encoding: .utf8) ?? "{}"
+    let text = String(data: data, encoding: .utf8) ?? "{}"
+    // SEC-1: JSONSerialization escapes '/' as '\/', which defeats
+    // LLMSanitizer's /Users/<name>/ regex (it matches literal slashes) — so
+    // usernames/home paths flowed UN-redacted to the agent. Unescape slashes
+    // (JSONSerialization only emits '\/' for a real '/', so this stays valid
+    // JSON) so the downstream sanitizeContent pass can redact paths before
+    // they reach the agent / a cloud LLM.
+    return text.replacingOccurrences(of: "\\/", with: "/")
 }
 
 // MARK: - Main Loop (stdio JSON-RPC)
