@@ -56,6 +56,7 @@ public enum AgentSessionBundle {
         alertsJson: String,
         mutationsJson: String,
         metadataJson: String,
+        toolCallsJson: String = "[]",
         to bundleDir: URL,
         trustSubstrate: TrustSubstrate?
     ) async throws -> ExportResult {
@@ -68,6 +69,7 @@ public enum AgentSessionBundle {
         try Data(eventsBlob.utf8).write(to: bundleDir.appendingPathComponent("events.jsonl"))
         try Data(alertsJson.utf8).write(to: bundleDir.appendingPathComponent("alerts.json"))
         try Data(mutationsJson.utf8).write(to: bundleDir.appendingPathComponent("mutations.json"))
+        try Data(toolCallsJson.utf8).write(to: bundleDir.appendingPathComponent("tool_calls.json"))
         try Data(metadataJson.utf8).write(to: bundleDir.appendingPathComponent("manifest.json"))
 
         // Merkle root over the content files (integrity/ is excluded).

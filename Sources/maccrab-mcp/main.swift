@@ -63,35 +63,55 @@ func validateParentProcess() {
 /// read time. Best-effort: a write failure never blocks the mutation.
 func auditLog(_ operation: String, details: String) {
     logger.notice("MCP AUDIT: \(operation) — \(details)")
-    let line: [String: Any] = [
+    appendJSONLine([
         "ts": ISO8601DateFormatter().string(from: Date()),
         "operation": operation,
         "details": details,
         "ppid": Int(getppid()),
-    ]
-    guard JSONSerialization.isValidJSONObject(line),
-          let data = try? JSONSerialization.data(withJSONObject: line),
-          var text = String(data: data, encoding: .utf8) else { return }
-    text += "\n"
-    let path = mcpMutationLogPath()
-    if let fh = FileHandle(forWritingAtPath: path) {
-        defer { try? fh.close() }
-        _ = try? fh.seekToEnd()
-        try? fh.write(contentsOf: Data(text.utf8))
-    } else {
-        try? Data(text.utf8).write(to: URL(fileURLWithPath: path))
-    }
+    ], to: mcpMutationLogPath())
 }
 
-/// Durable MCP mutation log, in the user app-support dir (uid-501-writable
-/// even when the engine's data dir is the root-owned system dir).
-func mcpMutationLogPath() -> String {
+/// v1.18 Wave-3 P5: record EVERY MCP tool call (not just mutations) to a
+/// durable per-call log, tagged with the caller's ppid (the session join
+/// happens at read time). The complete agent-interaction rail.
+func recordToolCall(_ tool: String, result: Any) {
+    let isError = ((result as? [String: Any])?["isError"] as? Bool) ?? false
+    appendJSONLine([
+        "ts": ISO8601DateFormatter().string(from: Date()),
+        "tool": tool,
+        "is_error": isError,
+        "ppid": Int(getppid()),
+    ], to: mcpToolCallLogPath())
+}
+
+/// User app-support dir (uid-501-writable even when the engine's data dir
+/// is the root-owned system dir).
+func mcpUserDir() -> String {
     let fm = FileManager.default
     let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
         .first.map { $0.appendingPathComponent("MacCrab").path }
         ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
     try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    return dir + "/mcp_mutations.jsonl"
+    return dir
+}
+
+func mcpMutationLogPath() -> String { mcpUserDir() + "/mcp_mutations.jsonl" }
+func mcpToolCallLogPath() -> String { mcpUserDir() + "/mcp_tool_calls.jsonl" }
+
+/// Best-effort append of one JSON line to a durable log. Never throws —
+/// a write failure must not block the operation being recorded.
+func appendJSONLine(_ obj: [String: Any], to path: String) {
+    guard JSONSerialization.isValidJSONObject(obj),
+          let data = try? JSONSerialization.data(withJSONObject: obj),
+          let text = String(data: data, encoding: .utf8) else { return }
+    let bytes = Data((text + "\n").utf8)
+    if let fh = FileHandle(forWritingAtPath: path) {
+        defer { try? fh.close() }
+        _ = try? fh.seekToEnd()
+        try? fh.write(contentsOf: bytes)
+    } else {
+        try? bytes.write(to: URL(fileURLWithPath: path))
+    }
 }
 
 // MARK: - Data Directory Resolution
@@ -1414,11 +1434,18 @@ func handleListAgentSessions(_ args: [String: Any]) async -> Any {
 /// Read the durable MCP mutation log and return the mutations whose ppid
 /// resolves to `sessionId` (ppid-correlated, medium confidence). Bounded
 /// to the most recent lines so an unbounded log can't blow up the call.
-func mutationsForSession(_ sessionId: String, store: EventStore) async -> [[String: Any]] {
-    guard let text = try? String(contentsOfFile: mcpMutationLogPath(), encoding: .utf8) else { return [] }
+/// Read a durable ppid-tagged JSONL log and return the entries whose ppid
+/// resolves (medium-confidence, ppid-correlated) to `sessionId`. Shared by
+/// the mutation rail (P2b) and the tool-call rail (P5). `keep` picks the
+/// fields surfaced per entry.
+func logEntriesForSession(
+    logPath: String, sessionId: String, store: EventStore, max: Int = 5000,
+    keep: ([String: Any]) -> [String: Any]
+) async -> [[String: Any]] {
+    guard let text = try? String(contentsOfFile: logPath, encoding: .utf8) else { return [] }
     var pidToSession: [Int32: String?] = [:]
     var out: [[String: Any]] = []
-    for raw in text.split(separator: "\n").suffix(2000) {
+    for raw in text.split(separator: "\n").suffix(max) {
         guard let data = raw.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let ppid = obj["ppid"] as? Int else { continue }
@@ -1430,16 +1457,32 @@ func mutationsForSession(_ sessionId: String, store: EventStore) async -> [[Stri
             resolved = (try? await store.agentSessionForPid(key)) ?? nil
             pidToSession[key] = resolved
         }
-        if resolved == sessionId {
-            out.append([
-                "ts": obj["ts"] ?? "",
-                "operation": obj["operation"] ?? "",
-                "details": obj["details"] ?? "",
-                "confidence": "ppid-correlated",
-            ])
-        }
+        if resolved == sessionId { out.append(keep(obj)) }
     }
     return out
+}
+
+func mutationsForSession(_ sessionId: String, store: EventStore) async -> [[String: Any]] {
+    await logEntriesForSession(logPath: mcpMutationLogPath(), sessionId: sessionId, store: store) { obj in
+        [
+            "ts": obj["ts"] ?? "",
+            "operation": obj["operation"] ?? "",
+            "details": obj["details"] ?? "",
+            "confidence": "ppid-correlated",
+        ]
+    }
+}
+
+/// P5 tool-call rail for a session.
+func toolCallsForSession(_ sessionId: String, store: EventStore) async -> [[String: Any]] {
+    await logEntriesForSession(logPath: mcpToolCallLogPath(), sessionId: sessionId, store: store) { obj in
+        [
+            "ts": obj["ts"] ?? "",
+            "tool": obj["tool"] ?? "",
+            "is_error": obj["is_error"] ?? false,
+            "confidence": "ppid-correlated",
+        ]
+    }
 }
 
 func handleGetAgentSession(_ args: [String: Any]) async -> Any {
@@ -1484,14 +1527,18 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
         // durable MCP mutation log and keep the lines whose ppid resolves
         // (medium-confidence, ppid-correlated) to THIS session.
         let mutations = await mutationsForSession(sessionId, store: store)
+        // Wave-3 P5: the per-tool-call rail — the agent's full MCP interaction.
+        let toolCalls = await toolCallsForSession(sessionId, store: store)
         return ["content": [["type": "text", "text": jsonStringify([
             "session_id": sessionId,
             "event_count": events.count,
             "alert_count": alerts.count,
             "mutation_count": mutations.count,
+            "tool_call_count": toolCalls.count,
             "timeline": timeline,
             "alerts": alerts,
             "mutations": mutations,
+            "tool_calls": toolCalls,
         ] as [String: Any])]]]
     } catch {
         return toolError("get_agent_session failed: \(error)")
@@ -1515,6 +1562,9 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
         let mutations = await mutationsForSession(sessionId, store: store)
         let mutationsJson = (try? JSONSerialization.data(withJSONObject: mutations, options: [.sortedKeys]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let toolCalls = await toolCallsForSession(sessionId, store: store)
+        let toolCallsJson = (try? JSONSerialization.data(withJSONObject: toolCalls, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
 
         let metadata: [String: Any] = [
             "session_id": sessionId,
@@ -1522,6 +1572,7 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
             "event_count": events.count,
             "alert_count": alerts.count,
             "mutation_count": mutations.count,
+            "tool_call_count": toolCalls.count,
             "maccrab_version": MacCrabVersion.current,
         ]
         let metadataJson = (try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]))
@@ -1544,6 +1595,7 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
             alertsJson: alertsJson,
             mutationsJson: mutationsJson,
             metadataJson: metadataJson,
+            toolCallsJson: toolCallsJson,
             to: target,
             trustSubstrate: ts
         )
@@ -2489,6 +2541,8 @@ while let line = readLine(strippingNewline: true) {
             }
         }
         sem.wait()
+        // Wave-3 P5: record the call on the durable per-call rail.
+        recordToolCall(toolName, result: result)
         // Sanitize before sending to the MCP client (typically an AI
         // agent like Claude Code). Without this, raw /Users/<name>/...
         // paths, private IPs, hostnames, and any leaked API keys flow
