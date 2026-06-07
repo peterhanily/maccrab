@@ -304,6 +304,17 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
+        "name": "export_session_bundle",
+        "description": "Export one agent session as a signed, Merkle-rooted, tamper-evident bundle (events + alerts + mutations) — a replayable black box for the session. Returns the bundle path, Merkle root, and signing status.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "session_id": ["type": "string", "description": "Durable agent session id (from list_agent_sessions)."],
+            ],
+            "required": ["session_id"],
+        ] as [String: Any],
+    ],
+    [
         "name": "hunt",
         "description": "Full-text threat hunting across events (FTS phrase / substring search over the event stream). Examples: 'ssh', 'launchctl', 'unsigned'. Note: this is a text search, not a natural-language or SQL interpreter.",
         "inputSchema": [
@@ -800,6 +811,8 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleListAgentSessions(args)
     case "get_agent_session":
         return await handleGetAgentSession(args)
+    case "export_session_bundle":
+        return await handleExportSessionBundle(args)
     case "hunt":
         return await handleHunt(args)
     case "get_security_score":
@@ -1482,6 +1495,70 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
         ] as [String: Any])]]]
     } catch {
         return toolError("get_agent_session failed: \(error)")
+    }
+}
+
+func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
+    guard let sessionId = args["session_id"] as? String, !sessionId.isEmpty else {
+        return toolError("'session_id' is required (see list_agent_sessions)")
+    }
+    do {
+        let store = try EventStore(directory: dataDir)
+        let events = try await store.eventsForAgentSession(sessionId, limit: 10000)
+        let encoder = JSONEncoder()
+        let eventsJsonl: [String] = events.compactMap { e in
+            (try? encoder.encode(e)).flatMap { String(data: $0, encoding: .utf8) }
+        }
+        let alertStore = try AlertStore(directory: dataDir)
+        let alerts = (try? await alertStore.alerts(forAgentSession: sessionId)) ?? []
+        let alertsJson = (try? encoder.encode(alerts)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let mutations = await mutationsForSession(sessionId, store: store)
+        let mutationsJson = (try? JSONSerialization.data(withJSONObject: mutations, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+
+        let metadata: [String: Any] = [
+            "session_id": sessionId,
+            "exported_at": ISO8601DateFormatter().string(from: Date()),
+            "event_count": events.count,
+            "alert_count": alerts.count,
+            "mutation_count": mutations.count,
+            "maccrab_version": MacCrabVersion.current,
+        ]
+        let metadataJson = (try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+
+        // Write to a user-writable exports dir; unique name avoids clobber.
+        let fm = FileManager.default
+        let base = (fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            .map { $0.appendingPathComponent("MacCrab/session_bundles") }
+            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/MacCrab/session_bundles"))
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        let target = base.appendingPathComponent("\(sessionId)-\(UUID().uuidString.prefix(8)).maccrabsession")
+
+        let ts = TrustSubstrate(storage: FilesystemTrustSubstrateStorage(
+            baseDirectory: URL(fileURLWithPath: dataDir + "/keys/")))
+
+        let res = try await AgentSessionBundle.export(
+            sessionId: sessionId,
+            eventsJsonl: eventsJsonl,
+            alertsJson: alertsJson,
+            mutationsJson: mutationsJson,
+            metadataJson: metadataJson,
+            to: target,
+            trustSubstrate: ts
+        )
+        return ["content": [["type": "text", "text": jsonStringify([
+            "session_id": sessionId,
+            "bundle_path": res.bundleDir.path,
+            "merkle_root": res.merkleRoot,
+            "signed": res.signed,
+            "key_mode": res.keyMode,
+            "event_count": events.count,
+            "alert_count": alerts.count,
+            "mutation_count": mutations.count,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("export_session_bundle failed: \(error)")
     }
 }
 
