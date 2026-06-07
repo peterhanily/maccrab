@@ -238,13 +238,13 @@ struct AlertStoreSchemaV5Tests {
         #expect(version >= 5)
     }
 
-    @Test("Migration is idempotent — re-opening DB preserves user_version (v6)")
+    @Test("Migration is idempotent — re-opening DB preserves user_version (v7)")
     func migrationIdempotent() async throws {
         let path = makeTempPath()
         defer { cleanup(path) }
 
         // First open: fresh install creates the schema and runs to the latest
-        // migration (v6 — triggering_events_json snapshot column).
+        // migration (v7 — ai_tool_session_id, Wave-3 P2 alert rail).
         _ = try AlertStore(path: path)
         // Second open: reapplies the migration set against an at-or-ahead
         // counter (no version bump). Must not throw.
@@ -255,7 +255,7 @@ struct AlertStoreSchemaV5Tests {
         let raw = try #require(openRaw(path))
         defer { sqlite3_close(raw) }
         let version = try #require(try? SchemaMigrator.readVersion(db: raw))
-        #expect(version == 6, "version should be exactly 6 after multiple opens, got \(version)")
+        #expect(version == 7, "version should be exactly 7 after multiple opens, got \(version)")
     }
 
     @Test("v2-shape DB opens cleanly on v5 binary — forward-compatible migration")

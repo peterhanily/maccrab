@@ -32,6 +32,7 @@ public struct V2DetectionWorkspace: View {
     @State private var extensions: [V2MockExtension] = []
     @State private var selectedExtension: V2MockExtension? = nil
     @State private var mcpServers: [V2MockMCP] = []
+    @State private var agentSessions: [V2AgentSession] = []
     /// v1.12.0: in-app YAML viewer sheet. Replaces the v1.11.x
     /// external-editor opener which exposed the read-only bundled
     /// YAML in TextEdit and confused users when Cmd+S failed.
@@ -156,6 +157,10 @@ public struct V2DetectionWorkspace: View {
 
             let m = await state.provider.mcpServers()
             await MainActor.run { self.mcpServers = m }
+
+            // Wave-3 recorder: durable AI-agent sessions.
+            let sess = await state.provider.agentSessions(limit: 50)
+            await MainActor.run { self.agentSessions = sess }
 
             // Composite (sequence + graph) rule labels — for the
             // empty-table explanation when an alert deep-links a
@@ -810,15 +815,45 @@ public struct V2DetectionWorkspace: View {
 
     private var aiGuardLineageCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Recent AI lineage").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
-            HStack(spacing: 8) {
-                Image(systemName: "link").foregroundStyle(V2Theme.aiAccent)
-                Text("AI lineage chains (terminal → AI tool → command) are captured by the daemon's AgentLineageService and persisted to `<dataDir>/agent_lineage.json`. Open the file directly to inspect; a dedicated dashboard surface is planned.")
-                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+            HStack {
+                Text("Agent sessions").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Spacer()
+                if !agentSessions.isEmpty {
+                    Text("\(agentSessions.count)").font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                }
             }
-            .padding(12)
-            .background(V2Theme.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+            if agentSessions.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars").foregroundStyle(V2Theme.aiAccent)
+                    Text("No AI-agent sessions recorded yet. Sessions appear once the engine observes a coding agent (Claude Code, Cursor, …) and its descendant activity.")
+                        .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+                }
+                .padding(12)
+                .background(V2Theme.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(agentSessions.prefix(20)) { s in
+                        HStack(spacing: 10) {
+                            Image(systemName: "terminal").foregroundStyle(V2Theme.aiAccent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(s.tool).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                                Text(s.projectDir ?? s.id)
+                                    .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text("\(s.eventCount) events").font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                                Text(s.lastSeen, style: .relative).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                            }
+                        }
+                        .padding(.vertical, 6).padding(.horizontal, 12)
+                    }
+                }
+                .background(V2Theme.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+            }
         }
         .v2Panel()
     }

@@ -55,8 +55,63 @@ func validateParentProcess() {
 }
 
 /// Audit log for state-modifying operations.
+///
+/// v1.18 Wave-3 P2b: besides the os.log line, append a durable JSON record
+/// to a user-writable mutation log so an agent session's mutations survive
+/// the process and can be surfaced in get_agent_session. We capture only
+/// the caller's `ppid` here (sync path); the ppid→session join happens at
+/// read time. Best-effort: a write failure never blocks the mutation.
 func auditLog(_ operation: String, details: String) {
     logger.notice("MCP AUDIT: \(operation) — \(details)")
+    appendJSONLine([
+        "ts": ISO8601DateFormatter().string(from: Date()),
+        "operation": operation,
+        "details": details,
+        "ppid": Int(getppid()),
+    ], to: mcpMutationLogPath())
+}
+
+/// v1.18 Wave-3 P5: record EVERY MCP tool call (not just mutations) to a
+/// durable per-call log, tagged with the caller's ppid (the session join
+/// happens at read time). The complete agent-interaction rail.
+func recordToolCall(_ tool: String, result: Any) {
+    let isError = ((result as? [String: Any])?["isError"] as? Bool) ?? false
+    appendJSONLine([
+        "ts": ISO8601DateFormatter().string(from: Date()),
+        "tool": tool,
+        "is_error": isError,
+        "ppid": Int(getppid()),
+    ], to: mcpToolCallLogPath())
+}
+
+/// User app-support dir (uid-501-writable even when the engine's data dir
+/// is the root-owned system dir).
+func mcpUserDir() -> String {
+    let fm = FileManager.default
+    let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first.map { $0.appendingPathComponent("MacCrab").path }
+        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+    try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+func mcpMutationLogPath() -> String { mcpUserDir() + "/mcp_mutations.jsonl" }
+func mcpToolCallLogPath() -> String { mcpUserDir() + "/mcp_tool_calls.jsonl" }
+
+/// Best-effort append of one JSON line to a durable log. Never throws —
+/// a write failure must not block the operation being recorded.
+func appendJSONLine(_ obj: [String: Any], to path: String) {
+    guard JSONSerialization.isValidJSONObject(obj),
+          let data = try? JSONSerialization.data(withJSONObject: obj),
+          let text = String(data: data, encoding: .utf8) else { return }
+    let bytes = Data((text + "\n").utf8)
+    if let fh = FileHandle(forWritingAtPath: path) {
+        defer { try? fh.close() }
+        _ = try? fh.seekToEnd()
+        try? fh.write(contentsOf: bytes)
+    } else {
+        try? bytes.write(to: URL(fileURLWithPath: path))
+    }
 }
 
 // MARK: - Data Directory Resolution
@@ -245,6 +300,39 @@ let tools: [[String: Any]] = [
         "name": "get_status",
         "description": "Get MacCrab daemon status: running state, rule count, event/alert counts, database size, security score, and active monitors.",
         "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "list_agent_sessions",
+        "description": "List recent AI-coding-agent sessions observed on this Mac (Claude Code, Cursor, etc.): tool, project dir, first/last activity, and event count. Each carries a durable session id — pass it to get_agent_session for the full timeline.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "limit": ["type": "integer", "description": "Max sessions (default 50, max 500)."],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_agent_session",
+        "description": "Return one agent session's chronological timeline — the process / file / network events attributed to that AI tool and its descendants, keyed by the durable session id from list_agent_sessions.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "session_id": ["type": "string", "description": "Durable agent session id (from list_agent_sessions)."],
+                "limit": ["type": "integer", "description": "Max timeline events (default 500, max 2000)."],
+            ],
+            "required": ["session_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "export_session_bundle",
+        "description": "Export one agent session as a signed, Merkle-rooted, tamper-evident bundle (events + alerts + mutations) — a replayable black box for the session. Returns the bundle path, Merkle root, and signing status.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "session_id": ["type": "string", "description": "Durable agent session id (from list_agent_sessions)."],
+            ],
+            "required": ["session_id"],
+        ] as [String: Any],
     ],
     [
         "name": "hunt",
@@ -753,6 +841,12 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleGetCampaigns(args)
     case "get_status":
         return await handleGetStatus()
+    case "list_agent_sessions":
+        return await handleListAgentSessions(args)
+    case "get_agent_session":
+        return await handleGetAgentSession(args)
+    case "export_session_bundle":
+        return await handleExportSessionBundle(args)
     case "hunt":
         return await handleHunt(args)
     case "get_security_score":
@@ -1386,6 +1480,214 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
         return toolError("Error reading campaigns: \(error.localizedDescription)")
+    }
+}
+
+func handleListAgentSessions(_ args: [String: Any]) async -> Any {
+    let limit = min(max((args["limit"] as? Int) ?? 50, 1), 500)
+    do {
+        let store = try EventStore(directory: dataDir)
+        let sessions = try await store.agentSessions(limit: limit)
+        let iso = ISO8601DateFormatter()
+        let payload = sessions.map { s -> [String: Any] in
+            [
+                "session_id": s.sessionId,
+                "tool": s.tool as Any,
+                "project_dir": s.projectDir as Any,
+                "first_seen": iso.string(from: s.firstSeen),
+                "last_seen": iso.string(from: s.lastSeen),
+                "event_count": s.eventCount,
+            ]
+        }
+        let note = payload.isEmpty
+            ? "No agent sessions recorded yet. Sessions populate once the running engine includes the Wave-3 session stamping (ai_tool_session_id)."
+            : ""
+        return ["content": [["type": "text", "text": jsonStringify(["sessions": payload, "note": note])]]]
+    } catch {
+        return toolError("list_agent_sessions failed: \(error)")
+    }
+}
+
+/// Read the durable MCP mutation log and return the mutations whose ppid
+/// resolves to `sessionId` (ppid-correlated, medium confidence). Bounded
+/// to the most recent lines so an unbounded log can't blow up the call.
+/// Read a durable ppid-tagged JSONL log and return the entries whose ppid
+/// resolves (medium-confidence, ppid-correlated) to `sessionId`. Shared by
+/// the mutation rail (P2b) and the tool-call rail (P5). `keep` picks the
+/// fields surfaced per entry.
+func logEntriesForSession(
+    logPath: String, sessionId: String, store: EventStore, max: Int = 5000,
+    keep: ([String: Any]) -> [String: Any]
+) async -> [[String: Any]] {
+    guard let text = try? String(contentsOfFile: logPath, encoding: .utf8) else { return [] }
+    var pidToSession: [Int32: String?] = [:]
+    var out: [[String: Any]] = []
+    for raw in text.split(separator: "\n").suffix(max) {
+        guard let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ppid = obj["ppid"] as? Int else { continue }
+        let key = Int32(ppid)
+        let resolved: String?
+        if let cached = pidToSession[key] {
+            resolved = cached
+        } else {
+            resolved = (try? await store.agentSessionForPid(key)) ?? nil
+            pidToSession[key] = resolved
+        }
+        if resolved == sessionId { out.append(keep(obj)) }
+    }
+    return out
+}
+
+func mutationsForSession(_ sessionId: String, store: EventStore) async -> [[String: Any]] {
+    await logEntriesForSession(logPath: mcpMutationLogPath(), sessionId: sessionId, store: store) { obj in
+        [
+            "ts": obj["ts"] ?? "",
+            "operation": obj["operation"] ?? "",
+            "details": obj["details"] ?? "",
+            "confidence": "ppid-correlated",
+        ]
+    }
+}
+
+/// P5 tool-call rail for a session.
+func toolCallsForSession(_ sessionId: String, store: EventStore) async -> [[String: Any]] {
+    await logEntriesForSession(logPath: mcpToolCallLogPath(), sessionId: sessionId, store: store) { obj in
+        [
+            "ts": obj["ts"] ?? "",
+            "tool": obj["tool"] ?? "",
+            "is_error": obj["is_error"] ?? false,
+            "confidence": "ppid-correlated",
+        ]
+    }
+}
+
+func handleGetAgentSession(_ args: [String: Any]) async -> Any {
+    guard let sessionId = args["session_id"] as? String, !sessionId.isEmpty else {
+        return toolError("'session_id' is required (see list_agent_sessions)")
+    }
+    let limit = min(max((args["limit"] as? Int) ?? 500, 1), 2000)
+    do {
+        let store = try EventStore(directory: dataDir)
+        let events = try await store.eventsForAgentSession(sessionId, limit: limit)
+        let iso = ISO8601DateFormatter()
+        let timeline = events.map { e -> [String: Any] in
+            var row: [String: Any] = [
+                "ts": iso.string(from: e.timestamp),
+                "category": e.eventCategory.rawValue,
+                "action": e.eventAction,
+                "process": e.process.name,
+                "pid": Int(e.process.pid),
+                "path": e.process.executable,
+            ]
+            if let f = e.file?.path { row["file"] = f }
+            if let n = e.network {
+                row["dest"] = (n.destinationHostname ?? "").isEmpty
+                    ? "\(n.destinationPort)" : "\(n.destinationHostname!):\(n.destinationPort)"
+            }
+            return row
+        }
+        // Wave-3 P2: the alert rail — what this session's activity tripped.
+        let alertStore = try AlertStore(directory: dataDir)
+        let sessionAlerts = (try? await alertStore.alerts(forAgentSession: sessionId)) ?? []
+        let alerts = sessionAlerts.map { a -> [String: Any] in
+            [
+                "ts": iso.string(from: a.timestamp),
+                "alert_id": a.id,
+                "rule_id": a.ruleId,
+                "rule_title": a.ruleTitle,
+                "severity": a.severity.rawValue,
+                "suppressed": a.suppressed,
+            ]
+        }
+        // Wave-3 P2b: the mutation rail — what the agent changed. Read the
+        // durable MCP mutation log and keep the lines whose ppid resolves
+        // (medium-confidence, ppid-correlated) to THIS session.
+        let mutations = await mutationsForSession(sessionId, store: store)
+        // Wave-3 P5: the per-tool-call rail — the agent's full MCP interaction.
+        let toolCalls = await toolCallsForSession(sessionId, store: store)
+        return ["content": [["type": "text", "text": jsonStringify([
+            "session_id": sessionId,
+            "event_count": events.count,
+            "alert_count": alerts.count,
+            "mutation_count": mutations.count,
+            "tool_call_count": toolCalls.count,
+            "timeline": timeline,
+            "alerts": alerts,
+            "mutations": mutations,
+            "tool_calls": toolCalls,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("get_agent_session failed: \(error)")
+    }
+}
+
+func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
+    guard let sessionId = args["session_id"] as? String, !sessionId.isEmpty else {
+        return toolError("'session_id' is required (see list_agent_sessions)")
+    }
+    do {
+        let store = try EventStore(directory: dataDir)
+        let events = try await store.eventsForAgentSession(sessionId, limit: 10000)
+        let encoder = JSONEncoder()
+        let eventsJsonl: [String] = events.compactMap { e in
+            (try? encoder.encode(e)).flatMap { String(data: $0, encoding: .utf8) }
+        }
+        let alertStore = try AlertStore(directory: dataDir)
+        let alerts = (try? await alertStore.alerts(forAgentSession: sessionId)) ?? []
+        let alertsJson = (try? encoder.encode(alerts)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let mutations = await mutationsForSession(sessionId, store: store)
+        let mutationsJson = (try? JSONSerialization.data(withJSONObject: mutations, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let toolCalls = await toolCallsForSession(sessionId, store: store)
+        let toolCallsJson = (try? JSONSerialization.data(withJSONObject: toolCalls, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+
+        let metadata: [String: Any] = [
+            "session_id": sessionId,
+            "exported_at": ISO8601DateFormatter().string(from: Date()),
+            "event_count": events.count,
+            "alert_count": alerts.count,
+            "mutation_count": mutations.count,
+            "tool_call_count": toolCalls.count,
+            "maccrab_version": MacCrabVersion.current,
+        ]
+        let metadataJson = (try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+
+        // Write to a user-writable exports dir; unique name avoids clobber.
+        let fm = FileManager.default
+        let base = (fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            .map { $0.appendingPathComponent("MacCrab/session_bundles") }
+            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/MacCrab/session_bundles"))
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        let target = base.appendingPathComponent("\(sessionId)-\(UUID().uuidString.prefix(8)).maccrabsession")
+
+        let ts = TrustSubstrate(storage: FilesystemTrustSubstrateStorage(
+            baseDirectory: URL(fileURLWithPath: dataDir + "/keys/")))
+
+        let res = try await AgentSessionBundle.export(
+            sessionId: sessionId,
+            eventsJsonl: eventsJsonl,
+            alertsJson: alertsJson,
+            mutationsJson: mutationsJson,
+            metadataJson: metadataJson,
+            toolCallsJson: toolCallsJson,
+            to: target,
+            trustSubstrate: ts
+        )
+        return ["content": [["type": "text", "text": jsonStringify([
+            "session_id": sessionId,
+            "bundle_path": res.bundleDir.path,
+            "merkle_root": res.merkleRoot,
+            "signed": res.signed,
+            "key_mode": res.keyMode,
+            "event_count": events.count,
+            "alert_count": alerts.count,
+            "mutation_count": mutations.count,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("export_session_bundle failed: \(error)")
     }
 }
 
@@ -2486,6 +2788,8 @@ while let line = readLine(strippingNewline: true) {
             }
         }
         sem.wait()
+        // Wave-3 P5: record the call on the durable per-call rail.
+        recordToolCall(toolName, result: result)
         // Sanitize before sending to the MCP client (typically an AI
         // agent like Claude Code). Without this, raw /Users/<name>/...
         // paths, private IPs, hostnames, and any leaked API keys flow

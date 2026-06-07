@@ -87,6 +87,14 @@ enum EventLoop {
             // no-op for events that aren't NOTIFY_EXIT.
             if event.eventAction == "exit" {
                 await state.mcpAttributor.processExited(pid: event.process.pid)
+                // v1.18 Wave-3 P1b: end the durable agent session when its
+                // AI-tool root exits. The registry retains it for a grace
+                // window so descendant events that outlive the root still
+                // correlate (this is endSession's first production caller).
+                if state.aiRegistry.isAITool(executablePath: event.process.executable) != nil {
+                    await state.agentSessionRegistry.end(rootPid: event.process.pid)
+                    await state.agentLineageService.endSession(aiPid: event.process.pid)
+                }
             }
 
             // Enrich the event (lineage, code signing)
@@ -123,6 +131,19 @@ enum EventLoop {
                 )
                 enrichedEvent.enrichments["ai_tool"] = aiType.rawValue
                 enrichedEvent.enrichments["ai_tool_name"] = aiType.displayName
+                // v1.18 Wave-3 P1: mint/get the durable session id and
+                // stamp it on the AI tool's OWN event. This branch (the
+                // root) previously recorded NO timeline data — only
+                // descendants did — so the tool's own file/net activity
+                // was uncorrelated. The bind at EventStore persists this.
+                let sid = await state.agentSessionRegistry.session(
+                    rootPid: aiProc.pid,
+                    pathHash: ProcessIdentity.fnv1a64(aiProc.executable),
+                    startTime: aiProc.startTime,
+                    tool: aiType.rawValue,
+                    now: enrichedEvent.timestamp
+                )
+                enrichedEvent.enrichments["ai_tool_session_id"] = sid
             } else if state.aiTracker.hasActiveSessionsHint {
                 // Only pay the isAIChild actor hop when there are
                 // actually AI sessions running that this event could
@@ -219,6 +240,17 @@ enum EventLoop {
                         state.aiRegistry.isAITool(executablePath: $0.executable) != nil
                     }) {
                         let rootPid = aiAncestor.pid
+                        // v1.18 Wave-3 P1: resolve this descendant's event to
+                        // the root's durable session id (grace-aware, so a
+                        // child that outlives the root still correlates) and
+                        // stamp it for EventStore persistence.
+                        if let sid = await state.agentSessionRegistry.sessionForRoot(
+                            pid: rootPid,
+                            pathHash: ProcessIdentity.fnv1a64(aiAncestor.executable),
+                            now: enrichedEvent.timestamp
+                        ) {
+                            enrichedEvent.enrichments["ai_tool_session_id"] = sid
+                        }
                         // Always record the spawn for any AI-child exec.
                         await state.agentLineageService.record(
                             aiPid: rootPid,

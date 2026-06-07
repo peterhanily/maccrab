@@ -205,4 +205,22 @@ struct MCPProtocolHarnessTests {
         let parseErr = objs.contains { ($0["error"] as? [String: Any])?["code"] as? Int == -32700 }
         #expect(parseErr)
     }
+
+    @Test("agent-session read tools are advertised and return well-formed (non-error) results")
+    func agentSessionTools() {
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_agent_sessions","arguments":{}}}"#,
+            #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_agent_session","arguments":{"session_id":"no-such-session"}}}"#,
+        ])
+        let names = Set(((byId(objs, 2)?["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? [])
+            .compactMap { $0["name"] as? String })
+        #expect(names.contains("list_agent_sessions"))
+        #expect(names.contains("get_agent_session"))
+        // Read tools must succeed (not isError) even with an empty store /
+        // unknown session — they return an empty list / empty timeline.
+        #expect((byId(objs, 3)?["result"] as? [String: Any])?["isError"] as? Bool != true)
+        #expect((byId(objs, 4)?["result"] as? [String: Any])?["isError"] as? Bool != true)
+    }
 }

@@ -125,6 +125,13 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
     /// the per-event 64 KB payload cap; nil for alerts built without an Event.
     public let triggeringEventsJson: String?
 
+    /// Wave-3 P2: durable agent-session id, lifted from the triggering
+    /// event's `ai_tool_session_id` enrichment (AlertSink). Ties the
+    /// alert to the agent session whose activity tripped it — the alert
+    /// rail of the intent→execution timeline. nil when the trigger isn't
+    /// AI-attributed.
+    public let aiToolSessionId: String?
+
     // MARK: Initializer
 
     public init(
@@ -153,7 +160,8 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         parentExecutable: String? = nil,
         processSha256: String? = nil,
         hostName: String? = nil,
-        triggeringEventsJson: String? = nil
+        triggeringEventsJson: String? = nil,
+        aiToolSessionId: String? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -181,6 +189,7 @@ public struct Alert: Codable, Sendable, Hashable, Identifiable {
         self.processSha256 = processSha256
         self.hostName = hostName
         self.triggeringEventsJson = triggeringEventsJson
+        self.aiToolSessionId = aiToolSessionId
     }
 }
 
