@@ -87,4 +87,27 @@ struct EventStoreAgentSessionTests {
         let none = try await store.eventsForAgentSession("does-not-exist")
         #expect(none.isEmpty)
     }
+
+    @Test("agentSessions aggregates one summary per session, most-recent first")
+    func agentSessionsAggregation() async throws {
+        let path = Self.tempPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let store = try EventStore(path: path)
+
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        // S1: two events; S2: one (more recent); plus an unstamped event.
+        try await store.insert(event: Self.makeEvent(sessionId: "S1", at: t0.addingTimeInterval(1)))
+        try await store.insert(event: Self.makeEvent(sessionId: "S1", at: t0.addingTimeInterval(2)))
+        try await store.insert(event: Self.makeEvent(sessionId: "S2", at: t0.addingTimeInterval(5)))
+        try await store.insert(event: Self.makeEvent(sessionId: nil, at: t0.addingTimeInterval(9)))
+
+        let sessions = try await store.agentSessions(limit: 50)
+        #expect(sessions.count == 2)                          // unstamped excluded
+        #expect(sessions.first?.sessionId == "S2")            // most-recent lastSeen first
+        let s1 = sessions.first { $0.sessionId == "S1" }
+        #expect(s1?.eventCount == 2)
+        #expect(s1?.tool == "claude_code")
+        #expect(s1?.firstSeen == t0.addingTimeInterval(1))
+        #expect(s1?.lastSeen == t0.addingTimeInterval(2))
+    }
 }

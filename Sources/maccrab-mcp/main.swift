@@ -247,6 +247,28 @@ let tools: [[String: Any]] = [
         "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
     ],
     [
+        "name": "list_agent_sessions",
+        "description": "List recent AI-coding-agent sessions observed on this Mac (Claude Code, Cursor, etc.): tool, project dir, first/last activity, and event count. Each carries a durable session id — pass it to get_agent_session for the full timeline.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "limit": ["type": "integer", "description": "Max sessions (default 50, max 500)."],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "get_agent_session",
+        "description": "Return one agent session's chronological timeline — the process / file / network events attributed to that AI tool and its descendants, keyed by the durable session id from list_agent_sessions.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "session_id": ["type": "string", "description": "Durable agent session id (from list_agent_sessions)."],
+                "limit": ["type": "integer", "description": "Max timeline events (default 500, max 2000)."],
+            ],
+            "required": ["session_id"],
+        ] as [String: Any],
+    ],
+    [
         "name": "hunt",
         "description": "Full-text threat hunting across events (FTS phrase / substring search over the event stream). Examples: 'ssh', 'launchctl', 'unsigned'. Note: this is a text search, not a natural-language or SQL interpreter.",
         "inputSchema": [
@@ -739,6 +761,10 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleGetCampaigns(args)
     case "get_status":
         return await handleGetStatus()
+    case "list_agent_sessions":
+        return await handleListAgentSessions(args)
+    case "get_agent_session":
+        return await handleGetAgentSession(args)
     case "hunt":
         return await handleHunt(args)
     case "get_security_score":
@@ -1309,6 +1335,66 @@ func handleGetCampaigns(_ args: [String: Any]) async -> Any {
         return ["content": [["type": "text", "text": lines.joined(separator: "\n")]]]
     } catch {
         return toolError("Error reading campaigns: \(error.localizedDescription)")
+    }
+}
+
+func handleListAgentSessions(_ args: [String: Any]) async -> Any {
+    let limit = min(max((args["limit"] as? Int) ?? 50, 1), 500)
+    do {
+        let store = try EventStore(directory: dataDir)
+        let sessions = try await store.agentSessions(limit: limit)
+        let iso = ISO8601DateFormatter()
+        let payload = sessions.map { s -> [String: Any] in
+            [
+                "session_id": s.sessionId,
+                "tool": s.tool as Any,
+                "project_dir": s.projectDir as Any,
+                "first_seen": iso.string(from: s.firstSeen),
+                "last_seen": iso.string(from: s.lastSeen),
+                "event_count": s.eventCount,
+            ]
+        }
+        let note = payload.isEmpty
+            ? "No agent sessions recorded yet. Sessions populate once the running engine includes the Wave-3 session stamping (ai_tool_session_id)."
+            : ""
+        return ["content": [["type": "text", "text": jsonStringify(["sessions": payload, "note": note])]]]
+    } catch {
+        return toolError("list_agent_sessions failed: \(error)")
+    }
+}
+
+func handleGetAgentSession(_ args: [String: Any]) async -> Any {
+    guard let sessionId = args["session_id"] as? String, !sessionId.isEmpty else {
+        return toolError("'session_id' is required (see list_agent_sessions)")
+    }
+    let limit = min(max((args["limit"] as? Int) ?? 500, 1), 2000)
+    do {
+        let store = try EventStore(directory: dataDir)
+        let events = try await store.eventsForAgentSession(sessionId, limit: limit)
+        let iso = ISO8601DateFormatter()
+        let timeline = events.map { e -> [String: Any] in
+            var row: [String: Any] = [
+                "ts": iso.string(from: e.timestamp),
+                "category": e.eventCategory.rawValue,
+                "action": e.eventAction,
+                "process": e.process.name,
+                "pid": Int(e.process.pid),
+                "path": e.process.executable,
+            ]
+            if let f = e.file?.path { row["file"] = f }
+            if let n = e.network {
+                row["dest"] = (n.destinationHostname ?? "").isEmpty
+                    ? "\(n.destinationPort)" : "\(n.destinationHostname!):\(n.destinationPort)"
+            }
+            return row
+        }
+        return ["content": [["type": "text", "text": jsonStringify([
+            "session_id": sessionId,
+            "event_count": events.count,
+            "timeline": timeline,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("get_agent_session failed: \(error)")
     }
 }
 

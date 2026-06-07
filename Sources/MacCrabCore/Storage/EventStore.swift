@@ -1116,6 +1116,49 @@ public actor EventStore {
         return try queryEvents(sql: sql, bindings: bindings)
     }
 
+    /// One-line summary per durable agent session, derived from the
+    /// stamped events (no separate registry table needed for this slice).
+    /// Most-recently-active first. Backed by idx_events_ai_session.
+    public struct AgentSessionSummary: Sendable, Hashable {
+        public let sessionId: String
+        public let tool: String?
+        public let projectDir: String?
+        public let firstSeen: Date
+        public let lastSeen: Date
+        public let eventCount: Int
+    }
+
+    /// Wave-3 P1b: enumerate agent sessions for list_agent_sessions.
+    public func agentSessions(limit: Int = 100) throws -> [AgentSessionSummary] {
+        let sql = """
+            SELECT ai_tool_session_id, MAX(ai_tool), MAX(working_directory),
+                   MIN(timestamp), MAX(timestamp), COUNT(*)
+            FROM events
+            WHERE ai_tool_session_id IS NOT NULL
+            GROUP BY ai_tool_session_id
+            ORDER BY MAX(timestamp) DESC
+            LIMIT ?1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(max(1, min(limit, 1000))))
+        var out: [AgentSessionSummary] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let sidC = sqlite3_column_text(stmt, 0) else { continue }
+            let tool = sqlite3_column_text(stmt, 1).map { String(cString: $0) }
+            let proj = sqlite3_column_text(stmt, 2).map { String(cString: $0) }
+            out.append(AgentSessionSummary(
+                sessionId: String(cString: sidC),
+                tool: tool,
+                projectDir: proj,
+                firstSeen: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3)),
+                lastSeen: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
+                eventCount: Int(sqlite3_column_int64(stmt, 5))
+            ))
+        }
+        return out
+    }
+
     /// Keyset-paginated variant of `events(...)`. Returns at most
     /// `pageSize` events strictly older than `cursor` (or the newest page
     /// if `cursor == nil`), plus the cursor for the next page.

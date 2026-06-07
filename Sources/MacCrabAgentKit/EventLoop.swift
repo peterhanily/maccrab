@@ -87,6 +87,14 @@ enum EventLoop {
             // no-op for events that aren't NOTIFY_EXIT.
             if event.eventAction == "exit" {
                 await state.mcpAttributor.processExited(pid: event.process.pid)
+                // v1.18 Wave-3 P1b: end the durable agent session when its
+                // AI-tool root exits. The registry retains it for a grace
+                // window so descendant events that outlive the root still
+                // correlate (this is endSession's first production caller).
+                if state.aiRegistry.isAITool(executablePath: event.process.executable) != nil {
+                    await state.agentSessionRegistry.end(rootPid: event.process.pid)
+                    await state.agentLineageService.endSession(aiPid: event.process.pid)
+                }
             }
 
             // Enrich the event (lineage, code signing)
