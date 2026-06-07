@@ -215,6 +215,17 @@ public actor AlertStore {
                 "ALTER TABLE alerts ADD COLUMN triggering_events_json TEXT",
             ]
         ),
+        // v7 (Wave-3 P2): tie an alert to the durable agent session whose
+        // activity tripped it (the alert rail of the session timeline).
+        // Lifted from the triggering event's ai_tool_session_id in AlertSink.
+        Migration(
+            version: 7,
+            name: "add_ai_tool_session_id",
+            sql: [
+                "ALTER TABLE alerts ADD COLUMN ai_tool_session_id TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_alerts_ai_session_ts ON alerts(ai_tool_session_id, timestamp) WHERE ai_tool_session_id IS NOT NULL",
+            ]
+        ),
     ]
 
     // MARK: Initialization
@@ -310,10 +321,12 @@ public actor AlertStore {
                 parent_executable TEXT,
                 process_sha256 TEXT,
                 host_name TEXT,
-                triggering_events_json TEXT
+                triggering_events_json TEXT,
+                ai_tool_session_id TEXT
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_alerts_ai_session_ts ON alerts(ai_tool_session_id, timestamp) WHERE ai_tool_session_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)",
             "CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts(event_id)",
@@ -351,8 +364,8 @@ public actor AlertStore {
                 campaign_id,
                 user_id, user_name, working_directory,
                 ai_tool, parent_executable, process_sha256, host_name,
-                triggering_events_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+                triggering_events_json, ai_tool_session_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
             """
         var insertStmt: OpaquePointer?
         if sqlite3_prepare_v2(handle, insertSQL, -1, &insertStmt, nil) != SQLITE_OK {
@@ -556,6 +569,9 @@ public actor AlertStore {
         // 25: triggering-event snapshot (schema v6). NULL for alerts built
         // without contributing events. AlertSink fills this from the Event(s).
         bindTextNonEmptyOrNull(stmt, index: 25, value: alert.triggeringEventsJson)
+        // 26: durable agent session id (schema v7). NULL unless the trigger
+        // was AI-attributed; AlertSink lifts it from the event enrichment.
+        bindTextNonEmptyOrNull(stmt, index: 26, value: alert.aiToolSessionId)
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
@@ -796,6 +812,13 @@ public actor AlertStore {
     public func alerts(forEventId eventId: String) throws -> [Alert] {
         let sql = "SELECT * FROM alerts WHERE event_id = ?1 ORDER BY timestamp DESC LIMIT 1000"
         return try queryAlerts(sql: sql, bindings: [(1, .text(eventId))])
+    }
+
+    /// Wave-3 P2: alerts tripped by a given durable agent session, oldest
+    /// first (timeline order). Backed by idx_alerts_ai_session_ts.
+    public func alerts(forAgentSession sessionId: String, limit: Int = 1000) throws -> [Alert] {
+        let sql = "SELECT * FROM alerts WHERE ai_tool_session_id = ?1 ORDER BY timestamp ASC LIMIT ?2"
+        return try queryAlerts(sql: sql, bindings: [(1, .text(sessionId)), (2, .int(Int32(max(1, min(limit, 5000)))))])
     }
 
     /// Returns a single alert by its identifier.
@@ -1287,6 +1310,9 @@ public actor AlertStore {
             // Column 24: triggering-events snapshot (schema v6). NULL for
             // pre-v6 rows and for alerts created without contributing events.
             let triggeringEventsJson = columnTextOrNil(stmt, index: 24)
+            // Column 25: durable agent session id (schema v7). NULL for
+            // pre-v7 rows and non-AI-attributed alerts.
+            let aiToolSessionId = columnTextOrNil(stmt, index: 25)
 
             let alert = Alert(
                 id: id,
@@ -1313,7 +1339,8 @@ public actor AlertStore {
                 parentExecutable: parentExecutable,
                 processSha256: processSha256,
                 hostName: hostName,
-                triggeringEventsJson: triggeringEventsJson
+                triggeringEventsJson: triggeringEventsJson,
+                aiToolSessionId: aiToolSessionId
             )
             results.append(alert)
         }

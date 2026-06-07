@@ -215,6 +215,7 @@ public actor AlertSink {
         alert: Alert, event: Event, precomputedSnapshot: String? = nil
     ) -> Alert {
         let aiTool = event.enrichments["ai_tool"] ?? event.enrichments["agent_tool"]
+        let aiSession = event.enrichments["ai_tool_session_id"]
         let parentExec = event.process.ancestors.first?.executable
         let sha256 = event.process.hashes?.sha256
         return Alert(
@@ -249,7 +250,9 @@ public actor AlertSink {
             // else use the batch-shared precomputed snapshot; else encode now.
             triggeringEventsJson: alert.triggeringEventsJson
                 ?? precomputedSnapshot
-                ?? EventSnapshot.encode([event])
+                ?? EventSnapshot.encode([event]),
+            // Wave-3 P2: tie the alert to the agent session that tripped it.
+            aiToolSessionId: alert.aiToolSessionId ?? Self.nilIfEmpty(aiSession)
         )
     }
 

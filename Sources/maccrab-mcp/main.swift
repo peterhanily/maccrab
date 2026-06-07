@@ -1388,10 +1388,25 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
             }
             return row
         }
+        // Wave-3 P2: the alert rail — what this session's activity tripped.
+        let alertStore = try AlertStore(directory: dataDir)
+        let sessionAlerts = (try? await alertStore.alerts(forAgentSession: sessionId)) ?? []
+        let alerts = sessionAlerts.map { a -> [String: Any] in
+            [
+                "ts": iso.string(from: a.timestamp),
+                "alert_id": a.id,
+                "rule_id": a.ruleId,
+                "rule_title": a.ruleTitle,
+                "severity": a.severity.rawValue,
+                "suppressed": a.suppressed,
+            ]
+        }
         return ["content": [["type": "text", "text": jsonStringify([
             "session_id": sessionId,
             "event_count": events.count,
+            "alert_count": alerts.count,
             "timeline": timeline,
+            "alerts": alerts,
         ] as [String: Any])]]]
     } catch {
         return toolError("get_agent_session failed: \(error)")
