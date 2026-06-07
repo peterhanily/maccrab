@@ -335,6 +335,17 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
+        "name": "verify_session_bundle",
+        "description": "Verify a .maccrabsession bundle exported by export_session_bundle: recomputes the Merkle root over the content (detects any tamper) and verifies the signature. Returns merkle_ok, signed, signature_ok.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": ["type": "string", "description": "Path to the .maccrabsession bundle directory (from export_session_bundle)."],
+            ],
+            "required": ["path"],
+        ] as [String: Any],
+    ],
+    [
         "name": "hunt",
         "description": "Full-text threat hunting across events (FTS phrase / substring search over the event stream). Examples: 'ssh', 'launchctl', 'unsigned'. Note: this is a text search, not a natural-language or SQL interpreter.",
         "inputSchema": [
@@ -847,6 +858,8 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
         return await handleGetAgentSession(args)
     case "export_session_bundle":
         return await handleExportSessionBundle(args)
+    case "verify_session_bundle":
+        return await handleVerifySessionBundle(args)
     case "hunt":
         return await handleHunt(args)
     case "get_security_score":
@@ -1626,6 +1639,12 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
     guard let sessionId = args["session_id"] as? String, !sessionId.isEmpty else {
         return toolError("'session_id' is required (see list_agent_sessions)")
     }
+    // SEC-3: session_id becomes a path component below; a real session id is a
+    // UUID. Reject anything else so a crafted '../'-style id can't write the
+    // bundle outside the session_bundles dir.
+    guard UUID(uuidString: sessionId) != nil else {
+        return toolError("'session_id' must be a session UUID (from list_agent_sessions)")
+    }
     do {
         let store = try EventStore(directory: dataDir)
         let events = try await store.eventsForAgentSession(sessionId, limit: 10000)
@@ -1663,8 +1682,15 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
         try? fm.createDirectory(at: base, withIntermediateDirectories: true)
         let target = base.appendingPathComponent("\(sessionId)-\(UUID().uuidString.prefix(8)).maccrabsession")
 
-        let ts = TrustSubstrate(storage: FilesystemTrustSubstrateStorage(
-            baseDirectory: URL(fileURLWithPath: dataDir + "/keys/")))
+        // WAVE3-02: force .filesystemDegraded (pure CryptoKit, no Secure-
+        // Enclave entitlement) because the MCP server is unentitled — the SE
+        // path fails with -34018 and yields an unsigned, forgeable bundle. A
+        // dedicated keys dir avoids inheriting any SE-mode state from the
+        // shared trace-signing keys dir.
+        let ts = TrustSubstrate(
+            storage: FilesystemTrustSubstrateStorage(baseDirectory: URL(fileURLWithPath: mcpUserDir() + "/session_keys/")),
+            modeOverride: .filesystemDegraded
+        )
 
         let res = try await AgentSessionBundle.export(
             sessionId: sessionId,
@@ -1676,7 +1702,7 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
             to: target,
             trustSubstrate: ts
         )
-        return ["content": [["type": "text", "text": jsonStringify([
+        var payload: [String: Any] = [
             "session_id": sessionId,
             "bundle_path": res.bundleDir.path,
             "merkle_root": res.merkleRoot,
@@ -1685,9 +1711,43 @@ func handleExportSessionBundle(_ args: [String: Any]) async -> Any {
             "event_count": events.count,
             "alert_count": alerts.count,
             "mutation_count": mutations.count,
-        ] as [String: Any])]]]
+            "verify_with": "verify_session_bundle { path: \"\(res.bundleDir.path)\" }",
+        ]
+        if let err = res.signError {
+            // Honest warning: an unsigned bundle detects accidental corruption
+            // (Merkle) but is forgeable (no signature binds the root).
+            payload["sign_error"] = err
+            payload["warning"] = "UNSIGNED bundle — signature failed; content is hash-rooted but not tamper-proof."
+        }
+        return ["content": [["type": "text", "text": jsonStringify(payload)]]]
     } catch {
         return toolError("export_session_bundle failed: \(error)")
+    }
+}
+
+func handleVerifySessionBundle(_ args: [String: Any]) async -> Any {
+    guard let path = args["path"] as? String, !path.isEmpty else {
+        return toolError("'path' is required (a .maccrabsession bundle dir from export_session_bundle)")
+    }
+    // Same substrate the export path uses, so the public key matches.
+    let ts = TrustSubstrate(
+        storage: FilesystemTrustSubstrateStorage(baseDirectory: URL(fileURLWithPath: mcpUserDir() + "/session_keys/")),
+        modeOverride: .filesystemDegraded
+    )
+    do {
+        let v = try await AgentSessionBundle.verify(at: URL(fileURLWithPath: path), trustSubstrate: ts)
+        let verdict = (v.merkleOk && v.signed && v.signatureOk) ? "verified"
+            : (v.merkleOk && !v.signed) ? "unsigned (content hash-rooted only — forgeable)"
+            : "TAMPERED / invalid"
+        return ["content": [["type": "text", "text": jsonStringify([
+            "path": path,
+            "merkle_ok": v.merkleOk,
+            "signed": v.signed,
+            "signature_ok": v.signatureOk,
+            "verdict": verdict,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("verify_session_bundle failed: \(error)")
     }
 }
 

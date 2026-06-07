@@ -22,7 +22,10 @@ struct AgentSessionBundleTests {
         let dir = tmp("sess-bundle")
         let keys = tmp("sess-keys")
         defer { try? FileManager.default.removeItem(at: dir); try? FileManager.default.removeItem(at: keys) }
-        let ts = TrustSubstrate(storage: FilesystemTrustSubstrateStorage(baseDirectory: keys))
+        // Force the no-entitlement CryptoKit path (WAVE3-02) so signing
+        // ACTUALLY happens — the same override the MCP export handler uses.
+        let ts = TrustSubstrate(storage: FilesystemTrustSubstrateStorage(baseDirectory: keys),
+                                modeOverride: .filesystemDegraded)
 
         let res = try await AgentSessionBundle.export(
             sessionId: "S1",
@@ -33,16 +36,48 @@ struct AgentSessionBundleTests {
             to: dir, trustSubstrate: ts
         )
         #expect(!res.merkleRoot.isEmpty)
+        #expect(res.signed)              // WAVE3-02: signing must succeed via filesystemDegraded
+        #expect(res.signError == nil)
 
         let v = try await AgentSessionBundle.verify(at: dir, trustSubstrate: ts)
         #expect(v.merkleOk)
-        if res.signed { #expect(v.signatureOk) }   // signature verifies when a key was available
+        #expect(v.signatureOk)
 
         // Tamper a content file → the recomputed Merkle no longer matches
         // the signed root.
         try Data("tampered\n".utf8).write(to: dir.appendingPathComponent("events.jsonl"))
         let v2 = try await AgentSessionBundle.verify(at: dir, trustSubstrate: ts)
         #expect(!v2.merkleOk)
+    }
+
+    /// SEC-2: the forgery the audit called out — tamper content AND re-patch
+    /// signature.json's merkle_root to match. Merkle alone (merkleOk) would
+    /// pass, but the SIGNATURE is over the original root, so signatureOk must
+    /// be false. This is exactly why a real signature (WAVE3-02) is required.
+    @Test("forgery: re-patching the merkle_root to match tampered content is caught by the signature")
+    func forgeryCaughtBySignature() async throws {
+        let dir = tmp("sess-bundle-forge")
+        let keys = tmp("sess-forge-keys")
+        defer { try? FileManager.default.removeItem(at: dir); try? FileManager.default.removeItem(at: keys) }
+        let ts = TrustSubstrate(storage: FilesystemTrustSubstrateStorage(baseDirectory: keys),
+                                modeOverride: .filesystemDegraded)
+
+        let res = try await AgentSessionBundle.export(
+            sessionId: "S9", eventsJsonl: ["{\"seq\":1}"], alertsJson: "[]",
+            mutationsJson: "[]", metadataJson: "{}", to: dir, trustSubstrate: ts)
+        #expect(res.signed)
+
+        // Attacker rewrites the timeline...
+        try Data("{\"seq\":\"forged\"}\n".utf8).write(to: dir.appendingPathComponent("events.jsonl"))
+        // ...and re-patches the stored merkle_root to the new content's root.
+        let sigURL = dir.appendingPathComponent("integrity/signature.json")
+        var sig = try JSONSerialization.jsonObject(with: Data(contentsOf: sigURL)) as! [String: Any]
+        sig["merkle_root"] = try BundleMerkle.compute(forBundleAt: dir).merkleRoot
+        try JSONSerialization.data(withJSONObject: sig, options: [.sortedKeys]).write(to: sigURL)
+
+        let v = try await AgentSessionBundle.verify(at: dir, trustSubstrate: ts)
+        #expect(v.merkleOk)          // attacker matched content↔root...
+        #expect(!v.signatureOk)      // ...but the signature over the ORIGINAL root no longer verifies
     }
 
     @Test("unsigned export still produces a valid, verifiable Merkle bundle")

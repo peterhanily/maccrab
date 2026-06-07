@@ -39,6 +39,10 @@ public enum AgentSessionBundle {
         public let merkleRoot: String
         public let signed: Bool
         public let keyMode: String
+        /// Set when signing was attempted but failed — surfaced instead of
+        /// silently swallowed, so an unsigned (forgeable) bundle is never
+        /// mistaken for a signed one.
+        public let signError: String?
     }
 
     public struct VerifyResult: Sendable {
@@ -79,11 +83,21 @@ public enum AgentSessionBundle {
         var keyMode = "unsigned"
         var signatureHex = ""
         var fingerprint = ""
-        if let ts = trustSubstrate, let sig = try? await ts.sign(Data(merkleRoot.utf8)) {
-            signatureHex = sig.map { String(format: "%02x", $0) }.joined()
-            signed = true
-            keyMode = ((try? await ts.activeMode())?.rawValue) ?? "unknown"
-            fingerprint = (try? await ts.publicKeyFingerprint()) ?? ""
+        var signError: String? = nil
+        if let ts = trustSubstrate {
+            do {
+                let sigBytes = try await ts.sign(Data(merkleRoot.utf8))
+                signatureHex = sigBytes.map { String(format: "%02x", $0) }.joined()
+                signed = true
+                keyMode = ((try? await ts.activeMode())?.rawValue) ?? "unknown"
+                fingerprint = (try? await ts.publicKeyFingerprint()) ?? ""
+            } catch {
+                // Do NOT swallow: an unsigned bundle is forgeable, so the
+                // failure must reach the caller (e.g. Secure-Enclave path
+                // -34018 in an unentitled process — callers should force
+                // .filesystemDegraded).
+                signError = "\(error)"
+            }
         }
 
         let sig: [String: Any] = [
@@ -97,7 +111,7 @@ public enum AgentSessionBundle {
         let sigData = try JSONSerialization.data(withJSONObject: sig, options: [.sortedKeys, .prettyPrinted])
         try sigData.write(to: bundleDir.appendingPathComponent("integrity/signature.json"))
 
-        return ExportResult(bundleDir: bundleDir, merkleRoot: merkleRoot, signed: signed, keyMode: keyMode)
+        return ExportResult(bundleDir: bundleDir, merkleRoot: merkleRoot, signed: signed, keyMode: keyMode, signError: signError)
     }
 
     /// Verify a session bundle: recompute the Merkle root over the content
