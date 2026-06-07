@@ -246,6 +246,27 @@ public struct V2MockTrace: Identifiable, Sendable, Hashable {
     public let severityHint: V2Severity
 }
 
+// MARK: - Agent session (Wave-3 recorder)
+
+/// One AI-coding-agent session's summary for the dashboard list.
+public struct V2AgentSession: Identifiable, Sendable, Hashable {
+    public let id: String          // durable session id
+    public let tool: String
+    public let projectDir: String?
+    public let eventCount: Int
+    public let firstSeen: Date
+    public let lastSeen: Date
+
+    public init(id: String, tool: String, projectDir: String?, eventCount: Int, firstSeen: Date, lastSeen: Date) {
+        self.id = id
+        self.tool = tool
+        self.projectDir = projectDir
+        self.eventCount = eventCount
+        self.firstSeen = firstSeen
+        self.lastSeen = lastSeen
+    }
+}
+
 // MARK: - Threat intel feed
 
 public struct V2MockFeed: Identifiable, Sendable, Hashable {

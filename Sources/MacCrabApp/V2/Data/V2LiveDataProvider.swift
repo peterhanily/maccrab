@@ -203,6 +203,27 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
     }
 
+    /// Wave-3 recorder: durable AI-agent sessions from events.db.
+    public func agentSessions(limit: Int) async -> [V2AgentSession] {
+        guard let eventStore else { return [] }
+        do {
+            let raw = try await eventStore.agentSessions(limit: limit)
+            return raw.map { s in
+                V2AgentSession(
+                    id: s.sessionId,
+                    tool: s.tool ?? "unknown",
+                    projectDir: s.projectDir,
+                    eventCount: s.eventCount,
+                    firstSeen: s.firstSeen,
+                    lastSeen: s.lastSeen
+                )
+            }
+        } catch {
+            lastErrorDescription = "agent sessions read: \(error)"
+            return []
+        }
+    }
+
     // The remaining surfaces don't have a 1:1 store yet — return mock
     // until phase 4.5 wires the appropriate scanners / monitors / config
     // readers. Marked clearly so consumers can label them as such.
