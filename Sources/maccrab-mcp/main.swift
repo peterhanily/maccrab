@@ -391,7 +391,7 @@ let tools: [[String: Any]] = [
     // v1.12.0 — Package Intelligence + Intent Classification tools.
     [
         "name": "check_typosquat_score",
-        "description": "Score a package name against the top-1000 most-typosquatted npm/PyPI corpora using Damerau-Levenshtein distance and Unicode TR39 confusable folding. Catches AI-hallucinated names (slopsquatting), homoglyph attacks (Cyrillic a vs Latin a), and adjacent-key transpositions. Returns nearest popular name + distance + score 0-100.",
+        "description": "Score a package name against a curated, operator-replaceable corpus of popular npm/PyPI package names using Damerau-Levenshtein distance and Unicode TR39 confusable folding. Catches AI-hallucinated names (slopsquatting), homoglyph attacks (Cyrillic a vs Latin a), and adjacent-key transpositions. Returns nearest popular name + distance + score 0-100.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -510,13 +510,27 @@ let tools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
+        "name": "forensics.create_case",
+        "description": "Create a new forensic case to hold collected artifacts, and return its case_id. Plaintext (unencrypted) so an agent can reopen it headlessly. Run a collector against the returned case_id, then read results with forensics.search_artifacts / forensics.timeline.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "name": ["type": "string", "description": "Short case label (≤200 chars)."],
+                "notes": ["type": "string", "description": "Optional free-text notes."],
+                "window_seconds": ["type": "integer", "description": "Optional time window (seconds back from now) recorded on the case."],
+            ],
+            "required": ["name"],
+        ] as [String: Any],
+    ],
+    [
         "name": "forensics.run_collector",
-        "description": "Invoke a Collector plugin against a case. Returns the CollectionResult (artifacts committed / rejected / status).",
+        "description": "Invoke a Collector plugin against a case. Optional `inputs` (e.g. {\"path\": \"/usr/bin/codesign\"}) targets path-driven analyzers; see each plugin's declared inputs via forensics.list_plugins. Returns the CollectionResult (artifacts committed / rejected / status).",
         "inputSchema": [
             "type": "object",
             "properties": [
                 "plugin_id": ["type": "string", "description": "Plugin id, e.g. com.maccrab.forensics.tcc-lite."],
                 "case_id": ["type": "string", "description": "Target case UUID."],
+                "inputs": ["type": "object", "description": "Optional operator-supplied inputs declared by the plugin (e.g. {\"path\": \"/full/path/to/binary\"})."],
             ],
             "required": ["plugin_id", "case_id"],
         ] as [String: Any],
@@ -785,6 +799,8 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
     // v1.13a / v1.13b — Mac Context Plugin Platform meta-tools.
     case "forensics.list_plugins":
         return await handleForensicsListPlugins(args)
+    case "forensics.create_case":
+        return await handleForensicsCreateCase(args)
     case "forensics.run_collector":
         return await handleForensicsRunCollector(args)
     case "forensics.search_artifacts":
@@ -808,6 +824,13 @@ func handleToolCall(name: String, args: [String: Any]) async -> Any {
     case "tierb.verify":
         return await handleTierBVerify()
     default:
+        // Dynamically-registered per-plugin tools (manifest-declared
+        // mcpTools on collector plugins). Forward-compatible: future
+        // installed collector plugins route here automatically.
+        try? await ForensicsMCPBootstrapper.shared.ensure()
+        if let manifest = await pluginForMCPTool(name) {
+            return await handlePluginMCPTool(name: name, manifest: manifest, args: args)
+        }
         return toolError("Unknown tool: \(name)")
     }
 }
@@ -864,6 +887,56 @@ private let sharedTyposquatDB = TyposquatDatabase()
 private let sharedNextPredictor = NextTechniquePredictor()
 private let sharedStylometric = StylometricFingerprinter()
 
+/// Resolve an LLM backend for the MCP server (currently only
+/// classify_package_intent uses it). Builds an LLMConfig from the
+/// dashboard-written `llm_config.json` + env overrides — the same
+/// non-entitled-reader path the sysext uses — and lets
+/// `LLMService.makeFromConfig` run its bounded 3 s availability probe.
+/// Returns nil (→ heuristic fallback) when nothing is configured or the
+/// backend is unreachable. Keychain is intentionally NOT read here to
+/// avoid any interactive prompt in an agent-driven server process.
+private func resolveMCPLLMService() async -> LLMService? {
+    var config = LLMConfig()
+    var hasConfig = false
+    let configPath = dataDir + "/llm_config.json"
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let enabled = json["enabled"] as? Bool { config.enabled = enabled }
+        if let provider = json["provider"] as? String {
+            config.provider = LLMProvider(rawValue: provider) ?? config.provider
+        }
+        if let v = json["ollama_url"] as? String { config.ollamaURL = v }
+        if let v = json["ollama_model"] as? String { config.ollamaModel = v }
+        if let v = json["ollama_api_key"] as? String { config.ollamaAPIKey = v }
+        if let v = json["claude_api_key"] as? String { config.claudeAPIKey = v }
+        if let v = json["claude_model"] as? String { config.claudeModel = v }
+        if let v = json["openai_url"] as? String { config.openaiURL = v }
+        if let v = json["openai_api_key"] as? String { config.openaiAPIKey = v }
+        if let v = json["openai_model"] as? String { config.openaiModel = v }
+        if let v = json["mistral_api_key"] as? String { config.mistralAPIKey = v }
+        if let v = json["mistral_model"] as? String { config.mistralModel = v }
+        if let v = json["gemini_api_key"] as? String { config.geminiAPIKey = v }
+        if let v = json["gemini_model"] as? String { config.geminiModel = v }
+        hasConfig = config.enabled
+    }
+    let env = ProcessInfo.processInfo.environment
+    if let p = env["MACCRAB_LLM_PROVIDER"] {
+        config.provider = LLMProvider(rawValue: p) ?? config.provider
+        hasConfig = true
+    }
+    if let v = env["MACCRAB_LLM_OLLAMA_URL"] { config.ollamaURL = v }
+    if let v = env["MACCRAB_LLM_OLLAMA_MODEL"] { config.ollamaModel = v }
+    if let v = env["MACCRAB_LLM_CLAUDE_KEY"] { config.claudeAPIKey = v }
+    if let v = env["MACCRAB_LLM_OPENAI_URL"] { config.openaiURL = v }
+    if let v = env["MACCRAB_LLM_OPENAI_KEY"] { config.openaiAPIKey = v }
+    guard hasConfig else { return nil }
+    return await LLMService.makeFromConfig(config)
+}
+
+/// Probe-once cache so classify_package_intent doesn't re-resolve (and
+/// re-probe) the backend on every call.
+private let sharedMCPLLMService = Task<LLMService?, Never> { await resolveMCPLLMService() }
+
 func handleCheckTyposquatScore(_ args: [String: Any]) async -> Any {
     guard let name = args["name"] as? String,
           let registryRaw = args["registry"] as? String,
@@ -876,7 +949,7 @@ func handleCheckTyposquatScore(_ args: [String: Any]) async -> Any {
     if let similar = result.similarTo, let distance = result.distance {
         lines.append("Closest popular: '\(similar)' (Damerau-Levenshtein \(distance))")
     } else {
-        lines.append("No nearby popular name in starter top-50 corpus")
+        lines.append("No nearby popular name in the bundled package-name corpus")
     }
     lines.append("Homoglyph: \(result.isHomoglyph ? "YES" : "no")")
     for reason in result.reasons { lines.append("- \(reason)") }
@@ -970,10 +1043,10 @@ func handleClassifyPackageIntent(_ args: [String: Any]) async -> Any {
         hasLanguageMismatch: (args["has_language_mismatch"] as? Bool) ?? false,
         aiAgentTriggered: (args["ai_agent_triggered"] as? Bool) ?? false
     )
-    // MCP server doesn't hold an LLMService — pass nil to use the
-    // deterministic heuristic classifier. When the daemon-side
-    // integration lands the wiring becomes nilOrShared.
-    let classifier = IntentClassifier(llmService: nil)
+    // Use a configured LLM backend when one is available (resolved +
+    // availability-probed once per process); IntentClassifier falls back
+    // to its deterministic heuristic when this is nil.
+    let classifier = IntentClassifier(llmService: await sharedMCPLLMService.value)
     let result = await classifier.classify(brief)
     var lines: [String] = ["Intent classification: \(packageName)"]
     lines.append("Label: \(result.label.rawValue)")
@@ -1068,8 +1141,12 @@ func handleClusterAlerts(_ args: [String: Any]) async -> Any {
 
     let store: AlertStore
     do {
-        let path = dataDir + "/events.db"
-        store = try AlertStore(path: path)
+        // Alerts live in alerts.db, not events.db. Use the directory:
+        // initializer (which appends the canonical alerts.db filename)
+        // exactly like handleGetAlerts and every other alert handler —
+        // opening events.db here bound this to a dormant/empty `alerts`
+        // table, so cluster_alerts always reported "0 alerts → 0 clusters".
+        store = try AlertStore(directory: dataDir)
     } catch {
         return toolError("Failed to open AlertStore: \(error.localizedDescription)")
     }
@@ -1885,6 +1962,139 @@ private func forensicsCaseManager() -> CaseManager {
     )
 }
 
+// MARK: - Plugin input coercion + dynamic per-plugin MCP tools
+
+/// Build PluginInvocationInputs from MCP call args, coercing each value
+/// to the type its InputSpec declares. Trusting the manifest's declared
+/// type sidesteps the NSNumber Bool-vs-Int ambiguity that a guess-the-
+/// type coercion would hit. The `caseID` input is resolved separately
+/// from `case_id`, so it's skipped here.
+private func buildPluginInputs(from args: [String: Any], specs: [InputSpec]) -> PluginInvocationInputs {
+    var values: [String: InputValue] = [:]
+    for spec in specs where spec.type != .caseID {
+        guard let raw = args[spec.name] else { continue }
+        switch spec.type {
+        case .bool:
+            if let b = raw as? Bool { values[spec.name] = .bool(b) }
+        case .integer:
+            if let i = raw as? Int { values[spec.name] = .integer(i) }
+        case .string, .path, .timeWindow, .caseID:
+            if let s = raw as? String { values[spec.name] = .string(s) }
+        }
+    }
+    return PluginInvocationInputs(values: values)
+}
+
+private func jsonSchemaType(for type: InputType) -> String {
+    switch type {
+    case .bool: return "boolean"
+    case .integer: return "integer"
+    case .string, .path, .timeWindow, .caseID: return "string"
+    }
+}
+
+/// Project each registered COLLECTOR plugin's declared mcpTools into MCP
+/// tool definitions, appended to the static `tools` list. Manifest-
+/// driven: a future installed collector plugin's declared mcpTools light
+/// up here automatically with no server code change. Non-collector
+/// plugin tools (enricher/analyzer) are omitted until their run-path
+/// returns case-committable output — we don't advertise what can't run.
+private func pluginMCPTools() async -> [[String: Any]] {
+    var out: [[String: Any]] = []
+    for m in await PluginRegistry.shared.manifests() where m.type == .collector {
+        for t in m.mcpTools {
+            var props: [String: Any] = [
+                "case_id": ["type": "string", "description": "Target case UUID. Create one with forensics.create_case."],
+            ]
+            for spec in m.inputs where spec.type != .caseID {
+                props[spec.name] = ["type": jsonSchemaType(for: spec.type), "description": spec.description]
+            }
+            out.append([
+                "name": t.name,
+                "description": "\(t.description) [plugin \(m.id); commits \(t.exposesPrivacyClass.rawValue)-class artifacts into the case — read them with forensics.search_artifacts]",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": props,
+                    "required": ["case_id"],
+                ] as [String: Any],
+            ])
+        }
+    }
+    return out
+}
+
+/// Resolve a dynamic plugin-tool name to its declaring collector plugin.
+private func pluginForMCPTool(_ name: String) async -> PluginManifest? {
+    for m in await PluginRegistry.shared.manifests() where m.type == .collector {
+        if m.mcpTools.contains(where: { $0.name == name }) { return m }
+    }
+    return nil
+}
+
+/// Run a dynamically-registered plugin tool. It maps to the declaring
+/// collector plugin's run, with the tool's declared inputs threaded
+/// through. Requires `case_id` (the artifact destination); the artifacts
+/// are then read via forensics.search_artifacts / forensics.timeline.
+func handlePluginMCPTool(name: String, manifest: PluginManifest, args: [String: Any]) async -> Any {
+    guard let caseID = args["case_id"] as? String else {
+        let optional = manifest.inputs.filter { $0.type != .caseID }.map { $0.name }
+        let extra = optional.isEmpty ? "" : " Inputs: \(optional.joined(separator: ", "))."
+        return toolError("'\(name)' requires 'case_id' (create one with forensics.create_case).\(extra)")
+    }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.openCase(id: caseID)
+        let inputs = buildPluginInputs(from: args, specs: manifest.inputs)
+        let runner = PluginRunner()
+        let (result, invocationID) = try await runner.runCollector(
+            id: manifest.id,
+            handle: handle,
+            inputs: inputs
+        )
+        return ["content": [["type": "text", "text": jsonStringify([
+            "tool": name,
+            "plugin_id": manifest.id,
+            "case_id": caseID,
+            "invocation_id": Int(invocationID),
+            "status": result.status.rawValue,
+            "artifacts_committed": result.artifactsCommitted,
+            "artifacts_rejected": result.artifactsRejected,
+            "notes": result.notes,
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("\(name) failed: \(error)")
+    }
+}
+
+func handleForensicsCreateCase(_ args: [String: Any]) async -> Any {
+    guard let name = (args["name"] as? String).map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
+          !name.isEmpty, name.count <= 200 else {
+        return toolError("'name' is required (a short case label, ≤200 chars)")
+    }
+    // Plaintext by default: an encrypted case wraps its DEK to the app's
+    // keychain, whose retrieval needs an interactive Touch ID/passcode
+    // prompt the headless MCP process can't satisfy — the agent could
+    // create it but never reopen it. Notes optional.
+    let notes = (args["notes"] as? String).map { String($0.prefix(2000)) }
+    let window: MacCrabForensics.TimeWindow? = (args["window_seconds"] as? Int).flatMap { secs in
+        secs > 0 ? MacCrabForensics.TimeWindow.relative(TimeInterval(secs)) : nil
+    }
+    do {
+        try await ForensicsMCPBootstrapper.shared.ensure()
+        let mgr = forensicsCaseManager()
+        let handle = try await mgr.createCase(name: name, timeWindow: window, notes: notes, encrypted: false)
+        return ["content": [["type": "text", "text": jsonStringify([
+            "case_id": handle.caseID,
+            "name": name,
+            "encryption": "plaintext",
+            "next_steps": "Run a collector against this case — forensics.run_collector{plugin_id, case_id, inputs} or a per-plugin tool like macho_analyze_path{case_id, path} — then read results with forensics.search_artifacts / forensics.timeline.",
+        ] as [String: Any])]]]
+    } catch {
+        return toolError("create_case failed: \(error)")
+    }
+}
+
 /// Encode a CommittedArtifact as the dict shape MCP tools return.
 private func encodeArtifact(_ a: CommittedArtifact) -> [String: Any] {
     var out: [String: Any] = [
@@ -1949,6 +2159,16 @@ func handleForensicsListPlugins(_ args: [String: Any]) async -> Any {
             "runtime": m.runtime.rawValue,
             "stability": m.stability.rawValue,
             "description": m.description,
+            "inputs": m.inputs.map { spec -> [String: Any] in
+                ["name": spec.name, "type": spec.type.rawValue, "description": spec.description, "required": spec.required]
+            },
+            "mcp_tools": m.mcpTools.map { t -> [String: Any] in
+                ["name": t.name, "description": t.description, "privacy_class": t.exposesPrivacyClass.rawValue]
+            },
+            // Only collector plugins are runnable via the dynamic per-tool
+            // MCP surface today (their declared mcpTools appear in tools/list);
+            // other types declare tools that ship when their run-path lands.
+            "runnable_via_mcp": m.type == .collector,
         ]
     }
     return ["content": [["type": "text", "text": jsonStringify(["plugins": payload])]]]
@@ -1963,10 +2183,17 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
         try await ForensicsMCPBootstrapper.shared.ensure()
         let mgr = forensicsCaseManager()
         let handle = try await mgr.openCase(id: caseID)
+        // Thread operator-supplied inputs (e.g. {"path": "/usr/bin/codesign"})
+        // so path-driven analyzers target a chosen file instead of their
+        // dogfood default. Coerced by the plugin's declared InputSpec types.
+        let inputsArg = args["inputs"] as? [String: Any] ?? [:]
+        let specs = await PluginRegistry.shared.registration(forID: pluginID)?.manifest.inputs ?? []
+        let inputs = buildPluginInputs(from: inputsArg, specs: specs)
         let runner = PluginRunner()
         let (result, invocationID) = try await runner.runCollector(
             id: pluginID,
-            handle: handle
+            handle: handle,
+            inputs: inputs
         )
         return ["content": [["type": "text", "text": jsonStringify([
             "plugin_id": pluginID,
@@ -2217,7 +2444,20 @@ while let line = readLine(strippingNewline: true) {
     case "notifications/initialized":
         break
     case "tools/list":
-        sendResponse(id: request.id, result: ["tools": tools])
+        // Static tools + dynamically-projected per-plugin tools. The
+        // forensics bootstrap + registry read are async, so spin the
+        // runloop like tools/call does.
+        let listSem = DispatchSemaphore(value: 0)
+        var allTools = tools
+        DispatchQueue.global().async {
+            Task {
+                try? await ForensicsMCPBootstrapper.shared.ensure()
+                allTools.append(contentsOf: await pluginMCPTools())
+                listSem.signal()
+            }
+        }
+        listSem.wait()
+        sendResponse(id: request.id, result: ["tools": allTools])
     case "ping":
         sendResponse(id: request.id, result: ["status": "ok"])
     case "tools/call":
@@ -2232,9 +2472,16 @@ while let line = readLine(strippingNewline: true) {
         // Use a semaphore on a background queue (not main) to avoid deadlock
         let sem = DispatchSemaphore(value: 0)
         var result: Any = ["content": [["type": "text", "text": "Internal error"]]]
+        // Whether this tool's output is forensic evidence (exempt from
+        // sanitization, below). True for the forensics.* meta-tools AND
+        // for dynamically-registered per-plugin tools (macho_analyze_path,
+        // …), whose names lack the forensics. prefix but return the same
+        // chain-of-custody-sensitive run results.
+        var isForensicTool = toolName.hasPrefix("forensics.")
         DispatchQueue.global().async {
             Task {
                 result = await handleToolCall(name: toolName, args: args)
+                if !isForensicTool { isForensicTool = await pluginForMCPTool(toolName) != nil }
                 sem.signal()
             }
         }
@@ -2246,13 +2493,12 @@ while let line = readLine(strippingNewline: true) {
         // automatic sanitization for cloud LLM calls — this is the
         // missing half of that promise for MCP responses.
         //
-        // Exception: forensic artifact reads (forensics.*) are
-        // integrity reads consumed as evidence — their source paths,
-        // summaries and hashes must NOT be scrubbed or chain-of-custody
-        // breaks. The privacy ceiling already bounds what those tools
-        // return (metadata by default; content only with an explicit
-        // `allow-ai --content` grant).
-        let response = toolName.hasPrefix("forensics.") ? result : sanitizeContent(result)
+        // Exception: forensic artifact reads are integrity reads consumed
+        // as evidence — their source paths, summaries and hashes must NOT
+        // be scrubbed or chain-of-custody breaks. The privacy ceiling
+        // already bounds what those tools return (metadata by default;
+        // content only with an explicit `allow-ai --content` grant).
+        let response = isForensicTool ? result : sanitizeContent(result)
         sendResponse(id: reqId, result: response)
     default:
         sendError(id: request.id, code: -32601, message: "Method not found: \(request.method)")

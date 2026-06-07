@@ -129,6 +129,69 @@ struct MCPProtocolHarnessTests {
         }
     }
 
+    /// Extract the first text block from a tools/call result payload.
+    private func resultText(_ objs: [[String: Any]], _ id: Int) -> String {
+        let result = byId(objs, id)?["result"] as? [String: Any]
+        let content = result?["content"] as? [[String: Any]]
+        return content?.first?["text"] as? String ?? ""
+    }
+
+    @Test("tools/list exposes forensics.create_case + dynamically-registered plugin tools")
+    func dynamicToolSurface() {
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ])
+        let tools = (byId(objs, 2)?["result"] as? [String: Any])?["tools"] as? [[String: Any]]
+        let names = Set((tools ?? []).compactMap { $0["name"] as? String })
+        // The new create-case meta-tool.
+        #expect(names.contains("forensics.create_case"))
+        // Per-plugin tools projected from collector manifests' mcpTools.
+        #expect(names.contains("macho_analyze_path"))
+        #expect(names.contains("tcc_grants_for_service"))
+        // The lone enricher-declared tool is NOT runnable yet → not advertised.
+        #expect(!names.contains("codesign_resolve"))
+        // A dynamic tool requires case_id and surfaces its plugin inputs.
+        if let macho = (tools ?? []).first(where: { $0["name"] as? String == "macho_analyze_path" }) {
+            let schema = macho["inputSchema"] as? [String: Any]
+            let props = schema?["properties"] as? [String: Any]
+            let required = schema?["required"] as? [String]
+            #expect(props?["case_id"] != nil)
+            #expect(props?["path"] != nil)
+            #expect(required?.contains("case_id") == true)
+        } else {
+            Issue.record("macho_analyze_path missing from tools/list")
+        }
+    }
+
+    @Test("suppress_alert / suppress_campaign are gated by the response tier")
+    func suppressGating() {
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_capabilities","arguments":{}}}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"suppress_alert","arguments":{"alert_id":"00000000-0000-0000-0000-000000000000"}}}"#,
+            #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"suppress_campaign","arguments":{"campaign_id":"does-not-exist"}}}"#,
+        ])
+        // Adaptive to the host's real grant file (root-owned, can't be
+        // faked in-test): if the response tier is OFF (the secure default /
+        // CI), both suppress calls must be capability-denied. If it's ON
+        // (a granted dev box), the denial reason must NOT be 'capability'
+        // (any error is then a not-found, not a bypassed gate).
+        let responseGranted = resultText(objs, 2).contains("[ON ] response")
+        for id in [3, 4] {
+            let text = resultText(objs, id).lowercased()
+            if responseGranted {
+                #expect(!text.contains("capability is not enabled"),
+                        "id \(id): with response granted, suppress must not be capability-denied")
+            } else {
+                let result = byId(objs, id)?["result"] as? [String: Any]
+                #expect(result?["isError"] as? Bool == true, "id \(id) should be isError when ungranted")
+                #expect(text.contains("capability"),
+                        "id \(id): ungranted suppress must be denied for a capability reason")
+            }
+        }
+    }
+
     @Test("JSON-RPC error codes for protocol-level failures")
     func jsonRpcErrorCodes() {
         let objs = drive([

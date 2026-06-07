@@ -23,7 +23,7 @@ public struct MachOAnalyzerPlugin: Collector {
         id: "com.maccrab.forensics.macho-analyzer",
         version: "1.0.0",
         displayName: "Mach-O Analyzer",
-        description: "Operator-supplied Mach-O analysis: arch, load commands, codesign posture, entitlements, declared dylib dependencies. Driven by the maccrabctl macho-analyze CLI or the macho_analyze_path MCP tool.",
+        description: "Operator-supplied Mach-O analysis: arch, load commands, codesign posture, entitlements, declared dylib dependencies. Run via `maccrabctl plugin run com.maccrab.forensics.macho-analyzer --path=<binary>` or the macho_analyze_path MCP tool.",
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],
@@ -33,11 +33,11 @@ public struct MachOAnalyzerPlugin: Collector {
                 description: "Absolute path to the Mach-O binary to analyze.",
                 type: .path,
                 default: nil,
-                required: false   // Optional in the manifest sense; PluginRunner
-                                  // doesn't currently thread inputs through, so
-                                  // the analyzer reads from a known default in
-                                  // this RC and the operator points the input
-                                  // at a binary in a follow-up.
+                required: false   // Optional: when supplied (via `plugin run
+                                  // --path` or the macho_analyze_path MCP tool)
+                                  // the analyzer targets that binary; when
+                                  // absent it falls back to a dogfood default
+                                  // set for quick smoke tests.
             ),
         ],
         outputs: [

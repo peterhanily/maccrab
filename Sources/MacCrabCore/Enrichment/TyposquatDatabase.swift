@@ -233,7 +233,7 @@ public actor TyposquatDatabase {
                 registry: registry,
                 isHomoglyph: true,
                 score: 100,
-                reasons: ["candidate is a homoglyph encoding of top-1000 package '\(normalizedCandidate)'"]
+                reasons: ["candidate is a homoglyph encoding of popular package '\(normalizedCandidate)'"]
             )
         }
 
@@ -272,7 +272,7 @@ public actor TyposquatDatabase {
         // Score: distance 1 = 90, distance 2 = 70, scale down for longer names.
         let baseScore = max(0, 100 - 20 * d)
         let isHomoglyph = (Self.confusableFold(candidate).lowercased() == match)
-        let reasons = ["Damerau-Levenshtein distance \(d) from top-1000 package '\(match)'"]
+        let reasons = ["Damerau-Levenshtein distance \(d) from popular package '\(match)'"]
             + (isHomoglyph ? ["candidate is a Unicode-confusable fold of '\(match)'"] : [])
 
         return TyposquatResult(

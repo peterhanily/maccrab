@@ -70,6 +70,10 @@ func loadAgentCapabilities() -> Set<AgentCapability> {
 
 /// Tool → required capability. Tools not listed are read-only and always
 /// allowed (subject to the MCP transport's own scoping).
+///
+/// NOTE (the load-bearing trap): this map FAILS OPEN — `agentCapabilityDenial`
+/// returns nil (allow) for any tool not listed here. So EVERY new mutating MCP
+/// tool MUST be added below, or it silently bypasses the capability gate.
 let agentToolCapability: [String: AgentCapability] = [
     "set_builtin_rule_setting": .config,
     "reload_rules": .config,
@@ -77,6 +81,12 @@ let agentToolCapability: [String: AgentCapability] = [
     "set_daemon_config": .config,        // defense-affecting keys re-checked → .response
     "create_rule": .authoring,
     "delete_rule": .authoring,
+    // Suppressing an alert/campaign hides findings — a defense-degrading
+    // action — so it requires the top tier, like other coverage-reducing
+    // changes. Without this, an agent with ZERO granted tiers (the secure
+    // default) could still suppress up to the per-session budget.
+    "suppress_alert": .response,
+    "suppress_campaign": .response,
 ]
 
 /// Drop a request into the privileged inbox the daemon polls (same dir +

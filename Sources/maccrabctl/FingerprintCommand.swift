@@ -13,6 +13,12 @@ func dispatchFingerprint(args: [String]) async {
         printFingerprintUsage()
         exit(0)
     }
+    // A bare help token must print usage, not be treated as a path to
+    // fingerprint (which produced "MCFPStatic: file not found at help").
+    if ["help", "-h", "--help"].contains(target) {
+        printFingerprintUsage()
+        exit(0)
+    }
     let asJSON = args.contains("--json")
 
     let path: String
