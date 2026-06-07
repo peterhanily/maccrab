@@ -63,6 +63,13 @@ struct ESProcessFields {
     var teamId: String
     var codesigningFlags: UInt32
     var isPlatformBinary: Bool
+    /// Real process birth time from `es_process_t.start_time`. Defaulted so
+    /// test constructors stay source-compatible; the live ES path always
+    /// supplies the kernel value. Previously hardcoded to Date() (event-
+    /// processing time), which drifted per-event and broke any consumer that
+    /// keys on a stable per-process identity (agent-session id, trace anti-
+    /// recycle).
+    var startTime: Date = Date()
 }
 
 /// Pure, unit-testable mapping from decoded ES fields to `ProcessInfo`. Mirrors
@@ -122,7 +129,7 @@ func esProcessInfo(from f: ESProcessFields) -> ProcessInfo {
         userId: f.euid,
         userName: "",        // Resolved later by enrichment
         groupId: 0,
-        startTime: Date(),
+        startTime: f.startTime,
         codeSignature: codeSignature,
         ancestors: ancestors,
         architecture: architecture,
@@ -146,7 +153,13 @@ func processFromESProcess(_ proc: UnsafePointer<es_process_t>) -> ProcessInfo {
         signingId: esStringToSwift(p.signing_id),
         teamId: esStringToSwift(p.team_id),
         codesigningFlags: p.codesigning_flags,
-        isPlatformBinary: p.is_platform_binary
+        isPlatformBinary: p.is_platform_binary,
+        // Real birth time from the kernel (struct timeval) — gives every
+        // event of a process a STABLE startTime so session/trace identity
+        // doesn't drift. Falls back to now if the field is unset (tv_sec<=0).
+        startTime: p.start_time.tv_sec > 0
+            ? Date(timeIntervalSince1970: Double(p.start_time.tv_sec) + Double(p.start_time.tv_usec) / 1_000_000)
+            : Date()
     ))
 }
 

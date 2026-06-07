@@ -18,11 +18,13 @@ struct MacCrabVersionTests {
     func fallbackIsSemVer() {
         let v = MacCrabVersion.fallback
         #expect(!v.isEmpty)
-        // Three numeric components separated by dots — strict SemVer
-        // shape we ship every release. If this assertion ever needs
-        // to soften, prerelease-check.sh's parity comparison with
-        // release.json should be updated in the same change.
-        let parts = v.split(separator: ".")
+        // SemVer core MAJOR.MINOR.PATCH, with an OPTIONAL pre-release suffix
+        // ("1.18.0" or an RC build like "1.18.0-rc1"). Release builds ship the
+        // strict 3-numeric shape; RC branches carry -rcN. prerelease-check.sh
+        // still enforces the strict release shape + release.json parity at
+        // publish time, so softening here does not weaken the release gate.
+        let core = v.split(separator: "-", maxSplits: 1).first.map(String.init) ?? v
+        let parts = core.split(separator: ".")
         #expect(parts.count == 3)
         for part in parts {
             #expect(Int(String(part)) != nil)

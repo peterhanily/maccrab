@@ -46,10 +46,6 @@ public actor AgentSessionRegistry {
     /// evicted past this.
     private let maxSessions: Int
 
-    /// Tolerance when comparing a root's startTime to a retained entry's
-    /// — ES timestamps for the same exec can wobble sub-second.
-    private static let startTimeTolerance: TimeInterval = 2
-
     public init(graceWindow: TimeInterval = 300, maxSessions: Int = 64) {
         self.graceWindow = graceWindow
         self.maxSessions = maxSessions
@@ -63,9 +59,21 @@ public actor AgentSessionRegistry {
     @discardableResult
     public func session(rootPid: Int32, pathHash: UInt64, startTime: Date,
                         tool: String, now: Date = Date()) -> String {
+        // Reuse keyed on (pid, pathHash) + liveness only. We deliberately do
+        // NOT gate reuse on startTime equality: in production the ES/FSEvents/
+        // kdebug collectors do not all carry a reliable process birth time
+        // (some stamp event-processing time), so a per-event startTime DRIFTS
+        // and a startTime-equality guard re-mints a fresh id every couple of
+        // seconds — shattering one agent into 100+ sessions (the exact
+        // behaviour an audit caught on live data). Recycle is still detected
+        // reliably: a pid reused by a DIFFERENT executable changes pathHash
+        // (→ new id), and a pid whose session aged past the grace window is
+        // expired (→ new id). The only residual case — a pid reused by the
+        // SAME executable within the grace window — is astronomically rare on
+        // macOS and merely merges two same-tool sessions (cosmetic), versus
+        // shattering every session (catastrophic).
         if var e = byPid[rootPid],
            e.pathHash == pathHash,
-           abs(e.startTime.timeIntervalSince(startTime)) <= Self.startTimeTolerance,
            !isExpired(e, now: now) {
             e.lastSeen = now
             e.endedAt = nil           // a fresh event from the root revives it

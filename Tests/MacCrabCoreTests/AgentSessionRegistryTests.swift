@@ -106,4 +106,22 @@ struct AgentSessionRegistryTests {
         let b = await reg.session(rootPid: 2000, pathHash: hClaude, startTime: T0, tool: "claude_code", now: T0)
         #expect(a != b)
     }
+
+    /// WAVE3-01 regression: production collectors stamp event-processing time
+    /// (not real process birth time) into startTime, so it DRIFTS across a
+    /// long-lived agent's events. Before the fix, the startTime-equality reuse
+    /// guard re-minted a fresh id every ~2s — one `claude` root shattered into
+    /// 100+ sessions on live data. The id must stay stable under drift.
+    @Test("drifting startTime for one pid+pathHash yields ONE durable id (WAVE3-01)")
+    func driftingStartTimeStaysOneSession() async {
+        let reg = AgentSessionRegistry()
+        var ids = Set<String>()
+        for i in 0..<200 {                                  // 200 events, 1s apart
+            let evt = T0.addingTimeInterval(Double(i))      // startTime drifts with the event
+            ids.insert(await reg.session(rootPid: rootPid, pathHash: hClaude,
+                                         startTime: evt, tool: "claude_code", now: evt))
+        }
+        #expect(ids.count == 1)                             // was 100+ before the fix
+        #expect(await reg.count() == 1)
+    }
 }
