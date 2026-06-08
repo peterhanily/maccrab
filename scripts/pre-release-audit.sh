@@ -139,6 +139,13 @@ else
         "webhookDiscordURL:syncWebhookConfig"
         "webhookPagerDutyKey:syncWebhookConfig"
         "webhookMinSeverity:syncWebhookConfig"
+        # v1.18 agent-control capability tiers → set-agent-capabilities-*.json
+        # dropped into the privileged inbox by syncAgentCapabilities(); the root
+        # daemon consumes it and writes mcp_capabilities.json. They DO round-trip
+        # to the daemon (not UI-only), so they belong here.
+        "agentCapConfig:syncAgentCapabilities"
+        "agentCapAuthoring:syncAgentCapabilities"
+        "agentCapResponse:syncAgentCapabilities"
     )
 
     # Verify each named sync function exists.
@@ -1951,10 +1958,16 @@ PY
             if grep -qE "^[[:space:]]+case [^/]*\"${field}\"" Sources/MacCrabCore/Detection/RuleEngine.swift 2>/dev/null; then
                 continue
             fi
-            # (b) Any Swift file writes `enrichments["<field>"] =`.
-            # Match both `event.enrichments[...]` and `enrichedEvent.enrichments[...]`
-            # plus the bare local-variable form `enrichments[...] =`.
-            if grep -rqE "enrichments\[\"${field}\"\][[:space:]]*=" Sources/ \
+            # (b) Any Swift file writes `enrichments["<field>"] =` (assignment
+            # form) OR the dictionary-LITERAL key form `"<field>":` inside an
+            # enrichments-building dictionary (e.g.
+            # ESCollector.introspectionEnrichments returns
+            # `["TargetImage": …, "SameTeam": …]`). The literal form is exactly
+            # what Pass E missed before — it falsely flagged 6 live introspection
+            # fields (TargetImage/TargetProcessName/TargetSignerType/TargetPid/
+            # TargetIsSelf/SameTeam) as dead. Pass 14 already matches `"key"`;
+            # this aligns Pass E with it.
+            if grep -rqE "enrichments\[\"${field}\"\][[:space:]]*=|\"${field}\"[[:space:]]*:" Sources/ \
                 --include='*.swift' 2>/dev/null; then
                 continue
             fi
@@ -2888,7 +2901,12 @@ else
     # Each non-metadata class must have a corresponding "rejects"
     # assertion in the test file.
     for cls in "content" "personalComms" "credentialAdjacent" "secret"; do
-        if ! grep -q "rejects $cls\|reject${cls^}\|rejects${cls^}\|Reject${cls^}" "$artifact_tests"; then
+        # ${cls^} (bash-4 first-char uppercase) is a "bad substitution" on
+        # macOS's bash 3.2 — which silently broke this grep (PASS 2026-D
+        # printed a green ✓ while the pattern was malformed). Capitalize
+        # portably instead.
+        cls_cap="$(printf '%s' "${cls:0:1}" | tr '[:lower:]' '[:upper:]')${cls:1}"
+        if ! grep -q "rejects $cls\|reject$cls_cap\|rejects$cls_cap\|Reject$cls_cap" "$artifact_tests"; then
             # Fallback to a more generous match — the test name
             # convention is "Plaintext case rejects <class>".
             if ! grep -iq "rejects ${cls}" "$artifact_tests" \

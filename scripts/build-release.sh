@@ -306,6 +306,39 @@ PLIST
     echo "    ✓ Patched MacCrab_MacCrabCore.bundle/Info.plist (macOS 26 Bundle(url:) compatibility)"
 fi
 
+# Same macOS-26 Bundle(url:) patch for the MacCrabApp resource bundle — it
+# ships the same stripped SwiftPM Info.plist (only CFBundleDevelopmentRegion),
+# which pre-release-audit.sh Pass B flags as missing CFBundleIdentifier /
+# CFBundlePackageType / CFBundleInfoDictionaryVersion. Patch it too so the
+# whole app validates on macOS 26 regardless of which bundle a future
+# Bundle.module consumer touches.
+APP_BUNDLE_PLIST="$APP/Contents/Resources/MacCrab_MacCrabApp.bundle/Info.plist"
+if [ -d "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle" ]; then
+    cat > "$APP_BUNDLE_PLIST" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.maccrab.MacCrabApp.resources</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>MacCrabApp Resources</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+</dict>
+</plist>
+PLIST
+    echo "    ✓ Patched MacCrab_MacCrabApp.bundle/Info.plist (macOS 26 Bundle(url:) compatibility)"
+fi
+
 # v1.10.0: bundle maccrabctl + maccrab-mcp inside the .app at
 # Contents/Resources/bin/. Pre-fix the dashboard's runMaccrabctl
 # probed Bundle.main first, but the binary was only ever shipped to
