@@ -328,9 +328,15 @@ enum DaemonSetup {
             atPath: compiledRulesDir,
             withIntermediateDirectories: true
         )
-        // Compiled rules are only read by the daemon — restrict to owner-only
-        // to prevent attackers from reading detection logic for evasion.
-        // rwxr-xr-x: non-root MacCrab.app needs to read rules for display
+        // rwxr-xr-x (0o755): the non-root MacCrab.app (uid 501) reads
+        // <support>/compiled_rules for rule display + integrity hashing
+        // (AppState), so the dir must stay world-traversable / files world-
+        // readable. Tradeoff: detection logic is world-READABLE — a minor
+        // evasion-recon surface, accepted for the app read path. Do NOT set
+        // 0o700 here: that breaks the app's read path (the v1.11.0 RC2 class
+        // of "audit-driven tightening silently breaks the user-context read").
+        // A future hardening could narrow to 0o750 root:admin IF every uid-501
+        // reader is confirmed in the admin group — verify the read path first.
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: compiledRulesDir)
 
         // Initialize components

@@ -2780,6 +2780,15 @@ let decoder = JSONDecoder()
 // Security: validate parent process at startup
 validateParentProcess()
 
+// maccrab-mcp is meant to run as the logged-in user (launched by an AI
+// agent like Claude Code). It never needs root. Warn — not refuse — when
+// run as euid 0 (refusing could break an unforeseen flow). Written to
+// STDERR so it never corrupts the stdout JSON-RPC stream.
+if geteuid() == 0 {
+    FileHandle.standardError.write(Data(
+        "warning: maccrab-mcp is running as root (euid 0); it is meant to run as the logged-in user. Running a user-writable bundled binary as root is an unnecessary privilege-escalation surface. Continuing.\n".utf8))
+}
+
 // Read newline-delimited JSON-RPC messages from stdin (MCP stdio transport).
 //
 // v1.17.4: the prior build also tried to accept LSP Content-Length framing,

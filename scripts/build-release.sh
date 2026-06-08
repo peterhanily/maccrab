@@ -705,6 +705,20 @@ cp "$PROJECT_DIR/README.md" "$STAGING_DIR/"
 cp "$SCRIPT_DIR/install.sh" "$STAGING_DIR/install.sh"
 chmod +x "$STAGING_DIR/install.sh"
 
+# ─── Guard: never ship private-key material ──────────────────────────
+# Regression guard for the security review's F7 ("dev/test keys ship")
+# concern. Scans the fully-assembled staging tree for PEM private-key
+# blocks. The marker "PRIVATE KEY" is unambiguous — it appears in real
+# private keys and nowhere legitimate in a shipped app (public keys say
+# "PUBLIC KEY"), so this cannot false-block a clean build. A match is a
+# stop-the-release event.
+if grep -rlI 'PRIVATE KEY' "$STAGING_DIR" >/dev/null 2>&1; then
+    echo "  ✗ ABORT: private-key material found in the staging tree — refusing to package:"
+    grep -rlI 'PRIVATE KEY' "$STAGING_DIR" | sed 's/^/      /'
+    exit 1
+fi
+echo "    ✓ No private-key material in the staging tree"
+
 # ─── DMG ─────────────────────────────────────────────────────────────
 echo "  Creating DMG..."
 DMG_NAME="MacCrab-v$VERSION.dmg"

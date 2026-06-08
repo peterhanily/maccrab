@@ -289,7 +289,7 @@ All keys are optional — missing keys use defaults from `DaemonConfig.swift`. S
 - **System Extension / root daemon:** `/Library/Application Support/MacCrab/` (release builds use this via sysextd-granted privileges; dev `sudo maccrabd` writes here too)
 - **Non-root dev daemon:** `~/Library/Application Support/MacCrab/` (dev `swift run maccrabd` without sudo)
 - Database: `events.db` (SQLite with WAL mode, 64MB cache, 256MB mmap)
-- Compiled rules: `compiled_rules/*.json` (0o700 permissions)
+- Compiled rules: `compiled_rules/*.json` (dir `0o755`, files `0o644` — world-readable: the non-root MacCrab.app reads them for rule display + integrity hashing; this is intentional, not `0o700`)
 - Auto-generated rules: `compiled_rules/auto_generated/`
 
 ## Code Conventions

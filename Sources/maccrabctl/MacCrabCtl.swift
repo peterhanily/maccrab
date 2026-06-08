@@ -10,6 +10,16 @@ struct MacCrabCtl {
         // handler terminates the process with exit code 141; we
         // want graceful EPIPE handling via try? instead.
         signal(SIGPIPE, SIG_IGN)
+
+        // maccrabctl is designed to run as the logged-in user; it never needs
+        // root. Warn (do NOT refuse — refusing could break an unforeseen
+        // flow) when run as euid 0, since running a user-writable bundled
+        // binary as root is an unnecessary privilege-escalation surface.
+        if geteuid() == 0 {
+            FileHandle.standardError.write(Data(
+                "warning: maccrabctl is running as root (euid 0); it is meant to run as the logged-in user. This is unnecessary and, if the app bundle is user-writable, a privilege-escalation risk. Continuing.\n".utf8))
+        }
+
         let args = CommandLine.arguments
 
         guard args.count >= 2 else {
