@@ -137,83 +137,69 @@ public actor SecurityScorer {
 
     // MARK: - Checks
 
-    private nonisolated func checkSIP() -> Bool {
+    /// Run a short-lived system probe with a HARD deadline. Reads stdout on a
+    /// background queue (a full pipe can't deadlock the caller) and SIGKILLs the
+    /// process if it overruns `timeout` — so a wedged probe (e.g. fdesetup /
+    /// spctl under MDM, Recovery, or disk pressure) can never hang the score,
+    /// and therefore can never hang `maccrabctl status`, the CLI's reliability
+    /// anchor. Returns captured stdout, or "" on timeout/launch-failure. Callers
+    /// treat "" as the conservative default (a protection is assumed OFF/unknown
+    /// rather than blocking) — under-reporting posture beats hanging.
+    private nonisolated func runProbe(_ path: String, _ args: [String],
+                                      captureStderr: Bool = false,
+                                      timeout: TimeInterval = 2.0) -> String {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/csrutil")
-        proc.arguments = ["status"]
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = args
         let pipe = Pipe()
         proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
+        proc.standardError = captureStderr ? pipe : FileHandle.nullDevice
+        do { try proc.run() } catch { return "" }
+
+        let q = DispatchQueue(label: "maccrab.probe")
+        var captured = ""
+        var done = false
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let s = String(data: data, encoding: .utf8) ?? ""
+            q.sync { captured = s; done = true }
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+            _ = sem.wait(timeout: .now() + 1.0)  // reader unblocks on post-kill EOF
+        }
         proc.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return output.contains("enabled")
+        return q.sync { done ? captured : "" }
+    }
+
+    private nonisolated func checkSIP() -> Bool {
+        runProbe("/usr/bin/csrutil", ["status"]).contains("enabled")
     }
 
     private nonisolated func checkFileVault() -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/fdesetup")
-        proc.arguments = ["status"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return output.contains("On")
+        runProbe("/usr/bin/fdesetup", ["status"]).contains("On")
     }
 
     private nonisolated func checkFirewall() -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/libexec/ApplicationFirewall/socketfilterfw")
-        proc.arguments = ["--getglobalstate"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return output.contains("enabled")
+        runProbe("/usr/libexec/ApplicationFirewall/socketfilterfw", ["--getglobalstate"]).contains("enabled")
     }
 
     private nonisolated func checkGatekeeper() -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/spctl")
-        proc.arguments = ["--status"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        try? proc.run()
-        proc.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output = runProbe("/usr/sbin/spctl", ["--status"], captureStderr: true)
         return output.contains("enabled") || output.contains("assessments enabled")
     }
 
     private nonisolated func checkAutoUpdates() -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        proc.arguments = ["read", "/Library/Preferences/com.apple.SoftwareUpdate", "AutomaticCheckEnabled"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return output.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        runProbe("/usr/bin/defaults", ["read", "/Library/Preferences/com.apple.SoftwareUpdate", "AutomaticCheckEnabled"])
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
 
     private nonisolated func checkScreenLock() -> Bool {
         // Check if screensaver password is required
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        proc.arguments = ["read", "com.apple.screensaver", "askForPassword"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return output.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        runProbe("/usr/bin/defaults", ["read", "com.apple.screensaver", "askForPassword"])
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
 
     private nonisolated func checkSSHEnabled() -> Bool {
@@ -243,18 +229,11 @@ public actor SecurityScorer {
     }
 
     private nonisolated func countUnsignedProcesses() -> Int {
-        // Use ps to count processes — simplified
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-A", "-o", "pid="]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-        // Approximate — would need codesign check on each
-        _ = pipe.fileHandleForReading.readDataToEndOfFile()
-        return 0  // Conservative: return 0, actual check would be expensive
+        // Use ps to count processes — simplified (bounded via runProbe so a
+        // wedged ps can't stall the score). Approximate — would need a codesign
+        // check on each; conservatively returns 0.
+        _ = runProbe("/bin/ps", ["-A", "-o", "pid="])
+        return 0
     }
 
     private nonisolated func countTmpProcesses() -> Int {
@@ -279,37 +258,12 @@ public actor SecurityScorer {
     }
 
     private nonisolated func isProcessRunning(_ name: String) -> Bool {
-        // v1.9 hot-fix: pre-fix this called `proc.terminationStatus`
-        // after `try? proc.run() ; proc.waitUntilExit()`. When pgrep
-        // can't launch (sandbox denial, sysextd transient, missing
-        // entitlement), `proc.run()` throws → `try?` eats it →
-        // `waitUntilExit()` returns instantly → `terminationStatus`
-        // throws NSException("task hasn't finished running") →
-        // SIGABRT (uncatchable from pure Swift). Crash report:
-        // 2026-05-06-013543 had this signature on the security-
-        // score poll path.
-        //
-        // Fix: avoid terminationStatus entirely. pgrep prints
-        // matching PIDs to stdout when it finds a match. Empty
-        // stdout = no match. We don't need the exit code.
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        proc.arguments = ["-x", name]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-        } catch {
-            return false
-        }
-        // readToEnd blocks until the pipe is closed. The pipe is
-        // closed when pgrep exits — same wait semantics as
-        // waitUntilExit, but without poking terminationStatus.
-        let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
-        // Drain — best-effort; even if waitUntilExit somehow throws
-        // it's contained.
-        proc.waitUntilExit()
-        return !data.isEmpty
+        // pgrep -x prints matching PIDs to stdout (empty = no match). Run it
+        // through runProbe so it's bounded (a wedged pgrep can't stall the
+        // score) and never touches `terminationStatus` — the v1.9 SIGABRT
+        // (NSException "task hasn't finished running" when pgrep failed to
+        // launch; crash 2026-05-06-013543) is structurally avoided.
+        !runProbe("/usr/bin/pgrep", ["-x", name])
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
