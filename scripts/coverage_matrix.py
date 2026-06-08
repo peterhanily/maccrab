@@ -90,11 +90,55 @@ def scan(rules_dir):
     return total, sequence_total, dict(tactics), dict(techniques)
 
 
+def count_graph(rules_dir):
+    """Count graph rules (Rules/graph/*.json). scan() only sees YAML, so the
+    6 graph rules are invisible to it — which is exactly why README (YAML-only,
+    478) and MODULES (incl. graph, 484) drifted apart."""
+    graph_dir = os.path.join(rules_dir, 'graph')
+    if not os.path.isdir(graph_dir):
+        return 0
+    return sum(1 for f in os.listdir(graph_dir) if f.endswith('.json'))
+
+
+def canonical_counts(rules_dir):
+    """The single source of truth for the headline rule decomposition."""
+    total_yaml, sequence, _, _ = scan(rules_dir)
+    graph = count_graph(rules_dir)
+    return {
+        'single': total_yaml - sequence,
+        'sequence': sequence,
+        'graph': graph,
+        'grand_total': total_yaml + graph,
+    }
+
+
+# Operator-facing surfaces that quote the headline rule total. --check asserts
+# each contains the canonical "<N> rules" so they can never silently drift
+# (the historical 478-vs-484 split + ModuleStatus's hardcoded "380+").
+COUNT_SURFACES = ['README.md', 'docs/MODULES.md', 'Sources/MacCrabCore/ModuleStatus.swift']
+
+
+def check_counts(rules_dir):
+    c = canonical_counts(rules_dir)
+    expected = "%d rules" % c['grand_total']
+    print("canonical: %d single + %d sequence + %d graph = %d total"
+          % (c['single'], c['sequence'], c['graph'], c['grand_total']))
+    bad = [p for p in COUNT_SURFACES
+           if os.path.exists(p) and expected not in open(p).read()]
+    if bad:
+        print("COUNT DRIFT — these surfaces do not contain '%s':" % expected)
+        for p in bad:
+            print("  - %s" % p)
+        sys.exit(1)
+    print("OK: all surfaces agree on '%s'" % expected)
+
+
 def text_report(rules_dir):
     total, sequence_total, tactics, techniques = scan(rules_dir)
+    graph = count_graph(rules_dir)
     print("MITRE ATT&CK Coverage Report")
     print("=" * 60)
-    print(f"Total rules: {total}")
+    print(f"Total rules: {total + graph} ({total - sequence_total} single-event + {sequence_total} sequence + {graph} graph)")
     print(f"Sequence rules: {sequence_total}")
     print(f"Unique techniques: {len(techniques)}")
     print()
@@ -191,6 +235,16 @@ def main():
         rules_dir = args[2] if len(args) > 2 else 'Rules'
         changed = update_readme(readme_path, rules_dir)
         print(f"{'updated' if changed else 'unchanged'}: {readme_path}")
+        return
+    if args and args[0] == '--counts':
+        rules_dir = args[1] if len(args) > 1 else 'Rules'
+        c = canonical_counts(rules_dir)
+        print("single=%d sequence=%d graph=%d total=%d"
+              % (c['single'], c['sequence'], c['graph'], c['grand_total']))
+        return
+    if args and args[0] == '--check':
+        rules_dir = args[1] if len(args) > 1 else 'Rules'
+        check_counts(rules_dir)
         return
     rules_dir = args[0] if args else 'Rules'
     text_report(rules_dir)

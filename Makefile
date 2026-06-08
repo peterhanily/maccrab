@@ -1,4 +1,4 @@
-.PHONY: build test compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown
+.PHONY: build test compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown check-counts
 
 PREFIX ?= /usr/local
 SUPPORT_DIR = /Library/Application\ Support/MacCrab
@@ -83,6 +83,11 @@ test-integration:
 
 lint-rules:
 	./scripts/rule-lint.sh
+
+# Single source of truth for headline rule counts. Fails if README / MODULES /
+# ModuleStatus drift from the canonical total derived from the rules tree.
+check-counts:
+	python3 scripts/coverage_matrix.py --check Rules
 
 test-stress:
 	./scripts/stress-test.sh 60
