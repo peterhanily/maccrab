@@ -41,6 +41,11 @@ public struct V2CommandPalette: View {
             fieldFocused = true
             selectedIndex = 0
         }
+        .task {
+            // Populate the live entity caches so alert:/rule:/trace: work the
+            // moment the palette opens (no-op cost in mock mode).
+            await state.refreshPaletteEntities()
+        }
         .onChange(of: query) { _ in selectedIndex = 0 }
         .accessibilityLabel("Command palette")
     }
@@ -273,13 +278,36 @@ public struct V2CommandPalette: View {
     }
 
     private func entityLookup(prefix: String, needle: String?) -> [V2PaletteItem]? {
-        // Entity-prefix search uses the static fixtures. In live mode
-        // we don't have a sync source for recent alerts/rules/traces,
-        // so suppress mock matches to avoid confusing users.
-        guard state.provider.mode == .mock else { return [] }
+        // In LIVE mode read the synchronous caches V2DashboardState refreshes on
+        // palette open; in MOCK mode use the static fixtures. (Previously this
+        // hard-returned [] in live mode, so alert:/rule:/trace: were dead on
+        // every real install — the one feature that only worked in the demo.)
+        let isMock = state.provider.mode == .mock
+        // `ip:` needs no entity data — it's a pure IOC-search nav hint — so it
+        // works in both modes (handled before any source lookup).
+        if prefix == "ip" {
+            return [
+                V2PaletteItem(
+                    id: "entity:ip:\(needle ?? "")",
+                    title: "Search IOC matches for \(needle ?? "an IP")",
+                    subtitle: "intel · IOC lookup",
+                    icon: "globe.americas.fill",
+                    shortcut: nil,
+                    keywords: ["ip", "ioc", needle ?? ""],
+                    category: .entity,
+                    destination: V2NavigationDestination(
+                        workspace: .intelligence, tab: .intelligenceThreatIntel,
+                        filters: needle.map { ["q": $0] } ?? [:]
+                    )
+                )
+            ]
+        }
+        let alertSource = isMock ? V2MockRepository.alerts : state.paletteAlerts
+        let ruleSource = isMock ? V2MockRepository.rules : state.paletteRules
+        let traceSource = isMock ? V2MockRepository.traces : state.paletteTraces
         switch prefix {
         case "alert":
-            return V2MockRepository.alerts
+            return alertSource
                 .filter { match($0.id, $0.title, $0.ruleId, needle: needle) }
                 .map { alert in
                     V2PaletteItem(
@@ -296,7 +324,7 @@ public struct V2CommandPalette: View {
                     )
                 }
         case "rule":
-            return V2MockRepository.rules
+            return ruleSource
                 .filter { match($0.id, $0.title, needle: needle) }
                 .map { rule in
                     V2PaletteItem(
@@ -313,7 +341,7 @@ public struct V2CommandPalette: View {
                     )
                 }
         case "trace":
-            return V2MockRepository.traces
+            return traceSource
                 .filter { match($0.id, $0.title, needle: needle) }
                 .map { trace in
                     V2PaletteItem(
@@ -330,23 +358,6 @@ public struct V2CommandPalette: View {
                         )
                     )
                 }
-        case "ip":
-            // No live IP table yet — fall back to IOC-match search hint.
-            return [
-                V2PaletteItem(
-                    id: "entity:ip:\(needle ?? "")",
-                    title: "Search IOC matches for \(needle ?? "an IP)")",
-                    subtitle: "intel · IOC lookup",
-                    icon: "globe.americas.fill",
-                    shortcut: nil,
-                    keywords: ["ip", "ioc", needle ?? ""],
-                    category: .entity,
-                    destination: V2NavigationDestination(
-                        workspace: .intelligence, tab: .intelligenceThreatIntel,
-                        filters: needle.map { ["q": $0] } ?? [:]
-                    )
-                )
-            ]
         default:
             return nil
         }

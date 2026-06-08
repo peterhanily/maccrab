@@ -37,6 +37,27 @@ public final class V2DashboardState: ObservableObject {
     /// `connectLiveData()` succeeds.
     @Published public var provider: V2DataProvider = V2MockDataProvider()
 
+    /// Synchronous caches of recent entities for the command palette's
+    /// alert:/rule:/trace: lookups. The palette filter is sync but the live
+    /// provider is async, so these are refreshed when the palette opens (and
+    /// on each auto-refresh tick) and read synchronously by entityLookup.
+    /// Empty in mock mode — the palette falls back to V2MockRepository there.
+    @Published public var paletteAlerts: [V2MockAlert] = []
+    @Published public var paletteRules: [V2MockRule] = []
+    @Published public var paletteTraces: [V2MockTrace] = []
+
+    /// Populate the palette entity caches from the live provider with bounded,
+    /// concurrent fetches. Safe to call on palette open + on refresh ticks.
+    public func refreshPaletteEntities() async {
+        async let a = provider.alerts(limit: 200)
+        async let r = provider.rules()
+        async let t = provider.traces(limit: 50)
+        let (alerts, rules, traces) = await (a, r, t)
+        self.paletteAlerts = alerts
+        self.paletteRules = rules
+        self.paletteTraces = traces
+    }
+
     /// Bumped by the auto-refresh timer; workspaces key their
     /// `.task` modifiers off this so they re-fetch on each tick.
     @Published public var refreshTick: Int = 0
