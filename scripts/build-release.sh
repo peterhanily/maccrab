@@ -651,34 +651,15 @@ if [ -n "$DEVELOPER_ID" ]; then
     fi
     echo "    ✓ no privileged entitlement leaked to Sparkle XPC / sysext"
 
-    # ── Notarize + staple the .app itself so `stapler validate MacCrab.app`
-    # passes after install (offline Gatekeeper). The DMG is notarized below;
-    # this is the bundle. BEST-EFFORT: any failure here only warns — the DMG
-    # is still notarized + stapled, so the build never bricks on this. Stapling
-    # stores a ticket alongside the bundle; it does NOT modify the signature or
-    # entitlements, so it carries no v1.12.0-class risk.
-    NZ_AUTH=()
-    if [ -n "${NOTARIZE_KEYCHAIN_PROFILE:-}" ]; then
-        NZ_AUTH=(--keychain-profile "$NOTARIZE_KEYCHAIN_PROFILE")
-    elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${NOTARIZE_PASSWORD:-}" ]; then
-        NZ_AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARIZE_PASSWORD")
-    fi
-    if [ "${#NZ_AUTH[@]}" -gt 0 ]; then
-        echo "  Notarizing the app bundle (so it can be stapled)..."
-        _appzip="${APP%.app}-notarize.zip"
-        rm -f "$_appzip"
-        if /usr/bin/ditto -c -k --keepParent "$APP" "$_appzip" \
-           && xcrun notarytool submit "$_appzip" "${NZ_AUTH[@]}" --wait 2>&1 | grep -q "status: Accepted"; then
-            if xcrun stapler staple "$APP"; then
-                echo "    ✓ app bundle stapled"
-            else
-                echo "    ⚠ app staple failed (non-fatal — DMG staple still applies)"
-            fi
-        else
-            echo "    ⚠ app notarization not accepted (non-fatal — DMG staple still applies)"
-        fi
-        rm -f "$_appzip"
-    fi
+    # NOTE on stapling the .app bundle (intentionally NOT done): we validated
+    # it and it does NOT work for this app. Even after a standalone app
+    # notarization returns `status: Accepted`, `xcrun stapler staple
+    # MacCrab.app` fails with Error 73 (no ticket) — a known finicky case for
+    # apps that EMBED a System Extension. It's also unnecessary: `spctl -a -t
+    # exec` already accepts the app as "Notarized Developer ID" (online
+    # Gatekeeper, the real-world path), and the DMG below IS stapled for the
+    # offline download/mount. So we sign + notarize (via the DMG) and skip the
+    # per-build app-notarize round-trip that buys nothing here.
 else
     echo "  Ad-hoc signing (set DEVELOPER_ID for distribution signing)"
     codesign --force --sign - "$APP" 2>/dev/null || true
