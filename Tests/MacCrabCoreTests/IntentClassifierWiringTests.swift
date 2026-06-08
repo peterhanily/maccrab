@@ -215,8 +215,13 @@ struct IntentClassifierWiringTests {
         #expect(shouldGo == true)
         await cache.recordDispatch(treeKey: treeKey)
 
-        // Dispatch in a detached Task, matching the EventLoop pattern.
-        Task.detached(priority: .utility) { @Sendable in
+        // Dispatch in a detached Task, matching the EventLoop pattern — but
+        // CAPTURE the handle and await it deterministically (`.value`) instead
+        // of racing a wall-clock poll deadline. Under full-suite parallel load
+        // the .utility-priority task can be CPU-starved past awaitRefinement's
+        // 10s timeout, which flaked this test in the default (parallel) gate
+        // while passing serial/isolated. Awaiting the handle removes the race.
+        let dispatch = Task.detached(priority: .utility) { @Sendable in
             let result = await classifier.classify(brief)
             guard result.label != .unknown, result.provider != "heuristic" else {
                 return
@@ -229,7 +234,9 @@ struct IntentClassifierWiringTests {
             )
             await cache.recordResult(treeKey: treeKey, refinement: r)
         }
+        await dispatch.value
 
+        // Cache is now populated; this resolves immediately (no deadline race).
         let refinement = await awaitRefinement(in: cache, treeKey: treeKey)
         #expect(refinement != nil, "LLM result should have landed in cache")
         #expect(refinement?.label == "exfiltration")
