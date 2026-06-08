@@ -1576,10 +1576,45 @@ enum DaemonTimers {
                 try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cfgPath)
                 auditLogInbox(state: state, prefix: "set-daemon-config",
                               id: sanitizeAuditField(key), uid: uid, result: "set=\(value)")
+                // Self-protection: disabling an ES event subscription blinds a
+                // class of kernel telemetry — rare-legitimate, high-impact.
+                if (key == "subscribe_file_open_events" || key == "subscribe_introspection_events"),
+                   (value as? Bool) == false {
+                    await emitSelfProtectionAlert(
+                        state: state, action: "Endpoint Security subscription disabled",
+                        detail: "ES event subscription '\(key)' was set to false (disables a class of kernel telemetry on the next daemon restart)")
+                }
             } catch {
                 print("[inbox] set-daemon-config \(key) write failed: \(error)")
             }
         }
+    }
+
+    /// v1.18 security hardening (self-protection): record an alert when an
+    /// inbox request makes a high-impact change to MacCrab's OWN detection
+    /// posture — granting an MCP capability tier, disabling an ES event
+    /// subscription, or enabling a remote LLM endpoint. Post-compromise,
+    /// malware running as the console user can drive these (uid-gated) verbs;
+    /// we cannot PREVENT that without user-presence, but we can make it LOUD.
+    /// Inserted directly into the alert store (recorded, dashboard/CLI/MCP-
+    /// visible, bypasses the noise filter); NOT OS-notified, to avoid spamming
+    /// the operator on their own legitimate changes. Observe-only — the verb
+    /// itself already executed; this never blocks it.
+    private static func emitSelfProtectionAlert(state: DaemonState, action: String, detail: String) async {
+        let alert = Alert(
+            ruleId: "maccrab.self-defense.config_modified",
+            ruleTitle: "MacCrab Self-Protection: \(action)",
+            severity: .high,
+            eventId: UUID().uuidString,
+            processPath: nil,
+            processName: "maccrabd",
+            description: "\(detail) via the privileged inbox. If you did not just make this change in the MacCrab dashboard, a process running as your user may be weakening MacCrab — investigate.",
+            mitreTactics: "attack.defense_evasion",
+            mitreTechniques: "attack.t1562.001",
+            suppressed: false
+        )
+        do { try await state.alertStore.insert(alert: alert) }
+        catch { print("[self-protection] failed to record '\(action)' alert: \(error)") }
     }
 
     /// v1.18: write the human's agent-control capability grants to a ROOT-owned
@@ -1611,6 +1646,10 @@ enum DaemonTimers {
                 "response": (json["response"] as? Bool) ?? false,
             ]
             let capPath = state.supportDir + "/mcp_capabilities.json"
+            // Read the prior grants so a tier going false->true (a GRANT) can
+            // raise a self-protection alert below.
+            let prevGrants: [String: Bool] = (try? Data(contentsOf: URL(fileURLWithPath: capPath)))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Bool] } ?? [:]
             do {
                 let out = try JSONSerialization.data(withJSONObject: grants, options: [.prettyPrinted, .sortedKeys])
                 let tmp = capPath + ".tmp"
@@ -1622,6 +1661,17 @@ enum DaemonTimers {
                 try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: capPath)
                 auditLogInbox(state: state, prefix: "set-agent-capabilities", id: "-", uid: uid,
                               result: "config=\(grants["config"]!) authoring=\(grants["authoring"]!) response=\(grants["response"]!)")
+                // Self-protection: a tier going false->true is a capability GRANT
+                // (the sharpest edge in the security review — this verb is gated
+                // only by uid). Fire only on a NEW grant, so re-writes/revokes
+                // stay quiet.
+                let newlyGranted = grants.filter { $0.value && !(prevGrants[$0.key] ?? false) }
+                    .keys.sorted()
+                if !newlyGranted.isEmpty {
+                    await emitSelfProtectionAlert(
+                        state: state, action: "MCP agent capability granted",
+                        detail: "MCP agent capability tier(s) [\(newlyGranted.joined(separator: ", "))] were GRANTED")
+                }
             } catch {
                 print("[inbox] set-agent-capabilities write failed: \(error)")
             }
@@ -1920,6 +1970,17 @@ enum DaemonTimers {
             try? out.write(to: URL(fileURLWithPath: rootPath), options: .atomic)
             try? fm.setAttributes([.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: rootPath)
             print("[inbox] llm-config: applied \(sanitized.count) field(s) → \(rootPath) (effective next engine restart)")
+            // Self-protection: a non-loopback endpoint accepted under
+            // allow_remote_endpoint=true means future engine LLM prompt traffic
+            // may leave the host — surface it (rare-legitimate, exfil-relevant).
+            let remoteApplied = sanitized.contains { (k, v) in
+                urlKeys.contains(k) && ((v as? String).map { !isLoopbackEndpoint($0) } ?? false)
+            }
+            if allowRemote && remoteApplied {
+                await emitSelfProtectionAlert(
+                    state: state, action: "Remote LLM endpoint enabled",
+                    detail: "A non-loopback LLM endpoint was configured with allow_remote_endpoint=true (engine prompt traffic may leave the host)")
+            }
         }
     }
 
