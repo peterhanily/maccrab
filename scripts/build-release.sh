@@ -623,6 +623,62 @@ if [ -n "$DEVELOPER_ID" ]; then
     # under `set -o pipefail`. Pipe through a shell function that
     # swallows SIGPIPE explicitly instead.
     codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | { head -5; cat >/dev/null; } || true
+
+    # ── Nested-entitlement guard (v1.13 audit improvement; see the v1.12.0
+    # Sparkle brick above). No nested helper may carry a privileged APP
+    # entitlement: the v1.12.0 regression propagated system-extension.install
+    # onto Sparkle's Installer.xpc and macOS refused to launch the updater.
+    # Read-only; fails loud. Does NOT trip on a correct build (Sparkle XPCs
+    # carry none; the sysext carries only endpoint-security.client).
+    echo "  Verifying nested-binary entitlements (no privileged leak)..."
+    ent_leak=0
+    while IFS= read -r _xpc; do
+        _exe=$(/usr/bin/find "$_xpc/Contents/MacOS" -maxdepth 1 -type f -print -quit 2>/dev/null)
+        [ -n "$_exe" ] || continue
+        if codesign -d --entitlements - "$_exe" 2>/dev/null | grep -qiE 'system-extension\.install|endpoint-security'; then
+            echo "    ✗ ENTITLEMENT LEAK: $(basename "$_xpc") carries a privileged app entitlement (v1.12.0-class regression)"
+            ent_leak=1
+        fi
+    done < <(/usr/bin/find "$APP/Contents/Frameworks" -name '*.xpc' -type d 2>/dev/null)
+    _sysexe="$APP/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
+    if [ -f "$_sysexe" ] && codesign -d --entitlements - "$_sysexe" 2>/dev/null | grep -qi 'system-extension\.install'; then
+        echo "    ✗ ENTITLEMENT LEAK: system extension carries system-extension.install (app-only entitlement)"
+        ent_leak=1
+    fi
+    if [ "$ent_leak" != "0" ]; then
+        echo "  ERROR: nested-entitlement guard failed — refusing to ship (see the v1.12.0 Sparkle brick)."
+        exit 1
+    fi
+    echo "    ✓ no privileged entitlement leaked to Sparkle XPC / sysext"
+
+    # ── Notarize + staple the .app itself so `stapler validate MacCrab.app`
+    # passes after install (offline Gatekeeper). The DMG is notarized below;
+    # this is the bundle. BEST-EFFORT: any failure here only warns — the DMG
+    # is still notarized + stapled, so the build never bricks on this. Stapling
+    # stores a ticket alongside the bundle; it does NOT modify the signature or
+    # entitlements, so it carries no v1.12.0-class risk.
+    NZ_AUTH=()
+    if [ -n "${NOTARIZE_KEYCHAIN_PROFILE:-}" ]; then
+        NZ_AUTH=(--keychain-profile "$NOTARIZE_KEYCHAIN_PROFILE")
+    elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${NOTARIZE_PASSWORD:-}" ]; then
+        NZ_AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARIZE_PASSWORD")
+    fi
+    if [ "${#NZ_AUTH[@]}" -gt 0 ]; then
+        echo "  Notarizing the app bundle (so it can be stapled)..."
+        _appzip="${APP%.app}-notarize.zip"
+        rm -f "$_appzip"
+        if /usr/bin/ditto -c -k --keepParent "$APP" "$_appzip" \
+           && xcrun notarytool submit "$_appzip" "${NZ_AUTH[@]}" --wait 2>&1 | grep -q "status: Accepted"; then
+            if xcrun stapler staple "$APP"; then
+                echo "    ✓ app bundle stapled"
+            else
+                echo "    ⚠ app staple failed (non-fatal — DMG staple still applies)"
+            fi
+        else
+            echo "    ⚠ app notarization not accepted (non-fatal — DMG staple still applies)"
+        fi
+        rm -f "$_appzip"
+    fi
 else
     echo "  Ad-hoc signing (set DEVELOPER_ID for distribution signing)"
     codesign --force --sign - "$APP" 2>/dev/null || true
