@@ -2846,7 +2846,14 @@ while let line = readLine(strippingNewline: true) {
         // for dynamically-registered per-plugin tools (macho_analyze_path,
         // …), whose names lack the forensics. prefix but return the same
         // chain-of-custody-sensitive run results.
+        // The session-bundle tools RETURN a functional bundle path the
+        // operator must use (export → verify); redacting the username in that
+        // path (SEC-1) would break the round-trip. The path is the operator's
+        // own bundle location, so it's exempt — unlike get_agent_session,
+        // whose timeline is observability data that stays sanitized.
         var isForensicTool = toolName.hasPrefix("forensics.")
+            || toolName == "export_session_bundle"
+            || toolName == "verify_session_bundle"
         DispatchQueue.global().async {
             Task {
                 result = await handleToolCall(name: toolName, args: args)
