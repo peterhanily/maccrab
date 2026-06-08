@@ -83,7 +83,9 @@ extension MacCrabCtl {
         let compiledDir = supportDir + "/compiled_rules"
         if FileManager.default.fileExists(atPath: compiledDir) {
             let files = try? FileManager.default.contentsOfDirectory(atPath: compiledDir)
-            let ruleCount = files?.filter { $0.hasSuffix(".json") }.count ?? 0
+            // Exclude manifest.json (and any non-rule sidecars) so the count
+            // matches ground truth — mirrors build-release.sh's rule count.
+            let ruleCount = files?.filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.count ?? 0
             let seqDir = compiledDir + "/sequences"
             let seqFiles = try? FileManager.default.contentsOfDirectory(atPath: seqDir)
             let seqCount = seqFiles?.filter { $0.hasSuffix(".json") }.count ?? 0

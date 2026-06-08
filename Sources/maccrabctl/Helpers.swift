@@ -110,11 +110,12 @@ extension MacCrabCtl {
           hunt <query>            Natural language threat hunting
           report [--hours N] [--output file]  Generate HTML incident report
 
-        Mac Context Plugin Platform (v1.13a-1):
-          case <subcommand>       Case lifecycle (new / list / show / artifacts /
+        Forensic Scans:
+          scan <subcommand>       Scan this Mac (new / list / show / run /
                                   allow-ai / mark-trusted-scheduled / delete)
           plugin <subcommand>     Plugin runtime (list / info / run)
-          (Run `maccrabctl case help` or `maccrabctl plugin help` for detail.)
+          (Run `maccrabctl scan help` or `maccrabctl plugin help` for detail.
+           `case` is a v1.17 alias for `scan`, removed in v1.19.)
           cdhash <PID>            Extract CDHash for a process
           cdhash --all            Extract CDHashes for all processes
           tree-score [N]          Top-N suspicious processes (behavioral + Markov scoring)
@@ -123,6 +124,7 @@ extension MacCrabCtl {
           vulns [--hours H] [--severity S]  Vulnerability alerts from the CVE scanner
           privacy [--hours H]  Privacy anomaly alerts (bulk egress, trackers, domain spikes)
           security            Full security posture breakdown with recommendations
+          modules             List subsystems with maturity (stable / experimental / opt-in)
 
         Other:
           version             Show version information

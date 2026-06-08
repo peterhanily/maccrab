@@ -196,6 +196,8 @@ struct MacCrabCtl {
             await listPrivacyAlerts(hours: hours)
         case "security":
             await showSecurityScore()
+        case "modules":
+            printModules()
         case "deception":
             await runDeception(args: args)
         case "allow":

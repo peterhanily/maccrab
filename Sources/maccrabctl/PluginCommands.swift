@@ -81,7 +81,6 @@ func printPluginUsage() {
                                       List plugins. Default: all.
       info <plugin-id>                Show manifest detail.
       search "<query>"                Search the rave catalog at rave.maccrab.com.
-                                      (Catalog fetcher lands v1.17.0-rc.4.)
       install <bundle-dir>            Install a signed plugin bundle.
         [--trust-on-install]          Trust this publisher for future installs.
         [--force]                     Overwrite if already installed.
@@ -118,9 +117,8 @@ func printPluginUsage() {
       verify-all      → verify
       daemon-status   → status
 
-    Third-party plugin Run is disabled until subprocess spawn ships
-    in a future release (rave Phase 1 dependency). Built-in (Tier A)
-    Run via `maccrabctl plugin run` continues to work as today.
+    Running third-party plugins is not yet supported. Built-in plugins
+    can be run today via `maccrabctl plugin run`.
     """)
 }
 
