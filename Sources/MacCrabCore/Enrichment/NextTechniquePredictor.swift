@@ -74,7 +74,7 @@ public actor NextTechniquePredictor {
         return Array(sorted.prefix(topN))
     }
 
-    /// Calibrated from the 38 existing sequence rules + the published
+    /// Calibrated from the 41 existing sequence rules + the published
     /// 2024-2026 supply-chain incident corpus. Each "from" row is
     /// normalised so the probabilities sum to ≤1 (the remainder
     /// represents "end of chain").

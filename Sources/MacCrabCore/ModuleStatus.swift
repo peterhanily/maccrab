@@ -66,7 +66,7 @@ public struct ModuleStatus: Sendable {
         // ─── Detection (experimental — actively iterating) ──────────
         .init(id: "sequence-engine", name: "Sequence engine",
               category: "detection", maturity: .experimental,
-              summary: "38 multi-step sequence rules with bounded windows."),
+              summary: "41 multi-step sequence rules with bounded windows."),
         .init(id: "campaign-detector", name: "Campaign detector",
               category: "detection", maturity: .experimental,
               summary: "Kill chain, alert storm, AI compromise, lateral movement clustering."),
