@@ -41,18 +41,22 @@ steps:
           category: file_event
           product: macos
       detection:
-          selection_sensitive:
+          # Single selection (one field, OR over the value list) instead of two
+          # separate selections OR'd together — the step compiler flattened the
+          # two-group OR into an impossible all_of (a path can't contain a TCC/
+          # Keychain substring AND a Documents substring) and dropped the
+          # not-filter_apple negation. One field-list keeps the OR semantics and
+          # compiles to a simple `selection and not filter_apple`.
+          selection:
               TargetFilename|contains:
                   - '/Library/Application Support/com.apple.TCC/'
                   - '/Library/Keychains/'
-          selection_user_data:
-              TargetFilename|contains:
                   - '/Desktop/'
                   - '/Documents/'
                   - '/Downloads/'
           filter_apple:
               SignerType: 'apple'
-          condition: (selection_sensitive or selection_user_data) and not filter_apple
+          condition: selection and not filter_apple
 
 trigger: all
 falsepositives:

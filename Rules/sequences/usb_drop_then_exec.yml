@@ -17,14 +17,13 @@ tags:
     - attack.initial_access
     - attack.t1091
     - attack.lateral_movement
-    - attack.t1091
     - attack.execution
     - attack.t1059
 
 type: sequence
 window: 300s
 ordered: true
-correlation: file.path
+correlation: none
 
 steps:
     - id: usb_drop

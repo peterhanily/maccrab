@@ -1,6 +1,6 @@
 title: Git Push from Sensitive Data Directories
 id: e1f2a3b4-7003-4000-c000-000000007003
-status: experimental
+status: deprecated
 description: |
   Detects git push operations where the working directory is under sensitive
   paths (Documents, Downloads, Desktop, database directories, private keys).

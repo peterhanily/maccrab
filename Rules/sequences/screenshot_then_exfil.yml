@@ -20,7 +20,7 @@ tags:
 
 type: sequence
 window: 120s
-correlation: process.same
+correlation: process.lineage
 ordered: true
 
 steps:

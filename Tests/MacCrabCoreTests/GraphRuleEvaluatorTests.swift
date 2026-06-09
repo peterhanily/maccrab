@@ -97,7 +97,7 @@ struct GraphRuleEvaluatorTests {
         let ids = Set(rules.map { $0.id })
         #expect(ids.contains("maccrab_ai_agent_credential_network_persistence"))
         #expect(ids.contains("maccrab_unsigned_download_executes_then_persists"))
-        #expect(ids.contains("maccrab_mcp_server_spawns_shell_then_credential"))
+        #expect(ids.contains("maccrab_ai_agent_shell_touches_credential"))
         #expect(ids.contains("maccrab_launchagent_after_credential_access"))
         #expect(ids.contains("maccrab_agent_associated_shell_writes_to_login_item"))
         #expect(ids.contains("maccrab_worm_self_propagation"))

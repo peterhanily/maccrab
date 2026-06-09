@@ -39,10 +39,6 @@ detection:
             - '/perl'
             - '/osascript'
             - '/launchd'
-    selection_no_tty:
-        # Non-interactive launches do not have a controlling TTY. The
-        # SessionEnricher leaves SessionTTY empty in that case.
-        SessionTTY: ''
     filter_apple:
         SignerType:
             - 'apple'
@@ -64,7 +60,7 @@ detection:
             - '/WarpTerminal'
             - '/tmux'
             - '/screen'
-    condition: selection and selection_no_tty and not filter_apple and not filter_apple_parent and not filter_ide_parent
+    condition: selection and not filter_apple and not filter_apple_parent and not filter_ide_parent
 falsepositives:
     - Ansible, Fabric, Paramiko-based automation scripts run from a deployment host
     - Legitimate parallel SSH tools (pssh, cssh)
