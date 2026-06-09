@@ -149,5 +149,14 @@
   { "name": "W2-T4 FP: a Developer-ID-signed app granted Accessibility does NOT fire (TCC signer now resolved)",
     "category": "tcc_event", "ruleId": "d1a2b3c4-0081-4000-a000-000000000081", "shouldFire": false,
     "process": { "executable": "/Applications/Rectangle.app/Contents/MacOS/Rectangle", "commandLine": "", "signer": "devId" },
-    "tcc": { "service": "kTCCServiceAccessibility", "allowed": true } }
+    "tcc": { "service": "kTCCServiceAccessibility", "allowed": true } },
+
+  { "name": "untrusted process reading the shadow-hash plist fires (W2-T4 read-detection)",
+    "category": "file_event", "ruleId": "d1a2b3c4-0403-4000-a000-000000000403", "shouldFire": true,
+    "process": { "executable": "/tmp/dumper", "commandLine": "/tmp/dumper", "signer": "unsigned" },
+    "file": { "path": "/var/db/dslocal/nodes/Default/users/admin.plist", "action": "open" } },
+  { "name": "opendirectoryd reading the shadow-hash plist does NOT fire (filter_opendirectory)",
+    "category": "file_event", "ruleId": "d1a2b3c4-0403-4000-a000-000000000403", "shouldFire": false,
+    "process": { "executable": "/usr/libexec/opendirectoryd", "commandLine": "opendirectoryd", "signer": "apple" },
+    "file": { "path": "/var/db/dslocal/nodes/Default/users/admin.plist", "action": "open" } }
 ]

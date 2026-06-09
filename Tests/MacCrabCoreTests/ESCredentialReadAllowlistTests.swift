@@ -48,6 +48,15 @@ struct ESCredentialReadAllowlistTests {
             // is the signal itself.
             "/Library/Application Support/MacCrab/decoys/CLAUDE.md.canary",
             "/Users/x/Library/Application Support/MacCrab/decoys/passwords.txt",
+            // v1.18 read-detection: the credential-read rules' target paths.
+            "/Users/x/Library/Safari/History.db",
+            "/Users/x/Library/Safari/Passwords",
+            "/Users/x/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite",
+            "/Users/x/Library/Application Support/1Password/data.db",
+            "/Users/x/Library/Application Support/Bitwarden/data.json",
+            "/Users/x/Documents/keepass.kdbx",
+            "/var/db/dslocal/nodes/Default/users/admin.plist",
+            "/private/var/db/dslocal/nodes/Default/users/admin.plist",
         ]
         for p in yes { #expect(ESCollector.isCredentialReadPath(p), "expected emit: \(p)") }
     }

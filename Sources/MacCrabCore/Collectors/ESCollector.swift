@@ -219,6 +219,14 @@ public final class ESCollector: @unchecked Sendable {
         "/.terraform.d/credentials", "/.config/gh/hosts.yml",
         "/.npmrc", "/.pypirc", "/.netrc", "/.gnupg/",
         "/Library/Keychains/",
+        // v1.18 read-detection: the credential-read rules (safari/notes/password-
+        // manager/shadow-hash) target these, so ES must emit NOTIFY_OPEN for them.
+        // (Decision: maximum detection coverage — these rules were dead without it;
+        // kept in sync by ESCredentialReadAllowlistTests.)
+        "/Library/Safari/",                                   // safari_password_accessed, safari_history_accessed
+        "/Library/Group Containers/group.com.apple.notes/",   // notes_database_access
+        "/1Password/", "/Bitwarden/", ".kdbx",                // password_manager_db (1Password / Bitwarden / KeePass)
+        "/var/db/dslocal/",                                   // shadow_hash_access + sensitive_file_read_untrusted (also matches /private/var/db/dslocal/)
         // Deception: any READ of a deployed decoy / honey-prompt is the
         // signal itself (MacCrab's own opens are muted via muteSelf, so a
         // hit here is always a third party). Rescues the critical
