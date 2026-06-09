@@ -504,7 +504,7 @@ Rules can trigger configurable response actions ranging from passive to active:
      Edit the rule YAML, then run `make readme-coverage` to regenerate. -->
 
 Rules live under `Rules/<tactic>/` as Sigma-compatible YAML. The current
-release ships **484 rules** (437 single-event + 41 sequence + 6 graph)
+release ships **483 rules** (436 single-event + 41 sequence + 6 graph)
 covering **170 unique MITRE ATT&CK techniques** across the macOS-relevant
 tactics:
 
