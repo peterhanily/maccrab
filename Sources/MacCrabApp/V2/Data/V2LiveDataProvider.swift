@@ -1652,7 +1652,8 @@ public final class V2LiveDataProvider: V2DataProvider {
             lastFired: stats?.lastFiredAt,
             firesLastWeek: Int(stats?.fireCount ?? 0),
             isCustom: isCustom,
-            description: r.description
+            description: r.description,
+            status: r.status
         )
     }
 

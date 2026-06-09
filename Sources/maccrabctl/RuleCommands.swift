@@ -43,7 +43,13 @@ extension MacCrabCtl {
             default:         levelStr = "[INFO]"
             }
 
-            print(String(format: "%-8s %-50s %s", levelStr, String(title.prefix(48)), String(tags.prefix(30))))
+            var line = String(format: "%-8s %-50s %s", levelStr, String(title.prefix(48)), String(tags.prefix(30)))
+            // Visually flag deprecated detections — retained (id/title/
+            // suppressions stay valid) but disabled and non-firing.
+            if (json["status"] as? String)?.lowercased() == "deprecated" {
+                line += "  " + ANSIColor.wrap("[DEPRECATED]", .orange)
+            }
+            print(line)
         }
     }
 

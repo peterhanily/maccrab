@@ -181,10 +181,19 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
     public let conditionTree: ConditionNode?
     public let falsepositives: [String]
     public var enabled: Bool
+    /// Original Sigma `status` (stable / test / experimental / deprecated).
+    /// Optional so compiled JSON predating the field decodes to nil. A
+    /// DEPRECATED rule ships disabled (enabled=false) but is retained so its
+    /// id/title still surface and existing suppressions keep working — this
+    /// lets the UI label it "Deprecated" rather than an ambiguous "Disabled".
+    public let status: String?
+
+    /// True when the rule is parked as deprecated content.
+    public var isDeprecated: Bool { status?.lowercased() == "deprecated" }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, description, level, tags, logsource, predicates
-        case condition, falsepositives, enabled
+        case condition, falsepositives, enabled, status
         case conditionTree = "condition_tree"
         case suppressibleRaw = "suppressible"
     }
@@ -201,7 +210,8 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
         condition: RuleCondition,
         conditionTree: ConditionNode? = nil,
         falsepositives: [String],
-        enabled: Bool = true
+        enabled: Bool = true,
+        status: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -215,6 +225,7 @@ public struct CompiledRule: Codable, Sendable, Hashable, Identifiable {
         self.conditionTree = conditionTree
         self.falsepositives = falsepositives
         self.enabled = enabled
+        self.status = status
     }
 }
 

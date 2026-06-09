@@ -1295,6 +1295,11 @@ def compile_rule(rule_data: dict, source_file: str):
         "condition": condition_type,
         "falsepositives": falsepositives,
         "enabled": enabled,
+        # Emit the original Sigma status so the UI can distinguish a
+        # DEPRECATED rule (intentionally parked, ships disabled) from a
+        # user-disabled one. Previously status was collapsed into `enabled`
+        # and the value was lost.
+        "status": status,
     }
 
     if condition_tree is not None:

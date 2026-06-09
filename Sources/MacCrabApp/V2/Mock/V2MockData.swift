@@ -229,6 +229,29 @@ public struct V2MockRule: Identifiable, Sendable, Hashable {
     public let firesLastWeek: Int
     public let isCustom: Bool
     public let description: String
+    /// Original Sigma status (stable / test / experimental / deprecated). nil
+    /// when unknown. Lets the Detection UI label deprecated rules distinctly
+    /// from user-disabled ones. Defaulted so existing call sites are unchanged.
+    public let status: String?
+
+    /// True when the rule is parked as deprecated content (ships disabled).
+    public var isDeprecated: Bool { status?.lowercased() == "deprecated" }
+
+    public init(id: String, title: String, category: String, severity: V2Severity,
+                mitre: [String], isEnabled: Bool, lastFired: Date?, firesLastWeek: Int,
+                isCustom: Bool, description: String, status: String? = nil) {
+        self.id = id
+        self.title = title
+        self.category = category
+        self.severity = severity
+        self.mitre = mitre
+        self.isEnabled = isEnabled
+        self.lastFired = lastFired
+        self.firesLastWeek = firesLastWeek
+        self.isCustom = isCustom
+        self.description = description
+        self.status = status
+    }
 }
 
 // MARK: - Trace (TraceGraph)

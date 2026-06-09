@@ -592,7 +592,12 @@ public struct V2DetectionWorkspace: View {
                 V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 240),
                              sortKey: { .text($0.title) }) { r in
                     VStack(alignment: .leading, spacing: 1) {
-                        V2TableCellText(r.title)
+                        HStack(spacing: 6) {
+                            V2TableCellText(r.title)
+                            if r.isDeprecated {
+                                V2StatusChip("Deprecated", kind: .warning)
+                            }
+                        }
                         V2TableCellText(r.id, primary: false, mono: true)
                     }
                 },
@@ -631,7 +636,14 @@ public struct V2DetectionWorkspace: View {
                 V2StatusChip(r.severity.label, kind: r.severity.chipKind)
                 V2StatusChip(r.isEnabled ? "Enabled" : "Disabled",
                              kind: r.isEnabled ? .healthy : .neutral)
+                if r.isDeprecated { V2StatusChip("Deprecated", kind: .warning) }
                 if r.isCustom { V2StatusChip("Custom", kind: .ai) }
+            }
+            if r.isDeprecated {
+                Text("This detection is deprecated — retained so its history and existing suppressions stay valid, but it ships disabled and does not fire.")
+                    .font(V2Theme.meta())
+                    .foregroundStyle(V2Theme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             V2InspectorSection("Description") {
                 Text(r.description).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
