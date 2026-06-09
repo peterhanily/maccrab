@@ -17,6 +17,7 @@ struct RuleCorpusFixture: Codable {
     let ruleId: String
     let shouldFire: Bool
     let process: ProcessFixture
+    var file: FileFixture?     // present → builds a file_event instead of process_creation
 }
 
 struct ProcessFixture: Codable {
@@ -24,6 +25,12 @@ struct ProcessFixture: Codable {
     let commandLine: String
     var signer: String?       // "unsigned" (default) | "apple" | "devId" | "adHoc"
     var parentExec: String?
+}
+
+struct FileFixture: Codable {
+    let path: String
+    let action: String        // create | write | close | rename | delete | open | link
+    var content: String?      // → enrichments["FileContent"] for content-matching rules
 }
 
 @Suite("Rule corpus: data-driven TP/TN replay (v1.18)")
@@ -52,6 +59,13 @@ struct RuleCorpusTests {
             userId: 501, userName: "t", groupId: 20, startTime: Date(), codeSignature: sig,
             ancestors: [ProcessAncestor(pid: 1, executable: f.process.parentExec ?? "/bin/bash", name: "parent")],
             architecture: "arm64", isPlatformBinary: f.process.signer == "apple")
+        if let ff = f.file {
+            let action = FileAction(rawValue: ff.action) ?? .write
+            var enr: [String: String] = [:]
+            if let c = ff.content { enr["FileContent"] = c }
+            return Event(eventCategory: .file, eventType: .change, eventAction: ff.action,
+                         process: proc, file: FileInfo(path: ff.path, action: action), enrichments: enr)
+        }
         return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: proc)
     }
 
@@ -68,8 +82,8 @@ struct RuleCorpusTests {
         _ = try await engine.loadRules(from: URL(fileURLWithPath: "/tmp/maccrab_v3"))
 
         for f in fixtures {
-            #expect(f.category == "process_creation",
-                    "\(f.name): harness currently builds process_creation events only — extend the builder for \(f.category)")
+            // Builder supports process_creation fixtures and (when `file` is
+            // present) file_event fixtures.
             let fired = await engine.evaluate(event(f)).contains { $0.ruleId == f.ruleId }
             #expect(fired == f.shouldFire,
                     "corpus '\(f.name)': expected rule \(f.ruleId) fire=\(f.shouldFire), got \(fired)")

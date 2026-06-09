@@ -20,7 +20,7 @@ logsource:
 detection:
     selection:
         TargetFilename|re: '^/(tmp|var|usr|opt|Library)/.*\/\.[^/]+$'
-        EventType: 'create'
+        FileAction: 'create'
     filter_apple:
         SignerType: 'apple'
     filter_system:

@@ -22,7 +22,7 @@ detection:
         TargetFilename|startswith:
             - '/etc/sudoers'
             - '/private/etc/sudoers'
-        EventType: 'write'
+        FileAction: 'write'
     selection_visudo:
         Image|endswith: '/visudo'
     filter_apple:

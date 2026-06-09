@@ -22,7 +22,7 @@ detection:
         TargetFilename|startswith:
             - '/etc/'
             - '/private/etc/'
-        EventType: 'write'
+        FileAction: 'write'
     filter_apple:
         SignerType: 'apple'
     filter_system_processes:
