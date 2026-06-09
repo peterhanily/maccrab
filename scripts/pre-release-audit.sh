@@ -292,9 +292,15 @@ section "PASS 2 — AlertSink single-sink invariant"
 # because the closures capture alertStore before AlertSink is built.
 
 # Allowed file: AlertSink.swift uses alertStore.insert internally.
-# Allowed exception sites: DaemonSetup.swift self-defense + ES-health.
-ALLOWED_EXCEPTION_FILE="Sources/MacCrabAgentKit/DaemonSetup.swift"
-ALLOWED_EXCEPTION_COUNT_TARGET=2
+# Allowed exception sites — self-protection alerts that MUST bypass the
+# NoiseFilter so they can't be muted/suppressed (same rationale as the
+# SelfDefense tamper alerts):
+#   DaemonSetup.swift  ×2 — self-defense file/rules tamper + ES-health
+#   DaemonTimers.swift ×1 — emitSelfProtectionAlert (inbox config-tamper
+#                            meta-alerts: capability grant / ES-subscription
+#                            disable / remote-LLM-endpoint enable)
+ALLOWED_SETUP_TARGET=2
+ALLOWED_TIMERS_TARGET=1
 
 # Find all production-code direct inserts.
 direct_inserts=$(grep -rnE 'alertStore\.insert' Sources \
@@ -307,18 +313,20 @@ direct_inserts=$(echo "$direct_inserts" | grep -v 'DaemonState\.swift')
 # Strip any inside the AlertSink directory itself if path differs.
 direct_inserts=$(echo "$direct_inserts" | grep -v '/AlertSink\.swift')
 
-# Count unique non-exception sites.
-exception_count=$(echo "$direct_inserts" | grep -c "$ALLOWED_EXCEPTION_FILE" || true)
+# Count audited exception sites vs everything else.
+setup_count=$(echo "$direct_inserts" | grep -c "DaemonSetup\.swift" || true)
+timers_count=$(echo "$direct_inserts" | grep -c "DaemonTimers\.swift" || true)
+exception_count=$(( setup_count + timers_count ))
 total_count=$(echo "$direct_inserts" | grep -cE '\S' || true)
 unauthorized_count=$(( total_count - exception_count ))
 
 if [[ "$unauthorized_count" -gt 0 ]]; then
     err "$unauthorized_count direct alertStore.insert call(s) outside AlertSink — route through state.alertSink.submit(...) instead:"
-    echo "$direct_inserts" | grep -v "$ALLOWED_EXCEPTION_FILE" | sed 's/^/    /' >&2
-elif [[ "$exception_count" -ne "$ALLOWED_EXCEPTION_COUNT_TARGET" ]]; then
-    warn "DaemonSetup.swift has $exception_count direct insert(s); expected exactly $ALLOWED_EXCEPTION_COUNT_TARGET (audited self-defense + ES-health). Update the exception count or this audit if the audited list changed."
+    echo "$direct_inserts" | grep -vE 'DaemonSetup\.swift|DaemonTimers\.swift' | sed 's/^/    /' >&2
+elif [[ "$setup_count" -ne "$ALLOWED_SETUP_TARGET" || "$timers_count" -ne "$ALLOWED_TIMERS_TARGET" ]]; then
+    warn "Audited direct-insert sites changed: DaemonSetup=$setup_count (expected $ALLOWED_SETUP_TARGET), DaemonTimers=$timers_count (expected $ALLOWED_TIMERS_TARGET). Update this audit if the audited list changed."
 else
-    ok "AlertSink chokepoint intact ($exception_count audited DaemonSetup exception(s), 0 unauthorized)"
+    ok "AlertSink chokepoint intact ($exception_count audited self-protection exception(s), 0 unauthorized)"
 fi
 
 # ---------------------------------------------------------------------
