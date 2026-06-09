@@ -210,19 +210,15 @@ public enum NoiseFilter {
         "attack.t1572",   // Protocol Tunneling (ngrok, ssh -R)
     ]
 
-    /// Execution/C2-tagged rules that are NOT yet safe to survive Gate 7 on an
-    /// Apple interpreter: supply-chain install / installer-script / MCP rules
-    /// that fire on benign `npm install` postinstall scripts, every PKG install,
-    /// or generic "ignore previous instructions" help text. They stay suppressed
-    /// on Apple-binary subjects (the pre-fix behaviour — no new flood) until their
-    /// own filters are tightened (off-registry + install-lineage gating; tracked
-    /// for the Wave-3 FP batch). The genuine LOLBin/C2 rules are unaffected.
-    static let gate7NonExemptRuleIds: Set<String> = [
-        "d1a2b3c4-0326-4000-a000-000000000026",  // package_manager_downloads_and_executes
-        "d1a2b3c4-0302-4000-a000-000000000002",  // npm_postinstall_downloads_binary
-        "d1a2b3c4-0449-4000-a000-000000000449",  // installer_pkg_script_execution
-        "d1a2b3c4-3003-4000-a000-000000003003",  // mcp_server_tool_poisoning
-    ]
+    /// Execution/C2-tagged rules temporarily held back from surviving Gate 7 on
+    /// an Apple interpreter because their own filters were too loose (flooded on
+    /// benign `npm install` postinstall scripts, every PKG install, or generic
+    /// help text). The four original entries — package_manager_downloads_and_
+    /// executes, npm_postinstall_downloads_binary, installer_pkg_script_execution,
+    /// mcp_server_tool_poisoning — were re-tightened (off-canonical-source +
+    /// install-context + structured-marker gating) so they now re-arm safely.
+    /// Kept as the mechanism for any future deferral.
+    static let gate7NonExemptRuleIds: Set<String> = []
 
     /// True when a match should SURVIVE the Gate-7 Apple-platform-binary
     /// suppressor: an execution/C2 LOLBin detection (the curl|bash hole) that is

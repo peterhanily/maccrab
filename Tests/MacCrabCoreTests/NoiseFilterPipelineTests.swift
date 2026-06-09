@@ -94,16 +94,18 @@ struct NoiseFilterPipelineTests {
         #expect(m.isEmpty, "a LOW exec match must still be dropped on an Apple binary")
     }
 
-    @Test("a deferred FP-prone supply-chain rule is dropped even though it is exec-tagged + medium")
-    func deferredRuleDropped() {
-        // installer_pkg_script_execution — exec-tagged + medium, but on the Gate-7
-        // deferral list (floods on every PKG install) until its filters are
-        // tightened. Must stay suppressed on an Apple-interpreter subject.
+    @Test("a re-tightened formerly-deferred exec rule re-arms (survives Gate 7)")
+    func reArmedRuleSurvives() {
+        // installer_pkg_script_execution (0449) was held off Gate-7 survival in
+        // Wave 1 (gate7NonExemptRuleIds) because it flooded on every PKG install.
+        // Wave 3-B tightened it (suspicious-payload requirement) and emptied the
+        // denylist, so a medium+ exec match like it now re-arms on an Apple
+        // interpreter — confirming the deferral was lifted, not permanent.
         var m = [RuleMatch(ruleId: "d1a2b3c4-0449-4000-a000-000000000449", ruleName: "n",
                            severity: .medium, description: "", mitreTechniques: ["attack.t1059"],
                            tags: [], suppressible: true)]
         NoiseFilter.apply(&m, event: appleInterpreterEvent(exec: "/bin/sh", commandLine: "sh postinstall"),
                           isWarmingUp: false)
-        #expect(m.isEmpty, "a deferred FP-prone exec rule must stay suppressed on Apple binaries")
+        #expect(!m.isEmpty, "a re-tightened exec rule re-arms (survives Gate 7) now the denylist is empty")
     }
 }

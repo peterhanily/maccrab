@@ -42,7 +42,29 @@ detection:
         CommandLine|contains:
             - '/System/Library/'
             - 'com.apple.'
-    condition: selection_installer_parent and selection_script and not filter_apple_installer
+    # Suspicious-payload requirement (v1.18 audit): every macOS PKG install runs
+    # postinstall scripts, so "installer spawned a script" alone fired on Docker /
+    # VS Code / Homebrew installs. Require the script to actually do something a
+    # malicious postinstall does — network fetch, decode, eval, drop+exec, or
+    # persistence — not a normal install step (pkgutil/defaults/ln/mkdir).
+    selection_suspicious:
+        CommandLine|contains:
+            - 'curl '
+            - 'wget '
+            - '| sh'
+            - '| bash'
+            - '| zsh'
+            - 'base64 -d'
+            - 'base64 --decode'
+            - 'eval '
+            - 'python -c'
+            - 'python3 -c'
+            - 'osascript -e'
+            - '/tmp/'
+            - 'launchctl load'
+            - 'nohup '
+            - '/dev/tcp/'
+    condition: selection_installer_parent and selection_script and selection_suspicious and not filter_apple_installer
 falsepositives:
     - Legitimate software installers (Homebrew cask, Adobe, Microsoft)
     - System software updates

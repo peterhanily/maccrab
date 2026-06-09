@@ -35,19 +35,28 @@ detection:
             - '/python'
             - '/python3'
             - '/npx'
-    selection_injection_args:
+    # v1.18 audit: the generic override phrases ("ignore all previous",
+    # "disregard all prior") also appear in legit tool help/debug text, so they
+    # fire alone only when wrapped in a tool-result structured marker (the
+    # poisoned-tool-output context). The high-specificity injection phrases fire
+    # on their own — they don't occur in benign help text.
+    selection_strong_injection:
         CommandLine|contains:
-            - 'ignore all previous'
             - 'ignore your instructions'
-            - 'disregard all prior'
-            - '<tool_result>'
-            - '</tool_result>'
-            - 'IMPORTANT: Before'
             - 'system prompt override'
             - 'you must first read'
             - 'do not tell the user'
             - 'hidden instruction'
-    condition: selection_mcp_process and selection_injection_args
+    selection_structured_marker:
+        CommandLine|contains:
+            - '<tool_result>'
+            - '</tool_result>'
+    selection_weak_injection:
+        CommandLine|contains:
+            - 'ignore all previous'
+            - 'disregard all prior'
+            - 'IMPORTANT: Before'
+    condition: selection_mcp_process and (selection_strong_injection or (selection_structured_marker and selection_weak_injection))
 falsepositives:
     - Security testing of MCP server implementations
     - Prompt injection research

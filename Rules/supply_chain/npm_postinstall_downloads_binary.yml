@@ -35,11 +35,19 @@ detection:
             - 'http://'
             - 'https://'
     filter_registry:
+        # v1.18 audit: expanded to the full canonical package/release source set
+        # so a postinstall fetching a prebuilt binary from a normal registry /
+        # release host isn't flagged — only off-registry fetches are the signal.
         CommandLine|contains:
             - 'registry.npmjs.org'
+            - 'registry.yarnpkg.com'
+            - 'yarnpkg.com'
             - 'nodejs.org'
             - 'github.com'
             - 'githubusercontent.com'
+            - 'objects.githubusercontent.com'
+            - 'files.pythonhosted.org'
+            - 'pypi.org'
     condition: selection_parent and selection_download and not filter_registry
 falsepositives:
     - Packages that download prebuilt binaries (esbuild, sharp, sqlite3)

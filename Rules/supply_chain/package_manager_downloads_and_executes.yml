@@ -53,7 +53,24 @@ detection:
             - '-o /tmp'
             - '--output /tmp'
             - 'chmod +x'
-    condition: selection_parent and selection_download_tool and selection_execution_pattern
+    # Off-canonical-source requirement (v1.18 audit): a native-module build or
+    # postinstall fetching a prebuilt from the package registry / GitHub releases
+    # is normal — only an OFF-registry download-and-execute is the supply-chain
+    # signal. Excludes the canonical package/release sources.
+    filter_canonical_source:
+        CommandLine|contains:
+            - 'registry.npmjs.org'
+            - 'registry.yarnpkg.com'
+            - 'yarnpkg.com'
+            - 'files.pythonhosted.org'
+            - 'pypi.org'
+            - 'crates.io'
+            - 'rubygems.org'
+            - 'github.com'
+            - 'githubusercontent.com'
+            - 'nodejs.org'
+            - 'objects.githubusercontent.com'
+    condition: selection_parent and selection_download_tool and selection_execution_pattern and not filter_canonical_source
 falsepositives:
     - Legitimate package install scripts that download prebuilt binaries
     - Homebrew-related installations triggered through package managers
