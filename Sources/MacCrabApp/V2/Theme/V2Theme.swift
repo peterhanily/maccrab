@@ -119,6 +119,11 @@ public enum V2Theme {
     /// status-bar icon, app icon, and maccrab.com.
     public static var brand: Color { MacCrabTheme.accent }
 
+    /// Darker brand variant for filled buttons that carry white text. White on
+    /// `brand` is 3.04:1 (dark) / 4.10:1 (light) — both fail WCAG AA 4.5:1;
+    /// `accentDim` (0xC13E20 dark = 5.28:1) passes. Used by V2ActionButton.primary.
+    public static var brandDim: Color { MacCrabTheme.accentDim }
+
     // MARK: - Interaction overlays (theme-aware)
 
     /// Subtle background fill for hover states — adapts so it shows

@@ -12,14 +12,14 @@ public final class V2MockDataProvider: V2DataProvider {
 
     public init() {}
 
-    public func alerts(limit: Int) async -> [V2MockAlert] {
-        Array(V2MockRepository.alerts.prefix(limit))
+    public func alerts(since: Date, limit: Int) async -> [V2MockAlert] {
+        Array(V2MockRepository.alerts.filter { $0.timestamp >= since }.prefix(limit))
     }
     public func events(limit: Int) async -> [V2MockEvent] {
         Array(V2MockRepository.events.prefix(limit))
     }
-    public func campaigns(limit: Int) async -> [V2MockCampaign] {
-        Array(V2MockRepository.campaigns.prefix(limit))
+    public func campaigns(since: Date, limit: Int) async -> [V2MockCampaign] {
+        Array(V2MockRepository.campaigns.filter { $0.lastSeen >= since }.prefix(limit))
     }
     public func traces(limit: Int) async -> [V2MockTrace] {
         Array(V2MockRepository.traces.prefix(limit))

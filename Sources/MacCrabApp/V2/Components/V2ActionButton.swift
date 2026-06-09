@@ -78,7 +78,8 @@ public struct V2ActionButton: View {
 
     private var background: Color {
         switch style {
-        case .primary: return V2Theme.brand
+        // WCAG AA: white-on-brand is 3.04:1; brandDim (accentDim) is 5.28:1 — pass.
+        case .primary: return V2Theme.brandDim
         case .secondary: return V2Theme.hoverBackground
         case .danger: return V2Theme.critical
         case .ghost: return .clear

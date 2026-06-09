@@ -34,9 +34,9 @@ public protocol V2DataProvider: AnyObject {
     /// Diagnostic — which DB directory (if any) the live provider opened.
     var dataDir: String? { get }
 
-    func alerts(limit: Int) async -> [V2MockAlert]
+    func alerts(since: Date, limit: Int) async -> [V2MockAlert]
     func events(limit: Int) async -> [V2MockEvent]
-    func campaigns(limit: Int) async -> [V2MockCampaign]
+    func campaigns(since: Date, limit: Int) async -> [V2MockCampaign]
     func traces(limit: Int) async -> [V2MockTrace]
     /// Wave-3 recorder: durable AI-agent sessions. Default [] so existing
     /// conformers don't break; the live provider overrides with real data.
@@ -205,6 +205,12 @@ public struct V2OverviewKPIs: Sendable, Equatable {
 // MARK: - Convenience defaults
 
 extension V2DataProvider {
+    // Default time window for the limit-only convenience calls (recent-activity
+    // widgets that don't drive the Alerts time-range chips). The chips call the
+    // since: form directly.
+    private static var defaultSince: Date { Date().addingTimeInterval(-7 * 24 * 60 * 60) }
+    public func alerts(limit: Int) async -> [V2MockAlert] { await alerts(since: Self.defaultSince, limit: limit) }
+    public func campaigns(limit: Int) async -> [V2MockCampaign] { await campaigns(since: Self.defaultSince, limit: limit) }
     public func alerts() async -> [V2MockAlert]      { await alerts(limit: 200) }
     public func events() async -> [V2MockEvent]      { await events(limit: 200) }
     public func campaigns() async -> [V2MockCampaign] { await campaigns(limit: 50) }

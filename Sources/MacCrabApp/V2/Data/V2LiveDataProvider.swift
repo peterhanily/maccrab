@@ -141,11 +141,14 @@ public final class V2LiveDataProvider: V2DataProvider {
     // decode loop runs in a Task.detached at .userInitiated priority,
     // so the main thread stays free for SwiftUI re-render.
 
-    public func alerts(limit: Int) async -> [V2MockAlert] {
+    public func alerts(since: Date, limit: Int) async -> [V2MockAlert] {
         guard let alertStore else { return [] }
         do {
+            // v1.18 (audit): honour the caller's time range. Pre-this the fetch
+            // was hardcoded to -7d, so the Alerts 30d / All-time chips filtered a
+            // 7-day subset and 77% of history was unreachable no matter the chip.
             let raw = try await alertStore.alerts(
-                since: Date().addingTimeInterval(-7 * 24 * 60 * 60),
+                since: since,
                 severity: nil, suppressed: nil, limit: limit
             )
             return await Task.detached(priority: .userInitiated) {
@@ -173,11 +176,11 @@ public final class V2LiveDataProvider: V2DataProvider {
         }
     }
 
-    public func campaigns(limit: Int) async -> [V2MockCampaign] {
+    public func campaigns(since: Date, limit: Int) async -> [V2MockCampaign] {
         guard let campaignStore else { return [] }
         do {
             let raw = try await campaignStore.list(
-                since: Date().addingTimeInterval(-7 * 24 * 60 * 60),
+                since: since,
                 includeSuppressed: false,
                 limit: limit
             )

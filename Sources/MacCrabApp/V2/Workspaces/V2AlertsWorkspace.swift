@@ -88,7 +88,10 @@ struct V2AlertsWorkspace: View {
             }
         }()
 
-        let a = await state.provider.alerts(limit: 200)
+        // Wide ranges need a higher ceiling than the default 200 so All-time
+        // doesn't silently truncate the history the chip just unlocked.
+        let fetchLimit = (state.alertTimeRange == "24h" || state.alertTimeRange == "7d") ? 200 : 1000
+        let a = await state.provider.alerts(since: cutoff, limit: fetchLimit)
         await MainActor.run {
             // v1.12.7 Wave 9R: overlay pending optimistic mutations
             // on top of the DB read. The daemon's inbox poller has
@@ -130,7 +133,7 @@ struct V2AlertsWorkspace: View {
             self.loaded = true
         }
 
-        let c = await state.provider.campaigns(limit: 50)
+        let c = await state.provider.campaigns(since: cutoff, limit: 50)
         await MainActor.run {
             // Same overlay pattern for campaigns: hide optimistically-
             // suppressed campaigns until the DB-side suppress lands.
