@@ -184,18 +184,25 @@ fi
 
 section "Stats sync"
 
-ACTUAL_RULES=$(find Rules -name "*.yml" -type f 2>/dev/null | wc -l | tr -d ' ')
-# Badge URL is `.../detection%20rules-<N>-orange` — pull the number that
-# sits between the second `-` and the colour name. Naïve `[0-9]+` would
-# also match the `20` in `%20`.
-README_RULES=$(grep -oE 'detection%20rules-[0-9]+-[a-z]+' README.md \
-    | sed -E 's/detection%20rules-([0-9]+)-.*/\1/' | head -1)
-if [[ -z "$README_RULES" ]]; then
+# The rules badge encodes all three classes: `rules-<single>%20%2B%20<seq>%20seq
+# %20%2B%20<graph>%20graph-<colour>`. Verify each against the canonical counts
+# (coverage_matrix.py is the single source of truth — same one check-counts uses).
+CANON=$(python3 scripts/coverage_matrix.py --counts Rules 2>/dev/null)
+C_SINGLE=$(echo "$CANON" | sed -E 's/.*single=([0-9]+).*/\1/')
+C_SEQ=$(echo "$CANON" | sed -E 's/.*sequence=([0-9]+).*/\1/')
+C_GRAPH=$(echo "$CANON" | sed -E 's/.*graph=([0-9]+).*/\1/')
+BADGE=$(grep -oE 'badge/rules-[0-9]+%20%2B%20[0-9]+%20seq%20%2B%20[0-9]+%20graph' README.md | head -1)
+if [[ -z "$BADGE" ]]; then
     warn "README.md: couldn't parse rules badge"
-elif [[ "$README_RULES" != "$ACTUAL_RULES" ]]; then
-    warn "README.md rules badge = $README_RULES, actual = $ACTUAL_RULES"
 else
-    ok "README.md rules badge → $ACTUAL_RULES"
+    B_SINGLE=$(echo "$BADGE" | sed -E 's#badge/rules-([0-9]+)%20.*#\1#')
+    B_SEQ=$(echo "$BADGE" | sed -E 's#.*%2B%20([0-9]+)%20seq.*#\1#')
+    B_GRAPH=$(echo "$BADGE" | sed -E 's#.*%2B%20([0-9]+)%20graph#\1#')
+    if [[ "$B_SINGLE" == "$C_SINGLE" && "$B_SEQ" == "$C_SEQ" && "$B_GRAPH" == "$C_GRAPH" ]]; then
+        ok "README.md rules badge → $B_SINGLE + $B_SEQ seq + $B_GRAPH graph"
+    else
+        warn "README.md rules badge = ${B_SINGLE}+${B_SEQ}+${B_GRAPH}, canonical = ${C_SINGLE}+${C_SEQ}+${C_GRAPH}"
+    fi
 fi
 
 # Tests badge has the same `%20passing` trap.

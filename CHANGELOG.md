@@ -3,6 +3,74 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] — 2026-06-09
+
+A detection-quality release. A corpus-wide review of every rule, sequence,
+graph, and campaign detection recovered detections that could never fire,
+removed the largest false-positive sources, and fixed a filter-negation bug
+that could miss real threats. It also adds an agent-session timeline,
+tightens MCP-server privacy, and includes reliability and hardening fixes.
+
+### Added
+
+- **Agent session timeline.** A session-keyed timeline of an AI agent's
+  activity — events, alerts, configuration changes, and tool calls on one
+  rail — with a cryptographically signed, verifiable evidence-bundle export
+  and a session list in the dashboard.
+- **Deprecated detections are labeled.** Rules that ship disabled now show a
+  clear "Deprecated" badge in the Detection list and detail view.
+
+### Changed
+
+- **Recovered detections that could never fire.** A class of rules carried a
+  predicate that the engine can never satisfy, so they silently never fired —
+  including the Claude Code project-config hook-RCE detection
+  (CVE-2025-59536 / CVE-2026-21852), several execution and credential rules,
+  and multi-step sequence rules dropped at load. These now fire correctly, and
+  a build-time guard fails if a sequence rule is ever silently dropped again.
+- **Far fewer false positives.** AI-tool detections now require an actual
+  AI-agent ancestor instead of firing machine-wide; TCC permission-grant
+  detections resolve the requesting app's real code signature, so a signed
+  app outside `/Applications` is no longer flagged as unsigned; severity is
+  recalibrated so a chatty rule can no longer mint an unsuppressible critical
+  alert.
+- **Command-and-control detections catch the common case.** A filter that was
+  excluding shell-launched processes — exactly the lineage of a reverse shell
+  or `curl | bash` — was removed, so those now fire while developer noise is
+  handled by the noise filter.
+- **Credential-read detections are active.** Reads of Safari, Notes, and
+  password-manager databases and the system shadow-hash store are now
+  observed, so the rules that watch them can fire.
+
+### Fixed
+
+- **Filter-negation correctness.** A multi-condition exclusion (`not (A and B)`)
+  compiled to an over-broad form that could suppress real detections; it now
+  negates correctly, closing a class of false negatives.
+- **MCP-server privacy.** The MCP server no longer exposes the operator's
+  username or home-directory paths to a connected agent.
+- **No hung scorers.** Every Security Score subprocess is now bounded by a
+  hard-deadline watchdog, so a stuck helper can't stall scoring.
+- **CLI polish.** Corrected a rule-count off-by-one, froze CLI vocabulary, and
+  added a `modules` command; refreshed documented rule/test counts to a single
+  source of truth.
+
+### Security
+
+- **Self-protection alerts.** High-impact privileged-inbox actions now raise an
+  observe-only self-protection alert.
+- **Signed session evidence.** Exported session bundles are cryptographically
+  signed and verified on import; path traversal in bundle handling is blocked.
+- **Release hygiene.** The release build aborts if a private key would ship in
+  the bundle, and the documentation on compiled-rule file permissions was
+  corrected.
+
+### Upgrade
+
+- **Sparkle:** accept the in-app update prompt and relaunch.
+- **Homebrew:** `brew upgrade --cask maccrab`
+- **Manual:** download the DMG from the release page and replace MacCrab.app.
+
 ## [1.17.6] — 2026-06-06
 
 A usability, control, and hardening release on top of v1.17.5: makes the
