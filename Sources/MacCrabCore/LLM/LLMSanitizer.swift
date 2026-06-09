@@ -79,6 +79,26 @@ public enum LLMSanitizer {
         pattern: #"\b([A-Z][a-z]+[a-z0-9]*-)+(MacBook-Pro|MacBook-Air|Mac-Pro|Mac-mini|Mac-Studio|iMac)\b"#
     )
 
+    /// The same names in the human-readable `scutil --get ComputerName` form —
+    /// `Adrian's Mac mini`, `Peter's MacBook Pro`. The hyphenated regex above
+    /// missed these, so a live ComputerName passed through un-redacted (audit).
+    private static let computerNameFriendlyRegex = try! NSRegularExpression(
+        pattern: #"\b[A-Z][a-z]+(?:['’]s)?\s(?:MacBook\s(?:Pro|Air)|Mac\s(?:Pro|mini|Studio)|iMac)\b"#
+    )
+
+    /// The LIVE host identifiers (ComputerName + network host name), read once.
+    /// Redacting these exact literals catches the real host name regardless of
+    /// its shape — the robust complement to the heuristic regexes above. Filtered
+    /// to >=4 chars so we never redact "" or a trivially-short name.
+    private static let liveHostLiterals: [String] = {
+        var names: [String] = []
+        if let cn = Host.current().localizedName { names.append(cn) }   // "Adrian's Mac mini"
+        let hn = Foundation.ProcessInfo.processInfo.hostName            // "adrians-mac-mini.local"
+        names.append(hn)
+        if let base = hn.split(separator: ".").first { names.append(String(base)) }
+        return names.filter { $0.count >= 4 }
+    }()
+
     /// CDHash values — 40-char hex strings preceded by `cdhash=` /
     /// `CDHash:` / `cd_hash:`. CDHash maps 1:1 to malware family in
     /// research datasets (i.e. leaking it tells an LLM exactly which
@@ -145,10 +165,21 @@ public enum LLMSanitizer {
     }
 
     private static func redactComputerNames(_ text: String) -> String {
-        computerNameRegex.stringByReplacingMatches(
-            in: text, range: NSRange(text.startIndex..., in: text),
-            withTemplate: "[COMPUTER_NAME]"
-        )
+        var result = text
+        // Exact live-host literals first (shape-independent, robust). Longest
+        // first so a base name doesn't partially redact the full name.
+        for literal in liveHostLiterals.sorted(by: { $0.count > $1.count }) {
+            result = result.replacingOccurrences(
+                of: literal, with: "[COMPUTER_NAME]", options: [.caseInsensitive])
+        }
+        // Then the hyphenated + friendly heuristic forms (for OTHER hosts whose
+        // names appear in ingested logs, not just this machine's).
+        for regex in [computerNameRegex, computerNameFriendlyRegex] {
+            result = regex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result),
+                withTemplate: "[COMPUTER_NAME]")
+        }
+        return result
     }
 
     private static func redactPrivateIPs(_ text: String) -> String {

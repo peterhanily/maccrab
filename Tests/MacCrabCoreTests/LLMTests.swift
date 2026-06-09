@@ -811,3 +811,19 @@ struct LLMConfigTests {
         #expect(LLMProvider(rawValue: "invalid") == nil)
     }
 }
+
+@Suite("LLM Sanitizer: ComputerName redaction (audit privacy gap)")
+struct LLMSanitizerComputerNameTests {
+    @Test("friendly scutil ComputerName form is redacted")
+    func friendlyComputerNameRedacted() {
+        let out = LLMSanitizer.sanitize("event on Adrian's Mac mini at noon")
+        #expect(!out.contains("Mac mini"), "friendly ComputerName must be redacted: \(out)")
+        #expect(out.contains("[COMPUTER_NAME]"))
+    }
+
+    @Test("hyphenated ComputerName still redacted; ordinary prose untouched")
+    func hyphenatedAndProse() {
+        #expect(LLMSanitizer.sanitize("Peters-MacBook-Pro").contains("[COMPUTER_NAME]"))
+        #expect(LLMSanitizer.sanitize("the mini fridge in the office") == "the mini fridge in the office")
+    }
+}
