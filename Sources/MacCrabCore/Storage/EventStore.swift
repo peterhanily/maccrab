@@ -1776,19 +1776,60 @@ public actor EventStore {
     public func pruneAlertEvidenceBySize(maxBytes: Int64, batchSize: Int = 2000) async throws -> Int {
         guard maxBytes > 0 else { return 0 }
         let batch = max(1, batchSize)
-        func payloadBytes() throws -> Int64 {
+        // `maxBytes` is a PHYSICAL footprint budget. The raw_json text is only
+        // part of each row's on-disk cost (25 columns + 3 indexes), so the prior
+        // SUM(LENGTH(raw_json)) cap let the physical table grow ~1.7x past the
+        // budget — which kept events.db permanently over its size cap and
+        // re-triggered the hourly full VACUUM on every maintenance tick (v1.18
+        // audit). Bound the physical footprint instead. DELETE doesn't reclaim
+        // pages until VACUUM (so dbstat can't drive the delete loop), so we derive
+        // the physical/logical multiplier from dbstat once, scale the raw_json
+        // budget by it, and loop on raw_json (which shrinks per delete). The
+        // post-sweep VACUUM in the maintenance path reclaims the freed pages.
+        func rawJsonBytes() throws -> Int64 {
             let stmt = try prepare("SELECT COALESCE(SUM(LENGTH(raw_json)), 0) FROM alert_evidence")
             defer { sqlite3_finalize(stmt) }
             guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
             return sqlite3_column_int64(stmt, 0)
         }
-        var total = try payloadBytes()
-        guard total > maxBytes else { return 0 }
+        // Physical page bytes of the table + its indexes via DBSTAT_VTAB. nil if
+        // dbstat isn't compiled into this SQLite build (→ conservative fallback).
+        func physicalBytes() -> Int64? {
+            let sql = """
+                SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
+                WHERE name = 'alert_evidence'
+                   OR name IN (SELECT name FROM sqlite_master
+                               WHERE type = 'index' AND tbl_name = 'alert_evidence')
+                """
+            guard let stmt = try? prepare(sql) else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            let bytes = sqlite3_column_int64(stmt, 0)
+            return bytes > 0 ? bytes : nil
+        }
+        let logical = try rawJsonBytes()
+        guard logical > 0 else { return 0 }
+        // Scale the raw_json budget by the physical/logical ratio — but only when
+        // the table is large enough that b-tree + index overhead is real signal,
+        // not sub-page rounding on a tiny table (which would over-prune). dbstat
+        // absent → a conservative fixed estimate so production still bounds size.
+        let multiplier: Double
+        switch physicalBytes() {
+        case .some(let phys) where phys > 1_048_576:
+            multiplier = max(1.0, Double(phys) / Double(logical))   // large table: measured ratio
+        case .some:
+            multiplier = 1.0                                        // small table: raw_json ≈ footprint
+        case .none:
+            multiplier = 1.8                                        // dbstat unavailable: conservative
+        }
+        let rawJsonBudget = Int64(Double(maxBytes) / multiplier)
+        var total = logical
+        guard total > rawJsonBudget else { return 0 }
         var deleted = 0
-        // Delete oldest rows in batches until under the cap. Bounded to 4096
-        // iterations so a pathological table can't wedge the sweep.
+        // Delete oldest rows in batches until under the (scaled) budget. Bounded
+        // to 4096 iterations so a pathological table can't wedge the sweep.
         for _ in 0..<4096 {
-            if total <= maxBytes { break }
+            if total <= rawJsonBudget { break }
             let stmt = try prepare(
                 "DELETE FROM alert_evidence WHERE rowid IN (SELECT rowid FROM alert_evidence ORDER BY timestamp ASC LIMIT \(batch))")
             let rc = sqlite3_step(stmt)
@@ -1800,7 +1841,7 @@ public actor EventStore {
             let n = Int(sqlite3_changes(db))
             deleted += n
             if n == 0 { break }
-            total = try payloadBytes()
+            total = try rawJsonBytes()
         }
         return deleted
     }

@@ -424,9 +424,18 @@ enum DaemonTimers {
                     // dominant (and, pre-v1.18, never-reclaimed) tenant of
                     // tracegraph.db. Orphan-guarded so surviving traces are
                     // never corrupted.
-                    let orphans = (try? await causalStore.pruneOrphanedGraph(olderThan: cutoff)) ?? (edges: 0, entities: 0)
+                    //
+                    // The substrate is NOT subject to the 90-day TRACE retention:
+                    // an entity/edge that hasn't joined a trace within the ±300s
+                    // materialization window is dead and never will, so pruning it
+                    // by the trace cutoff (90d) let orphans pile up to 91%+ of the
+                    // file on a young DB (audit: 207k orphan entities / 7 traces,
+                    // ~179 MB). Reclaim orphans older than a short window instead;
+                    // the orphan guard keeps surviving traces safe at any window.
+                    let orphanCutoff = Date().addingTimeInterval(-3600)  // 1h ≫ the 5-min trace window
+                    let orphans = (try? await causalStore.pruneOrphanedGraph(olderThan: orphanCutoff)) ?? (edges: 0, entities: 0)
                     if orphans.edges > 0 || orphans.entities > 0 {
-                        logger.info("TraceGraph substrate sweep: pruned \(orphans.edges) edges + \(orphans.entities) entities older than \(days)d")
+                        logger.info("TraceGraph substrate sweep: pruned \(orphans.edges) orphan edges + \(orphans.entities) orphan entities (>1h, unreferenced)")
                     }
                     let size = await causalStore.databaseSizeBytes()
                     if size > capBytes {
@@ -2365,14 +2374,22 @@ func runAdaptiveRollupSweep(
         }
 
         let freeMB = freeDiskMB(forPath: dbPath)
-        if freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) {
+        // v1.18 (audit): incremental_vacuum (above) already returns freed pages to
+        // the OS, so a DB that is now under target needs no full-file rebuild.
+        // Reserve the expensive full VACUUM (whole-file copy — ~3 min + a pinned
+        // CPU core on a ~400MB DB, and it trips the macOS disk-writes monitor) for
+        // the genuinely-still-over-target case; otherwise just checkpoint the WAL.
+        // This ends the hourly full-VACUUM write-amplification the audit found
+        // (which was driven by the evidence-cap bug keeping the DB permanently
+        // over cap → Layer-3 firing every tick → totalPruned>0 → VACUUM every tick).
+        if dbSizeAfterIncremental > targetSizeMB && freeMB >= Int(Double(dbSizeAfterIncremental) * 1.3) {
             do {
                 try await eventStore.vacuum()
             } catch {
                 logger.warning("Tier-rollup VACUUM failed: \(error.localizedDescription, privacy: .public)")
             }
         } else {
-            logger.warning("Tier-rollup: skipping full VACUUM (free disk \(freeMB) MB < 1.3× DB size \(dbSizeAfterIncremental) MB). incremental_vacuum reclaimed \(reclaimed) pages; running checkpoint(TRUNCATE) for WAL cleanup.")
+            logger.notice("Tier-rollup: incremental_vacuum reclaimed \(reclaimed) pages → \(dbSizeAfterIncremental) MB (target \(targetSizeMB) MB); full VACUUM not needed, running checkpoint(TRUNCATE) for WAL cleanup.")
             await eventStore.walCheckpoint()
         }
     }
