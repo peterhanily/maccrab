@@ -170,7 +170,7 @@ header "2. CHECK ALERTS FOR SYSTEM PROCESS FALSE POSITIVES"
 ALL_ALERTS=$(sqlite3 "$USER_DB" \
     "SELECT rule_id, rule_title, process_name, process_path, severity FROM alerts;" 2>/dev/null || echo "")
 
-ALERT_COUNT=$(echo "$ALL_ALERTS" | grep -c '|' 2>/dev/null || echo "0")
+ALERT_COUNT=$(echo "$ALL_ALERTS" | grep -c '|' 2>/dev/null || true)
 info "Total alerts generated: $ALERT_COUNT"
 
 if [ "$ALERT_COUNT" -eq 0 ]; then
@@ -292,11 +292,11 @@ header "5. ALERT SEVERITY DISTRIBUTION"
 # ═══════════════════════════════════════════════════
 
 if [ "$ALERT_COUNT" -gt 0 ]; then
-    CRIT=$(echo "$ALL_ALERTS" | grep -ci "critical" 2>/dev/null || echo "0")
-    HIGH=$(echo "$ALL_ALERTS" | grep -ci "high" 2>/dev/null || echo "0")
-    MED=$(echo "$ALL_ALERTS" | grep -ci "medium" 2>/dev/null || echo "0")
-    LOW=$(echo "$ALL_ALERTS" | grep -ci "low" 2>/dev/null || echo "0")
-    INFO_SEV=$(echo "$ALL_ALERTS" | grep -ci "informational" 2>/dev/null || echo "0")
+    CRIT=$(echo "$ALL_ALERTS" | grep -ci "critical" 2>/dev/null || true)
+    HIGH=$(echo "$ALL_ALERTS" | grep -ci "high" 2>/dev/null || true)
+    MED=$(echo "$ALL_ALERTS" | grep -ci "medium" 2>/dev/null || true)
+    LOW=$(echo "$ALL_ALERTS" | grep -ci "low" 2>/dev/null || true)
+    INFO_SEV=$(echo "$ALL_ALERTS" | grep -ci "informational" 2>/dev/null || true)
 
     echo -e "  Critical: $CRIT  |  High: $HIGH  |  Medium: $MED  |  Low: $LOW  |  Info: $INFO_SEV"
 
@@ -320,7 +320,7 @@ header "6. DAEMON LOG CHECK"
 # Check daemon log for error patterns
 LOG_FILE="/tmp/maccrab_fp_test.log"
 if [ -f "$LOG_FILE" ]; then
-    ERROR_LINES=$(grep -ci "error\|fatal\|crash\|panic" "$LOG_FILE" 2>/dev/null || echo "0")
+    ERROR_LINES=$(grep -ci "error\|fatal\|crash\|panic" "$LOG_FILE" 2>/dev/null || true)
     if [ "$ERROR_LINES" -gt 0 ]; then
         warn "$ERROR_LINES error-level log entries"
         grep -i "error\|fatal\|crash\|panic" "$LOG_FILE" | head -5 | sed 's/^/    /'
@@ -329,7 +329,7 @@ if [ -f "$LOG_FILE" ]; then
     fi
 
     # Check for any CRIT lines in stdout (the old-style alerts)
-    CRIT_LINES=$(grep -c "^\[CRIT\]" "$LOG_FILE" 2>/dev/null || echo "0")
+    CRIT_LINES=$(grep -c "^\[CRIT\]" "$LOG_FILE" 2>/dev/null || true)
     if [ "$CRIT_LINES" -gt 0 ]; then
         warn "$CRIT_LINES [CRIT] lines in daemon output"
         grep "^\[CRIT\]" "$LOG_FILE" | head -5 | sed 's/^/    /'

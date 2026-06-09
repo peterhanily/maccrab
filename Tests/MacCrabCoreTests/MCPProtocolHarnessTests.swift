@@ -110,10 +110,21 @@ struct MCPProtocolHarnessTests {
 
         let tools = (byId(objs, 2)?["result"] as? [String: Any])?["tools"] as? [[String: Any]]
         let names = Set((tools ?? []).compactMap { $0["name"] as? String })
-        #expect(names.count >= 30)   // 34 tools
-        #expect(names.contains("get_alerts"))
-        #expect(names.contains("get_status"))
-        #expect(names.contains("forensics.search_artifacts"))
+        // Floor sized to the static tool surface (~49 + dynamically-registered
+        // plugin tools; ~78 live). The prior >=30 floor was so far below the
+        // real surface that a whole category could vanish undetected — the
+        // golden set below pins the load-bearing tools across categories so a
+        // dropped registration fails this test.
+        #expect(names.count >= 45)
+        for required in [
+            "get_alerts", "get_status", "get_events", "get_campaigns",
+            "suppress_alert", "suppress_campaign", "hunt", "get_security_score",
+            "get_traces", "get_trace_detail",
+            "export_session_bundle", "verify_session_bundle", "get_agent_session",
+            "forensics.search_artifacts",
+        ] {
+            #expect(names.contains(required), "MCP tool missing from tools/list: \(required)")
+        }
     }
 
     @Test("Forensics/unknown errors set isError:true (the contract fix)")

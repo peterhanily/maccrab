@@ -33,7 +33,11 @@ public struct FleetAlertSummary: Codable, Sendable {
 
     public init(ruleId: String, ruleTitle: String, severity: String, processPath: String, mitreTechniques: String, timestamp: Date) {
         self.ruleId = ruleId; self.ruleTitle = ruleTitle; self.severity = severity
-        self.processPath = processPath; self.mitreTechniques = mitreTechniques; self.timestamp = timestamp
+        // Privacy: redact the username (and any other PII) out of the path
+        // before it can leave the host. FleetTelemetry's own header promises
+        // "no user names", but processPath shipped raw (/Users/<name>/...).
+        self.processPath = LLMSanitizer.sanitize(processPath)
+        self.mitreTechniques = mitreTechniques; self.timestamp = timestamp
     }
 }
 
@@ -43,6 +47,13 @@ public struct FleetIOCSighting: Codable, Sendable {
     public let value: String
     public let context: String // Brief context (process name, not full cmdline)
     public let timestamp: Date
+
+    public init(type: String, value: String, context: String, timestamp: Date) {
+        self.type = type
+        self.value = value          // the IOC itself — must NOT be redacted
+        self.context = LLMSanitizer.sanitize(context)  // privacy: scrub PII from the context
+        self.timestamp = timestamp
+    }
 }
 
 /// Per-process behavioral score summary.
@@ -50,6 +61,13 @@ public struct FleetBehaviorScore: Codable, Sendable {
     public let processPath: String
     public let score: Double
     public let topIndicators: [String]
+
+    public init(processPath: String, score: Double, topIndicators: [String]) {
+        // Privacy: redact the username out of the path before egress.
+        self.processPath = LLMSanitizer.sanitize(processPath)
+        self.score = score
+        self.topIndicators = topIndicators
+    }
 }
 
 /// Aggregated fleet data pulled from the collector.

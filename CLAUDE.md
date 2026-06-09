@@ -20,7 +20,7 @@ make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
 make test-detection            # Detection coverage test (15 categories)
 make test-campaign             # Multi-tactic kill chain simulation (5 waves)
-make test-fp                   # False positive test (105 system processes)
+make test-fp                   # False positive test (~50 system processes)
 make test-stress               # Sustained operation monitor (60s default)
 make lint-rules                # Rule linting
 ```
@@ -35,7 +35,7 @@ MacCrab is a local-first macOS threat detection engine. Since v1.3 (April 2026),
 - **maccrabd** (`Sources/maccrabd/`) -- Legacy standalone daemon. Kept for `swift run maccrabd` development when no ES entitlement is available — falls back through `eslogger` → `kdebug` → FSEvents
 - **MacCrabForensics** (`Sources/MacCrabForensics/`) -- Mac Context Plugin Platform: forensic case/collector/plugin library. Linked by `maccrabctl`, `MacCrabApp`, and `maccrab-mcp`; intentionally not linked by the sysext or `maccrabd`
 - **maccrabctl** (`Sources/maccrabctl/`) -- CLI tool for status, events, alerts, threat hunting, reports
-- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing 43 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics.*` plugin tools)
+- **maccrab-mcp** (`Sources/maccrab-mcp/`) -- MCP server exposing ~78 tools for AI agent integration (v1.10 trace tools, v1.12.0 supply-chain / intent tools, and `forensics.*` plugin tools)
 - **MacCrabApp** (`Sources/MacCrabApp/`) -- SwiftUI menubar app + dashboard + SystemExtension activator. Reads from the engine's SQLite DB
 
 ### Key Directories
@@ -195,7 +195,7 @@ MacCrab includes an MCP (Model Context Protocol) server that lets AI agents quer
 
 **Binary:** `maccrab-mcp` (5th executable target in Package.swift)
 
-**Tools exposed (43):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools and the `forensics.*` plugin tools)
+**Tools exposed (~78 live in this build; varies with installed plugins):** (table below is illustrative; the full set also includes the v1.12.0 supply-chain / intent tools and the `forensics.*` plugin tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -308,7 +308,7 @@ All keys are optional — missing keys use defaults from `DaemonConfig.swift`. S
 make test-detection              # 15 detection categories (~2 min)
 make test-campaign               # 5-wave kill chain simulation (~5 min)
 make test-campaign SUSTAINED=1   # Slow burn (~12 min, more realistic)
-make test-fp                     # False positive validation (105 system processes)
+make test-fp                     # False positive validation (~50 system processes)
 make test-stress 120             # Sustained operation monitor (120s)
 ```
 
