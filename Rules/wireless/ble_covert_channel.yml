@@ -50,7 +50,24 @@ detection:
         CommandLine|contains:
             - 'Bluetooth'
             - 'peripheral'
-    condition: selection_tools or selection_python_ble or selection_osascript_bt
+    # The dedicated attack tools (btlejack/bettercap/…) are high-signal and fire
+    # regardless. The python/osascript branches match generic BLE API usage that
+    # IoT/automation developers trigger constantly, so gate ONLY those on
+    # non-dev lineage.
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/python'
+            - '/python3'
+    condition: selection_tools or ((selection_python_ble or selection_osascript_bt) and not filter_dev_tools)
 falsepositives:
     - IoT developers and embedded systems engineers testing BLE peripherals
     - Smart home automation developers using BLE for legitimate device control
