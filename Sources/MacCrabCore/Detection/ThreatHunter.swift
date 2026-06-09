@@ -41,6 +41,16 @@ public actor ThreatHunter {
 
         // Try to match against known query patterns
         guard let (sql, interpretation) = translateQuery(normalized) else {
+            // No template matched — don't give up. The CLI markets NL hunting,
+            // so a bare term must still search the stream (audit: hunt returned
+            // 0 + suggestions while matching events plainly existed).
+            if let (fbSQL, fbInterp) = substringFallback(normalized) {
+                let results = executeSQL(fbSQL)
+                return HuntResult(
+                    query: query, sqlQuery: fbSQL, resultCount: results.count, results: results,
+                    executionTime: Date().timeIntervalSince(start), interpretation: fbInterp
+                )
+            }
             return HuntResult(
                 query: query, sqlQuery: "", resultCount: 0, results: [],
                 executionTime: 0, interpretation: "Could not interpret query. Try: 'show alerts from last hour', 'find unsigned processes', 'network connections to unusual ports'"
@@ -48,13 +58,50 @@ public actor ThreatHunter {
         }
 
         // Execute the SQL
-        let results = executeSQL(sql)
-        let elapsed = Date().timeIntervalSince(start)
+        var results = executeSQL(sql)
+        var usedSQL = sql
+        var usedInterp = interpretation
+
+        // A specific keyword template can latch onto one term and return nothing
+        // (e.g. "download" → the /Downloads/ template misses a curl exec that
+        // lives elsewhere). If the template found nothing, widen to a substring
+        // search across the raw query before reporting "no results".
+        if results.isEmpty,
+           let (fbSQL, fbInterp) = substringFallback(normalized), fbSQL != sql {
+            let widened = executeSQL(fbSQL)
+            if !widened.isEmpty {
+                results = widened
+                usedSQL = fbSQL
+                usedInterp = "\(interpretation) — no matches; widened to substring search. \(fbInterp)"
+            }
+        }
 
         return HuntResult(
-            query: query, sqlQuery: sql, resultCount: results.count,
-            results: results, executionTime: elapsed, interpretation: interpretation
+            query: query, sqlQuery: usedSQL, resultCount: results.count,
+            results: results, executionTime: Date().timeIntervalSince(start), interpretation: usedInterp
         )
+    }
+
+    /// Build a broad substring search across event columns from the query's
+    /// significant terms (stopwords dropped). Used when no template matched or a
+    /// template returned nothing, so `hunt "curl"` always searches the stream.
+    private func substringFallback(_ query: String) -> (sql: String, interpretation: String)? {
+        let stop: Set<String> = [
+            "show", "find", "search", "get", "list", "me", "all", "the", "a", "an",
+            "from", "with", "for", "of", "in", "on", "to", "and", "or", "that", "any",
+            "events", "event", "alerts", "alert", "process", "processes",
+        ]
+        let terms = query.split(whereSeparator: { " \t\"',".contains($0) })
+            .map(String.init)
+            .filter { $0.count > 1 && !stop.contains($0) }
+        guard !terms.isEmpty else { return nil }
+        let clauses = terms.prefix(5).map { term -> String in
+            let e = term.replacingOccurrences(of: "'", with: "''")
+            return "(process_name LIKE '%\(e)%' OR process_path LIKE '%\(e)%' OR process_commandline LIKE '%\(e)%' OR file_path LIKE '%\(e)%')"
+        }
+        let sql = "SELECT * FROM events WHERE \(clauses.joined(separator: " OR ")) ORDER BY timestamp DESC LIMIT 100"
+        let shown = terms.prefix(5).map { "'\($0)'" }.joined(separator: ", ")
+        return (sql, "Substring search for \(shown) across process and file columns")
     }
 
     /// Execute a threat hunting query with LLM enhancement.
