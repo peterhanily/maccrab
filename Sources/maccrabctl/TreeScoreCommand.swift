@@ -89,8 +89,7 @@ extension MacCrabCtl {
             if scored.isEmpty {
                 print("  No processes with significant behavioral signal.")
             } else {
-                print(String(format: "  %-35s %5s %5s %5s  %s",
-                    "Process", "Alrts", "Rules", "Tctcs", "Top Severity"))
+                print("  \("Process".padding(toLength: 35, withPad: " ", startingAt: 0)) Alrts Rules Tctcs  Top Severity")
                 print("  " + String(repeating: "─", count: 72))
                 for (stats, _) in scored {
                     let name = String(((stats.path as NSString).lastPathComponent.isEmpty
@@ -102,8 +101,7 @@ extension MacCrabCtl {
                     else if (stats.severities["medium"] ?? 0) > 0 { topSeverity = "MEDIUM" }
                     else { topSeverity = "LOW" }
 
-                    print(String(format: "  %-35s %5d %5d %5d  %s",
-                        name, stats.alertCount, stats.rules.count, stats.tactics.count, topSeverity))
+                    print("  \(name.padding(toLength: 35, withPad: " ", startingAt: 0)) \(String(format: "%5d %5d %5d", stats.alertCount, stats.rules.count, stats.tactics.count))  \(topSeverity)")
                 }
             }
         } catch {

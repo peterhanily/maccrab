@@ -109,7 +109,7 @@ extension MacCrabCtl {
                 let valuesStr = values.count > 4
                     ? values.prefix(3).joined(separator: ", ") + ", … (\(values.count) total)"
                     : values.joined(separator: ", ")
-                print(String(format: "  %2d. %-32s %-14s %@", idx + 1, field, op, valuesStr))
+                print("  \(String(format: "%2d", idx + 1)). \(field.padding(toLength: 32, withPad: " ", startingAt: 0)) \(op.padding(toLength: 14, withPad: " ", startingAt: 0)) \(valuesStr)")
             }
         }
 

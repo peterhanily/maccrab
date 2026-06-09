@@ -15,7 +15,7 @@ extension MacCrabCtl {
     static func extractAllCDHashes() async {
         print("Extracting CDHashes for all running processes...")
         print("══════════════════════════════════════════════════════════════")
-        print(String(format: "%-8s %s", "PID", "CDHash"))
+        print("\("PID".padding(toLength: 8, withPad: " ", startingAt: 0)) CDHash")
         print(String(repeating: "─", count: 60))
 
         // Get all PIDs using proc_listallpids

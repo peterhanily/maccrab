@@ -138,9 +138,9 @@ private func runCorpusDiff(args: [String]) async {
             print("")
             print("Wilson 95% CI per component (lower bound is the conservative ship gate):")
             for ci in cis {
-                print(String(
-                    format: "  %-4s  point %6.2f%%   95%% CI [%5.2f%%, %5.2f%%]",
-                    ci.component, ci.pointEstimatePct, ci.ci95LowerPct, ci.ci95UpperPct
+                print("  \(ci.component.padding(toLength: 4, withPad: " ", startingAt: 0))  point " + String(
+                    format: "%6.2f%%   95%% CI [%5.2f%%, %5.2f%%]",
+                    ci.pointEstimatePct, ci.ci95LowerPct, ci.ci95UpperPct
                 ))
             }
         }

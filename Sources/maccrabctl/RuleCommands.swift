@@ -20,7 +20,7 @@ extension MacCrabCtl {
 
         print("Detection Rules (\(jsonFiles.count) total)")
         print("══════════════════════════════════════════════════════════════")
-        print(String(format: "%-8s %-50s %s", "Level", "Title", "Tags"))
+        print("\("Level".padding(toLength: 8, withPad: " ", startingAt: 0)) \("Title".padding(toLength: 50, withPad: " ", startingAt: 0)) Tags")
         print(String(repeating: "─", count: 80))
 
         for file in jsonFiles {
@@ -43,7 +43,7 @@ extension MacCrabCtl {
             default:         levelStr = "[INFO]"
             }
 
-            var line = String(format: "%-8s %-50s %s", levelStr, String(title.prefix(48)), String(tags.prefix(30)))
+            var line = "\(levelStr.padding(toLength: 8, withPad: " ", startingAt: 0)) \(String(title.prefix(48)).padding(toLength: 50, withPad: " ", startingAt: 0)) \(String(tags.prefix(30)))"
             // Visually flag deprecated detections — retained (id/title/
             // suppressions stay valid) but disabled and non-firing.
             if (json["status"] as? String)?.lowercased() == "deprecated" {
