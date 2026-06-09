@@ -18,6 +18,7 @@
 
 import Testing
 import Foundation
+import CSQLCipher
 @testable import MacCrabCore
 
 @Suite("v1.9 → v1.10 multi-store migration")
@@ -53,7 +54,21 @@ struct SchemaMigrationIntegrationTests {
         }
     }
 
-    @Test("Reopen is a no-op — no second-pass migrations applied")
+    /// Read PRAGMA user_version (the migrator's forward-only key) from a store
+    /// DB file. The store DBs are not SQLCipher-keyed, so a read-only open
+    /// suffices. Returns -1 on open/read failure.
+    private func userVersion(at path: String) -> Int {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(path, &handle, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let h = handle else {
+            if let h = handle { sqlite3_close(h) }
+            return -1
+        }
+        defer { sqlite3_close(h) }
+        return (try? SchemaMigrator.readVersion(db: h)) ?? -1
+    }
+
+    @Test("Reopen is a no-op — user_version is stable, no forward migration re-runs")
     func reopenIsIdempotent() async throws {
         let dir = TempDir()
         _ = try EventStore(directory: dir.path)
@@ -61,42 +76,27 @@ struct SchemaMigrationIntegrationTests {
         _ = try CampaignStore(directory: dir.path)
         _ = try await SQLiteCausalGraphStore(databasePath: dir.path + "/tracegraph.db")
 
-        // Capture the mtimes — re-init should not rewrite the schema.
-        let fm = FileManager.default
-        let before: [String: Date] = try [
-            "events.db", "alerts.db", "campaigns.db", "tracegraph.db"
-        ].reduce(into: [:]) { acc, name in
-            let attrs = try fm.attributesOfItem(atPath: dir.path + "/" + name)
-            acc[name] = (attrs[.modificationDate] as? Date) ?? .distantPast
-        }
-        // Brief delay to make any rewrite visible in the mtime.
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // v1.18: replaced a wall-clock mtime heuristic (Δmtime < 15s) that was
+        // chronically flaky under full-suite parallel contention — it measured
+        // how LONG the reopen took, not WHETHER a migration re-ran. The migrator
+        // re-applies steps idempotently on reopen *without changing the counter*
+        // (SchemaMigrator's own contract), so the deterministic invariant is:
+        // every store's PRAGMA user_version is unchanged across a reopen. A
+        // forward migration wrongly re-running (the v1.7.6 co-resident-counter
+        // regression this suite guards) would move the counter. No timing.
+        let dbs = ["events.db", "alerts.db", "campaigns.db", "tracegraph.db"]
+        let before = dbs.map { userVersion(at: dir.path + "/" + $0) }
 
         _ = try EventStore(directory: dir.path)
         _ = try AlertStore(directory: dir.path)
         _ = try CampaignStore(directory: dir.path)
         _ = try await SQLiteCausalGraphStore(databasePath: dir.path + "/tracegraph.db")
 
-        for (name, prev) in before {
-            let attrs = try fm.attributesOfItem(atPath: dir.path + "/" + name)
-            let now = (attrs[.modificationDate] as? Date) ?? .distantPast
-            // v1.12.8 (Phase 0 cleanup): tolerance raised 1.0s → 15.0s.
-            // Reason: under parallel test-runner contention (1500+ tests
-            // running concurrently), this test's reopen-and-stat path
-            // routinely observes Δmtime of 6–10s while the four store
-            // opens queue behind unrelated I/O on the runner. The actual
-            // failure mode this test guards against — a migration running
-            // a second time on reopen — produces Δmtime in the seconds-
-            // to-minutes range as the migration rewrites the file and
-            // copies data. 15s is still well below what a true repeated
-            // migration would cost while comfortably above the observed
-            // contention floor. Pre-v1.12.8, every push to main forced
-            // --no-verify because this test failed in the suite but
-            // passed in isolation (0.27s). Tracked for fix-via-suite-
-            // isolation in a future SwiftTesting upgrade.
-            let delta = now.timeIntervalSince(prev)
-            #expect(delta < 15.0,
-                    "\(name) was rewritten on reopen (Δmtime \(delta)s) — implies a migration ran twice")
+        let after = dbs.map { userVersion(at: dir.path + "/" + $0) }
+        for (i, name) in dbs.enumerated() {
+            #expect(before[i] >= 0, "\(name): could not read user_version on first open")
+            #expect(before[i] == after[i],
+                    "\(name): user_version changed on reopen (\(before[i]) → \(after[i])) — a forward migration re-ran")
         }
     }
 

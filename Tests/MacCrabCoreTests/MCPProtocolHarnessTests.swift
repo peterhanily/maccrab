@@ -15,7 +15,13 @@
 import Testing
 import Foundation
 
-@Suite("MCP protocol contract")
+// .serialized: each test spawns (and, on first run, BUILDS) the maccrab-mcp
+// binary. Run in parallel under full-suite load, the 7 tests raced a
+// concurrent `swift build --product maccrab-mcp` (thundering herd) plus a
+// 7-way spawn, which intermittently timed out the read watchdog → empty
+// responses → the flaky failures seen in the default gate. Serializing the
+// suite means one build, one spawn at a time; other suites still run parallel.
+@Suite("MCP protocol contract", .serialized)
 struct MCPProtocolHarnessTests {
 
     /// Locate the built maccrab-mcp binary, building it once if absent.
