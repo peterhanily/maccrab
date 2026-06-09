@@ -269,23 +269,39 @@ else
         ok "Every localized key in Swift has an en.lproj entry"
     fi
 
-    # Per-locale coverage
+    # Per-locale coverage — key count AND value-divergence. A bundle can carry
+    # 100% of the keys while most VALUES are byte-identical English (i.e. not
+    # actually translated); the old key-count ratio reported that as 100% and
+    # hid it (audit). Report the translated-value %, which is the real signal.
     for lproj in Sources/MacCrabApp/Resources/*.lproj; do
         [[ -d "$lproj" ]] || continue
         LOCALE=$(basename "$lproj" .lproj)
         [[ "$LOCALE" == "en" ]] && continue
         LOCALE_STRINGS="$lproj/Localizable.strings"
         [[ -f "$LOCALE_STRINGS" ]] || continue
-        LOCALE_KEYS=$(grep -oE '^"[^"]+"' "$LOCALE_STRINGS" | tr -d '"' | sort -u)
-        LOCALE_COUNT=$(echo "$LOCALE_KEYS" | grep -c '^' || echo 0)
+        read -r LOCALE_COUNT TRANSLATED_PCT < <(python3 - "$EN_STRINGS" "$LOCALE_STRINGS" <<'PY'
+import re, sys
+def parse(p):
+    d = {}
+    for ln in open(p, encoding="utf-8", errors="replace"):
+        m = re.match(r'\s*"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"\s*;', ln)
+        if m: d[m.group(1)] = m.group(2)
+    return d
+en = parse(sys.argv[1]); loc = parse(sys.argv[2])
+shared = [k for k in loc if k in en]
+translated = sum(1 for k in shared if loc[k] != en[k])
+pct = (100 * translated // len(en)) if en else 0
+print(len(loc), pct)
+PY
+)
         if [[ "$EN_COUNT" -gt 0 ]]; then
-            PERCENT=$(( 100 * LOCALE_COUNT / EN_COUNT ))
-            if [[ "$PERCENT" -lt 50 ]]; then
-                warn "$LOCALE: $LOCALE_COUNT/$EN_COUNT keys ($PERCENT%) — below 50%"
-            elif [[ "$PERCENT" -lt 100 ]]; then
-                info "$LOCALE: $LOCALE_COUNT/$EN_COUNT keys ($PERCENT%)"
+            KEYPCT=$(( 100 * LOCALE_COUNT / EN_COUNT ))
+            if [[ "$TRANSLATED_PCT" -lt 50 ]]; then
+                warn "$LOCALE: $LOCALE_COUNT/$EN_COUNT keys (${KEYPCT}%) but only ${TRANSLATED_PCT}% translated — rest byte-identical English"
+            elif [[ "$TRANSLATED_PCT" -lt 90 ]]; then
+                info "$LOCALE: $LOCALE_COUNT/$EN_COUNT keys, ${TRANSLATED_PCT}% translated"
             else
-                ok "$LOCALE: $LOCALE_COUNT/$EN_COUNT keys (100%)"
+                ok "$LOCALE: $LOCALE_COUNT/$EN_COUNT keys, ${TRANSLATED_PCT}% translated"
             fi
         fi
     done
