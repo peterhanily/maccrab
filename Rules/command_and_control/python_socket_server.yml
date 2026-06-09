@@ -47,28 +47,9 @@ detection:
             - "bind=(''"
             - "bind=('',"
             - 'INADDR_ANY'
-    filter_terminal:
-        ParentImage|endswith:
-            - '/bash'
-            - '/zsh'
-            - '/sh'
-            - '/fish'
-            - '/dash'
-            - '/Terminal'
-            - '/iTerm2'
-            - '/Alacritty'
-            - '/kitty'
-            - '/WarpTerminal'
-            - '/tmux'
-            - '/screen'
-            - '/Cursor'
-            - '/Code'
-            - '/Code Helper'
-            - '/Xcode'
-            - '/PyCharm'
     filter_apple_parent:
         ParentSignerType: 'apple'
-    condition: selection_python and selection_server and selection_external_bind and not filter_terminal and not filter_apple_parent
+    condition: selection_python and selection_server and selection_external_bind and not filter_apple_parent
 falsepositives:
     - Self-hosted internal services intentionally bound to all interfaces
     - Container or CI runners using Python servers on 0.0.0.0

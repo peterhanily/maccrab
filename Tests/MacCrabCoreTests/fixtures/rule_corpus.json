@@ -136,5 +136,9 @@
                  "parentExec": "/Applications/Cursor.app/Contents/MacOS/Cursor" } },
   { "name": "W2-T2 FP: a human running sudo in a terminal does NOT fire AI-sudo (AI-parent gate)",
     "category": "process_creation", "ruleId": "d1a2b3c4-2002-4000-a000-000000002002", "shouldFire": false,
-    "process": { "executable": "/usr/bin/sudo", "commandLine": "sudo whoami", "signer": "apple", "parentExec": "/bin/zsh" } }
+    "process": { "executable": "/usr/bin/sudo", "commandLine": "sudo whoami", "signer": "apple", "parentExec": "/bin/zsh" } },
+
+  { "name": "shell-launched nc listener fires (W2-T3: filter_terminal no longer suppresses the primary C2 path)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-0241-4000-a000-000000000241", "shouldFire": true,
+    "process": { "executable": "/usr/bin/nc", "commandLine": "nc -lvp 4444", "signer": "apple", "parentExec": "/bin/zsh" } }
 ]
