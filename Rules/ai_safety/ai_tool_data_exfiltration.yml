@@ -10,6 +10,10 @@ description: >
     an attacker-controlled server.
 author: MacCrab Community
 date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1041/
+    - https://attack.mitre.org/techniques/T1048/003/
+    - https://attack.mitre.org/techniques/T1071/001/
 tags:
     - attack.exfiltration
     - attack.t1041

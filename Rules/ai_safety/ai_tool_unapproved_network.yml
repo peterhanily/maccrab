@@ -9,6 +9,9 @@ description: >
     prompt-injection-driven data exfiltration or supply-chain compromise.
 author: MacCrab Community
 date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1041/
+    - https://attack.mitre.org/techniques/T1071/001/
 tags:
     - attack.command_and_control
     - attack.exfiltration

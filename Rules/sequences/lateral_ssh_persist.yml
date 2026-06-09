@@ -6,6 +6,8 @@ description: >
     locations, indicating automated lateral movement with persistence.
 author: MacCrab Community
 date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1021/004/
 tags:
     - attack.lateral_movement
     - attack.persistence

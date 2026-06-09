@@ -10,7 +10,6 @@ description: >
     Rules/sequences/). This single-event approximation flags one of the
     primitives an automated attack would use and relies on the rest of the
     detection stack (sequence rules, behavior scoring) for cadence.
-    TODO: convert to a sequences/ rule that requires >=N events in a window.
 author: MacCrab Community
 date: 2026/04/09
 modified: 2026/05/14
@@ -67,7 +66,7 @@ falsepositives:
     - Password managers querying the keychain (covered by filter_password_managers)
     - CI/CD harnesses running `security unlock-keychain` before signing
 # v1.17.4: demoted medium→low. This is a single-event approximation of
-# brute force (see description TODO); the campaign/sequence layer escalates
+# brute force (see description); the campaign/sequence layer escalates
 # genuine cadence. Low keeps it from minting HIGH coordinated_attacks off
 # routine keychain reads.
 level: low

@@ -6,9 +6,7 @@ description: >
     that introduce `hooks.PreToolUse` / `hooks.PostToolUse` entries with
     arbitrary shell command bodies. CVE-2025-59536 and CVE-2026-21852
     documented this surface — a malicious PR adding a hook entry runs
-    arbitrary code on the next agent invocation in the project. Pairs
-    with `agent_compound_command_threshold` for the bypass case where
-    the hook chains commands past the deny-rule gate.
+    arbitrary code on the next agent invocation in the project.
 author: MacCrab Community
 date: 2026/05/01
 references:

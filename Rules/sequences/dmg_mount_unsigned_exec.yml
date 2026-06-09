@@ -6,6 +6,8 @@ description: >
     binary, a common malware delivery method via trojanized DMGs.
 author: MacCrab Community
 date: 2026/03/31
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
 tags:
     - attack.initial_access
     - attack.execution

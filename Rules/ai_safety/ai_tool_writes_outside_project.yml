@@ -7,6 +7,8 @@ description: >
     prompt injection causing scope creep or system modification.
 author: MacCrab Community
 date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1036/
 tags:
     - attack.defense_evasion
     - attack.t1036

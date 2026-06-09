@@ -6,6 +6,8 @@ description: >
     sources that are not common package registries or known CDNs.
 author: MacCrab Community
 date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1105/
 tags:
     - attack.command_and_control
     - attack.t1105

@@ -6,6 +6,8 @@ description: >
     tools that may contain hidden prompt injection or malicious instructions.
 author: MacCrab Community
 date: 2026/04/04
+references:
+    - https://attack.mitre.org/techniques/T1027/
 tags:
     - attack.defense_evasion
     - attack.t1027
