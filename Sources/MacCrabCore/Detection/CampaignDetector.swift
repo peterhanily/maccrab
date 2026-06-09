@@ -343,8 +343,23 @@ public actor CampaignDetector {
 
         guard count >= stormThreshold else { return nil }
 
-        let isCritical = count >= stormCriticalThreshold
-        let severity: Severity = isCritical ? .critical : .high
+        // FP fix: previously the storm severity came from VOLUME ALONE, so a
+        // chatty low/info rule firing past the threshold minted a false
+        // CRITICAL campaign (the #1 real-world false critical). Now: (1) gate —
+        // only rules of severity >= .medium can form a storm (chatty low/info
+        // rules are exactly the noise source), and (2) cap — the storm's
+        // severity never exceeds the contributing rule's own severity.
+        func rank(_ s: Severity) -> Int {
+            switch s {
+            case .critical: return 4; case .high: return 3; case .medium: return 2
+            case .low: return 1; case .informational: return 0
+            }
+        }
+        let ruleSeverity = latestAlert.severity
+        guard rank(ruleSeverity) >= rank(.medium) else { return nil }
+        let volumeSeverity: Severity = (count >= stormCriticalThreshold) ? .critical : .high
+        let severity: Severity = rank(volumeSeverity) <= rank(ruleSeverity) ? volumeSeverity : ruleSeverity
+        let isCritical = severity == .critical
         let ratePerMinute = Double(count) / (stormWindow / 60.0)
         let title = isCritical
             ? "Alert Storm: active attack in progress"

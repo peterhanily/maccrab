@@ -9,11 +9,24 @@
       "where": {
         "executable_name": {
           "in": [
-            "npm", "npx", "pnpm", "yarn", "node",
-            "pip", "pip3", "uv", "poetry", "python", "python3",
-            "bun", "deno",
-            "gem", "ruby", "bundle",
-            "cargo", "rustup",
+            "npm",
+            "npx",
+            "pnpm",
+            "yarn",
+            "node",
+            "pip",
+            "pip3",
+            "uv",
+            "poetry",
+            "python",
+            "python3",
+            "bun",
+            "deno",
+            "gem",
+            "ruby",
+            "bundle",
+            "cargo",
+            "rustup",
             "twine"
           ]
         }
@@ -21,18 +34,50 @@
     },
     "cred": {
       "type": "file",
-      "where": { "file_kind": { "equals": "credential_file" } }
+      "where": {
+        "file_kind": {
+          "equals": "credential_file"
+        }
+      }
     },
     "net": {
       "type": "network",
-      "where": { "reputation": { "not_in": ["known_good", "private_range"] } }
+      "where": {
+        "reputation": {
+          "in": [
+            "suspicious",
+            "malicious"
+          ]
+        }
+      }
     }
   },
   "edges": [
-    { "from": "proc", "to": "cred", "relation": "read",         "min_tier": "weak_inferred" },
-    { "from": "proc", "to": "net",  "relation": "connected_to", "min_tier": "weak_inferred" }
+    {
+      "from": "proc",
+      "to": "cred",
+      "relation": "read",
+      "min_tier": "weak_inferred"
+    },
+    {
+      "from": "proc",
+      "to": "net",
+      "relation": "connected_to",
+      "min_tier": "weak_inferred"
+    }
   ],
-  "scope": { "common_ancestor": "proc", "max_depth": 4 },
-  "constraints": { "within_seconds": 120, "min_confidence": 0.7 },
-  "attack": ["T1195.001", "T1555", "T1567", "T1098"]
+  "scope": {
+    "common_ancestor": "proc",
+    "max_depth": 4
+  },
+  "constraints": {
+    "within_seconds": 120,
+    "min_confidence": 0.7
+  },
+  "attack": [
+    "T1195.001",
+    "T1555",
+    "T1567",
+    "T1098"
+  ]
 }

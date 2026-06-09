@@ -97,5 +97,26 @@
   { "name": "JXA ObjC bridge download fires (B3: was dead via not-PlatformBinary on Apple osascript)",
     "category": "process_creation", "ruleId": "d1a2b3c4-0007-4000-a000-000000000007", "shouldFire": true,
     "process": { "executable": "/usr/bin/osascript", "commandLine": "osascript -l JavaScript -e 'ObjC.import(\"Foundation\"); $.NSURLSession; curl '",
-                 "signer": "apple", "parentExec": "/bin/zsh" } }
+                 "signer": "apple", "parentExec": "/bin/zsh" } },
+
+  { "name": "actual xmrig binary fires crypto miner", "category": "process_creation",
+    "ruleId": "d1a2b3c4-0425-4000-a000-000000000425", "shouldFire": true,
+    "process": { "executable": "/tmp/xmrig", "commandLine": "xmrig -o pool.evil:3333", "signer": "unsigned" } },
+  { "name": "W2-T1 FP: killall xmrig does NOT fire crypto miner (dropped bare-cmdline branch)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-0425-4000-a000-000000000425", "shouldFire": false,
+    "process": { "executable": "/bin/zsh", "commandLine": "killall xmrig", "signer": "apple" } },
+
+  { "name": "dd wipe to a raw disk device fires disk-wipe", "category": "process_creation",
+    "ruleId": "f0e1d2c3-a001-4000-e000-00000000a001", "shouldFire": true,
+    "process": { "executable": "/bin/dd", "commandLine": "dd if=/dev/zero of=/dev/rdisk2 bs=1m", "signer": "apple" } },
+  { "name": "W2-T1 FP: shred of a user file does NOT fire critical disk-wipe (dropped shred branch)",
+    "category": "process_creation", "ruleId": "f0e1d2c3-a001-4000-e000-00000000a001", "shouldFire": false,
+    "process": { "executable": "/usr/bin/shred", "commandLine": "shred -u /Users/t/secret.txt", "signer": "unsigned" } },
+
+  { "name": "spctl --master-disable fires gatekeeper override", "category": "process_creation",
+    "ruleId": "d1a2b3c4-1008-4000-a000-000000001008", "shouldFire": true,
+    "process": { "executable": "/usr/sbin/spctl", "commandLine": "spctl --master-disable", "signer": "apple" } },
+  { "name": "W2-T1 FP: xattr -d quarantine does NOT fire unsuppressible gatekeeper (dropped xattr branch)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-1008-4000-a000-000000001008", "shouldFire": false,
+    "process": { "executable": "/usr/bin/xattr", "commandLine": "xattr -d com.apple.quarantine /Users/t/Downloads/app", "signer": "apple" } }
 ]

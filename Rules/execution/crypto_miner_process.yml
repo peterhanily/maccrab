@@ -31,20 +31,12 @@ detection:
             - '/gminer'
             - '/lolminer'
             - '/ccminer'
-    selection_cmdline:
-        CommandLine|contains:
-            - 'xmrig'
-            - 'minerd'
-            - 'cpuminer'
-            - 'cgminer'
-            - 'bfgminer'
-            - 'ethminer'
-            - 'phoenixminer'
-            - 'nbminer'
-            - 'gminer'
-            - 'lolminer'
-            - 'ccminer'
-    condition: selection_name or selection_cmdline
+    # FP fix: dropped selection_cmdline — bare CommandLine substrings ('xmrig',
+    # 'minerd', …) matched ANY argv mentioning them (a miner-killer script, a
+    # security scan, documentation), and this rule is critical+suppressible:false.
+    # The Image-name match (selection_name) is the reliable, high-confidence
+    # signal for the actual miner binary executing.
+    condition: selection_name
 falsepositives:
     - Legitimate cryptocurrency mining by the system owner
     - Security research and testing

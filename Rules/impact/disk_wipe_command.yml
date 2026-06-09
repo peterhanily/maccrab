@@ -33,10 +33,7 @@ detection:
             - 'eraseDisk'
             - 'secureErase'
             - 'eraseOpticalMedia'
-    selection_shred:
-        Image|endswith: '/shred'
-        CommandLine|re: '.*(/(Users|var|tmp|Volumes|Library|private)).*'
-    condition: (selection_dd_wipe and selection_dd_target_disk) or selection_diskutil_erase or selection_shred
+    condition: (selection_dd_wipe and selection_dd_target_disk) or selection_diskutil_erase
 falsepositives:
     - IT administrators securely wiping drives before decommission
     - Security researchers using dd in controlled test environments
