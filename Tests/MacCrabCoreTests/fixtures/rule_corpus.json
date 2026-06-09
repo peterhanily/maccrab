@@ -88,6 +88,10 @@
     "category": "process_creation", "ruleId": "d1a2b3c4-0003-4000-a000-000000000003", "shouldFire": false,
     "process": { "executable": "/bin/bash", "commandLine": "curl -s http://apple.com/x | bash",
                  "signer": "apple", "parentExec": "/usr/libexec/some_daemon" } },
+  { "name": "W3-C: a known-installer curl|sh (rustup) does NOT fire (filter_known_installers)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-0003-4000-a000-000000000003", "shouldFire": false,
+    "process": { "executable": "/bin/bash", "commandLine": "curl -s https://sh.rustup.rs | sh",
+                 "signer": "apple", "parentExec": "/bin/zsh" } },
 
   { "name": "osascript do-shell-script fires (B3: was dead via not-SignerType:apple on Apple osascript)",
     "category": "process_creation", "ruleId": "d1a2b3c4-0454-4000-b000-000000000454", "shouldFire": true,

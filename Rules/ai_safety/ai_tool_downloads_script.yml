@@ -48,7 +48,25 @@ detection:
             - 'Windsurf.app'
             - 'Visual Studio Code.app'
             - '/Code Helper'
-    condition: selection_download and selection_pipe_exec and selection_ai_parent
+    # v1.18 audit: an AI assistant running a documented `curl <url> | sh` install
+    # (Homebrew, rustup, docker, …) is benign dev setup. Suppress the well-known
+    # installer endpoints (same set as fileless_attack_indicators); an off-list /
+    # typosquat domain still fires.
+    filter_known_installers:
+        CommandLine|contains:
+            - 'sh.rustup.rs'
+            - 'get.docker.com'
+            - 'raw.githubusercontent.com/Homebrew/install/'
+            - 'raw.githubusercontent.com/nvm-sh/nvm/'
+            - 'sh.brew.sh'
+            - 'install.python-poetry.org'
+            - 'astral.sh/uv/install'
+            - 'starship.rs/install'
+            - 'fnm.vercel.app/install'
+            - 'pyenv.run'
+            - 'get.sdkman.io'
+            - 'cli.github.com'
+    condition: selection_download and selection_pipe_exec and selection_ai_parent and not filter_known_installers
 falsepositives:
     - Legitimate installation scripts (Homebrew, rustup, nvm)
 level: medium

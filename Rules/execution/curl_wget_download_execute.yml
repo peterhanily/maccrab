@@ -42,7 +42,25 @@ detection:
             - '/System/'
             - '/usr/libexec/'
             - '/usr/sbin/'
-    condition: selection_shell and selection_pipe and selection_execute and not filter_system
+    # v1.18 audit: now that this survives Gate 7 on the Apple shell, suppress the
+    # documented `curl -s <url> | sh` install path for well-known tools (same
+    # trusted-installer set as fileless_attack_indicators) so legit dev setup
+    # doesn't fire. A typosquat / off-list domain still trips it.
+    filter_known_installers:
+        CommandLine|contains:
+            - 'sh.rustup.rs'
+            - 'get.docker.com'
+            - 'raw.githubusercontent.com/Homebrew/install/'
+            - 'raw.githubusercontent.com/nvm-sh/nvm/'
+            - 'sh.brew.sh'
+            - 'install.python-poetry.org'
+            - 'astral.sh/uv/install'
+            - 'starship.rs/install'
+            - 'fnm.vercel.app/install'
+            - 'pyenv.run'
+            - 'get.sdkman.io'
+            - 'cli.github.com'
+    condition: selection_shell and selection_pipe and selection_execute and not filter_system and not filter_known_installers
 falsepositives:
     - Legitimate install scripts (Homebrew, rustup, nvm)
 level: medium
