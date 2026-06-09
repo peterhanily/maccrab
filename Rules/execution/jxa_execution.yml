@@ -44,7 +44,6 @@ detection:
             - 'shellScript'
             - 'do shell script'
     filter_apple:
-        PlatformBinary: 'true'
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'

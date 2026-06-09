@@ -37,7 +37,6 @@ detection:
             - 'smb://'
             - 'afp://'
     filter_apple_parent:
-        PlatformBinary: 'true'
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'

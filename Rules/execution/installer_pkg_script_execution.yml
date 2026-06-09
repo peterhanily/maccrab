@@ -39,7 +39,6 @@ detection:
             - '/perl'
             - '/ruby'
     filter_apple_installer:
-        SignerType: 'apple'
         CommandLine|contains:
             - '/System/Library/'
             - 'com.apple.'

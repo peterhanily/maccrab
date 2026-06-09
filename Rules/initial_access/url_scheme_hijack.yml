@@ -31,9 +31,13 @@ detection:
             - 'LSHandlers'
             - 'CFBundleURLSchemes'
             - 'CFBundleURLTypes'
-    filter_apple:
-        SignerType: 'apple'
-    condition: (selection_lsregister or selection_defaults) and not filter_apple
+    filter_system_parent:
+        ParentImage|startswith:
+            - '/System/'
+            - '/usr/libexec/'
+            - '/usr/sbin/'
+            - '/Library/Apple/'
+    condition: (selection_lsregister or selection_defaults) and not filter_system_parent
 falsepositives:
     - Legitimate app installations registering their URL schemes
     - Developer testing custom URL handlers

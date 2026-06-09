@@ -31,9 +31,7 @@ detection:
         ParentImage|startswith:
             - '/System/'
             - '/usr/libexec/'
-    filter_apple_signed:
-        SignerType: 'apple'
-    condition: selection and not filter_system and not filter_apple_signed
+    condition: selection and not filter_system
 falsepositives:
     - Legitimate installation scripts using process substitution
     - Homebrew formula installation
