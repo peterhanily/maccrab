@@ -116,6 +116,11 @@ public actor TCCMonitor {
 
     /// File descriptors and dispatch sources for watching database files.
     private var watchSources: [DispatchSourceFileSystemObject] = []
+
+    /// Resolves the code signature of the TCC client so SignerType is accurate.
+    /// Before v1.18 the TCC event carried no codeSignature at all → SignerType
+    /// resolved to nil → every "granted to unsigned" rule fired on signed apps.
+    private let codeSigningCache = CodeSigningCache()
     private var watchFileDescriptors: [Int32] = []
 
     /// Debounce interval to coalesce rapid database writes (in seconds).
@@ -344,7 +349,7 @@ public actor TCCMonitor {
     ///
     /// Implements simple debouncing to coalesce rapid writes (tccd often
     /// writes multiple times for a single user action).
-    private func handleDatabaseChange() {
+    private func handleDatabaseChange() async {
         let now = Date()
         guard now.timeIntervalSince(lastChangeTime) >= debounceInterval else {
             return
@@ -359,18 +364,18 @@ public actor TCCMonitor {
             if let previous = previousEntries[key] {
                 // Entry exists in both — check if the auth value changed
                 if previous.authValue != entry.authValue {
-                    emitEvent(entry: entry, previousAuthValue: previous.authValue)
+                    await emitEvent(entry: entry, previousAuthValue: previous.authValue)
                 }
             } else {
                 // Brand new entry
-                emitEvent(entry: entry, previousAuthValue: nil)
+                await emitEvent(entry: entry, previousAuthValue: nil)
             }
         }
 
         // Detect revocations (entries that were removed entirely)
         for (key, previousEntry) in previousEntries {
             if currentEntries[key] == nil {
-                emitRevocationEvent(entry: previousEntry)
+                await emitRevocationEvent(entry: previousEntry)
             }
         }
 
@@ -381,7 +386,7 @@ public actor TCCMonitor {
     // MARK: - Event Emission
 
     /// Emits an event for a new or changed TCC entry.
-    private func emitEvent(entry: TCCEntry, previousAuthValue: Int?) {
+    private func emitEvent(entry: TCCEntry, previousAuthValue: Int?) async {
         let allowed = entry.authValue == 2
         let eventAction: String
         let eventType: EventType
@@ -394,7 +399,7 @@ public actor TCCMonitor {
             eventType = .deletion
         }
 
-        let event = buildEvent(
+        let event = await buildEvent(
             entry: entry,
             eventType: eventType,
             eventAction: eventAction,
@@ -411,8 +416,8 @@ public actor TCCMonitor {
     }
 
     /// Emits a revocation event for an entry that was removed from the database.
-    private func emitRevocationEvent(entry: TCCEntry) {
-        let event = buildEvent(
+    private func emitRevocationEvent(entry: TCCEntry) async {
+        let event = await buildEvent(
             entry: entry,
             eventType: .deletion,
             eventAction: "tcc_revoke",
@@ -435,7 +440,7 @@ public actor TCCMonitor {
         eventAction: String,
         allowed: Bool,
         previousAuthValue: Int?
-    ) -> Event {
+    ) async -> Event {
         let authReasonString = Self.authReasonNames[entry.authReason] ?? "reason_\(entry.authReason)"
 
         // Resolve the client path if the client type indicates an absolute path
@@ -446,6 +451,15 @@ public actor TCCMonitor {
             // Bundle identifier — attempt to resolve via Launch Services
             clientPath = resolveBundlePath(bundleId: entry.client)
         }
+
+        // Resolve the client's ACTUAL code signature so SignerType is accurate.
+        // When the path is unresolvable the signature stays nil → SignerType
+        // resolves to nil, which the (positive) `SignerType: unsigned` TCC rules
+        // do NOT match — i.e. an unknown client is treated as "don't fire",
+        // never as "unsigned". This is what fixes the whole TCC FP family.
+        let clientSignature = clientPath.isEmpty
+            ? nil
+            : await codeSigningCache.evaluate(path: clientPath)
 
         let tccInfo = TCCInfo(
             service: entry.service,
@@ -467,7 +481,8 @@ public actor TCCMonitor {
             userId: 0,
             userName: "",
             groupId: 0,
-            startTime: Date(timeIntervalSince1970: entry.lastModified)
+            startTime: Date(timeIntervalSince1970: entry.lastModified),
+            codeSignature: clientSignature
         )
 
         // Build enrichments with TCC-specific metadata

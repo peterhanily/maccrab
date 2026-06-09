@@ -21,10 +21,6 @@ detection:
             - 'kTCCServiceContacts'
             - 'kTCCServiceAddressBook'
         TCCAllowed: 'true'
-    filter_signed:
-        SignerType:
-            - 'apple'
-            - 'appStore'
     filter_known_apps:
         TCCClient|contains:
             - 'com.apple.AddressBook'
@@ -33,7 +29,11 @@ detection:
             - 'com.apple.mail'
             - 'com.tinyspeck.slackmacgap'
             - 'com.google.Chrome'
-    condition: selection and not filter_signed and not filter_known_apps
+    selection_unsigned:
+        SignerType:
+            - 'unsigned'
+            - 'adHoc'
+    condition: selection and selection_unsigned and not filter_known_apps
 falsepositives:
     - CRM applications (Salesforce, HubSpot native apps)
     - Email clients with contact sync

@@ -38,9 +38,11 @@ detection:
             - 'com.apple.GarageBand'
             - 'com.adobe.Audition'
             - 'com.loom.'
-    filter_signed:
-        SignerType: 'apple'
-    condition: selection and not filter_known_apps and not filter_signed
+    selection_unsigned:
+        SignerType:
+            - 'unsigned'
+            - 'adHoc'
+    condition: selection and not filter_known_apps and selection_unsigned
 falsepositives:
     - VoIP or conferencing tools not in the filter list
     - Audio recording and podcast applications

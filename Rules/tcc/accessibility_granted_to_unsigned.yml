@@ -16,12 +16,11 @@ detection:
     selection:
         TCCService: 'kTCCServiceAccessibility'
         TCCAllowed: 'true'
-    filter_signed:
+    selection_unsigned:
         SignerType:
-            - 'apple'
-            - 'appStore'
-            - 'devId'
-    condition: selection and not filter_signed
+            - 'unsigned'
+            - 'adHoc'
+    condition: selection and selection_unsigned
 falsepositives:
     - Legitimate assistive technology applications
 level: medium

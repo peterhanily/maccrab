@@ -29,9 +29,11 @@ detection:
             - 'com.apple.Safari'
             - 'com.webex.'
             - 'com.discord'
-    filter_signed:
-        SignerType: 'apple'
-    condition: selection and not filter_known_apps and not filter_signed
+    selection_unsigned:
+        SignerType:
+            - 'unsigned'
+            - 'adHoc'
+    condition: selection and not filter_known_apps and selection_unsigned
 falsepositives:
     - New or niche video conferencing tools
     - Streaming applications (OBS)

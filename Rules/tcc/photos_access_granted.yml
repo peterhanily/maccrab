@@ -22,10 +22,6 @@ detection:
             - 'kTCCServicePhotos'
             - 'kTCCServiceMediaLibrary'
         TCCAllowed: 'true'
-    filter_signed:
-        SignerType:
-            - 'apple'
-            - 'appStore'
     filter_known_apps:
         TCCClient|contains:
             - 'com.apple.Photos'
@@ -35,7 +31,11 @@ detection:
             - 'com.adobe.Lightroom'
             - 'com.skylum.luminar'
             - 'com.apple.Image_Capture'
-    condition: selection and not filter_signed and not filter_known_apps
+    selection_unsigned:
+        SignerType:
+            - 'unsigned'
+            - 'adHoc'
+    condition: selection and selection_unsigned and not filter_known_apps
 falsepositives:
     - Photo editing tools distributed outside the App Store
     - Backup utilities that sync photo libraries

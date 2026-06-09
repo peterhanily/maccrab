@@ -140,5 +140,14 @@
 
   { "name": "shell-launched nc listener fires (W2-T3: filter_terminal no longer suppresses the primary C2 path)",
     "category": "process_creation", "ruleId": "d1a2b3c4-0241-4000-a000-000000000241", "shouldFire": true,
-    "process": { "executable": "/usr/bin/nc", "commandLine": "nc -lvp 4444", "signer": "apple", "parentExec": "/bin/zsh" } }
+    "process": { "executable": "/usr/bin/nc", "commandLine": "nc -lvp 4444", "signer": "apple", "parentExec": "/bin/zsh" } },
+
+  { "name": "unsigned app granted Accessibility fires (W2-T4 TCC)", "category": "tcc_event",
+    "ruleId": "d1a2b3c4-0081-4000-a000-000000000081", "shouldFire": true,
+    "process": { "executable": "/Applications/Sketchy.app/Contents/MacOS/Sketchy", "commandLine": "", "signer": "unsigned" },
+    "tcc": { "service": "kTCCServiceAccessibility", "allowed": true } },
+  { "name": "W2-T4 FP: a Developer-ID-signed app granted Accessibility does NOT fire (TCC signer now resolved)",
+    "category": "tcc_event", "ruleId": "d1a2b3c4-0081-4000-a000-000000000081", "shouldFire": false,
+    "process": { "executable": "/Applications/Rectangle.app/Contents/MacOS/Rectangle", "commandLine": "", "signer": "devId" },
+    "tcc": { "service": "kTCCServiceAccessibility", "allowed": true } }
 ]

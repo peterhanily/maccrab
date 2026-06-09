@@ -18,6 +18,13 @@ struct RuleCorpusFixture: Codable {
     let shouldFire: Bool
     let process: ProcessFixture
     var file: FileFixture?     // present → builds a file_event instead of process_creation
+    var tcc: TCCFixture?       // present → builds a tcc_event (process carries the signer)
+}
+
+struct TCCFixture: Codable {
+    let service: String
+    let allowed: Bool
+    var client: String?
 }
 
 struct ProcessFixture: Codable {
@@ -65,6 +72,12 @@ struct RuleCorpusTests {
             if let c = ff.content { enr["FileContent"] = c }
             return Event(eventCategory: .file, eventType: .change, eventAction: ff.action,
                          process: proc, file: FileInfo(path: ff.path, action: action), enrichments: enr)
+        }
+        if let tc = f.tcc {
+            let info = TCCInfo(service: tc.service, client: tc.client ?? "com.example.app",
+                               clientPath: f.process.executable, allowed: tc.allowed, authReason: "user_consent")
+            return Event(eventCategory: .tcc, eventType: .creation, eventAction: "tcc_grant",
+                         process: proc, tcc: info)
         }
         return Event(eventCategory: .process, eventType: .start, eventAction: "exec", process: proc)
     }
