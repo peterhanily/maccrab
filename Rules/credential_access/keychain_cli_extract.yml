@@ -1,6 +1,11 @@
 title: Keychain Password Extraction via security CLI
 id: d1a2b3c4-0320-4000-a000-000000000320
-status: experimental
+# DEPRECATED (v1.18): strict subset of keychain_dump_via_security.yml — that rule
+# matches the same base `security` subcommands (find-generic-password,
+# find-internet-password, export -t, find-certificate) via substring, at the same
+# severity + identical parent filters, so it fires on everything this rule's
+# flag-specific variants (-w/-g/-a -p) catch. Verified by adversarial coverage diff.
+status: deprecated
 description: >
     Detects the macOS security CLI being used to extract passwords, certificates,
     or dump the entire keychain. The security command can retrieve stored credentials
