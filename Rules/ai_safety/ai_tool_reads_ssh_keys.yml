@@ -18,7 +18,29 @@ detection:
         TargetFilename|contains: '/.ssh/id_'
     filter_xcode_test:
         ParentImage|endswith: '/swiftpm-testing-helper'
-    condition: selection and not filter_xcode_test
+    selection_ai_parent:
+        ProcessAncestors|contains:
+            - '/claude'
+            - '/claude-code'
+            - '/Cursor'
+            - '/cursor'
+            - '/copilot'
+            - '/gh-copilot'
+            - '/codex'
+            - '/aider'
+            - '/continue'
+            - '/cody'
+            - '/zed'
+            - '/windsurf'
+            - '/Goose'
+            - '/goose'
+            - 'Claude.app'
+            - 'Cursor.app'
+            - 'Zed.app'
+            - 'Windsurf.app'
+            - 'Visual Studio Code.app'
+            - '/Code Helper'
+    condition: selection and selection_ai_parent and not filter_xcode_test
 falsepositives:
     - Git operations that use SSH authentication
     - scp/rsync file transfers

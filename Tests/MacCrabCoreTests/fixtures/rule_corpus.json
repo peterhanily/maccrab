@@ -118,5 +118,23 @@
     "process": { "executable": "/usr/sbin/spctl", "commandLine": "spctl --master-disable", "signer": "apple" } },
   { "name": "W2-T1 FP: xattr -d quarantine does NOT fire unsuppressible gatekeeper (dropped xattr branch)",
     "category": "process_creation", "ruleId": "d1a2b3c4-1008-4000-a000-000000001008", "shouldFire": false,
-    "process": { "executable": "/usr/bin/xattr", "commandLine": "xattr -d com.apple.quarantine /Users/t/Downloads/app", "signer": "apple" } }
+    "process": { "executable": "/usr/bin/xattr", "commandLine": "xattr -d com.apple.quarantine /Users/t/Downloads/app", "signer": "apple" } },
+
+  { "name": "AI tool descendant reading ~/.ssh/id_rsa fires (W2-T2 gate present)", "category": "file_event",
+    "ruleId": "d1a2b3c4-2006-4000-a000-000000002006", "shouldFire": true,
+    "process": { "executable": "/bin/cat", "commandLine": "cat id_rsa", "signer": "apple",
+                 "parentExec": "/Applications/Claude.app/Contents/MacOS/claude" },
+    "file": { "path": "/Users/t/.ssh/id_rsa", "action": "open" } },
+  { "name": "W2-T2 FP: a non-AI process reading ~/.ssh/id_rsa does NOT fire (AI-parent gate)",
+    "category": "file_event", "ruleId": "d1a2b3c4-2006-4000-a000-000000002006", "shouldFire": false,
+    "process": { "executable": "/usr/bin/ssh", "commandLine": "ssh host", "signer": "apple", "parentExec": "/bin/zsh" },
+    "file": { "path": "/Users/t/.ssh/id_rsa", "action": "open" } },
+
+  { "name": "AI tool descendant running sudo fires (W2-T2 gate present)", "category": "process_creation",
+    "ruleId": "d1a2b3c4-2002-4000-a000-000000002002", "shouldFire": true,
+    "process": { "executable": "/usr/bin/sudo", "commandLine": "sudo whoami", "signer": "apple",
+                 "parentExec": "/Applications/Cursor.app/Contents/MacOS/Cursor" } },
+  { "name": "W2-T2 FP: a human running sudo in a terminal does NOT fire AI-sudo (AI-parent gate)",
+    "category": "process_creation", "ruleId": "d1a2b3c4-2002-4000-a000-000000002002", "shouldFire": false,
+    "process": { "executable": "/usr/bin/sudo", "commandLine": "sudo whoami", "signer": "apple", "parentExec": "/bin/zsh" } }
 ]

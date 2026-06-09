@@ -22,7 +22,29 @@ detection:
             - 'codex'
             - 'openclaw'
             - 'Cursor'
-    condition: selection
+    selection_ai_parent:
+        ProcessAncestors|contains:
+            - '/claude'
+            - '/claude-code'
+            - '/Cursor'
+            - '/cursor'
+            - '/copilot'
+            - '/gh-copilot'
+            - '/codex'
+            - '/aider'
+            - '/continue'
+            - '/cody'
+            - '/zed'
+            - '/windsurf'
+            - '/Goose'
+            - '/goose'
+            - 'Claude.app'
+            - 'Cursor.app'
+            - 'Zed.app'
+            - 'Windsurf.app'
+            - 'Visual Studio Code.app'
+            - '/Code Helper'
+    condition: selection and selection_ai_parent
 falsepositives:
     - Installing system packages that legitimately require sudo
 level: medium

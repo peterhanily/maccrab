@@ -21,7 +21,29 @@ detection:
         CommandLine|contains:
             - 'config --global'
             - 'config --system'
-    condition: selection
+    selection_ai_parent:
+        ProcessAncestors|contains:
+            - '/claude'
+            - '/claude-code'
+            - '/Cursor'
+            - '/cursor'
+            - '/copilot'
+            - '/gh-copilot'
+            - '/codex'
+            - '/aider'
+            - '/continue'
+            - '/cody'
+            - '/zed'
+            - '/windsurf'
+            - '/Goose'
+            - '/goose'
+            - 'Claude.app'
+            - 'Cursor.app'
+            - 'Zed.app'
+            - 'Windsurf.app'
+            - 'Visual Studio Code.app'
+            - '/Code Helper'
+    condition: selection and selection_ai_parent
 falsepositives:
     - Initial git setup
     - AI tools setting user.name or user.email
