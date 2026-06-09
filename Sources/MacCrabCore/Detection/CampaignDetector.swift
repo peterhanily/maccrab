@@ -197,13 +197,6 @@ public actor CampaignDetector {
     /// Detected campaigns (kept for `activeCampaigns` queries).
     private var detectedCampaigns: [Campaign] = []
 
-    /// Incremental tactic index: normalized tactic → count of alerts in the
-    /// current window that carry that tactic. Maintained in lock-step with
-    /// `recentAlerts` via `addToIndexes` / `removeFromIndexes`. Allows
-    /// `checkKillChain()` to run in O(T) (number of unique tactics) rather
-    /// than O(n·t) (alerts × tactics per alert).
-    private var normalizedTacticCounts: [String: Int] = [:]
-
     /// Incremental user-ID index: user ID → count of alerts in the current
     /// window from that user context. Allows `checkLateralMovement()` to run
     /// in O(1) rather than O(n).
@@ -918,9 +911,6 @@ public actor CampaignDetector {
 
     /// Add a newly appended alert to the tactic and user-ID indexes.
     private func addToIndexes(_ alert: AlertSummary) {
-        for tactic in alert.tactics {
-            normalizedTacticCounts[normalizeTactic(tactic), default: 0] += 1
-        }
         if let uid = alert.userId {
             userIdCounts[uid, default: 0] += 1
         }
@@ -928,17 +918,6 @@ public actor CampaignDetector {
 
     /// Remove a stale alert from the tactic and user-ID indexes.
     private func removeFromIndexes(_ alert: AlertSummary) {
-        for tactic in alert.tactics {
-            let n = normalizeTactic(tactic)
-            if let count = normalizedTacticCounts[n] {
-                let newCount = count - 1
-                if newCount <= 0 {
-                    normalizedTacticCounts.removeValue(forKey: n)
-                } else {
-                    normalizedTacticCounts[n] = newCount
-                }
-            }
-        }
         if let uid = alert.userId {
             if let count = userIdCounts[uid] {
                 let newCount = count - 1
