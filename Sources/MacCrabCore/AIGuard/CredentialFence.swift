@@ -198,6 +198,13 @@ public struct CredentialFence: Sendable {
         // benign and must not trip the SSH-key match below.
         if filename.hasSuffix(".pub") { return nil }
 
+        // The OS PUBLIC trust store (/System/Library/Keychains/ — SystemTrust
+        // Settings.plist, SystemCACertificates.keychain, SystemRootCertificates)
+        // is public cert-trust config, NOT a credential database. Reading it is
+        // not credential theft, yet the `/Library/Keychains/` fragment below
+        // matches it as a substring (audit: codesign/security flagged for it).
+        if path.contains("/system/library/keychains/") { return nil }
+
         for sensitive in allPaths {
             let pattern = sensitive.pattern.lowercased()
             switch sensitive.kind {

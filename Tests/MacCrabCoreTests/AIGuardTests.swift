@@ -409,3 +409,19 @@ struct BehaviorScoringEvictionTests {
                 "An early low-score transient should have been evicted")
     }
 }
+
+@Suite("AI Guard: Credential Fence trust-store classification")
+struct CredentialFenceTrustStoreTests {
+    @Test("OS public trust store is NOT a credential (audit AI-Guard #4)")
+    func publicTrustStoreExempt() {
+        let fence = CredentialFence()
+        // /System/Library/Keychains/ is public cert-trust config, not a
+        // credential DB — must not match the /Library/Keychains/ fragment.
+        #expect(fence.checkAccess(filePath: "/System/Library/Keychains/SystemTrustSettings.plist") == nil)
+        #expect(fence.checkAccess(filePath: "/System/Library/Keychains/SystemCACertificates.keychain") == nil)
+        // A real user keychain DB still matches.
+        #expect(fence.checkAccess(filePath: "/Users/x/Library/Keychains/login.keychain-db") == .keychain)
+        // A real SSH private key still matches (not over-suppressed).
+        #expect(fence.checkAccess(filePath: "/Users/x/.ssh/id_rsa") == .sshKey)
+    }
+}

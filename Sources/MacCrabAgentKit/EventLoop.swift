@@ -369,8 +369,25 @@ enum EventLoop {
                     // double-fired on a decoy that the dedicated honeyfile_accessed
                     // detector (keyed on this same IsHoneyfile enrichment) already
                     // handles. The enricher tags these IsHoneyfile=true.
+                    //
+                    // v1.18 (AI-Guard #4): code-signing / notarization tools
+                    // (codesign, security, stapler, …) legitimately read the
+                    // keychain as part of a build and run as Claude Code
+                    // descendants during dev, so the fence flagged them as "AI Tool
+                    // Accessed Keychain" — 130 firings on codesign/security/stapler
+                    // that also fed the 8.0 ai_tool_credential_access indicator and
+                    // escalated to CRITICAL "persistent threat actor" campaigns
+                    // (audit). Their malicious use is covered by the dedicated
+                    // keychain_dump_via_security / keychain-CLI Sigma rules; exempt
+                    // them from the broad AI-credential fence.
+                    let credFenceSubject = (enrichedEvent.process.executable as NSString).lastPathComponent
+                    let credFenceSigningTools: Set<String> = [
+                        "codesign", "security", "stapler", "productsign", "pkgbuild",
+                        "productbuild", "notarytool", "altool", "amfid", "xcodebuild",
+                    ]
                     if let filePath = enrichedEvent.file?.path,
-                       enrichedEvent.enrichments["IsHoneyfile"] != "true" {
+                       enrichedEvent.enrichments["IsHoneyfile"] != "true",
+                       !credFenceSigningTools.contains(credFenceSubject) {
                         if let (credType, credDesc) = state.credentialFence.checkAccessDetailed(
                             filePath: filePath,
                             aiToolName: aiType?.displayName ?? "AI tool"

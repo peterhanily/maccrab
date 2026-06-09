@@ -222,6 +222,11 @@ public actor CrossProcessCorrelator {
         "/dev/tty",
         "/dev/pts/",
         "/dev/ttys",
+        // PTY master. iTerm2 → iTermServer → sudo writing /dev/ptmx is normal
+        // interactive sudo in a terminal (allocating the slave PTY), not a
+        // cross-process attack. EventInsertFilter already treats it as benign;
+        // the two exemption lists had drifted (audit: 35 firings, 19 hand-suppressed).
+        "/dev/ptmx",
         // Homebrew scratch + cellar. `brew install` fires 3,000+ chain
         // events from bash/ruby/curl/git/dirname/readlink touching
         // /opt/homebrew/var/ and /private/tmp/brew-*/. The shell-utility

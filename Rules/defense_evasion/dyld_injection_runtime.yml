@@ -19,10 +19,13 @@ logsource:
     product: macos
 detection:
     selection:
+        # Require the env-var ASSIGNMENT (=), not a bare mention: pre-this a
+        # `grep DYLD_INSERT_LIBRARIES`, a shell snapshot, or docs tripped it
+        # (audit: 25 firings on benign commandlines that merely contained the token).
         CommandLine|contains:
-            - 'DYLD_INSERT_LIBRARIES'
-            - 'DYLD_FRAMEWORK_PATH'
-            - 'DYLD_LIBRARY_PATH'
+            - 'DYLD_INSERT_LIBRARIES='
+            - 'DYLD_FRAMEWORK_PATH='
+            - 'DYLD_LIBRARY_PATH='
     filter_developer:
         ParentImage|endswith:
             - '/Xcode'

@@ -32,12 +32,19 @@ detection:
             - '--update'
             - '--device'
     selection_nvram:
+        # WRITES only — an assignment (var=…) or a delete (-d var). A bare
+        # `nvram boot-args` is a READ (which MacCrab's own security-score poll
+        # runs), and this rule is must-fire, so the read tripped a HIGH every poll
+        # (audit: 90 firings, 89 from MacCrab's own daemon).
         Image|endswith: '/nvram'
         CommandLine|contains:
-            - 'SystemAudioVolume'
-            - 'boot-args'
-            - 'csr-active-config'
-            - 'authenticated-root-hash'
+            - 'SystemAudioVolume='
+            - 'boot-args='
+            - 'csr-active-config='
+            - 'authenticated-root-hash='
+            - '-d boot-args'
+            - '-d csr-active-config'
+            - '-d authenticated-root-hash'
     filter_system_update:
         ParentImage|endswith:
             - '/softwareupdate'
