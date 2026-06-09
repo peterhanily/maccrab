@@ -25,7 +25,6 @@ detection:
             - 'create'
             - 'write'
             - 'rename'
-            - 'clone'
     filter_system:
         TargetFilename|startswith:
             - '/System/'

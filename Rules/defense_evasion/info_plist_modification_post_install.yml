@@ -30,7 +30,6 @@ detection:
     selection_info_plist:
         TargetFilename|endswith: '.app/Contents/Info.plist'
         FileAction:
-            - 'modify'
             - 'close'
     selection_installed_path:
         TargetFilename|contains:

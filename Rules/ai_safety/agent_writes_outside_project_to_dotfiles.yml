@@ -23,7 +23,6 @@ logsource:
 detection:
     selection_dotfile:
         FileAction:
-            - 'modify'
             - 'create'
         TargetFilename|endswith:
             - '/.zshrc'

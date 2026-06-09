@@ -37,7 +37,6 @@ detection:
             - '/.vscode/launch.json'
         FileAction:
             - 'create'
-            - 'modify'
             - 'close'
     # v1.12.0 RC3 fix (Det-H9): the rule's own falsepositive list
     # acknowledged "user editing tasks.json via vim/nvim/emacs",

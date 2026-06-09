@@ -38,7 +38,6 @@ detection:
             - '/Library/Application Support/Murus/'
         FileAction:
             - 'create'
-            - 'modify'
             - 'close'
     filter_vendor_writers:
         Image|contains:

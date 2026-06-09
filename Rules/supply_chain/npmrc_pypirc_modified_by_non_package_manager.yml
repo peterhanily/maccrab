@@ -39,7 +39,6 @@ detection:
             - '/.cargo/credentials'
             - '/.gem/credentials'
         FileAction:
-            - 'modify'
             - 'create'
     filter_package_managers:
         Image|endswith:

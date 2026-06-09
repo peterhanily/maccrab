@@ -37,7 +37,6 @@ detection:
             - '/.gitconfig'
             - '/.git/config'
         FileAction:
-            - 'modify'
             - 'close'
     selection_fingerprint_keys:
         FileContent|contains:

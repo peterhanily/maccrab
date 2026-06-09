@@ -34,7 +34,6 @@ detection:
             - 'create'
             - 'write'
             - 'rename'
-            - 'clone'
     filter_apple:
         SignerType: 'apple'
     condition: selection and not filter_apple
