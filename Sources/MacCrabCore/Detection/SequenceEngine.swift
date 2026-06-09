@@ -40,6 +40,16 @@ public enum ProcessRelation: String, Codable, Sendable {
     case ancestor
     /// Shares a parent with the referenced step's process.
     case sibling
+    /// Exact same process — alias rule authors write as "same_process"
+    /// (semantically identical to `same`). Before v1.18 this token failed to
+    /// decode and silently dropped the entire rule at load.
+    case sameProcess = "same_process"
+    /// Anywhere in the referenced process's tree: the same process, an
+    /// ancestor, or a descendant. Authors write "same_tree".
+    case sameTree = "same_tree"
+    /// No process-relationship constraint — the step is correlated by the
+    /// window + ordering alone. Authors write "any".
+    case any
 }
 
 /// Defines which steps must complete before the sequence fires.
@@ -1133,6 +1143,20 @@ public actor SequenceEngine {
                 return false
             }
             return eventParent.pid == refParent.pid
+
+        case .sameProcess:
+            // Identical to .same (exact PID); separate token used by authors.
+            return eventPid == referencePid
+
+        case .sameTree:
+            // Same process, or anywhere in its ancestry/descendants.
+            if eventPid == referencePid { return true }
+            if await lineage.isDescendant(eventPid, of: referencePid) { return true }
+            return await lineage.isDescendant(referencePid, of: eventPid)
+
+        case .any:
+            // No process-relationship constraint; correlate by window/order only.
+            return true
         }
     }
 

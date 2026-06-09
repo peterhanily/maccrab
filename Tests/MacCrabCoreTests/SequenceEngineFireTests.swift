@@ -137,14 +137,29 @@ struct SequenceEngineFireTests {
         #expect(matches.first { $0.ruleId == "seq-default" }?.suppressible == true)
     }
 
-    @Test("real compiled sequence rules load and index")
+    @Test("EVERY compiled sequence rule loads — no silent decode drops")
     func realRulesLoad() async throws {
-        let seqDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("compiled_rules/sequences")
-        guard FileManager.default.fileExists(atPath: seqDir.path) else { return }  // skip if not compiled
+        // The silent-drop guard. SequenceEngine.loadRules catches per-file
+        // decode errors and logs them, so a step using a token the Swift model
+        // can't decode (e.g. an unknown ProcessRelation like same_tree/
+        // same_process/any, or an unknown correlation) drops the WHOLE rule at
+        // load while it still counts toward the compiled total — exactly how 7
+        // of 41 sequence rules shipped dead before v1.18. Asserting
+        // loaded == compiled-file-count converts that silent drop into a test
+        // failure.
+        ensureRulesCompiled()
+        let seqDir = URL(fileURLWithPath: "/tmp/maccrab_v3/sequences")
+        guard FileManager.default.fileExists(atPath: seqDir.path) else {
+            Issue.record("compiled sequence dir missing — ensureRulesCompiled() did not produce it")
+            return
+        }
+        let jsonCount = try FileManager.default
+            .contentsOfDirectory(at: seqDir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.count
+        #expect(jsonCount > 0, "no compiled sequence rules found")
         let engine = SequenceEngine(lineage: ProcessLineage())
-        let n = try await engine.loadRules(from: seqDir)
-        #expect(n > 0, "expected real compiled sequence rules to load")
+        let loaded = try await engine.loadRules(from: seqDir)
+        #expect(loaded == jsonCount,
+                "sequence rules silently dropped at load: \(loaded)/\(jsonCount) — a step uses a token the engine can't decode (unknown ProcessRelation/correlation). See SequenceEngine load catch.")
     }
 }
