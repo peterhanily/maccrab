@@ -31,7 +31,31 @@ detection:
             - '/System/'
             - '/usr/libexec/'
         SignerType: 'apple'
-    condition: selection and selection_enum and not filter_system
+    filter_dev_tools:
+        ParentImage|endswith:
+            - '/bash'
+            - '/zsh'
+            - '/sh'
+            - '/fish'
+            - '/dash'
+            - '/Terminal'
+            - '/iTerm2'
+            - '/Alacritty'
+            - '/kitty'
+            - '/WarpTerminal'
+            - '/tmux'
+            - '/screen'
+            - '/Cursor'
+            - '/Code'
+            - '/node'
+            - '/ruby'
+            - '/python'
+            - '/python3'
+            - '/runner'
+            - '/buildkite-agent'
+            - '/circleci'
+            - '/Runner.Listener'
+    condition: selection and selection_enum and not filter_system and not filter_dev_tools
 falsepositives:
     - System administration scripts
     - MDM enrollment and compliance checks

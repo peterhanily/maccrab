@@ -18,7 +18,10 @@ detection:
         TargetFilename|startswith: '/Library/LaunchDaemons/'
         TargetFilename|endswith: '.plist'
     filter_apple:
-        SignerType: 'apple'
+        SignerType:
+            - 'apple'
+            - 'appStore'
+            - 'devId'
     condition: selection and not filter_apple
 falsepositives:
     - Legitimate software installation requiring root persistence
