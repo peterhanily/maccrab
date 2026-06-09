@@ -212,7 +212,17 @@ public actor NotarizationChecker {
         // Rate-limit concurrent spctl calls
         await acquireSlot()
 
-        let output = runSpctl(binaryPath: binaryPath)
+        // Run the blocking spctl OFF the actor. runSpctl is synchronous
+        // (process.run + waitUntilExit + readDataToEndOfFile, up to a 15s
+        // timeout); even though it's `nonisolated`, calling it directly here runs
+        // it on the actor's executor and pins the actor for the whole assess — so
+        // a slow spctl (cold Chrome ~19s) stalled every event-loop
+        // cachedResult(binaryPath:) awaiting this actor (audit: exec-ingest
+        // stall). Detaching suspends performAssessment at the await and frees the
+        // actor to service cache lookups while spctl runs.
+        let output = await Task.detached(priority: .utility) { [self, binaryPath] in
+            self.runSpctl(binaryPath: binaryPath)
+        }.value
 
         // Release the concurrency slot now that spctl has finished
         releaseSlot()
