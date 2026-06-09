@@ -73,7 +73,16 @@ public enum NoiseFilter {
         // Gate 7 — Apple platform binary. Hot: the majority of events
         // on a healthy Mac. See `isAppleSystemBinary` for signals.
         if isAppleSystemBinary(event: event) {
-            matches.removeAll { !$0.isMustFire }
+            // EXCEPTION — LOLBin / C2 execution. Shells and interpreters
+            // (/bin/bash, /usr/bin/curl, python3, osascript) ARE Apple platform
+            // binaries, so a blanket drop here silently kills the entire single-
+            // event execution/C2 class that detects a MALICIOUS pattern in the
+            // subject's OWN commandline (curl|bash, do-shell-script, reverse
+            // shells). Trust the subject's BEHAVIOUR, not its Apple path:
+            // execution/C2 matches survive regardless of `suppressible` (mirrors
+            // the Gate-8 credential-theft carve-out). Non-execution noise (a
+            // discovery/info rule on an Apple binary) is still dropped.
+            matches.removeAll { !$0.isMustFire && !isExecutionMatch($0) }
             if matches.isEmpty { return }
         }
 
@@ -184,6 +193,48 @@ public enum NoiseFilter {
         match.mitreTechniques.contains { tech in
             let t = tech.lowercased()
             return credentialTheftTechniquePrefixes.contains { t.hasPrefix($0) }
+        }
+    }
+
+    /// Execution / C2 ATT&CK techniques whose matches survive the Gate-7
+    /// Apple-platform-binary suppressor. These rules fire on a malicious pattern
+    /// in the SUBJECT's own commandline (a LOLBin abuse of an Apple-shipped
+    /// interpreter), so the subject being `/bin/bash` is exactly what they detect
+    /// — trusting the Apple path would defeat them. Prefix match catches
+    /// sub-techniques (e.g. `attack.t1059.004` Unix Shell).
+    static let executionTechniquePrefixes: [String] = [
+        "attack.t1059",   // Command and Scripting Interpreter (shell/python/osascript/jxa)
+        "attack.t1105",   // Ingress Tool Transfer (curl|bash download-and-execute)
+        "attack.t1095",   // Non-Application Layer Protocol (reverse shell, /dev/tcp)
+        "attack.t1071",   // Application Layer Protocol (C2 over http/dns)
+        "attack.t1572",   // Protocol Tunneling (ngrok, ssh -R)
+    ]
+
+    /// Execution/C2-tagged rules that are NOT yet safe to survive Gate 7 on an
+    /// Apple interpreter: supply-chain install / installer-script / MCP rules
+    /// that fire on benign `npm install` postinstall scripts, every PKG install,
+    /// or generic "ignore previous instructions" help text. They stay suppressed
+    /// on Apple-binary subjects (the pre-fix behaviour — no new flood) until their
+    /// own filters are tightened (off-registry + install-lineage gating; tracked
+    /// for the Wave-3 FP batch). The genuine LOLBin/C2 rules are unaffected.
+    static let gate7NonExemptRuleIds: Set<String> = [
+        "d1a2b3c4-0326-4000-a000-000000000026",  // package_manager_downloads_and_executes
+        "d1a2b3c4-0302-4000-a000-000000000002",  // npm_postinstall_downloads_binary
+        "d1a2b3c4-0449-4000-a000-000000000449",  // installer_pkg_script_execution
+        "d1a2b3c4-3003-4000-a000-000000003003",  // mcp_server_tool_poisoning
+    ]
+
+    /// True when a match should SURVIVE the Gate-7 Apple-platform-binary
+    /// suppressor: an execution/C2 LOLBin detection (the curl|bash hole) that is
+    /// (a) at least `.medium` — a LOW-severity exec indicator is too weak to
+    /// override the trust gate (mirrors the must-fire floor), and (b) not on the
+    /// FP-prone deferral list above.
+    static func isExecutionMatch(_ match: RuleMatch) -> Bool {
+        guard match.severity >= .medium else { return false }
+        guard !gate7NonExemptRuleIds.contains(match.ruleId) else { return false }
+        return match.mitreTechniques.contains { tech in
+            let t = tech.lowercased()
+            return executionTechniquePrefixes.contains { t.hasPrefix($0) }
         }
     }
 
