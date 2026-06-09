@@ -1012,6 +1012,39 @@ def _ast_to_condition_tree(node, sections: dict, predicates: list[dict]) -> dict
     return {"type": "and", "operands": []}
 
 
+def _is_multi_predicate(node, sections) -> bool:
+    """True if `node` expands to more than one predicate.
+
+    A NOT over such a node CANNOT be represented by flat per-predicate
+    negation: the flat path turns `not (A and B)` into `(not A) and (not B)`
+    instead of the De-Morgan-correct `(not A) or (not B)`, which
+    over-suppresses (false negatives). Only the condition tree
+    (`{"type":"not","operands":[{"type":"group","mode":"all_of",...}]}`)
+    expresses it correctly, so detecting this forces the tree path.
+    """
+    if sections is None:
+        return False
+    if isinstance(node, _ASTRef):
+        cnt = 0
+        for name in _resolve_section_names(node.name, sections):
+            cnt += len(_section_predicates(name, sections, negate=False))
+            if cnt > 1:
+                return True
+        return False
+    if isinstance(node, _ASTQuantifier):
+        cnt = 0
+        for name in _resolve_section_names(node.target, sections):
+            cnt += len(_section_predicates(name, sections, negate=False))
+            if cnt > 1:
+                return True
+        return False
+    if isinstance(node, _ASTBinOp):
+        return True
+    if isinstance(node, _ASTNot):
+        return _is_multi_predicate(node.child, sections)
+    return False
+
+
 def _needs_condition_tree(ast_node, sections=None) -> bool:
     """
     Determine if an AST is complex enough to require a condition tree.
@@ -1036,6 +1069,10 @@ def _needs_condition_tree(ast_node, sections=None) -> bool:
         return False
 
     if isinstance(ast_node, _ASTNot):
+        # not(A and B) over a multi-predicate selection must use the tree —
+        # the flat path mis-negates it to (not A) and (not B). De Morgan fix.
+        if _is_multi_predicate(ast_node.child, sections):
+            return True
         return _needs_condition_tree(ast_node.child, sections)
 
     if isinstance(ast_node, _ASTBinOp):
@@ -1047,6 +1084,10 @@ def _needs_condition_tree(ast_node, sections=None) -> bool:
                     # OR inside AND — might need a tree
                     return True
                 if isinstance(c, _ASTNot) and isinstance(c.child, _ASTBinOp):
+                    return True
+                if isinstance(c, _ASTNot) and _is_multi_predicate(c.child, sections):
+                    # not(multi-key filter) inside an AND — needs the tree so
+                    # the negation is (not A) or (not B), not (not A) and (not B).
                     return True
             return False
 

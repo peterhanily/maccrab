@@ -26,9 +26,14 @@ func ensureRulesCompiled() {
         .deletingLastPathComponent()   // Tests
         .deletingLastPathComponent()   // project root
     let rulesDir = projectDir.appendingPathComponent("Rules").path
+    let compilerPath = projectDir.appendingPathComponent("Compiler/compile_rules.py").path
 
+    // Recompile when Rules/ changed OR the compiler itself changed — otherwise a
+    // compiler fix (e.g. the De Morgan negation fix) would silently test against
+    // stale compiled output and a regression could false-pass.
     if FileManager.default.fileExists(atPath: compiledDir),
-       !rulesDirNewerThan(compiledDir, rulesRoot: rulesDir) {
+       !rulesDirNewerThan(compiledDir, rulesRoot: rulesDir),
+       !fileNewerThanCompiled(compilerPath, compiledDir: compiledDir) {
         return
     }
 
@@ -46,6 +51,18 @@ func ensureRulesCompiled() {
     proc.standardError = FileHandle.nullDevice
     try? proc.run()
     proc.waitUntilExit()
+}
+
+/// True if `source` (e.g. the compiler script) is newer than the compiled
+/// output — forces a recompile when the compiler changes even though Rules/
+/// did not.
+private func fileNewerThanCompiled(_ source: String, compiledDir: String) -> Bool {
+    guard let compiledNewest = newestMTime(at: compiledDir),
+          let attrs = try? FileManager.default.attributesOfItem(atPath: source),
+          let srcMTime = attrs[.modificationDate] as? Date else {
+        return true
+    }
+    return srcMTime > compiledNewest
 }
 
 /// Return true if any .yml under `rulesRoot` has an mtime newer than the
