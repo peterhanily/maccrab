@@ -39,11 +39,18 @@ done
 if [ -n "$RESOURCE_BUNDLE" ]; then
     cp -r "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/MacCrab_MacCrabApp.bundle"
     # Also copy lproj dirs directly into Resources for fallback
+    lproj_count=0
     for lproj in "$RESOURCE_BUNDLE"/*.lproj; do
         if [ -d "$lproj" ]; then
             cp -r "$lproj" "$APP_BUNDLE/Contents/Resources/"
+            lproj_count=$((lproj_count + 1))
         fi
     done
+    # Dev-only soft check (release builds hard-fail in build-release.sh):
+    # zero/short matches mean the dev bundle falls back to English.
+    if [ "$lproj_count" -ne 14 ]; then
+        echo "WARNING: expected 14 .lproj localizations in the resource bundle, found $lproj_count" >&2
+    fi
 fi
 
 # Embed Sparkle.framework. SPM links MacCrabApp against Sparkle but does

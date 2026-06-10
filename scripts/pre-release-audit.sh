@@ -2970,6 +2970,105 @@ if [[ $pass_2026B_violations -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------
+# PASS K — release toolchain pin (v1.18.1)
+# ---------------------------------------------------------------------
+# Releases stay on Xcode 26.x until the macOS 27 design-QA gate passes:
+# the 27 SDK ignores UIDesignRequiresCompatibility (no design opt-out
+# once built with it) and carries the TN3211 @State and Swift Charts
+# (174168981) source/runtime hazards. Bump PINNED_XCODE_MAJOR
+# deliberately, with the design QA done — never as a side effect of
+# updating Xcode. RELEASE_PROCESS.md Step 3 documents the gate.
+
+section "PASS K — release toolchain pin"
+
+PINNED_XCODE_MAJOR=26
+XCODE_VERSION_LINE=$(xcodebuild -version 2>/dev/null | head -1 || true)
+if [[ -z "$XCODE_VERSION_LINE" ]]; then
+    warn "PASS K: xcodebuild not found — cannot verify the toolchain pin (CLT-only host?)"
+else
+    XCODE_MAJOR=$(echo "$XCODE_VERSION_LINE" | sed -n 's/^Xcode \([0-9][0-9]*\).*/\1/p')
+    if [[ -z "$XCODE_MAJOR" ]]; then
+        warn "PASS K: could not parse an Xcode major version from '$XCODE_VERSION_LINE'"
+    elif [[ "$XCODE_MAJOR" -ne "$PINNED_XCODE_MAJOR" ]]; then
+        err "PASS K: toolchain is '$XCODE_VERSION_LINE' but releases are pinned to Xcode ${PINNED_XCODE_MAJOR}.x (macOS 27 design-QA gate — RELEASE_PROCESS.md Step 3)"
+    else
+        ok "PASS K: toolchain '$XCODE_VERSION_LINE' matches the Xcode ${PINNED_XCODE_MAJOR}.x pin"
+    fi
+fi
+
+# ---------------------------------------------------------------------
+# PASS L — Xcode 27 source-compat guards (v1.18.1)
+# ---------------------------------------------------------------------
+# Two source patterns become hazards the day the toolchain moves to
+# Xcode 27 (TN3211 + macOS 27 release-note 174168981). Guarding them
+# NOW means the eventual SDK bump can't ship either regression:
+#
+#   L1 — if/switch directly inside a Chart{} content closure crashes
+#        at RUNTIME on Xcode-27 builds whose deployment target is
+#        below 27.0 (ours is 13.0). Workaround when needed: extract
+#        the conditional content into an @ChartContentBuilder func.
+#        Brace-aware awk (PASS-7 style) — a plain grep cannot scope
+#        "inside the Chart closure" and flags annotation sub-closures.
+#
+#   L2 — an @State property with an INLINE DEFAULT that is ALSO
+#        assigned via _prop = State(initialValue:) in init: Xcode 27's
+#        @State macro DISCARDS the init assignment. Either form alone
+#        is fine (the repo's 8 existing State(initialValue:) sites
+#        have no inline defaults — the documented-correct pattern).
+
+section "PASS L — Xcode 27 source-compat guards"
+
+# L1 — chart-conditional guard
+pass_L_chart_violations=0
+chart_files=$(grep -rl "import Charts" --include='*.swift' Sources/ 2>/dev/null || true)
+for f in $chart_files; do
+    hits=$(awk '
+        in_chart == 0 && /(^|[^A-Za-z0-9_.])Chart[[:space:]]*[({]/ {
+            opens = gsub(/{/, "{"); closes = gsub(/}/, "}")
+            depth = opens - closes
+            if (depth > 0) { in_chart = 1 }
+            next
+        }
+        in_chart == 1 {
+            if (depth == 1 && $0 ~ /^[[:space:]]*(if|switch)[[:space:](]/) {
+                printf "%d: %s\n", NR, $0
+            }
+            opens = gsub(/{/, "{"); closes = gsub(/}/, "}")
+            depth += opens - closes
+            if (depth <= 0) { in_chart = 0 }
+        }
+    ' "$f" || true)
+    if [[ -n "$hits" ]]; then
+        err "PASS L1: conditional directly inside a Chart{} closure in $f (runtime crash on Xcode-27 builds with deployment target < 27 — extract into an @ChartContentBuilder func):"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            echo "    $line" >&2
+        done <<< "$hits"
+        pass_L_chart_violations=$((pass_L_chart_violations+1))
+    fi
+done
+if [[ $pass_L_chart_violations -eq 0 ]]; then
+    ok "PASS L1: no conditionals directly inside Chart{} content closures"
+fi
+
+# L2 — TN3211 @State inline-default + init-assignment combination
+pass_L_state_violations=0
+state_init_files=$(grep -rl "= State(initialValue" --include='*.swift' Sources/ 2>/dev/null || true)
+for f in $state_init_files; do
+    props=$(grep -oE '_[A-Za-z0-9_]+[[:space:]]*=[[:space:]]*State\(initialValue' "$f" \
+        | sed -E 's/^_([A-Za-z0-9_]+).*/\1/' | sort -u)
+    for prop in $props; do
+        if grep -qE "@State[[:space:]]+(private[[:space:]]+|fileprivate[[:space:]]+)?var[[:space:]]+${prop}[[:space:]]*(:[^=]*)?=" "$f"; then
+            err "PASS L2: $f: @State '${prop}' has an inline default AND a State(initialValue:) assignment in init — Xcode 27's @State macro discards the init assignment (TN3211). Drop one of the two."
+            pass_L_state_violations=$((pass_L_state_violations+1))
+        fi
+    done
+done
+if [[ $pass_L_state_violations -eq 0 ]]; then
+    ok "PASS L2: no @State inline-default + init State(initialValue:) combinations"
+fi
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 

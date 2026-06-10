@@ -88,12 +88,25 @@ boolean-as-value bugs. 0 skips required.
 
 `VERSION=<version> scripts/build-release.sh`:
 
-1. `swift build -c release` for the SPM targets (MacCrabCore,
-   maccrabctl, maccrab-mcp, maccrabd) twice — once each for
-   arm64 and x86_64. Lipo'd into universal binaries.
-2. `xcodebuild` against `Xcode/project.yml` (regenerated via
-   `xcodegen` if needed) for the bundled targets (MacCrabApp,
-   MacCrabAgent). The system extension bundle is staged under
+> **Toolchain pin:** release builds use **Xcode 26.x** until the
+> macOS 27 design-QA gate passes (the 27 SDK ignores
+> `UIDesignRequiresCompatibility`, so a 27-SDK build cannot render
+> the 26-era design, and Xcode 27 carries the TN3211 `@State` and
+> Swift Charts (174168981) source/runtime hazards). Enforced
+> mechanically by `pre-release-audit.sh` PASS K; the toolchain used
+> is stamped into `release.json` for provenance. Bump the pin
+> deliberately, with the design QA done — not as a side effect of
+> updating Xcode.
+
+1. `swift build -c release` for ALL targets (MacCrabCore,
+   maccrabctl, maccrab-mcp, maccrabd, MacCrabApp, MacCrabAgent)
+   twice — once each for arm64 and x86_64. Lipo'd into universal
+   binaries. (`Xcode/project.yml` is IDE-only; nothing in the
+   release pipeline runs `xcodebuild` or `xcodegen`.)
+2. `MacCrab.app` is hand-assembled by the script: app binary,
+   top-level `*.lproj` (must find exactly 14 — the copy aborts
+   otherwise), bundled rule compiler + PyYAML, compiled rules, SPM
+   resource bundles, and the system extension bundle staged under
    `MacCrab.app/Contents/Library/SystemExtensions/`.
 3. CLIs bundled under `MacCrab.app/Contents/Resources/bin/` so
    Sparkle in-place updates keep the terminal CLI current.

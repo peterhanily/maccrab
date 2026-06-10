@@ -186,6 +186,22 @@ for lproj in Sources/MacCrabApp/Resources/*.lproj; do
     cp -R "$lproj" "$APP/Contents/Resources/"
     lproj_count=$((lproj_count + 1))
 done
+# v1.18.1 guard: the glob silently matches zero dirs if the source layout
+# changes (e.g. a .strings → .xcstrings migration), which would ship an
+# all-English app — the exact bug 345f079 fixed. 14 is the shipped locale
+# count; bump it deliberately when adding a locale.
+if [ "$lproj_count" -ne 14 ]; then
+    echo "ERROR: expected 14 .lproj localizations, found $lproj_count — aborting (Bundle.main localization would silently regress)" >&2
+    exit 1
+fi
+# Bundle.main lookup is case-sensitive and SPM lowercases these two in
+# Bundle.module; the source-tree copy must preserve the correct casing.
+for cased in zh-Hans pt-BR; do
+    if [ ! -d "$APP/Contents/Resources/${cased}.lproj" ]; then
+        echo "ERROR: ${cased}.lproj missing or mis-cased in app Resources" >&2
+        exit 1
+    fi
+done
 echo "    ✓ Bundled $lproj_count localizations → Resources/*.lproj (Bundle.main)"
 
 # v1.12.0 RC16 (in-dashboard Sigma editor): bundle compile_rules.py
@@ -802,10 +818,15 @@ SUITE_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Suite' {} + 2>/dev/nul
 TEST_COUNT="${TEST_COUNT:-0}"
 SUITE_COUNT="${SUITE_COUNT:-0}"
 RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# v1.18.1: record the toolchain for provenance — RELEASE_PROCESS.md notes
+# historical builds were unreproducible without this.
+TOOLCHAIN=$(xcodebuild -version 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+TOOLCHAIN="${TOOLCHAIN:-unknown}"
 cat > "$RELEASE_JSON" <<RELEASE_EOF
 {
   "version": "$VERSION",
   "release_date": "$RELEASE_DATE",
+  "toolchain": "$TOOLCHAIN",
   "rules": $RULE_COUNT,
   "tests": $TEST_COUNT,
   "test_suites": $SUITE_COUNT,
