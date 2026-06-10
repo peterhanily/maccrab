@@ -384,6 +384,16 @@ enum EventLoop {
                     let credFenceSigningTools: Set<String> = [
                         "codesign", "security", "stapler", "productsign", "pkgbuild",
                         "productbuild", "notarytool", "altool", "amfid", "xcodebuild",
+                        // MacCrab's OWN tools read the keychain for signature
+                        // verification (cdhash/tree-score/why, the daemon's signing
+                        // enrichment) — flagging ourselves for keychain access is a
+                        // self-FP, surfaced live when maccrabctl was run under an AI
+                        // tool (1.18.0 RC verification: it was the lone residual
+                        // keychain alert after the signing-tool exemption landed).
+                        "maccrabctl", "maccrabd", "com.maccrab.agent",
+                        // Sparkle release tooling (appcast EdDSA signing) — benign
+                        // dev-host noise, not AI credential theft.
+                        "sign_update", "generate_keys",
                     ]
                     if let filePath = enrichedEvent.file?.path,
                        enrichedEvent.enrichments["IsHoneyfile"] != "true",
