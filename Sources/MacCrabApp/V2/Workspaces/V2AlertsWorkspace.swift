@@ -1056,8 +1056,11 @@ struct V2AlertsWorkspace: View {
                 }
             }
             V2InspectorSection("Actions") {
+                // v1.18.1: compact action bar — the primary verb gets the
+                // full row; the two secondary verbs share one row at equal
+                // width (the old layout stacked all three full-width).
                 VStack(alignment: .leading, spacing: 8) {
-                    V2ActionButton("Investigate in Events", icon: "magnifyingglass", style: .primary) {
+                    V2ActionButton("Investigate in Events", icon: "magnifyingglass", style: .primary, fullWidth: true) {
                         let filter = !alert.processPath.isEmpty
                             ? alert.processPath
                             : (alert.process != "—" ? alert.process : alert.ruleId)
@@ -1074,46 +1077,48 @@ struct V2AlertsWorkspace: View {
                         state.pendingEventsHalfWindowSeconds = 30 * 60
                         state.switchWorkspace(.events)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    if alert.ruleId.hasPrefix("maccrab.campaign.") {
-                        // A campaign alert is a correlation across many
-                        // alerts, not an editable Sigma rule — "Open rule"
-                        // would dead-end on the built-in explanation note.
-                        // Route to the Campaigns tab, where the correlation
-                        // actually lives. (The alert carries no campaign id,
-                        // so we open the list rather than a specific one.)
-                        V2ActionButton("View campaigns", icon: "square.stack.3d.up", style: .secondary,
-                                       tooltip: "This alert is a campaign correlation — open the Campaigns tab") {
-                            state.goto(V2NavigationDestination(
-                                workspace: .alerts,
-                                tab: .alertsCampaigns
-                            ))
+                    .frame(maxWidth: .infinity)
+                    HStack(spacing: 8) {
+                        if alert.ruleId.hasPrefix("maccrab.campaign.") {
+                            // A campaign alert is a correlation across many
+                            // alerts, not an editable Sigma rule — "Open rule"
+                            // would dead-end on the built-in explanation note.
+                            // Route to the Campaigns tab, where the correlation
+                            // actually lives. (The alert carries no campaign id,
+                            // so we open the list rather than a specific one.)
+                            V2ActionButton("Campaigns", icon: "square.stack.3d.up", style: .secondary, fullWidth: true,
+                                           tooltip: "This alert is a campaign correlation — open the Campaigns tab") {
+                                state.goto(V2NavigationDestination(
+                                    workspace: .alerts,
+                                    tab: .alertsCampaigns
+                                ))
+                            }
+                            .frame(maxWidth: .infinity)
+                        } else {
+                            V2ActionButton("Open rule", icon: "shield.lefthalf.filled", style: .secondary, fullWidth: true,
+                                           tooltip: "Jump to this rule in Detection › Rules") {
+                                // Pre-fill the rule search query so the rules
+                                // table filters down to this rule, plus carry
+                                // the rule id as the entity selection so the
+                                // inspector opens automatically.
+                                state.ruleSearchQuery = alert.ruleId
+                                state.goto(V2NavigationDestination(
+                                    workspace: .detection,
+                                    tab: .detectionRules,
+                                    entityId: alert.ruleId
+                                ))
+                            }
+                            .frame(maxWidth: .infinity)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        V2ActionButton("Open rule", icon: "shield.lefthalf.filled", style: .secondary,
-                                       tooltip: "Jump to this rule in Detection › Rules") {
-                            // Pre-fill the rule search query so the rules
-                            // table filters down to this rule, plus carry
-                            // the rule id as the entity selection so the
-                            // inspector opens automatically.
-                            state.ruleSearchQuery = alert.ruleId
-                            state.goto(V2NavigationDestination(
-                                workspace: .detection,
-                                tab: .detectionRules,
-                                entityId: alert.ruleId
-                            ))
+                        V2ActionButton("Suppress", icon: "bell.slash", style: .secondary, fullWidth: true,
+                                       disabled: alert.suppressed,
+                                       tooltip: alert.suppressed
+                                            ? "Already suppressed"
+                                            : "Mark this alert as suppressed in the alert store") {
+                            Task { await suppress(alert) }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity)
                     }
-                    V2ActionButton("Suppress", icon: "bell.slash", style: .secondary,
-                                   disabled: alert.suppressed,
-                                   tooltip: alert.suppressed
-                                        ? "Already suppressed"
-                                        : "Mark this alert as suppressed in the alert store") {
-                        Task { await suppress(alert) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -1577,41 +1582,22 @@ struct V2AlertsWorkspace: View {
                         // it back. These two row buttons cover the
                         // most common operator fix-ups inline.
                         V2DataColumn(id: "actions", title: "Actions", width: .fixed(170)) { a in
+                            // v1.18.1: unified on the shared compact tinted
+                            // V2ActionButton (the old hand-rolled pills
+                            // predate the .tinted/.compact variants).
                             HStack(spacing: 4) {
                                 if a.suppressed {
-                                    Button {
+                                    V2ActionButton("Unsuppress", icon: "bell",
+                                                   style: .tinted(V2Theme.brand), size: .compact,
+                                                   tooltip: "Lift suppression on this alert") {
                                         Task { await unsuppressAlert(a) }
-                                    } label: {
-                                        HStack(spacing: 3) {
-                                            Image(systemName: "bell")
-                                                .scaledSystem(9, weight: .semibold)
-                                            Text("Unsuppress")
-                                                .font(V2Theme.meta())
-                                        }
-                                        .foregroundStyle(V2Theme.brand)
-                                        .padding(.horizontal, 6).padding(.vertical, 3)
-                                        .background(V2Theme.brand.opacity(0.10))
-                                        .clipShape(RoundedRectangle(cornerRadius: 4))
                                     }
-                                    .buttonStyle(.plain)
-                                    .help("Lift suppression on this alert")
                                 }
-                                Button {
+                                V2ActionButton("Delete", icon: "trash",
+                                               style: .tinted(V2Theme.critical), size: .compact,
+                                               tooltip: "Permanently delete this alert from alerts.db") {
                                     Task { await deleteAlert(a) }
-                                } label: {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: "trash")
-                                            .scaledSystem(9, weight: .semibold)
-                                        Text("Delete")
-                                            .font(V2Theme.meta())
-                                    }
-                                    .foregroundStyle(V2Theme.critical)
-                                    .padding(.horizontal, 6).padding(.vertical, 3)
-                                    .background(V2Theme.critical.opacity(0.10))
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
                                 }
-                                .buttonStyle(.plain)
-                                .help("Permanently delete this alert from alerts.db")
                             }
                         },
                     ],

@@ -748,83 +748,110 @@ struct AlertPopoverView: View {
     let onShowDashboard: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // Crab icon
-            Text("🦀")
-                .scaledSystem(28)
-                .frame(width: 36, height: 36)
+        // v1.18.1 polish: severity-tinted leading accent bar + V2-consistent
+        // chip and button styling (the old "View" was a stock
+        // .borderedProminent .mini that ignored the app's design language).
+        HStack(alignment: .top, spacing: 0) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(alert.severityColor)
+                .frame(width: 4)
+                .frame(maxHeight: .infinity)
+                .padding(.vertical, 8)
+                .padding(.leading, 8)
+                .accessibilityHidden(true)
 
-            // Content
-            VStack(alignment: .leading, spacing: 4) {
-                // Title row
-                HStack {
-                    Text("MacCrab")
-                        .font(.system(.caption, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Text(alert.timeAgoString)
-                        .font(.caption2)
-                        .foregroundColor(Color(.tertiaryLabelColor))
-                    Button(action: onDismiss) {
-                        Image(systemName: "xmark")
-                            .scaledSystem(9, weight: .bold)
-                            .foregroundColor(Color(.tertiaryLabelColor))
-                    }
-                    .buttonStyle(.plain)
-                }
+            HStack(alignment: .top, spacing: 10) {
+                // Crab icon
+                Text("🦀")
+                    .scaledSystem(26)
+                    .frame(width: 34, height: 34)
 
-                // Alert title
-                Text(alert.ruleTitle)
-                    .font(.system(.subheadline, weight: .medium))
-                    .foregroundColor(.primary)
-                    .lineLimit(2)
-
-                // Description
-                if !alert.description.isEmpty {
-                    Text(alert.description)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                }
-
-                // Bottom row: severity + action
-                HStack(spacing: 8) {
-                    // Severity pill
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(alert.severityColor)
-                            .frame(width: 6, height: 6)
-                        Text(alert.severity == .critical ? "Critical" : "High")
-                            .font(.system(.caption2, weight: .medium))
-                            .foregroundColor(alert.severityColor)
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(alert.severityColor.opacity(0.1))
-                    .clipShape(Capsule())
-
-                    if !alert.processName.isEmpty {
-                        Text(alert.processName)
+                // Content
+                VStack(alignment: .leading, spacing: 4) {
+                    // Title row
+                    HStack {
+                        Text("MacCrab")
+                            .font(.system(.caption, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(alert.timeAgoString)
                             .font(.caption2)
                             .foregroundColor(Color(.tertiaryLabelColor))
-                            .lineLimit(1)
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark")
+                                .scaledSystem(9, weight: .bold)
+                                .foregroundColor(Color(.tertiaryLabelColor))
+                                .frame(width: 16, height: 16)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(String(localized: "popover.dismiss", defaultValue: "Dismiss alert notification"))
                     }
 
-                    Spacer()
+                    // Alert title
+                    Text(alert.ruleTitle)
+                        .font(.system(.subheadline, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
 
-                    Button(action: onShowDashboard) {
-                        Text("View")
-                            .font(.system(.caption2, weight: .medium))
+                    // Description
+                    if !alert.description.isEmpty {
+                        Text(alert.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.mini)
+
+                    // Bottom row: severity + action
+                    HStack(spacing: 8) {
+                        // Severity pill
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(alert.severityColor)
+                                .frame(width: 6, height: 6)
+                            Text(alert.severity == .critical ? "Critical" : "High")
+                                .font(.system(.caption2, weight: .semibold))
+                                .foregroundColor(alert.severityColor)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(alert.severityColor.opacity(0.12))
+                        .overlay(Capsule().stroke(alert.severityColor.opacity(0.25), lineWidth: 1))
+                        .clipShape(Capsule())
+
+                        if !alert.processName.isEmpty {
+                            Text(alert.processName)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(Color(.tertiaryLabelColor))
+                                .lineLimit(1)
+                        }
+
+                        Spacer()
+
+                        Button(action: onShowDashboard) {
+                            Text("View")
+                                .font(.system(.caption2, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(V2Theme.brandDim)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius)
+                                        .stroke(V2Theme.brand.opacity(0.4), lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(String(localized: "popover.view.help", defaultValue: "Open this alert in the dashboard"))
+                    }
+                    .padding(.top, 2)
                 }
-                .padding(.top, 2)
             }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 10)
+            .padding(.top, 2)
         }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 10)
-        .padding(.top, 2)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color(nsColor: .windowBackgroundColor))
     }

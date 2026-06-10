@@ -295,6 +295,14 @@ public struct V2DetectionWorkspace: View {
     /// a one-time scan of compiled_rules/ that indexes UUID → path by
     /// each JSON's internal `id` field.
     private func loadBundledCompiledRule(id: String) -> CompiledRule? {
+        guard let data = bundledCompiledRuleData(id: id) else { return nil }
+        return try? JSONDecoder().decode(CompiledRule.self, from: data)
+    }
+
+    /// Raw JSON Data variant of the lookup above — v1.18.1: the severity
+    /// override patches the raw dict (CompiledRule.level is a `let`, and
+    /// raw patching keeps MacCrabCore untouched for a UI feature).
+    private func bundledCompiledRuleData(id: String) -> Data? {
         // Fast path: UUID-named file (works if build-release.sh has
         // started shipping UUID copies in a later release).
         let direct: [String?] = [
@@ -303,8 +311,8 @@ public struct V2DetectionWorkspace: View {
         ]
         for path in direct.compactMap({ $0 }) {
             if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-               let rule = try? JSONDecoder().decode(CompiledRule.self, from: data) {
-                return rule
+               (try? JSONDecoder().decode(CompiledRule.self, from: data)) != nil {
+                return data
             }
         }
         // Slow path: scan compiled_rules/ and match by internal `id`.
@@ -318,27 +326,38 @@ public struct V2DetectionWorkspace: View {
                   let rule = try? JSONDecoder().decode(CompiledRule.self, from: data) else {
                 continue
             }
-            if rule.id == id { return rule }
+            if rule.id == id { return data }
         }
         return nil
+    }
+
+    /// An existing user override for this rule, if one is on disk
+    /// (root-owned but world-readable). Used so a new override builds on
+    /// the previous one — e.g. disabling a rule keeps its severity
+    /// override, and a severity change keeps the disabled flag. Also the
+    /// only source for rules the USER installed (no bundled copy exists).
+    private func existingUserOverrideData(id: String) -> Data? {
+        try? Data(contentsOf: URL(fileURLWithPath: Self.userRulesDir + "/\(id).json"))
     }
 
     /// Ensure the override directory exists and is writable. Returns
     /// true if writable after the call. First time through fires an
     private func writeDisabledOverride(rule: V2MockRule) async {
-        guard var compiled = loadBundledCompiledRule(id: rule.id) else {
+        // v1.18.1: build on an existing user override so disabling a rule
+        // keeps its severity override, and patch the raw JSON dict (see
+        // bundledCompiledRuleData for why not CompiledRule).
+        guard let data = existingUserOverrideData(id: rule.id) ?? bundledCompiledRuleData(id: rule.id),
+              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             state.showToast(V2Toast(
                 kind: .error,
-                title: "Couldn't load bundled rule",
-                detail: "Rule \(rule.id) wasn't found in the .app bundle."
+                title: "Couldn't load rule definition",
+                detail: "Rule \(rule.id) wasn't found in the .app bundle or user_rules."
             ))
             return
         }
-        compiled.enabled = false
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(compiled),
-              let json = String(data: data, encoding: .utf8) else {
+        obj["enabled"] = false
+        guard let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+              let json = String(data: out, encoding: .utf8) else {
             state.showToast(V2Toast(kind: .error, title: "Couldn't encode override", detail: rule.id))
             return
         }
@@ -369,6 +388,120 @@ public struct V2DetectionWorkspace: View {
                                     detail: rule.title + " — applies in ~5 s"))
         case .failure(let msg):
             state.showToast(V2Toast(kind: .error, title: "Couldn't re-enable rule", detail: msg))
+        }
+    }
+
+    /// v1.18.1: change a rule's effective severity WITHOUT the YAML
+    /// round-trip. Built-ins route through the builtin-settings inbox verb;
+    /// single-event Sigma rules get a user-rule override (raw JSON `level`
+    /// patch via the same install-rule verb the disable flow uses);
+    /// sequence/graph rules are read-only (their engines don't read the
+    /// user_rules overlay).
+    private func setSeverityOverride(_ rule: V2MockRule, severityRaw: String?) async {
+        if rule.id.hasPrefix("maccrab.") {
+            appState.setBuiltinRuleSeverity(ruleId: rule.id, severityRaw: severityRaw)
+            state.showToast(V2Toast(
+                kind: .info,
+                title: severityRaw == nil ? "Severity reverted to default" : "Severity override sent",
+                detail: rule.title + " — applies in ~5 s"
+            ))
+            return
+        }
+        if rule.category == "Sequence" || rule.category == "Graph" {
+            state.showToast(V2Toast(
+                kind: .info,
+                title: "Read-only rule",
+                detail: rule.title + " — multi-step rules are managed in their rule files"
+            ))
+            return
+        }
+        guard let data = existingUserOverrideData(id: rule.id) ?? bundledCompiledRuleData(id: rule.id),
+              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            state.showToast(V2Toast(
+                kind: .error,
+                title: "Couldn't load rule definition",
+                detail: "Rule \(rule.id) wasn't found in the .app bundle or user_rules."
+            ))
+            return
+        }
+        let wasDisabled = userDisabledRuleIDs.contains(rule.id) || !rule.isEnabled
+        if let severityRaw {
+            obj["level"] = severityRaw
+        } else {
+            // Revert to the bundled default. If the rule is also disabled,
+            // keep a disable-only override; otherwise drop the override file.
+            guard let bundled = bundledCompiledRuleData(id: rule.id),
+                  let bundledObj = (try? JSONSerialization.jsonObject(with: bundled)) as? [String: Any] else {
+                // User-installed rule: there is no bundled default to revert to.
+                state.showToast(V2Toast(
+                    kind: .info,
+                    title: "No bundled default",
+                    detail: rule.title + " — edit this custom rule's YAML to change its severity"
+                ))
+                return
+            }
+            if !wasDisabled {
+                let result = UserRuleInstaller.dropInboxRequest(
+                    verb: "remove-rule", payload: ["ruleId": rule.id])
+                switch result {
+                case .success:
+                    state.showToast(V2Toast(kind: .info, title: "Severity reverted to default",
+                                            detail: rule.title + " — applies in ~5 s"))
+                case .failure(let msg):
+                    state.showToast(V2Toast(kind: .error, title: "Couldn't revert severity", detail: msg))
+                }
+                return
+            }
+            obj = bundledObj
+        }
+        if wasDisabled { obj["enabled"] = false }
+        guard let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+              let json = String(data: out, encoding: .utf8) else {
+            state.showToast(V2Toast(kind: .error, title: "Couldn't encode override", detail: rule.id))
+            return
+        }
+        let result = UserRuleInstaller.dropInboxRequest(
+            verb: "install-rule", payload: ["ruleId": rule.id, "json": json])
+        switch result {
+        case .success:
+            state.showToast(V2Toast(
+                kind: .info,
+                title: severityRaw == nil ? "Severity reverted to default" : "Severity set to \(severityRaw!)",
+                detail: rule.title + " — applies in ~5 s"
+            ))
+        case .failure(let msg):
+            state.showToast(V2Toast(kind: .error, title: "Couldn't set severity", detail: msg))
+        }
+    }
+
+    /// Severity chip that opens an override menu (v1.18.1 — inline severity
+    /// without opening the YAML). Sequence/Graph rules render a plain chip.
+    @ViewBuilder
+    private func severityControl(for r: V2MockRule) -> some View {
+        if r.category == "Sequence" || r.category == "Graph" {
+            V2StatusChip(r.severity.label, kind: r.severity.chipKind)
+        } else {
+            Menu {
+                Button("Critical") { Task { await setSeverityOverride(r, severityRaw: "critical") } }
+                Button("High")     { Task { await setSeverityOverride(r, severityRaw: "high") } }
+                Button("Medium")   { Task { await setSeverityOverride(r, severityRaw: "medium") } }
+                Button("Low")      { Task { await setSeverityOverride(r, severityRaw: "low") } }
+                Button("Info")     { Task { await setSeverityOverride(r, severityRaw: "informational") } }
+                Divider()
+                Button("Default")  { Task { await setSeverityOverride(r, severityRaw: nil) } }
+            } label: {
+                HStack(spacing: 3) {
+                    V2StatusChip(r.severity.label, kind: r.severity.chipKind)
+                    Image(systemName: "chevron.down")
+                        .scaledSystem(7, weight: .semibold)
+                        .foregroundStyle(V2Theme.mutedText)
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Change this rule's effective severity")
+            .accessibilityLabel("Severity \(r.severity.label). Activate to change.")
         }
     }
 
@@ -548,9 +681,24 @@ public struct V2DetectionWorkspace: View {
             columns: [
                 V2DataColumn(id: "on", title: "On", width: .fixed(50),
                              sortKey: { .number($0.isEnabled ? 0 : 1) }) { r in
-                    Image(systemName: r.isEnabled ? "circle.fill" : "circle")
-                        .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
-                        .scaledSystem(8)
+                    // v1.18.1: the static status dot is now the toggle —
+                    // enable/disable without opening the inspector.
+                    // toggleRuleDisabled routes builtin/user/read-only
+                    // rules correctly and toasts the outcome.
+                    Button {
+                        Task { await toggleRuleDisabled(r) }
+                    } label: {
+                        Image(systemName: r.isEnabled ? "circle.fill" : "circle")
+                            .foregroundStyle(r.isEnabled ? V2Theme.healthy : V2Theme.tertiaryText)
+                            .scaledSystem(8)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(r.isEnabled ? "Enabled — click to disable" : "Disabled — click to enable")
+                    .accessibilityLabel(r.isEnabled
+                        ? "Rule enabled. Activate to disable."
+                        : "Rule disabled. Activate to enable.")
                 },
                 V2DataColumn(id: "title", title: "Rule", width: .flexible(min: 240),
                              sortKey: { .text($0.title) }) { r in
@@ -568,9 +716,9 @@ public struct V2DetectionWorkspace: View {
                              sortKey: { .text($0.category) }) { r in
                     V2TableCellText(r.category, primary: false)
                 },
-                V2DataColumn(id: "sev", title: "Severity", width: .fixed(96),
+                V2DataColumn(id: "sev", title: "Severity", width: .fixed(110),
                              sortKey: { .number(Double($0.severity.sortOrder)) }) { r in
-                    V2StatusChip(r.severity.label, kind: r.severity.chipKind)
+                    severityControl(for: r)
                 },
                 V2DataColumn(id: "mitre", title: "MITRE", width: .fixed(110),
                              sortKey: { .text($0.mitre.first ?? "") }) { r in
@@ -643,41 +791,67 @@ public struct V2DetectionWorkspace: View {
                 // AlertSink chokepoint via the inbox IPC).
                 BuiltinRuleSettingsSection(rule: r, appState: appState, state: state)
                 V2InspectorSection("Actions") {
-                    V2ActionButton(
-                        r.isEnabled ? "Mute rule" : "Enable rule",
-                        icon: r.isEnabled ? "minus.circle" : "checkmark.circle",
-                        style: .secondary,
-                        tooltip: "Built-in rule: mute the alert (the detection + any protective action still run)."
-                    ) {
-                        Task { await toggleRuleDisabled(r) }
-                    }
-                    V2ActionButton("View fires", icon: "list.bullet", style: .secondary) {
-                        state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                    // v1.18.1: compact action bar (paired equal-width row)
+                    // instead of intrinsic-width buttons stacked vertically.
+                    HStack(spacing: 8) {
+                        V2ActionButton(
+                            r.isEnabled ? "Mute rule" : "Enable rule",
+                            icon: r.isEnabled ? "minus.circle" : "checkmark.circle",
+                            style: .secondary,
+                            fullWidth: true,
+                            tooltip: "Built-in rule: mute the alert (the detection + any protective action still run)."
+                        ) {
+                            Task { await toggleRuleDisabled(r) }
+                        }
+                        V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true) {
+                            state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                        }
                     }
                 }
             } else {
+                // v1.18.1: severity is editable here too — no YAML round-trip.
+                V2InspectorSection("Settings") {
+                    HStack {
+                        Text("Effective severity")
+                            .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
+                        Spacer()
+                        severityControl(for: r)
+                    }
+                    Text("Changing severity writes a user-rule override (survives updates). \"Default\" reverts to the bundled value.")
+                        .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 V2InspectorSection("Actions") {
-                    V2ActionButton("View YAML", icon: "doc.text", style: .secondary,
-                                   tooltip: "Show the rule's source YAML in-app") {
-                        yamlViewerRule = r
-                    }
-                    V2ActionButton("Edit YAML", icon: "pencil", style: .secondary,
-                                   tooltip: "Open the YAML in an in-app editor. Save writes a user-rule override that survives Sparkle updates.") {
-                        yamlEditorRule = r
-                    }
-                    let isDisabled = userDisabledRuleIDs.contains(r.id) || !r.isEnabled
-                    V2ActionButton(
-                        isDisabled ? "Enable rule" : "Disable rule",
-                        icon: isDisabled ? "checkmark.circle" : "minus.circle",
-                        style: .secondary,
-                        tooltip: isDisabled
-                            ? "Re-enable this rule (removes the user override)"
-                            : "Disable this rule without editing the bundled YAML. First disable in this session may prompt for your admin password to create the override directory; subsequent disables don't."
-                    ) {
-                        Task { await toggleRuleDisabled(r) }
-                    }
-                    V2ActionButton("View fires", icon: "list.bullet", style: .secondary) {
-                        state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                    // v1.18.1: compact 2×2 action bar (paired equal-width
+                    // rows) instead of four stacked intrinsic-width buttons.
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            V2ActionButton("View YAML", icon: "doc.text", style: .secondary, fullWidth: true,
+                                           tooltip: "Show the rule's source YAML in-app") {
+                                yamlViewerRule = r
+                            }
+                            V2ActionButton("Edit YAML", icon: "pencil", style: .secondary, fullWidth: true,
+                                           tooltip: "Open the YAML in an in-app editor. Save writes a user-rule override that survives Sparkle updates.") {
+                                yamlEditorRule = r
+                            }
+                        }
+                        let isDisabled = userDisabledRuleIDs.contains(r.id) || !r.isEnabled
+                        HStack(spacing: 8) {
+                            V2ActionButton(
+                                isDisabled ? "Enable rule" : "Disable rule",
+                                icon: isDisabled ? "checkmark.circle" : "minus.circle",
+                                style: .secondary,
+                                fullWidth: true,
+                                tooltip: isDisabled
+                                    ? "Re-enable this rule (removes the user override)"
+                                    : "Disable this rule without editing the bundled YAML. First disable in this session may prompt for your admin password to create the override directory; subsequent disables don't."
+                            ) {
+                                Task { await toggleRuleDisabled(r) }
+                            }
+                            V2ActionButton("View fires", icon: "list.bullet", style: .secondary, fullWidth: true) {
+                                state.goto(V2NavigationDestination(workspace: .alerts, tab: .alertsHistory))
+                            }
+                        }
                     }
                 }
             }

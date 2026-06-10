@@ -11,12 +11,28 @@ public enum V2ActionStyle: Sendable {
     case secondary
     case danger
     case ghost
+    /// Subtle semantic tint for inline row actions: colored text on a
+    /// 10%-alpha wash of the same color (the History Unsuppress/Delete
+    /// look, promoted to a reusable style in v1.18.1).
+    case tinted(Color)
+}
+
+public enum V2ActionSize: Sendable {
+    case regular
+    /// Inline / table-row density: smaller type + padding (v1.18.1).
+    case compact
 }
 
 public struct V2ActionButton: View {
     public let label: String
     public let icon: String?
     public let style: V2ActionStyle
+    public let size: V2ActionSize
+    /// Expands the button's VISUAL surface (background included) to the
+    /// available width — `.frame(maxWidth:)` applied outside the button
+    /// only widens the hit area while the drawn button stays intrinsic,
+    /// which is what made stacked inspector verbs look ragged (v1.18.1).
+    public let fullWidth: Bool
     public let disabled: Bool
     public let tooltip: String?
     public let action: () -> Void
@@ -25,6 +41,8 @@ public struct V2ActionButton: View {
         _ label: String,
         icon: String? = nil,
         style: V2ActionStyle = .secondary,
+        size: V2ActionSize = .regular,
+        fullWidth: Bool = false,
         disabled: Bool = false,
         tooltip: String? = nil,
         action: @escaping () -> Void
@@ -32,34 +50,44 @@ public struct V2ActionButton: View {
         self.label = label
         self.icon = icon
         self.style = style
+        self.size = size
+        self.fullWidth = fullWidth
         self.disabled = disabled
         self.tooltip = tooltip
         self.action = action
     }
 
+    private var compact: Bool { size == .compact }
+    private var cornerRadius: CGFloat {
+        compact ? V2Theme.chipCornerRadius : V2Theme.smallCornerRadius
+    }
+
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: compact ? 4 : 6) {
                 if let icon {
-                    Image(systemName: icon).scaledSystem(12, weight: .semibold)
+                    Image(systemName: icon).scaledSystem(compact ? 10 : 12, weight: .semibold)
                 }
-                Text(label).scaledSystem(13, weight: .semibold)
+                Text(label).scaledSystem(compact ? 12 : 13, weight: .semibold)
             }
+            .frame(maxWidth: fullWidth ? .infinity : nil)
             .foregroundStyle(foreground.opacity(disabled ? 0.5 : 1.0))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(minHeight: 32)
+            .padding(.horizontal, compact ? 8 : 14)
+            .padding(.vertical, compact ? 4 : 10)
+            .frame(minHeight: compact ? 22 : 32)
             .background(background.opacity(disabled ? 0.5 : 1.0))
             .overlay(
-                RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius)
+                RoundedRectangle(cornerRadius: cornerRadius)
                     .stroke(border.opacity(disabled ? 0.5 : 1.0), lineWidth: 1)
             )
-            .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
             // HIG: 44×44pt minimum tap target. We can't always reach 44
             // because action buttons sit in compact toolbars, but 32pt
             // is the maximum we can bring to tab strips and inspector
             // verb stacks without breaking layout. 32 + intrinsic
-            // padding of the parent typically reaches 40-44.
+            // padding of the parent typically reaches 40-44. (.compact
+            // is for inline table-row actions where the row itself is
+            // the larger target.)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -73,6 +101,7 @@ public struct V2ActionButton: View {
         case .secondary: return V2Theme.primaryText
         case .danger: return .white
         case .ghost: return V2Theme.mutedText
+        case .tinted(let color): return color
         }
     }
 
@@ -83,6 +112,7 @@ public struct V2ActionButton: View {
         case .secondary: return V2Theme.hoverBackground
         case .danger: return V2Theme.critical
         case .ghost: return .clear
+        case .tinted(let color): return color.opacity(0.10)
         }
     }
 
@@ -92,6 +122,7 @@ public struct V2ActionButton: View {
         case .secondary: return V2Theme.panelBorder
         case .danger: return V2Theme.critical.opacity(0.4)
         case .ghost: return V2Theme.panelBorder.opacity(0.6)
+        case .tinted(let color): return color.opacity(0.25)
         }
     }
 }
