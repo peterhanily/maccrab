@@ -719,13 +719,28 @@ enum EventLoop {
             if enrichedEvent.eventCategory == .network,
                let aiTool = enrichedEvent.enrichments["ai_tool"],
                let net = enrichedEvent.network {
+                // v1.18 (RC live-test fix): recover the domain for an IP-only
+                // connection from the DNS reverse cache. AI tools resolve
+                // api.anthropic.com / github.com via DNS (captured by DNSCollector)
+                // and then connect by IP, so destinationHostname is usually nil at
+                // the connection event. Without this the sandbox can't match the
+                // domain allowlist and the wellKnownCloudPrefixes fallback misses
+                // the AWS/Azure/Akamai ranges these APIs actually use — firing an
+                // "unapproved IP" alert on every legit AI-API / GitHub call (~37/wk
+                // of pure FP observed live). Recovering the domain lets the
+                // allowlist match; a genuinely-unapproved host still fires (now
+                // named, not a bare IP).
+                var resolvedDomain = net.destinationHostname
+                if resolvedDomain == nil {
+                    resolvedDomain = await state.dnsCollector.domainForIP(net.destinationIp)
+                }
                 if let violation = await state.aiNetworkSandbox.checkConnection(
                     aiToolName: aiTool,
                     processPid: enrichedEvent.process.pid,
                     processPath: enrichedEvent.process.executable,
                     destinationIP: net.destinationIp,
                     destinationPort: net.destinationPort,
-                    destinationDomain: net.destinationHostname
+                    destinationDomain: resolvedDomain
                 ) {
                     let alert = Alert(
                         ruleId: "maccrab.ai-guard.network-sandbox",
