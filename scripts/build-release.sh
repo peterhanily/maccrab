@@ -821,6 +821,16 @@ cat > "$RELEASE_JSON" <<RELEASE_EOF
 }
 RELEASE_EOF
 echo "  release.json written → $RELEASE_JSON"
+
+# v1.18: bump the Homebrew cask sha256 to the freshly-built DMG. Pre-this it was
+# a manual step that lagged (a release shipped with the PRIOR version's cask
+# sha256, so `brew install --cask maccrab` failed checksum verification). The
+# DMG sha is authoritative here, so sync the cask(s) in the same breath.
+for cask in "$PROJECT_DIR/Casks/maccrab.rb" "$PROJECT_DIR/homebrew/maccrab.rb"; do
+    [ -f "$cask" ] || continue
+    /usr/bin/sed -i '' -E "s/sha256 \"[a-f0-9]{64}\"/sha256 \"$DMG_SHA\"/" "$cask"
+done
+echo "  Homebrew cask sha256 synced to the DMG ($DMG_SHA)"
 echo ""
 
 rm -rf "$STAGING_DIR"

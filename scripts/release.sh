@@ -35,6 +35,22 @@ if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
 fi
 
+# v1.18: derive GitHub tokens from the login-Keychain git credential when not
+# explicitly set. In the field the standalone SITE_REPO_TOKEN AND the gh OAuth
+# token both expired, which (a) aborted this script at Step 0a and (b) 401'd
+# `gh release create` mid-release. The git credential that `git push` already
+# uses is API-valid + repo-write for both maccrab and maccrab-site, so falling
+# back to it removes the release's dependence on separately-maintained tokens
+# that silently rot. Export GH_TOKEN / SITE_REPO_TOKEN to override.
+_maccrab_git_pat() { printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p'; }
+_MACCRAB_PAT="$(_maccrab_git_pat || true)"
+if [ -n "${_MACCRAB_PAT:-}" ]; then
+    export GH_TOKEN="${GH_TOKEN:-$_MACCRAB_PAT}"
+    export SITE_REPO_TOKEN="${SITE_REPO_TOKEN:-$_MACCRAB_PAT}"
+    echo "  ✓ GitHub tokens available (GH_TOKEN/SITE_REPO_TOKEN; Keychain git credential used as fallback)"
+fi
+unset _MACCRAB_PAT
+
 # Verify credentials
 if [ -z "${DEVELOPER_ID:-}" ]; then
     echo "ERROR: DEVELOPER_ID not set."
