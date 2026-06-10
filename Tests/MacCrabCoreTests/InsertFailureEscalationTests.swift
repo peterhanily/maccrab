@@ -248,4 +248,27 @@ struct InsertFailureEscalationTests {
         #expect(snap.total == 1)
         #expect(snap.lastKind == "disk_io")
     }
+
+    @Test("snapshot total is a rolling 24h window — old errors age out (no perpetual stale count)")
+    func rollingWindowAgesOutOldErrors() async {
+        await reset()
+        let tracker = StorageErrorTracker.shared
+
+        // 5 errors at the anchor.
+        for i in 0..<5 {
+            await tracker.recordEventError(diskIOError(), now: Self.anchor.addingTimeInterval(Double(i)))
+        }
+        var snap = await tracker.eventInsertErrorSnapshot(now: Self.anchor.addingTimeInterval(5))
+        #expect(snap.total == 5, "all 5 recent errors counted, got \(snap.total)")
+
+        // 25h later the anchor errors fall outside the 24h window.
+        let later = Self.anchor.addingTimeInterval(25 * 3600)
+        snap = await tracker.eventInsertErrorSnapshot(now: later)
+        #expect(snap.total == 0, "errors older than 24h must age out (the stale-1M fix), got \(snap.total)")
+
+        // A fresh error at `later` counts; the aged-out ones stay gone.
+        await tracker.recordEventError(diskIOError(), now: later)
+        snap = await tracker.eventInsertErrorSnapshot(now: later)
+        #expect(snap.total == 1, "only the in-window error counts, got \(snap.total)")
+    }
 }

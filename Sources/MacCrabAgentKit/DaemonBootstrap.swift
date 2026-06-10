@@ -40,6 +40,13 @@ public enum DaemonBootstrap {
 
         let state = await DaemonSetup.initialize()
 
+        // Clear any stale cumulative storage-error total left by an older build:
+        // rewrite storage_errors.json from the (empty-on-boot) rolling 24h window
+        // so a long-past burst (field-observed ~1M, stale for weeks) stops showing
+        // in the dashboard + diagnostics. Best-effort; no-op for the non-root dev
+        // daemon (can't write the root-owned release path).
+        await StorageErrorTracker.shared.refreshSnapshot()
+
         if printBanner {
             await StartupBanner.print(state: state)
         }

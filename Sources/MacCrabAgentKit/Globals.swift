@@ -92,6 +92,19 @@ actor StorageErrorTracker {
     /// continued growth.
     private let rateWarningCooldown: TimeInterval = 60
 
+    /// Rolling 24h per-hour buckets that back the SNAPSHOT + heartbeat totals.
+    /// The cumulative `alertInsertErrors`/`eventInsertErrors` counters above stay
+    /// as boot-lifetime totals for the os_log messages, but `storage_errors.json`
+    /// (which the dashboard reads + which the diagnostics surface) now reports the
+    /// trailing-24h sums so a long-past burst ages out instead of alarming forever
+    /// — field-observed ~1M `disk_io` errors stale since a May disk-pressure
+    /// incident kept the file showing a million long after inserts recovered.
+    /// Keyed by Unix-epoch hour; older buckets evicted on each record. Memory
+    /// bounded at <=25 entries.
+    private var eventErrorPerHourWindow: [Int64: Int] = [:]
+    private var alertErrorPerHourWindow: [Int64: Int] = [:]
+    private let rollingWindowSeconds: Int64 = 24 * 3600
+
     /// Test-observable emission counters. Production code never reads
     /// these; tests use them to assert the escalation ladder fired
     /// the expected number of times without needing to mock os_log.
@@ -116,16 +129,18 @@ actor StorageErrorTracker {
     private var lastAlertErrorLog: Date = .distantPast
 
     func recordAlertError(_ error: Error) {
+        let now = Date()
         alertInsertErrors += 1
+        recordHourly(&alertErrorPerHourWindow, at: now)
         lastErrorMessage = error.localizedDescription
         lastErrorKind = "alert_insert"
-        lastErrorAt = Date()
-        if Date().timeIntervalSince(lastAlertErrorLog) > 60 {
+        lastErrorAt = now
+        if now.timeIntervalSince(lastAlertErrorLog) > 60 {
             let count = self.alertInsertErrors
             logger.error("Alert insert failed (\(count, privacy: .public) total): \(error.localizedDescription, privacy: .public)")
-            lastAlertErrorLog = Date()
+            lastAlertErrorLog = now
         }
-        writeSnapshot()
+        writeSnapshot(now: now)
     }
 
     func recordEventError(_ error: Error) {
@@ -137,6 +152,7 @@ actor StorageErrorTracker {
     /// no-`now` form above.
     internal func recordEventError(_ error: Error, now: Date) {
         eventInsertErrors += 1
+        recordHourly(&eventErrorPerHourWindow, at: now)
         let message = error.localizedDescription
         lastErrorMessage = message
         let kind = Self.classifyEventInsertError(error)
@@ -175,7 +191,7 @@ actor StorageErrorTracker {
             )
         }
 
-        writeSnapshot()
+        writeSnapshot(now: now)
     }
 
     /// Tier 3 surface — read by `DaemonTimers` when assembling the
@@ -192,7 +208,7 @@ actor StorageErrorTracker {
         evictExpiredRateBuckets(now: now)
         let rate = currentRatePerMinute()
         let lastKind: String? = lastEventInsertKind.isEmpty ? nil : lastEventInsertKind
-        return (eventInsertErrors, rate, lastKind)
+        return (rollingSum(eventErrorPerHourWindow, now: now), rate, lastKind)
     }
 
     /// Test-only: reset all internal state. Production never calls this
@@ -207,6 +223,8 @@ actor StorageErrorTracker {
         eventErrorCountByKind.removeAll()
         eventErrorLastSeenByKind.removeAll()
         eventErrorPerSecondWindow.removeAll()
+        eventErrorPerHourWindow.removeAll()
+        alertErrorPerHourWindow.removeAll()
         lastRateWarningAt = .distantPast
         lastAlertErrorLog = .distantPast
         tier1EmissionCount = 0
@@ -325,15 +343,46 @@ actor StorageErrorTracker {
         return eventErrorPerSecondWindow.values.reduce(0, +)
     }
 
+    /// Bucket a hit into the trailing-24h per-hour window and evict expired
+    /// buckets. Mirrors `recordRateHit` + `evictExpiredRateBuckets` but at hour
+    /// granularity (<=25 entries) so the snapshot total reflects only recent
+    /// errors. `now`-injectable for tests.
+    private func recordHourly(_ window: inout [Int64: Int], at now: Date) {
+        let secs = Int64(now.timeIntervalSince1970)
+        window[secs / 3600, default: 0] &+= 1
+        let cutoffHour = (secs - rollingWindowSeconds) / 3600
+        window = window.filter { $0.key >= cutoffHour }
+    }
+
+    /// Sum the trailing-24h window (re-applying the cutoff so a stale snapshot
+    /// read between errors still reports a correct recent total).
+    private func rollingSum(_ window: [Int64: Int], now: Date) -> Int {
+        let cutoffHour = (Int64(now.timeIntervalSince1970) - rollingWindowSeconds) / 3600
+        return window.filter { $0.key >= cutoffHour }.values.reduce(0, +)
+    }
+
     /// Serialize current counters + most-recent error to the snapshot
     /// path. Best-effort — if the write fails we just miss this one
     /// update; the next error will try again. Silent failure here is
     /// acceptable because the error we're tracking is already logged
     /// to os_log.
-    private func writeSnapshot() {
+    /// Startup hook: rewrite the snapshot from the current (empty-on-boot)
+    /// rolling windows. Clears a stale cumulative total left in
+    /// storage_errors.json by an older build — the rolling counters otherwise
+    /// only rewrite on the next error, which a recovered/healthy host never
+    /// produces, so a million-error file would persist forever. Call once at
+    /// daemon start.
+    func refreshSnapshot(now: Date = Date()) {
+        writeSnapshot(now: now)
+    }
+
+    private func writeSnapshot(now: Date) {
         let payload: [String: Any] = [
-            "alert_insert_errors": alertInsertErrors,
-            "event_insert_errors": eventInsertErrors,
+            // Rolling trailing-24h totals (not boot-cumulative) so a long-past
+            // burst ages out of the dashboard + diagnostics.
+            "alert_insert_errors": rollingSum(alertErrorPerHourWindow, now: now),
+            "event_insert_errors": rollingSum(eventErrorPerHourWindow, now: now),
+            "window_hours": rollingWindowSeconds / 3600,
             "last_error_message": lastErrorMessage,
             "last_error_kind": lastErrorKind,
             "last_error_at_unix": lastErrorAt?.timeIntervalSince1970 ?? 0,
