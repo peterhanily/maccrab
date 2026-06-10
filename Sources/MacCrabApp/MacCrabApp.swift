@@ -701,11 +701,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        // Find and trigger the Settings/Preferences menu item from the app menu
+        // Find + trigger the Settings/Preferences menu item. Match by its
+        // conventional Cmd-, key equivalent FIRST (locale-independent): matching
+        // only the English title substring ("settings"/"preferences") broke in
+        // every non-English locale, where macOS localizes the item (e.g.
+        // "Einstellungen…", "Réglages…") — the match failed and only the
+        // unreliable showSettingsWindow: fallback remained, so Settings wouldn't
+        // open. (Surfaced once localization actually loaded.)
         if let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu {
             for item in appMenu.items {
                 let title = item.title.lowercased()
-                if title.contains("settings") || title.contains("preferences") {
+                if item.keyEquivalent == "," || title.contains("settings") || title.contains("preferences") {
                     appMenu.performActionForItem(at: appMenu.index(of: item))
                     return
                 }
