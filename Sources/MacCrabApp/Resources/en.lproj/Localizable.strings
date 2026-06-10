@@ -751,3 +751,65 @@
 "sidebar.ax.resize" = "Sidebar width";
 "sidebar.ax.workspace" = "%@ workspace";
 "sidebar.ax.workspaceHint" = "Command %lld";
+
+/* v1.18.1 — previously implicit keys (defaultValue-only) made explicit for translators */
+"agentTraces.statusRunning" = "Running on %lld";
+"eventDetail.openAlerts" = "Open the Alerts workspace for full detail and actions.";
+"settings.agentControl" = "Agent Control (MCP)";
+"settings.agentControlHelp" = "Let a Claude/Codex agent on this Mac customise MacCrab through the MCP server. Every tier is off by default and each change is audit-logged. Turn on only what you need.";
+"settings.agentTier.authoring" = "Author rules";
+"settings.agentTier.authoringDesc" = "Create and delete detection rules (validated by the compiler).";
+"settings.agentTier.config" = "Tune detection";
+"settings.agentTier.configDesc" = "Built-in rule settings, reload rules, refresh intel, safe daemon tunables.";
+"settings.agentTier.response" = "Change defense-affecting config";
+"settings.agentTier.responseDesc" = "Toggle ES introspection / file-open subscriptions and ultrasonic. Disabling these reduces detection — grant with care.";
+"settings.flushCurrentSize" = "Current size: %@";
+"settings.flushDelta" = "Last sweep: %@ → %@";
+"settings.flushLastRun" = "Last run %@";
+"settings.flushPath" = "(%@)";
+"settings.llmOllamaHelp" = "Local: install from ollama.com, run: ollama pull %@. Remote: enter the URL and API key of your Ollama server.";
+"settings.retention.confirmTitle" = "Delete alerts older than %lld days?";
+"settings.severityNoiseWarning" = "At this level nearly every detection posts a macOS banner. Most users want High. Every alert appears in the dashboard regardless of this setting.";
+"settings.sysextStateFailed" = "Failed: %@";
+"settings.sysextStateFailedDetail" = "Failed: %@";
+"wizard.saveErrorTitle" = "Couldn't install rule";
+"wizard.savedSubtitle" = "Compiled and loaded into the engine. It now appears in Detection → Rules and fires immediately.";
+
+/* v1.18.1 — section headers routed through String(localized:) */
+"inspector.actions" = "Actions";
+"inspector.actionsTaken" = "Actions taken";
+"inspector.activity" = "Activity";
+"inspector.aiAnalysis" = "AI analysis";
+"inspector.anchorVerdict" = "Anchor verdict";
+"inspector.builtInSettings" = "Built-in settings";
+"inspector.criticalPath" = "Critical path";
+"inspector.cves" = "CVEs";
+"inspector.description" = "Description";
+"inspector.detectionRule" = "Detection rule";
+"inspector.identity" = "Identity";
+"inspector.logic" = "Logic";
+"inspector.mitre" = "MITRE";
+"inspector.permissionsExtPermissionsCount" = "Permissions (%lld)";
+"inspector.process" = "Process";
+"inspector.riskScore" = "Risk score";
+"inspector.settings" = "Settings";
+"inspector.status" = "Status";
+"inspector.supplyChain" = "Supply chain";
+"inspector.surroundingEvents2Min" = "Surrounding events (±2 min)";
+"inspector.timeline" = "Timeline";
+"inspector.traceContext" = "Trace context";
+"inspector.triggeringEvent" = "Triggering event";
+"inspector.updateCommand" = "Update command";
+"inspector.whatHappened" = "What happened";
+"inspector.when" = "When";
+"raveDetail.requires" = "Requires";
+"raveDetail.signedBy" = "Signed by";
+"raveDetail.tags" = "Tags";
+"raveDetail.version" = "Version";
+"raveDetail.whatItDoes" = "What it does";
+
+/* v1.18.1 — forensics settings section headers */
+"forensicsSettings.installedScanners" = "Installed scanners";
+"forensicsSettings.maintenance" = "Maintenance";
+"forensicsSettings.onDiskLocation" = "On-disk location";
+"forensicsSettings.trustedPublishers" = "Trusted publishers";

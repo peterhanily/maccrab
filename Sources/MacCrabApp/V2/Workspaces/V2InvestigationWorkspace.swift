@@ -1667,16 +1667,16 @@ struct V2InvestigationWorkspace: View {
                     V2StatusChip("\(trace.edgeCount) edges", kind: .neutral)
                 }
             }
-            V2InspectorSection("Anchor verdict") {
+            V2InspectorSection(String(localized: "inspector.anchorVerdict", defaultValue: "Anchor verdict")) {
                 Text(trace.anchorVerdict)
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.primaryText)
             }
-            V2InspectorSection("Timeline") {
+            V2InspectorSection(String(localized: "inspector.timeline", defaultValue: "Timeline")) {
                 V2InspectorKeyValue("First seen", V2TimeFormat.relative(trace.firstSeen))
                 V2InspectorKeyValue("Last update", V2TimeFormat.relative(trace.lastUpdated))
             }
-            V2InspectorSection("Critical path") {
+            V2InspectorSection(String(localized: "inspector.criticalPath", defaultValue: "Critical path")) {
                 ForEach(trace.rootProcess.split(separator: "→").map { $0.trimmingCharacters(in: .whitespaces) },
                         id: \.self) { step in
                     HStack(spacing: 6) {
@@ -1687,7 +1687,7 @@ struct V2InvestigationWorkspace: View {
                     }
                 }
             }
-            V2InspectorSection("Actions") {
+            V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
                 V2ActionButton("Open Agent Traces", icon: "wand.and.stars", style: .secondary) {
                     state.selectTab(.investigationAgentTraces)
                 }

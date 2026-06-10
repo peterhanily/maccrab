@@ -891,7 +891,7 @@ struct V2AlertsWorkspace: View {
             // the "What happened" summary and the structured detail below.
             let triggers = parseTriggerEvents(from: alert.triggeringEventsJson)
             if let summary = contextualSummary(for: alert, events: triggers) {
-                V2InspectorSection("What happened") {
+                V2InspectorSection(String(localized: "inspector.whatHappened", defaultValue: "What happened")) {
                     Text(summary)
                         .font(V2Theme.body())
                         .foregroundStyle(V2Theme.primaryText)
@@ -899,13 +899,13 @@ struct V2AlertsWorkspace: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            V2InspectorSection("Detection rule") {
+            V2InspectorSection(String(localized: "inspector.detectionRule", defaultValue: "Detection rule")) {
                 Text(alert.description)
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.primaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            V2InspectorSection("Process") {
+            V2InspectorSection(String(localized: "inspector.process", defaultValue: "Process")) {
                 V2InspectorKeyValue("Name",   alert.process)
                 if !alert.processPath.isEmpty {
                     V2InspectorKeyValue("Path",   alert.processPath, mono: true)
@@ -936,12 +936,12 @@ struct V2AlertsWorkspace: View {
                     V2InspectorKeyValue("Host",   alert.hostName, mono: true)
                 }
             }
-            V2InspectorSection("When") {
+            V2InspectorSection(String(localized: "inspector.when", defaultValue: "When")) {
                 V2InspectorKeyValue("Detected", V2TimeFormat.absolute(alert.timestamp), mono: true)
                 V2InspectorKeyValue("Relative", V2TimeFormat.relative(alert.timestamp))
             }
             if !alert.actionsTaken.isEmpty {
-                V2InspectorSection("Actions taken") {
+                V2InspectorSection(String(localized: "inspector.actionsTaken", defaultValue: "Actions taken")) {
                     ForEach(alert.actionsTaken, id: \.self) { act in
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle.fill")
@@ -961,7 +961,7 @@ struct V2AlertsWorkspace: View {
             // rendered to nothing was actively confusing; both come
             // back in v1.11 when the metadata_json migration lands.
             if let summary = alert.llmSummary, !summary.isEmpty {
-                V2InspectorSection("AI analysis") {
+                V2InspectorSection(String(localized: "inspector.aiAnalysis", defaultValue: "AI analysis")) {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
                             if let v = alert.llmVerdict {
@@ -1020,7 +1020,7 @@ struct V2AlertsWorkspace: View {
             // actually fired. `triggers` is parsed once at the top of the
             // inspector.
             if !triggers.isEmpty {
-                V2InspectorSection("Triggering event") {
+                V2InspectorSection(String(localized: "inspector.triggeringEvent", defaultValue: "Triggering event")) {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(Array(triggers.enumerated()), id: \.offset) { _, ev in
                             triggerEventCard(ev)
@@ -1031,10 +1031,10 @@ struct V2AlertsWorkspace: View {
                     }
                 }
             }
-            V2InspectorSection("Surrounding events (±2 min)") {
+            V2InspectorSection(String(localized: "inspector.surroundingEvents2Min", defaultValue: "Surrounding events (±2 min)")) {
                 SurroundingEventsView(alert: alert, appState: appState)
             }
-            V2InspectorSection("Trace context") {
+            V2InspectorSection(String(localized: "inspector.traceContext", defaultValue: "Trace context")) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Inspect this alert's full causal trace via the CLI:")
                         .font(V2Theme.meta())
@@ -1055,7 +1055,7 @@ struct V2AlertsWorkspace: View {
                     }
                 }
             }
-            V2InspectorSection("Actions") {
+            V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
                 // v1.18.1: compact action bar — the primary verb gets the
                 // full row; the two secondary verbs share one row at equal
                 // width (the old layout stacked all three full-width).

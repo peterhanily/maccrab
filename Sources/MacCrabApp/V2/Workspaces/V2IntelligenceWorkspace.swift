@@ -854,7 +854,7 @@ public struct V2IntelligenceWorkspace: View {
         V2Inspector(title: pkg.name,
                     subtitle: "\(pkg.manager) · installed \(pkg.installed)",
                     onClose: { selectedPackage = nil }) {
-            V2InspectorSection("Status") {
+            V2InspectorSection(String(localized: "inspector.status", defaultValue: "Status")) {
                 V2InspectorKeyValue("Installed", pkg.installed, mono: true)
                 V2InspectorKeyValue("Latest", pkg.latest, mono: true)
                 let outdated = pkg.installed != pkg.latest
@@ -862,7 +862,7 @@ public struct V2IntelligenceWorkspace: View {
                 V2InspectorKeyValue("Behind", V2TimeFormat.staleness(pkg.staleness))
                 V2InspectorKeyValue("Vulnerabilities", "\(pkg.vulnCount)", mono: true)
             }
-            V2InspectorSection("Update command") {
+            V2InspectorSection(String(localized: "inspector.updateCommand", defaultValue: "Update command")) {
                 let cmd = upgradeCommand(for: pkg)
                 HStack(spacing: 6) {
                     Text(cmd)
@@ -879,7 +879,7 @@ public struct V2IntelligenceWorkspace: View {
                 }
             }
             if pkg.vulnCount > 0 {
-                V2InspectorSection("CVEs") {
+                V2InspectorSection(String(localized: "inspector.cves", defaultValue: "CVEs")) {
                     Text("Vulnerability detail is available via the CLI:")
                         .font(V2Theme.meta())
                         .foregroundStyle(V2Theme.mutedText)
@@ -914,7 +914,7 @@ public struct V2IntelligenceWorkspace: View {
                 || pkg.attestationStatus != nil
                 || (pkg.contentRedFlags?.isEmpty == false)
             if hasSupplyChainSignal {
-                V2InspectorSection("Supply chain") {
+                V2InspectorSection(String(localized: "inspector.supplyChain", defaultValue: "Supply chain")) {
                     if let score = pkg.typosquatScore {
                         V2InspectorKeyValue("Typosquat", typosquatDisplay(score: score, similarTo: pkg.typosquatSimilarTo, isLikely: pkg.isLikelyTyposquat))
                     }

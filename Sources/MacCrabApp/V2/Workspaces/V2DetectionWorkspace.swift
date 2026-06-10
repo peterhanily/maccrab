@@ -756,11 +756,11 @@ public struct V2DetectionWorkspace: View {
                     .foregroundStyle(V2Theme.mutedText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            V2InspectorSection("Description") {
+            V2InspectorSection(String(localized: "inspector.description", defaultValue: "Description")) {
                 Text(r.description).font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            V2InspectorSection("Logic") {
+            V2InspectorSection(String(localized: "inspector.logic", defaultValue: "Logic")) {
                 Text(mockYAML(for: r))
                     .font(V2Theme.mono())
                     .foregroundStyle(V2Theme.neutral)
@@ -770,7 +770,7 @@ public struct V2DetectionWorkspace: View {
                     .clipShape(RoundedRectangle(cornerRadius: V2Theme.smallCornerRadius))
                     .textSelection(.enabled)
             }
-            V2InspectorSection("MITRE") {
+            V2InspectorSection(String(localized: "inspector.mitre", defaultValue: "MITRE")) {
                 ForEach(r.mitre, id: \.self) { code in
                     HStack(spacing: 6) {
                         Image(systemName: "doc.plaintext").scaledSystem(11)
@@ -779,7 +779,7 @@ public struct V2DetectionWorkspace: View {
                     }
                 }
             }
-            V2InspectorSection("Activity") {
+            V2InspectorSection(String(localized: "inspector.activity", defaultValue: "Activity")) {
                 V2InspectorKeyValue("Last fired",
                                     r.lastFired.map(V2TimeFormat.relative) ?? "—")
                 V2InspectorKeyValue("Fires (7d)", "\(r.firesLastWeek)")
@@ -790,7 +790,7 @@ public struct V2DetectionWorkspace: View {
                 // or have its severity overridden (applied at the daemon's
                 // AlertSink chokepoint via the inbox IPC).
                 BuiltinRuleSettingsSection(rule: r, appState: appState, state: state)
-                V2InspectorSection("Actions") {
+                V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
                     // v1.18.1: compact action bar (paired equal-width row)
                     // instead of intrinsic-width buttons stacked vertically.
                     HStack(spacing: 8) {
@@ -810,7 +810,7 @@ public struct V2DetectionWorkspace: View {
                 }
             } else {
                 // v1.18.1: severity is editable here too — no YAML round-trip.
-                V2InspectorSection("Settings") {
+                V2InspectorSection(String(localized: "inspector.settings", defaultValue: "Settings")) {
                     HStack {
                         Text("Effective severity")
                             .font(V2Theme.body()).foregroundStyle(V2Theme.primaryText)
@@ -821,7 +821,7 @@ public struct V2DetectionWorkspace: View {
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                V2InspectorSection("Actions") {
+                V2InspectorSection(String(localized: "inspector.actions", defaultValue: "Actions")) {
                     // v1.18.1: compact 2×2 action bar (paired equal-width
                     // rows) instead of four stacked intrinsic-width buttons.
                     VStack(spacing: 8) {
@@ -868,7 +868,7 @@ public struct V2DetectionWorkspace: View {
         @State private var severitySel = "default"
 
         var body: some View {
-            V2InspectorSection("Built-in settings") {
+            V2InspectorSection(String(localized: "inspector.builtInSettings", defaultValue: "Built-in settings")) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("This detection's logic isn't editable. You can override its severity or mute it; the detection still runs.")
                         .font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
@@ -1115,7 +1115,7 @@ public struct V2DetectionWorkspace: View {
                 }
                 riskPill(ext.riskScore)
             }
-            V2InspectorSection("Permissions (\(ext.permissions.count))") {
+            V2InspectorSection(String(localized: "inspector.permissionsExtPermissionsCount", defaultValue: "Permissions (\(ext.permissions.count))")) {
                 if ext.permissions.isEmpty {
                     Text("No declared permissions (or manifest unreadable, e.g. Firefox .xpi).")
                         .font(V2Theme.meta())
@@ -1139,13 +1139,13 @@ public struct V2DetectionWorkspace: View {
                     }
                 }
             }
-            V2InspectorSection("Risk score") {
+            V2InspectorSection(String(localized: "inspector.riskScore", defaultValue: "Risk score")) {
                 Text(riskExplanation(for: ext))
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.primaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            V2InspectorSection("Identity") {
+            V2InspectorSection(String(localized: "inspector.identity", defaultValue: "Identity")) {
                 V2InspectorKeyValue("ID", String(ext.id.split(separator: ":").last ?? ""), mono: true)
                 V2InspectorKeyValue("Version", ext.version, mono: true)
             }

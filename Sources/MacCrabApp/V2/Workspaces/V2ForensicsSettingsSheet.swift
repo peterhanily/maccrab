@@ -82,7 +82,7 @@ struct V2ForensicsSettingsSheet: View {
 
     private var installedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Installed scanners",
+            sectionHeader(String(localized: "forensicsSettings.installedScanners", defaultValue: "Installed scanners"),
                           "Third-party scanners you've added via the catalog or local bundle.")
             if loading {
                 ProgressView().controlSize(.small)
@@ -121,7 +121,7 @@ struct V2ForensicsSettingsSheet: View {
 
     private var trustSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Trusted publishers",
+            sectionHeader(String(localized: "forensicsSettings.trustedPublishers", defaultValue: "Trusted publishers"),
                           "Read-only. Use `maccrabctl plugin trust <key>` or `revoke <key>` to mutate.")
             if trustedKeys.isEmpty && revokedKeys.isEmpty {
                 emptyHint("No publisher keys in trust or revocation list.")
@@ -153,7 +153,7 @@ struct V2ForensicsSettingsSheet: View {
 
     private var maintenanceSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionHeader("Maintenance",
+            sectionHeader(String(localized: "forensicsSettings.maintenance", defaultValue: "Maintenance"),
                           "Leftover dev / test scanners detected in your plugins directory.")
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(devResidue, id: \.self) { id in
@@ -181,7 +181,7 @@ struct V2ForensicsSettingsSheet: View {
 
     private var pluginsRootSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("On-disk location", "")
+            sectionHeader(String(localized: "forensicsSettings.onDiskLocation", defaultValue: "On-disk location"), "")
             Text(installer.pluginsRootPath)
                 .scaledSystem(11, design: .monospaced)
                 .foregroundStyle(.secondary)

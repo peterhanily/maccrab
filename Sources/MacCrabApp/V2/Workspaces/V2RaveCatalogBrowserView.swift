@@ -335,15 +335,15 @@ struct V2RaveCatalogBrowserView: View {
                 }
 
                 Divider()
-                detailSection("What it does", body: longDescription(e))
+                detailSection(String(localized: "raveDetail.whatItDoes", defaultValue: "What it does"), body: longDescription(e))
                 if !e.tags.isEmpty {
-                    detailSection("Tags", view: tagWrap(e.tags))
+                    detailSection(String(localized: "raveDetail.tags", defaultValue: "Tags"), view: tagWrap(e.tags))
                 }
-                detailSection("Version", body: "v\(e.currentVersion)")
+                detailSection(String(localized: "raveDetail.version", defaultValue: "Version"), body: "v\(e.currentVersion)")
                 if let min = e.minMaccrabVersion {
-                    detailSection("Requires", body: "MacCrab v\(min) or newer")
+                    detailSection(String(localized: "raveDetail.requires", defaultValue: "Requires"), body: "MacCrab v\(min) or newer")
                 }
-                detailSection("Signed by", body: e.signerIdentity.isEmpty ? "—" : e.signerIdentity)
+                detailSection(String(localized: "raveDetail.signedBy", defaultValue: "Signed by"), body: e.signerIdentity.isEmpty ? "—" : e.signerIdentity)
 
                 Divider()
                 installCommand(e)
