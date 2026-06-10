@@ -19,6 +19,25 @@ import os.log
 /// Maintains a domain/IP allowlist of known-safe destinations. Connections
 /// that fall outside the allowlist produce a ``Violation`` that can be fed
 /// into the alert pipeline.
+///
+/// ## Known limitation: DNS-over-HTTPS (DoH)
+///
+/// Domain recovery for IP-only connections relies on the DNSCollector's port-53
+/// BPF capture (`domainForIP`). DoH encrypts the resolution inside TLS/443, so a
+/// DoH-resolved connection arrives with only an IP — `domainForIP` misses it and
+/// the domain allowlist can't match, leaving the `wellKnownCloudPrefixes` IP
+/// fallback as the only signal (which covers the major clouds but not every CDN
+/// range). Recovering the domain in that case would require extracting the TLS
+/// ClientHello SNI, which is **not feasible from macOS userland**: `libproc`
+/// socket info exposes only IP/port/protocol/TCP-state (no TLS metadata), and
+/// parsing SNI would mean a BPF packet tap with full TLS record/handshake
+/// parsing (1.2 vs 1.3, fragmentation, 0-RTT, resumption) — far beyond the
+/// port-53 DNS capture. Accepted mitigations instead of SNI: (1) DNS recovery
+/// for standard port-53 resolvers (the common case — CLI tools, system
+/// resolver); (2) `wellKnownCloudPrefixes` for major AI/CDN backends; (3)
+/// `DoHDetector` separately flags suspicious DoH usage. A DoH-only app talking
+/// to an off-prefix IP may still produce an "unapproved IP" finding — by design,
+/// since MacCrab genuinely cannot see what it resolved.
 public actor AINetworkSandbox {
 
     private let logger = Logger(subsystem: "com.maccrab", category: "ai-network-sandbox")
