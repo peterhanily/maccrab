@@ -897,6 +897,23 @@ public actor AlertStore {
         return db.map { Int(sqlite3_changes($0)) } ?? 0
     }
 
+    /// Reverse of `suppress(campaignId:)` — lift suppression on every alert
+    /// tagged with this campaign id. Used by the dashboard's campaign-restore
+    /// flow so suppress/restore is symmetric. Returns rows changed.
+    @discardableResult
+    public func unsuppress(campaignId id: String) throws -> Int {
+        let sql = "UPDATE alerts SET suppressed = 0 WHERE campaign_id = ?1 AND suppressed = 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, index: 1, value: id)
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE else {
+            let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            throw AlertStoreError.stepFailed(msg)
+        }
+        return db.map { Int(sqlite3_changes($0)) } ?? 0
+    }
+
     /// v1.11.0 (audit perf HIGH): SQL-side AI-Guard alert filter.
     /// Pre-fix the MCP `get_ai_alerts` handler pulled 10K alerts then
     /// substring-matched 8 keywords across rule_id + title in Swift.

@@ -102,6 +102,13 @@ public protocol V2DataProvider: AnyObject {
     /// Returns 0 on read-only DB / missing campaign.
     func suppressCampaign(id: String) async -> Int
 
+    /// Restore (unsuppress) a campaign + lift suppression on its contributing
+    /// alerts. Returns true if the restore (or its inbox request) landed.
+    func unsuppressCampaign(id: String) async -> Bool
+
+    /// Currently-suppressed campaigns, for the restore surface.
+    func suppressedCampaigns(limit: Int) async -> [V2MockCampaign]
+
     /// Trigger a one-shot threat-intel feed refresh. Implementations
     /// shell out to `maccrabctl intel refresh` (which signals the
     /// daemon's ThreatIntelFeed actor to call `refreshNow`). Returns
@@ -215,6 +222,10 @@ extension V2DataProvider {
     public func events() async -> [V2MockEvent]      { await events(limit: 200) }
     public func campaigns() async -> [V2MockCampaign] { await campaigns(limit: 50) }
     public func traces() async -> [V2MockTrace]      { await traces(limit: 50) }
+    // Campaign-restore defaults — overridden by V2LiveDataProvider; mock + any
+    // other conformer get safe no-ops so they needn't implement the surface.
+    public func unsuppressCampaign(id: String) async -> Bool { false }
+    public func suppressedCampaigns(limit: Int) async -> [V2MockCampaign] { [] }
     /// Default integrations to empty — keeps `V2MockDataProvider`
     /// from needing a no-op override.
     public func integrations() async -> [V2MockIntegration] { [] }

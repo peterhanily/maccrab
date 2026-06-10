@@ -19,6 +19,7 @@ struct V2AlertsWorkspace: View {
     @State private var suppressionEntries: [V2SuppressionEntry] = []
     @State private var alerts: [V2MockAlert] = []
     @State private var campaigns: [V2MockCampaign] = []
+    @State private var suppressedCampaigns: [V2MockCampaign] = []
     @State private var selectedCampaignIds: Set<String> = []
     @State private var loaded = false
     // v1.12.7 Wave 9R: pending-mutation reconciliation. After Wave 9Q
@@ -147,6 +148,10 @@ struct V2AlertsWorkspace: View {
 
             self.campaigns = merged.filter { $0.lastSeen >= cutoff }
         }
+
+        // Suppressed campaigns — powers the in-UI restore surface.
+        let sc = await state.provider.suppressedCampaigns(limit: 50)
+        await MainActor.run { self.suppressedCampaigns = sc }
 
         let s = await state.provider.suppressions()
         await MainActor.run {
@@ -1315,9 +1320,66 @@ struct V2AlertsWorkspace: View {
                         campaignCard(campaign)
                     }
                 }
+                if !suppressedCampaigns.isEmpty {
+                    suppressedCampaignsSection
+                }
             }
             .padding(16)
         }
+    }
+
+    /// In-UI restore surface (replaces the old "use the CLI" dead-end). Lists
+    /// campaigns currently suppressed, each with a Restore button that calls
+    /// provider.unsuppressCampaign + brings it back into the active list.
+    private var suppressedCampaignsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Suppressed campaigns (\(suppressedCampaigns.count))")
+                .scaledSystem(12, weight: .semibold)
+                .foregroundStyle(V2Theme.tertiaryText)
+                .textCase(.uppercase)
+                .padding(.top, 8)
+            ForEach(suppressedCampaigns) { c in
+                HStack(spacing: 12) {
+                    Image(systemName: "flame")
+                        .foregroundStyle(c.severity.chipKind.color)
+                        .scaledSystem(14)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(c.name).scaledSystem(13, weight: .medium)
+                        Text("\(c.alertCount) alerts · suppressed")
+                            .scaledSystem(11).foregroundStyle(V2Theme.mutedText)
+                    }
+                    Spacer()
+                    V2ActionButton("Restore", icon: "bell", style: .secondary,
+                                   tooltip: "Unsuppress this campaign and its contributing alerts.") {
+                        Task { await restoreCampaign(c) }
+                    }
+                }
+                .padding(10)
+                .v2Panel()
+            }
+        }
+    }
+
+    private func restoreCampaign(_ c: V2MockCampaign) async {
+        // Optimistic: drop from the suppressed list immediately.
+        await MainActor.run { suppressedCampaigns.removeAll { $0.id == c.id } }
+        let ok = await state.provider.unsuppressCampaign(id: c.id)
+        await MainActor.run {
+            if ok {
+                pendingSuppressedCampaignIds.remove(c.id)
+                state.showToast(V2Toast(kind: .success, title: "Campaign restored", detail: c.name))
+            } else {
+                // Roll back the optimistic removal on failure.
+                suppressedCampaigns.append(c)
+                let detail = state.provider.lastErrorDescription ?? "unknown error"
+                let isReadOnly = detail.lowercased().contains("read-only")
+                state.showToast(V2Toast(
+                    kind: isReadOnly ? .warning : .error,
+                    title: isReadOnly ? "Cannot mutate from dashboard" : "Restore failed",
+                    detail: detail))
+            }
+        }
+        await reload()
     }
 
     private func campaignCard(_ c: V2MockCampaign) -> some View {
@@ -1389,7 +1451,7 @@ struct V2AlertsWorkspace: View {
                     ))
                 }
                 V2ActionButton("Suppress", icon: "bell.slash", style: .secondary,
-                               tooltip: "Suppress this campaign and every contributing alert. Use `maccrabctl unsuppress <rule_id>` to reverse.") {
+                               tooltip: "Suppress this campaign and every contributing alert. Restore it any time from the Suppressed campaigns section below.") {
                     Task { await suppressCampaign(c) }
                 }
             }

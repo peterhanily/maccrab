@@ -202,6 +202,9 @@ public struct V2MockCampaign: Identifiable, Sendable, Hashable {
     public var techniques: [String] = []
     public var aiTools: [String] = []
     public var processTreeDepth: Int = 0
+    /// Whether this campaign is currently suppressed. Drives the
+    /// "Suppressed campaigns" restore surface. Defaults false.
+    public var suppressed: Bool = false
 }
 
 // MARK: - Event

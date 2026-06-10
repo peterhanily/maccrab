@@ -39,4 +39,21 @@ struct AlertStoreCountByCampaignTests {
         #expect(try await store.countByCampaign(campaignId: "camp-1") == 0)  // none left
         #expect(try await store.countByCampaign(campaignId: "camp-2") == 2)  // untouched
     }
+
+    @Test("unsuppress(campaignId:) reverses suppress(campaignId:) — symmetric restore")
+    func unsuppressReversesSuppress() async throws {
+        let (store, tmp) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        for _ in 0..<3 { try await store.insert(alert: alert(campaign: "camp-1", suppressed: false)) }
+        for _ in 0..<2 { try await store.insert(alert: alert(campaign: "camp-2", suppressed: false)) }
+
+        let suppressed = try await store.suppress(campaignId: "camp-1")
+        #expect(suppressed == 3)
+        #expect(try await store.countByCampaign(campaignId: "camp-1") == 0)   // all suppressed
+
+        let restored = try await store.unsuppress(campaignId: "camp-1")
+        #expect(restored == 3, "restore must lift exactly what was suppressed")
+        #expect(try await store.countByCampaign(campaignId: "camp-1") == 3)   // back to unsuppressed
+        #expect(try await store.countByCampaign(campaignId: "camp-2") == 2)   // never touched
+    }
 }

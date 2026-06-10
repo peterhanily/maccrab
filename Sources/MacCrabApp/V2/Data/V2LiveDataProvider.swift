@@ -1236,6 +1236,53 @@ public final class V2LiveDataProvider: V2DataProvider {
         return count
     }
 
+    /// Reverse of ``suppressCampaign(id:)``: lift the campaign's own suppression
+    /// + the suppression on its contributing alerts, and flip the persistent
+    /// campaign row back to active. Read-only DB → queue an unsuppress-campaign
+    /// inbox mutation. Returns true if the restore (or its inbox request) landed.
+    public func unsuppressCampaign(id: String) async -> Bool {
+        guard let alertStore else {
+            lastErrorDescription = "no alert store"
+            return false
+        }
+        do {
+            try await alertStore.unsuppress(alertId: id)
+        } catch {
+            if isReadOnlyError(error) {
+                if queueInboxMutation(prefix: "unsuppress-campaign", id: id) {
+                    lastErrorDescription = nil
+                    return true
+                }
+                lastErrorDescription = describeMutationError(error)
+                return false
+            }
+        }
+        do {
+            _ = try await alertStore.unsuppress(campaignId: id)
+        } catch {
+            lastErrorDescription = "campaign restore fan-out: \(error)"
+        }
+        if let campaignStore {
+            try? await campaignStore.setSuppressed(id: id, false)
+        }
+        return true
+    }
+
+    /// Fetch currently-suppressed campaigns for the restore surface.
+    public func suppressedCampaigns(limit: Int) async -> [V2MockCampaign] {
+        guard let campaignStore else { return [] }
+        do {
+            let raw = try await campaignStore.list(
+                since: Date.distantPast, includeSuppressed: true, limit: limit)
+            return await Task.detached(priority: .userInitiated) {
+                raw.map(V2LiveDataProvider.toV2Campaign).filter { $0.suppressed }
+            }.value
+        } catch {
+            lastErrorDescription = "suppressed campaigns read: \(error)"
+            return []
+        }
+    }
+
     /// Drop a JSON mutation request into <dataDir>/inbox/ for the
     /// root daemon to pick up. Files are named `<prefix>-<id>.json` so
     /// re-clicking a suppress button coalesces into one file (idempotent).
@@ -1617,7 +1664,8 @@ public final class V2LiveDataProvider: V2DataProvider {
             affectedExecutables: execs,
             techniques: r.techniques ?? [],
             aiTools: r.aiTools ?? [],
-            processTreeDepth: r.processTreeDepth ?? 0
+            processTreeDepth: r.processTreeDepth ?? 0,
+            suppressed: r.suppressed
         )
     }
 
