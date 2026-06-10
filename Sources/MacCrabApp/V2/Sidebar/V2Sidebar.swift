@@ -69,6 +69,7 @@ struct V2Sidebar: View {
                                 .padding(.top, group == .monitor ? 0 : 12)
                                 .padding(.bottom, 4)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityAddTraits(.isHeader)
                         }
                         ForEach(visible) { workspace in
                             V2SidebarItem(
@@ -131,6 +132,17 @@ struct V2Sidebar: View {
                         storedWidth = Double(min(max(new, minWidth), maxWidth))
                     }
             )
+            // v1.18.1: the drag-only handle was invisible to VoiceOver and
+            // unreachable by keyboard. Expose it as an adjustable element —
+            // VO increment/decrement nudges the width 20 pt per step.
+            .accessibilityElement()
+            .accessibilityLabel(String(localized: "sidebar.ax.resize",
+                                       defaultValue: "Sidebar width"))
+            .accessibilityValue("\(Int(storedWidth))")
+            .accessibilityAdjustableAction { direction in
+                let step: Double = direction == .increment ? 20 : -20
+                storedWidth = Double(min(max(CGFloat(storedWidth + step), minWidth), maxWidth))
+            }
     }
 
     // MARK: - Header
@@ -332,7 +344,10 @@ private struct V2SidebarItem: View {
         .onHover { isHovering = $0 }
         .help(collapsed ? workspace.title + "  ⌘\(workspace.keyboardIndex)" : "")
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
-        .accessibilityLabel("\(workspace.title) workspace, ⌘\(workspace.keyboardIndex)")
+        .accessibilityLabel(String(localized: "sidebar.ax.workspace",
+                                   defaultValue: "\(workspace.title) workspace"))
+        .accessibilityHint(String(localized: "sidebar.ax.workspaceHint",
+                                  defaultValue: "Command \(workspace.keyboardIndex)"))
     }
 
     // Mac-style accent on the active row: brand-tinted bg + brand

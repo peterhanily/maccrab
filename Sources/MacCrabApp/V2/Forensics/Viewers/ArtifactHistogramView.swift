@@ -95,6 +95,19 @@ struct ArtifactHistogramView: View {
             AxisMarks(position: .leading)
         }
         .frame(maxWidth: .infinity, minHeight: 200, idealHeight: 280)
+        // v1.18.1: summary-only accessibility (matches EventTimeHistogram).
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(chartAccessibilitySummary)
+    }
+
+    private var chartAccessibilitySummary: String {
+        guard let peak = buckets.max(by: { $0.count < $1.count }) else {
+            return String(localized: "forensics.histogram.ax.empty",
+                          defaultValue: "Timeline histogram: no events")
+        }
+        let peakTime = peak.start.formatted(date: .abbreviated, time: .shortened)
+        return String(localized: "forensics.histogram.ax.summary",
+                      defaultValue: "Timeline histogram: \(artifacts.count) events per \(bucketLabel), peak \(peak.count) at \(peakTime)")
     }
 
     // MARK: - Helpers

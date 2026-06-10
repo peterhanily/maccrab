@@ -52,7 +52,9 @@ enum HistogramGranularity {
 /// table layout when the user toggles the histogram off.
 struct EventTimeHistogram: View {
     let bins: [EventTimeBin]
-    /// "Hour" or "Day" — used in the chart's accessibility label.
+    /// "Hour" or "Day" — names the X-axis dimension on the bar marks and
+    /// appears in the accessible summary. (v1.18.1: the summary this comment
+    /// long claimed actually exists now.)
     let unitLabel: String
     /// Granularity controls X-axis formatting (HH:mm vs MMM-d).
     let granularity: HistogramGranularity
@@ -139,7 +141,23 @@ struct EventTimeHistogram: View {
             .frame(height: 130)
             .padding(.horizontal)
             .padding(.vertical, 4)
+            // v1.18.1: summary-only accessibility — per-bar traversal of a
+            // 100+-bin histogram is worse for VoiceOver than one sentence.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Self.accessibilitySummary(bins: bins, unitLabel: unitLabel))
         }
+    }
+
+    /// One-sentence accessible summary (static so tests can pin it).
+    static func accessibilitySummary(bins: [EventTimeBin], unitLabel: String) -> String {
+        let total = bins.reduce(0) { $0 + $1.count }
+        guard total > 0, let peak = bins.max(by: { $0.count < $1.count }) else {
+            return String(localized: "histogram.ax.empty",
+                          defaultValue: "Event histogram: no events in range")
+        }
+        let peakTime = peak.date.formatted(date: .abbreviated, time: .shortened)
+        return String(localized: "histogram.ax.summary",
+                      defaultValue: "Event histogram: \(total) events across \(bins.count) \(unitLabel.lowercased()) bins, peak \(peak.count) at \(peakTime)")
     }
 
     private func dateFormatStyle(for g: HistogramGranularity) -> Date.FormatStyle {

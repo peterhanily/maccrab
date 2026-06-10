@@ -710,3 +710,20 @@
 "workspaceTab.system.health" = "Health";
 "workspaceTab.system.permissions" = "Permissions";
 "workspaceTab.system.settings" = "Settings";
+
+/* v1.18.1 — accessibility + UX strings */
+"popover.dismiss" = "Dismiss alert notification";
+"popover.view.help" = "Open this alert in the dashboard";
+"palette.ax.noResults" = "No matches";
+"palette.ax.results" = "%lld results";
+"palette.ax.label" = "Command palette";
+"palette.ax.field" = "Search commands, workspaces, and entities";
+"histogram.ax.empty" = "Event histogram: no events in range";
+"histogram.ax.summary" = "Event histogram: %lld events across %lld %@ bins, peak %lld at %@";
+"forensics.histogram.ax.empty" = "Timeline histogram: no events";
+"forensics.histogram.ax.summary" = "Timeline histogram: %lld events per %@, peak %lld at %@";
+"forensics.barchart.ax.empty" = "Bar chart: no data";
+"forensics.barchart.ax.summary" = "Bar chart of %lld events by %@; largest group %@ with %lld";
+"sidebar.ax.resize" = "Sidebar width";
+"sidebar.ax.workspace" = "%@ workspace";
+"sidebar.ax.workspaceHint" = "Command %lld";

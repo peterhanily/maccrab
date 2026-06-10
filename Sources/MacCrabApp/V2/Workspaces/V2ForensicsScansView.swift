@@ -271,6 +271,7 @@ struct V2ForensicsScansView: View {
                 .scaledSystem(22)
                 .foregroundStyle(.tint)
                 .frame(width: 28, alignment: .center)
+                .accessibilityHidden(true) // decorative — title text follows
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(kit.name)

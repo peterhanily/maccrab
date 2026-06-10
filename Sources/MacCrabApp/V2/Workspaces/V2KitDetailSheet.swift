@@ -47,6 +47,7 @@ struct V2KitDetailSheet: View {
                 .padding(8)
                 .background(Color.accentColor.opacity(0.12))
                 .cornerRadius(8)
+                .accessibilityHidden(true) // decorative — title text follows
             VStack(alignment: .leading, spacing: 2) {
                 Text(kit.name).font(.title3).fontWeight(.semibold)
                 HStack(spacing: 6) {

@@ -9,11 +9,13 @@
 //   - Verbs always shown
 //   - Deep-link rows
 
+import AppKit
 import SwiftUI
 
 public struct V2CommandPalette: View {
 
     @ObservedObject var state: V2DashboardState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var query: String = ""
     @State private var selectedIndex: Int = 0
     @FocusState private var fieldFocused: Bool
@@ -46,8 +48,15 @@ public struct V2CommandPalette: View {
             // moment the palette opens (no-op cost in mock mode).
             await state.refreshPaletteEntities()
         }
-        .onChange(of: query) { _ in selectedIndex = 0 }
-        .accessibilityLabel("Command palette")
+        .onChange(of: query) { _ in
+            selectedIndex = 0
+            // VoiceOver can't see the visual result list shrink/grow.
+            let count = flatten(groupedItems).count
+            announce(count == 0
+                ? String(localized: "palette.ax.noResults", defaultValue: "No matches")
+                : String(localized: "palette.ax.results", defaultValue: "\(count) results"))
+        }
+        .accessibilityLabel(String(localized: "palette.ax.label", defaultValue: "Command palette"))
     }
 
     // MARK: - Subviews
@@ -64,6 +73,8 @@ public struct V2CommandPalette: View {
                 .foregroundStyle(V2Theme.primaryText)
                 .focused($fieldFocused)
                 .onSubmit { applySelected() }
+                .accessibilityLabel(String(localized: "palette.ax.field",
+                                           defaultValue: "Search commands, workspaces, and entities"))
             shortcutHint("Esc")
         }
         .padding(14)
@@ -96,7 +107,7 @@ public struct V2CommandPalette: View {
             .onChange(of: selectedIndex) { idx in
                 let flat = flatten(groupedItems)
                 if idx >= 0, idx < flat.count {
-                    withAnimation(.easeInOut(duration: 0.1)) {
+                    withAnimation(V2Motion.paletteScroll(reduceMotion: reduceMotion)) {
                         reader.scrollTo(flat[idx].id, anchor: .center)
                     }
                 }
@@ -142,6 +153,7 @@ public struct V2CommandPalette: View {
             .padding(.horizontal, 14)
             .padding(.top, 8)
             .padding(.bottom, 2)
+            .accessibilityAddTraits(.isHeader)
     }
 
     private func row(item: V2PaletteItem, isSelected: Bool) -> some View {
@@ -179,6 +191,8 @@ public struct V2CommandPalette: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 
     // MARK: - Keyboard handlers
@@ -206,6 +220,23 @@ public struct V2CommandPalette: View {
         if next < 0 { next = flat.count - 1 }
         if next >= flat.count { next = 0 }
         selectedIndex = next
+        // The hidden-button arrow shortcuts move a purely visual highlight;
+        // tell VoiceOver where it landed.
+        announce(flat[next].title)
+    }
+
+    /// VoiceOver announcement helper — macOS-13-compatible (SwiftUI's
+    /// AccessibilityNotification.Announcement needs macOS 14).
+    private func announce(_ text: String) {
+        guard NSWorkspace.shared.isVoiceOverEnabled else { return }
+        NSAccessibility.post(
+            element: NSApp as Any,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: text,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ]
+        )
     }
 
     private func applySelected() {

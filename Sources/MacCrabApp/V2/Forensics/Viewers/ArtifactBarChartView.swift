@@ -96,8 +96,20 @@ struct ArtifactBarChartView: View {
                 AxisMarks(position: .top)
             }
             .frame(maxWidth: .infinity, minHeight: CGFloat(buckets.count) * 22 + 40)
+            // v1.18.1: summary-only accessibility (matches EventTimeHistogram).
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(chartAccessibilitySummary)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private var chartAccessibilitySummary: String {
+        guard let top = buckets.first else {
+            return String(localized: "forensics.barchart.ax.empty",
+                          defaultValue: "Bar chart: no data")
+        }
+        return String(localized: "forensics.barchart.ax.summary",
+                      defaultValue: "Bar chart of \(artifacts.count) events by \(humanField); largest group \(top.label) with \(top.count)")
     }
 
     private var humanField: String {

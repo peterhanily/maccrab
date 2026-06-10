@@ -187,6 +187,9 @@ struct V2ForensicsFindingsView: View {
                 .scaledSystem(11)
                 .foregroundStyle(color(for: sev))
                 .padding(.top, 2)
+                // v1.18.1: severity was icon-only here — VoiceOver read the
+                // raw symbol name; now it reads the severity it encodes.
+                .accessibilityLabel("\(sev.displayName) severity")
             VStack(alignment: .leading, spacing: 2) {
                 Text(a.record.summary ?? friendlyContentType(a.record.contentType))
                     .scaledSystem(12, weight: seen ? .regular : .medium)

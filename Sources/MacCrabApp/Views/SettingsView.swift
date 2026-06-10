@@ -216,6 +216,7 @@ struct SettingsView: View {
                             Image(systemName: uiMode.wrappedValue == mode ? "largecircle.fill.circle" : "circle")
                                 .foregroundColor(uiMode.wrappedValue == mode ? .accentColor : .secondary)
                                 .font(.caption)
+                                .accessibilityHidden(true) // decorative legend dot
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(mode.displayName).font(.subheadline).fontWeight(.medium)
                                 Text(mode.summary).font(.caption).foregroundColor(.secondary)

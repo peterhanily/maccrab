@@ -62,4 +62,11 @@ public enum V2Motion {
             ? .opacity
             : .opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading))
     }
+
+    /// Command-palette keyboard-selection scroll (v1.18.1 — previously a raw
+    /// withAnimation that bypassed the token system). Near-instant under
+    /// reduce motion.
+    public static func paletteScroll(reduceMotion: Bool) -> Animation {
+        reduceMotion ? .linear(duration: 0.001) : .easeInOut(duration: 0.1)
+    }
 }
