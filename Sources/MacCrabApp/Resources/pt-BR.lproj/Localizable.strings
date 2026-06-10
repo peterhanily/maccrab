@@ -471,15 +471,15 @@
 
 /* ── Severity Labels ── */
 /* TODO: translate */
-"severity.informational" = "Informational";
+"severity.informational" = "Informativo";
 /* TODO: translate */
-"severity.low" = "Low";
+"severity.low" = "Baixa";
 /* TODO: translate */
-"severity.medium" = "Medium";
+"severity.medium" = "Média";
 /* TODO: translate */
-"severity.high" = "High";
+"severity.high" = "Alta";
 /* TODO: translate */
-"severity.critical" = "Critical";
+"severity.critical" = "Crítica";
 
 
 
@@ -678,16 +678,16 @@
 "welcome.setup.es" = "Endpoint Security: approve the System Extension when prompted by System Settings";
 "welcome.setup.fda" = "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add MacCrab.app";
 "welcome.setup.noRules" = "No compiled rules found \u{2014} run make compile-rules";
-"workspace.alerts.title" = "Alerts";
-"workspace.detection.title" = "Detection";
+"workspace.alerts.title" = "Alertas";
+"workspace.detection.title" = "Detecção";
 "workspace.docs.title" = "Docs";
-"workspace.events.title" = "Events";
-"workspace.forensics.title" = "Forensics";
-"workspace.intelligence.title" = "Intelligence";
-"workspace.investigation.title" = "Investigation";
-"workspace.overview.title" = "Overview";
-"workspace.prevention.title" = "Prevention";
-"workspace.system.title" = "System";
+"workspace.events.title" = "Eventos";
+"workspace.forensics.title" = "Forense";
+"workspace.intelligence.title" = "Inteligência";
+"workspace.investigation.title" = "Investigação";
+"workspace.overview.title" = "Visão geral";
+"workspace.prevention.title" = "Prevenção";
+"workspace.system.title" = "Sistema";
 "workspaceTab.alerts.campaigns" = "Campaigns";
 "workspaceTab.alerts.history" = "History";
 "workspaceTab.alerts.open" = "Open";

@@ -471,15 +471,15 @@
 
 /* ── Severity Labels ── */
 /* TODO: translate */
-"severity.informational" = "Informational";
+"severity.informational" = "情報";
 /* TODO: translate */
-"severity.low" = "Low";
+"severity.low" = "低";
 /* TODO: translate */
-"severity.medium" = "Medium";
+"severity.medium" = "中";
 /* TODO: translate */
-"severity.high" = "High";
+"severity.high" = "高";
 /* TODO: translate */
-"severity.critical" = "Critical";
+"severity.critical" = "重大";
 
 
 
@@ -490,7 +490,7 @@
 /* anyway. Surfacing them here makes them discoverable for   */
 /* future translators without changing the visible UI.       */
 /* --------------------------------------------------------- */
-"severity.info" = "Info";
+"severity.info" = "情報";
 "statusLevel.healthy" = "Healthy";
 "statusLevel.info" = "Info";
 "statusLevel.warning" = "Warning";
@@ -678,16 +678,16 @@
 "welcome.setup.es" = "Endpoint Security: approve the System Extension when prompted by System Settings";
 "welcome.setup.fda" = "Grant Full Disk Access: System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access \u{2192} add MacCrab.app";
 "welcome.setup.noRules" = "No compiled rules found \u{2014} run make compile-rules";
-"workspace.alerts.title" = "Alerts";
-"workspace.detection.title" = "Detection";
-"workspace.docs.title" = "Docs";
-"workspace.events.title" = "Events";
-"workspace.forensics.title" = "Forensics";
-"workspace.intelligence.title" = "Intelligence";
-"workspace.investigation.title" = "Investigation";
-"workspace.overview.title" = "Overview";
-"workspace.prevention.title" = "Prevention";
-"workspace.system.title" = "System";
+"workspace.alerts.title" = "アラート";
+"workspace.detection.title" = "検出";
+"workspace.docs.title" = "ドキュメント";
+"workspace.events.title" = "イベント";
+"workspace.forensics.title" = "フォレンジック";
+"workspace.intelligence.title" = "インテリジェンス";
+"workspace.investigation.title" = "調査";
+"workspace.overview.title" = "概要";
+"workspace.prevention.title" = "防御";
+"workspace.system.title" = "システム";
 "workspaceTab.alerts.campaigns" = "Campaigns";
 "workspaceTab.alerts.history" = "History";
 "workspaceTab.alerts.open" = "Open";

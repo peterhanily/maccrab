@@ -45,7 +45,11 @@ enum Severity: String, CaseIterable, Hashable, Comparable {
     }
 
     var label: String {
-        rawValue.capitalized
+        // Route through the severity.* keys (was hardcoded rawValue.capitalized,
+        // so badges rendered English in every locale). Dynamic key → the runtime
+        // bundle lookup API; falls back to the capitalized rawValue if a locale
+        // lacks the key.
+        Bundle.main.localizedString(forKey: "severity.\(rawValue)", value: rawValue.capitalized, table: nil)
     }
 
     /// Distinct SF Symbol per severity level for accessibility.
