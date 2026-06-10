@@ -33,15 +33,26 @@ public enum UIMode: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    /// One-sentence description shown beside the picker in Settings.
+    /// One-sentence description shown beside the picker in Settings. Reflects the
+    /// real V2 sidebar mapping (see V2Workspace.minimumMode). Everything is always
+    /// protected — this only changes which workspaces show in the sidebar.
     public var summary: String {
         switch self {
         case .basic:
-            return "Overview, Alerts, Prevention. For home users."
+            return "Overview, Alerts, System, Docs. For home users."
         case .standard:
-            return "Adds Campaigns, Events, AI Guard, Integrations. For lead operators."
+            return "Adds Events, Investigation, Detection, Prevention. For lead operators."
         case .advanced:
-            return "Every view (Rules, AI Analysis, ES Health…). For detection engineers."
+            return "Adds Forensics + Intelligence — every view. For detection engineers."
+        }
+    }
+
+    /// Density ordering for visibility comparisons (basic ⊂ standard ⊂ advanced).
+    public var rank: Int {
+        switch self {
+        case .basic:    return 0
+        case .standard: return 1
+        case .advanced: return 2
         }
     }
 

@@ -15,6 +15,10 @@ struct V2Sidebar: View {
 
     @AppStorage("v2.sidebar.width")     private var storedWidth: Double = 220
     @AppStorage("v2.sidebar.collapsed") private var collapsed: Bool = false
+    // Density toggle (Settings › Appearance). Gates which workspaces show in the
+    // sidebar; defaults to .advanced so upgrades keep the full surface.
+    @AppStorage(UIMode.storageKey)      private var uiModeRaw: String = UIMode.advanced.rawValue
+    private var currentUIMode: UIMode { UIMode(rawValue: uiModeRaw) ?? .advanced }
 
     private let collapsedWidth: CGFloat = 56
     private let minWidth: CGFloat = 180
@@ -53,7 +57,10 @@ struct V2Sidebar: View {
                 // grouping. Same surface, less visual noise.
                 VStack(spacing: 2) {
                     ForEach(V2SidebarGroup.allCases) { group in
-                        if !collapsed, let label = group.headerLabel {
+                        let visible = group.workspaces.filter { $0.isVisible(in: currentUIMode) }
+                        // Header only when the group has at least one visible
+                        // workspace in this density mode (no empty section labels).
+                        if !collapsed, !visible.isEmpty, let label = group.headerLabel {
                             Text(label)
                                 .scaledSystem(10, weight: .semibold)
                                 .foregroundStyle(V2Theme.tertiaryText)
@@ -63,7 +70,7 @@ struct V2Sidebar: View {
                                 .padding(.bottom, 4)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        ForEach(group.workspaces) { workspace in
+                        ForEach(visible) { workspace in
                             V2SidebarItem(
                                 workspace: workspace,
                                 isActive: state.currentWorkspace == workspace,
@@ -71,6 +78,15 @@ struct V2Sidebar: View {
                                 onSelect: { state.switchWorkspace(workspace) }
                             )
                         }
+                    }
+                }
+                // Nav safety: if the density mode changes while the user is on a
+                // now-hidden workspace, fall back to Overview so the sidebar and
+                // the displayed workspace don't disagree. (The workspace is still
+                // reachable via the command palette.)
+                .onChange(of: uiModeRaw) { _ in
+                    if !state.currentWorkspace.isVisible(in: currentUIMode) {
+                        state.switchWorkspace(.overview)
                     }
                 }
                 .padding(.horizontal, collapsed ? 6 : 8)

@@ -21,6 +21,23 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
 
     public var id: String { rawValue }
 
+    /// Lowest UIMode density at which this workspace shows in the sidebar.
+    /// Basic = day-to-day monitoring + system; Standard adds the investigation +
+    /// configuration surfaces; Advanced adds the analyst-heavy ones. This gates
+    /// sidebar *visibility* ONLY — every workspace's engine runs regardless, and
+    /// hidden ones stay reachable via the command palette / deep links.
+    public var minimumMode: UIMode {
+        switch self {
+        case .overview, .alerts, .system, .docs:               return .basic
+        case .events, .investigation, .detection, .prevention: return .standard
+        case .forensics, .intelligence:                        return .advanced
+        }
+    }
+
+    public func isVisible(in mode: UIMode) -> Bool {
+        minimumMode.rank <= mode.rank
+    }
+
     public var title: String {
         switch self {
         case .overview:      return String(localized: "workspace.overview.title",      defaultValue: "Overview")

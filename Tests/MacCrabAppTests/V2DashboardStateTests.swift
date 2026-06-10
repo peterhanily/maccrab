@@ -157,4 +157,26 @@ struct V2DashboardStateTests {
         s.switchWorkspace(.alerts)
         #expect(s.currentTab() == .alertsOpen)
     }
+
+    @Test("UIMode gates sidebar workspace visibility (basic ⊂ standard ⊂ advanced)")
+    func uiModeWorkspaceVisibility() {
+        // Basic: day-to-day monitoring + system only.
+        for w in [V2Workspace.overview, .alerts, .system, .docs] {
+            #expect(w.isVisible(in: .basic), "\(w) must show in basic")
+        }
+        for w in [V2Workspace.events, .investigation, .detection, .prevention, .forensics, .intelligence] {
+            #expect(!w.isVisible(in: .basic), "\(w) must be hidden in basic")
+        }
+        // Standard: adds investigation + configuration; still hides analyst surfaces.
+        for w in [V2Workspace.events, .investigation, .detection, .prevention] {
+            #expect(w.isVisible(in: .standard), "\(w) must show in standard")
+        }
+        for w in [V2Workspace.forensics, .intelligence] {
+            #expect(!w.isVisible(in: .standard), "\(w) must be hidden in standard")
+        }
+        // Advanced: everything (the default — upgrades keep the full surface).
+        for w in V2Workspace.allCases {
+            #expect(w.isVisible(in: .advanced), "\(w) must show in advanced")
+        }
+    }
 }
