@@ -357,6 +357,14 @@ public final class V2DashboardState: ObservableObject {
         if workspace == .detection, tab == .detectionRules, let q = filters["q"] {
             ruleSearchQuery = q
         }
+        // Modal-intent filter. The command palette's "Create Detection Rule"
+        // navigates here with modal=new; V2DetectionWorkspace observes
+        // presentNewRuleTick to open RuleWizard (the same path the Overview
+        // "Create Rule" quick-action uses). Pre-this the filter was silently
+        // dropped, so the palette navigated to Detection but no wizard opened.
+        if workspace == .detection, filters["modal"] == "new" {
+            presentNewRuleTick += 1
+        }
     }
 
     private func recordRecent(_ destination: V2NavigationDestination) {

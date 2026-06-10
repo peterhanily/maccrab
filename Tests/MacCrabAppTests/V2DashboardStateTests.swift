@@ -70,6 +70,15 @@ struct V2DashboardStateTests {
         #expect(s.history.canGoBack == true)
     }
 
+    @Test("command-palette modal=new navigation opens the rule wizard (bumps presentNewRuleTick)")
+    func modalNewBumpsRuleWizardTick() {
+        let s = freshState()
+        let before = s.presentNewRuleTick
+        s.goto(V2NavigationDestination(workspace: .detection, tab: .detectionRules, filters: ["modal": "new"]))
+        #expect(s.currentWorkspace == .detection)
+        #expect(s.presentNewRuleTick == before + 1, "modal=new must bump the wizard tick (palette dead-end fix)")
+    }
+
     @Test("goBack and goForward navigate the history stack")
     func backForwardNavigate() {
         let s = freshState()
