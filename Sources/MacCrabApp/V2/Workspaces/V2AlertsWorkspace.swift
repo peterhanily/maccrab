@@ -14,6 +14,7 @@ struct V2AlertsWorkspace: View {
 
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selected: V2MockAlert?
     @State private var suppressionEntries: [V2SuppressionEntry] = []
     @State private var alerts: [V2MockAlert] = []
@@ -580,10 +581,10 @@ struct V2AlertsWorkspace: View {
             if let alert = selected {
                 alertInspector(for: alert)
                     .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: selected?.id)
+        .animation(V2Motion.inspectorPresent(reduceMotion: reduceMotion), value: selected?.id)
     }
 
     /// Time-range chip group used by Open + History + Campaigns tabs.

@@ -6,6 +6,7 @@ import SwiftUI
 struct V2InvestigationWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTrace: V2MockTrace?
     @State private var traces: [V2MockTrace] = []
     @State private var recentAlerts: [V2MockAlert] = []
@@ -245,13 +246,13 @@ struct V2InvestigationWorkspace: View {
             if traceInspectorOpen, let trace = selectedTrace ?? traces.first {
                 traceInspector(trace)
                     .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
             } else if !traceInspectorOpen {
                 showInspectorButton
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: traceInspectorOpen)
+        .animation(V2Motion.inspectorPresent(reduceMotion: reduceMotion), value: traceInspectorOpen)
     }
 
     /// Brief explainer at the top of the TraceGraph tab. Pre-fix the
@@ -632,7 +633,7 @@ struct V2InvestigationWorkspace: View {
             HStack(spacing: 2) {
                 ForEach(V2TraceLayout.allCases) { layoutCase in
                     Button {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                        withAnimation(V2Motion.graphSpring(reduceMotion: reduceMotion)) {
                             // Switching to a non-manual layout discards
                             // custom positions so the chosen algorithm
                             // can take over.
@@ -670,7 +671,7 @@ struct V2InvestigationWorkspace: View {
             Spacer()
             if !customPositions.isEmpty {
                 Button {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                    withAnimation(V2Motion.graphSpring(reduceMotion: reduceMotion)) {
                         customPositions.removeAll()
                         dragModel.offsets.removeAll()
                         if graphLayout == .manual { graphLayout = .radial }
@@ -1857,6 +1858,7 @@ public enum V2TraceLayout: String, CaseIterable, Identifiable {
 /// drag-frame redraw to a single node + its parent's `.position()`
 /// modifier, which is what we want.
 private struct DraggableMemberNode: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let member: V2TraceMember
     let basePosition: CGPoint
     let zoom: CGFloat
@@ -1994,7 +1996,7 @@ private struct DraggableMemberNode: View {
                         .scaleEffect(1.0 / max(zoom, 0.1), anchor: .topLeading)
                         .offset(x: 110, y: -8)
                         .allowsHitTesting(true)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading)))
+                        .transition(V2Motion.nodeReveal(reduceMotion: reduceMotion))
                         .zIndex(999)
                 }
             }

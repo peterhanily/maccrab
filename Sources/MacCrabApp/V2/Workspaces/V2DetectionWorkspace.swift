@@ -10,6 +10,7 @@ import MacCrabCore
 public struct V2DetectionWorkspace: View {
     @ObservedObject var state: V2DashboardState
     @ObservedObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedRule: V2MockRule?
     /// Cached lowercased haystack per rule, computed once when
     /// `rules` is loaded. Each rule's haystack is the concat of
@@ -429,10 +430,10 @@ public struct V2DetectionWorkspace: View {
             if let rule = selectedRule {
                 ruleInspector(rule)
                     .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: selectedRule?.id)
+        .animation(V2Motion.inspectorPresent(reduceMotion: reduceMotion), value: selectedRule?.id)
         .sheet(item: $yamlViewerRule) { rule in
             RuleYAMLViewerSheet(rule: rule, onClose: { yamlViewerRule = nil })
         }

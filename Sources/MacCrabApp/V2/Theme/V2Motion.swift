@@ -36,4 +36,30 @@ public enum V2Motion {
     public static func workspaceTransition(reduceMotion: Bool) -> AnyTransition {
         .opacity
     }
+
+    /// Inspector / detail-pane slide-in from the trailing edge. Degrades to a
+    /// pure fade under reduce motion (no horizontal travel).
+    public static func inspectorSlide(reduceMotion: Bool) -> AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .move(edge: .trailing).combined(with: .opacity)
+    }
+
+    /// Inspector show/hide animation curve. Near-instant under reduce motion.
+    public static func inspectorPresent(reduceMotion: Bool) -> Animation {
+        reduceMotion ? .linear(duration: 0.001) : .easeInOut(duration: 0.18)
+    }
+
+    /// Trace-graph layout-change spring. Near-instant under reduce motion.
+    public static func graphSpring(reduceMotion: Bool) -> Animation {
+        reduceMotion ? .linear(duration: 0.001) : .spring(response: 0.4, dampingFraction: 0.85)
+    }
+
+    /// Graph node reveal (hover preview). Drops the scale pop under reduce
+    /// motion; preserves the exact subtle pop otherwise.
+    public static func nodeReveal(reduceMotion: Bool) -> AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading))
+    }
 }

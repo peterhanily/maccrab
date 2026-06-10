@@ -7,6 +7,7 @@ import MacCrabCore
 
 public struct V2IntelligenceWorkspace: View {
     @ObservedObject var state: V2DashboardState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var feeds: [V2MockFeed] = []
     /// Last time any feed actually pulled fresh records — surfaced in
     /// the summary row so the operator can SEE the feeds working
@@ -842,10 +843,10 @@ public struct V2IntelligenceWorkspace: View {
             if let pkg = selectedPackage {
                 packageInspector(pkg)
                     .shadow(color: Color.black.opacity(0.25), radius: 8, x: -4, y: 0)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(V2Motion.inspectorSlide(reduceMotion: reduceMotion))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: selectedPackage?.id)
+        .animation(V2Motion.inspectorPresent(reduceMotion: reduceMotion), value: selectedPackage?.id)
     }
 
     @ViewBuilder
