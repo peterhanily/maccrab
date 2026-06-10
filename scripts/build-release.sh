@@ -172,6 +172,22 @@ APP="$STAGING_DIR/MacCrab.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$STAGING_DIR/bin/MacCrabApp" "$APP/Contents/MacOS/MacCrab"
 
+# v1.18 localization fix. SPM bundles the MacCrabApp target's .lproj into
+# Bundle.module (MacCrab_MacCrabApp.bundle), but all 396 String(localized:) call
+# sites resolve via Bundle.main — so without a top-level copy NONE of the 14
+# locales loaded at runtime (long-standing bug: the Settings language picker set
+# AppleLanguages + restarted, but Bundle.main had no .lproj to match → every key
+# fell back to its English defaultValue). Copy them to the app's top-level
+# Resources (the standard .app localization layout) so Bundle.main resolves them.
+# Also restores the correct region casing (zh-Hans, pt-BR) that SPM lowercases.
+lproj_count=0
+for lproj in Sources/MacCrabApp/Resources/*.lproj; do
+    [ -d "$lproj" ] || continue
+    cp -R "$lproj" "$APP/Contents/Resources/"
+    lproj_count=$((lproj_count + 1))
+done
+echo "    ✓ Bundled $lproj_count localizations → Resources/*.lproj (Bundle.main)"
+
 # v1.12.0 RC16 (in-dashboard Sigma editor): bundle compile_rules.py
 # plus a vendored copy of PyYAML's pure-Python module so the dashboard
 # can compile user-edited YAML to the daemon-readable JSON format on
