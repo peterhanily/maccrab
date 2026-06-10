@@ -156,8 +156,15 @@ struct EventStream: View {
         let row: EventStore.AggregateRow
     }
 
-    private var identifiedAggregates: [IdentifiedAggregate] {
-        aggregateRows.map {
+    /// v1.18.1: stored, not computed. The computed form re-mapped a fresh
+    /// array on every body re-evaluation and rebound the NSTableView-backed
+    /// Table to it — the same constraint-churn class the filteredCache
+    /// comment above documents (v1.7.11), reachable whenever the user parks
+    /// on a >24h range. Assigned alongside aggregateRows in the .task below.
+    @State private var identifiedAggregates: [IdentifiedAggregate] = []
+
+    private static func identify(_ rows: [EventStore.AggregateRow]) -> [IdentifiedAggregate] {
+        rows.map {
             IdentifiedAggregate(
                 id: "\($0.day)|\($0.category.rawValue)|\($0.processSigner)|\($0.processPath)",
                 row: $0
@@ -626,6 +633,7 @@ struct EventStream: View {
             } else {
                 aggregateRows = []
             }
+            identifiedAggregates = Self.identify(aggregateRows)
         }
         // v1.8.0 polish: SQL-side histogram. Re-fetched on time-range,
         // category, or aggregate-mode change. Skips work in aggregate mode

@@ -1546,7 +1546,12 @@ struct V2AlertsWorkspace: View {
                 Text("Resolved + suppressed alerts from the recent retention window. Right-click a row for Unsuppress and Delete actions, or use the inspector buttons.")
                     .font(V2Theme.body())
                     .foregroundStyle(V2Theme.mutedText)
-                let history = self.alerts.filter { $0.suppressed } + self.alerts.suffix(4)
+                // v1.18.1: dedupe — a suppressed alert inside the last 4
+                // used to appear in both halves, giving the ForEach
+                // duplicate ids (undefined Table diffing + console warnings).
+                let suppressed = self.alerts.filter { $0.suppressed }
+                let suppressedIds = Set(suppressed.map(\.id))
+                let history = suppressed + self.alerts.suffix(4).filter { !suppressedIds.contains($0.id) }
                 V2DataTable(
                     columns: [
                         V2DataColumn(id: "sev", title: "Severity", width: .fixed(96)) { a in

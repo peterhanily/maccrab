@@ -77,10 +77,15 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     /// sortable column's value. Leave nil for views that already have their own
     /// search box (Alerts, Rules) so there is no duplicate filter.
     public let searchPrompt: String?
-    @State private var hoveredId: Item.ID?
     @State private var sortColumnId: String?
     @State private var sortAscending = true
     @State private var filterQuery = ""
+    /// v1.18.1: stored, not computed. The computed form re-ran the filter +
+    /// O(n log n) sort on EVERY body re-evaluation — including each hover
+    /// boundary crossing while hover was table-level state. Recomputed only
+    /// when an input actually changes (same discipline as EventStream's
+    /// filteredCache).
+    @State private var displayCache: [Item] = []
 
     public init(
         columns: [V2DataColumn<Item>],
@@ -95,7 +100,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     }
 
     /// Filter (by any sortable column's text) then sort (by the active column).
-    private var displayItems: [Item] {
+    private func recomputeDisplay() {
         var result = items
         let q = filterQuery.trimmingCharacters(in: .whitespaces).lowercased()
         if !q.isEmpty {
@@ -110,7 +115,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                 sortAscending ? key(a) < key(b) : key(b) < key(a)
             }
         }
-        return result
+        displayCache = result
     }
 
     public var body: some View {
@@ -123,13 +128,23 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
             Divider().background(V2Theme.panelBorder)
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(displayItems) { item in
-                        rowView(item)
+                    ForEach(displayCache) { item in
+                        Row(
+                            columns: columns,
+                            item: item,
+                            isSelected: selection?.id == item.id,
+                            select: { selection = $0 }
+                        )
                     }
                 }
             }
         }
         .v2Panel(padding: 0)
+        .onAppear { recomputeDisplay() }
+        .onChange(of: items) { _ in recomputeDisplay() }
+        .onChange(of: filterQuery) { _ in recomputeDisplay() }
+        .onChange(of: sortColumnId) { _ in recomputeDisplay() }
+        .onChange(of: sortAscending) { _ in recomputeDisplay() }
     }
 
     private func filterField(_ prompt: String) -> some View {
@@ -160,7 +175,7 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         HStack(spacing: 0) {
             ForEach(columns.indices, id: \.self) { idx in
                 let col = columns[idx]
-                cell(width: col.width, alignment: col.alignment) {
+                Self.cell(width: col.width, alignment: col.alignment) {
                     if col.sortKey != nil {
                         Button { toggleSort(col.id) } label: {
                             HStack(spacing: 3) {
@@ -192,58 +207,64 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         .background(V2Theme.sidebarBackground.opacity(0.6))
     }
 
-    @ViewBuilder
-    private func rowView(_ item: Item) -> some View {
-        let isSelected = selection?.id == item.id
-        let isHovered = hoveredId == item.id
+    /// v1.18.1: hover state lives in the row, not the table. A hover
+    /// boundary crossing used to mutate table-level @State and re-evaluate
+    /// every visible row; now it re-renders exactly the row under the
+    /// pointer.
+    private struct Row: View {
+        let columns: [V2DataColumn<Item>]
+        let item: Item
+        let isSelected: Bool
+        let select: (Item) -> Void
+        @State private var isHovered = false
 
-        Button {
-            selection = item
-        } label: {
-            HStack(spacing: 0) {
-                ForEach(columns.indices, id: \.self) { idx in
-                    let col = columns[idx]
-                    cell(width: col.width, alignment: col.alignment) {
-                        col.cell(item)
+        var body: some View {
+            Button {
+                select(item)
+            } label: {
+                HStack(spacing: 0) {
+                    ForEach(columns.indices, id: \.self) { idx in
+                        let col = columns[idx]
+                        V2DataTable.cell(width: col.width, alignment: col.alignment) {
+                            col.cell(item)
+                        }
                     }
                 }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 12)
+                .background(background)
+                .overlay(
+                    Rectangle()
+                        .fill(isSelected ? V2Theme.brand : .clear)
+                        .frame(width: 2),
+                    alignment: .leading
+                )
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 12)
-            .background(rowBackground(isSelected: isSelected, isHovered: isHovered))
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            // VoiceOver: combine the row's cells into a single labelled
+            // button so VO doesn't read the row as 5 separate elements
+            // ("button", "text", "text", "chip", "text"…). The .combine
+            // traversal collapses each cell's text into one announcement.
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+            .accessibilityHint("Activate to select this row")
             .overlay(
-                Rectangle()
-                    .fill(isSelected ? V2Theme.brand : .clear)
-                    .frame(width: 2),
-                alignment: .leading
+                Rectangle().fill(V2Theme.panelBorder).frame(height: 1),
+                alignment: .bottom
             )
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hover in
-            hoveredId = hover ? item.id : (hoveredId == item.id ? nil : hoveredId)
-        }
-        // VoiceOver: combine the row's cells into a single labelled
-        // button so VO doesn't read the row as 5 separate elements
-        // ("button", "text", "text", "chip", "text"…). The .combine
-        // traversal collapses each cell's text into one announcement.
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
-        .accessibilityHint("Activate to select this row")
-        .overlay(
-            Rectangle().fill(V2Theme.panelBorder).frame(height: 1),
-            alignment: .bottom
-        )
-    }
 
-    private func rowBackground(isSelected: Bool, isHovered: Bool) -> Color {
-        if isSelected { return V2Theme.brand.opacity(0.10) }
-        if isHovered  { return V2Theme.hoverBackground }
-        return Color.clear
+        private var background: Color {
+            if isSelected { return V2Theme.brand.opacity(0.10) }
+            if isHovered  { return V2Theme.hoverBackground }
+            return Color.clear
+        }
     }
 
     @ViewBuilder
-    private func cell<C: View>(
+    private static func cell<C: View>(
         width: V2DataColumn<Item>.Width,
         alignment: HorizontalAlignment,
         @ViewBuilder content: () -> C
