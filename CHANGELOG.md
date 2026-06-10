@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.18.0] — 2026-06-09
+## [1.18.0] — 2026-06-10
 
 A detection-quality release. A corpus-wide review of every rule, sequence,
 graph, and campaign detection recovered detections that could never fire,
@@ -42,6 +42,18 @@ tightens MCP-server privacy, and includes reliability and hardening fixes.
   password-manager databases and the system shadow-hash store are now
   observed, so the rules that watch them can fire.
 
+### Dashboard, localization & accessibility
+
+- **Localization now applies.** Bundled language packs load across the dashboard
+  (severity labels, navigation, and more) and Settings opens in every language;
+  coverage is partial and expanding.
+- **Density modes work.** The Basic / Standard / Advanced toggle gates which
+  workspaces appear in the sidebar; every detection stays active regardless.
+- **Restore suppressed campaigns** from the dashboard (Alerts → Suppressed
+  campaigns), not only the CLI.
+- **Reduce Motion** is honored across workspace inspectors and the trace graph.
+- **Command palette** "Create Detection Rule" opens the rule editor.
+
 ### Fixed
 
 - **Filter-negation correctness.** A multi-condition exclusion (`not (A and B)`)
@@ -54,9 +66,16 @@ tightens MCP-server privacy, and includes reliability and hardening fixes.
 - **CLI polish.** Corrected a rule-count off-by-one, froze CLI vocabulary, and
   added a `modules` command; refreshed documented rule/test counts to a single
   source of truth.
+- **Storage diagnostics.** Storage-health reporting now uses a rolling recent
+  window instead of a cumulative since-boot total, so a long-past incident no
+  longer shows indefinitely.
 
 ### Security
 
+- **Custom rules install through the privileged inbox.** User rules + overrides
+  are written to a root-owned directory by the daemon (which the engine loads),
+  not a group-writable directory it refused — so a dashboard-saved rule takes
+  effect.
 - **Self-protection alerts.** High-impact privileged-inbox actions now raise an
   observe-only self-protection alert.
 - **Signed session evidence.** Exported session bundles are cryptographically
