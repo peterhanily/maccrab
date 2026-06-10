@@ -325,41 +325,7 @@ public struct V2DetectionWorkspace: View {
 
     /// Ensure the override directory exists and is writable. Returns
     /// true if writable after the call. First time through fires an
-    /// AppleScript admin prompt to mkdir + chmod 0775 root:admin. On
-    /// the user's choice of decline we surface a toast and bail.
-    private func ensureOverrideDirWritable() -> Bool {
-        let fm = FileManager.default
-        let dir = Self.userRulesDir
-        if fm.isWritableFile(atPath: dir) { return true }
-        // Build the script outside the AppleScript double-quotes so
-        // the same chmod-only / no-find pattern that fixed the RC11
-        // -2741 parse error keeps holding.
-        let shell = "mkdir -p '\(dir)' && chown root:admin '\(dir)' && chmod 0775 '\(dir)'"
-        let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to create the user-rules directory once so you can override rules without entering your password every time.\""
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", script]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0 && fm.isWritableFile(atPath: dir)
-        } catch {
-            return false
-        }
-    }
-
     private func writeDisabledOverride(rule: V2MockRule) async {
-        guard ensureOverrideDirWritable() else {
-            state.showToast(V2Toast(
-                kind: .error,
-                title: "Couldn't create override directory",
-                detail: "Admin password is required the first time you disable a rule."
-            ))
-            return
-        }
         guard var compiled = loadBundledCompiledRule(id: rule.id) else {
             state.showToast(V2Toast(
                 kind: .error,
@@ -369,45 +335,41 @@ public struct V2DetectionWorkspace: View {
             return
         }
         compiled.enabled = false
-        let outPath = Self.userRulesDir + "/\(rule.id).json"
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(compiled),
-              (try? data.write(to: URL(fileURLWithPath: outPath))) != nil else {
-            state.showToast(V2Toast(
-                kind: .error,
-                title: "Couldn't write override",
-                detail: outPath
-            ))
+              let json = String(data: data, encoding: .utf8) else {
+            state.showToast(V2Toast(kind: .error, title: "Couldn't encode override", detail: rule.id))
             return
         }
-        touchReloadTick()
-        state.showToast(V2Toast(
-            kind: .info,
-            title: "Rule disabled",
-            detail: rule.title + " — daemon will reload in ~5 s"
-        ))
+        // Route through the privileged inbox: the ROOT daemon writes the override
+        // into the secure root-owned user_rules dir (the engine's secure-dir gate
+        // refuses a user-writable dir, so the app can't write it itself — that
+        // mismatch was why disabling a rule appeared to work but the rule kept
+        // firing). yaml omitted: a disable override is JSON-only.
+        let result = UserRuleInstaller.dropInboxRequest(
+            verb: "install-rule", payload: ["ruleId": rule.id, "json": json])
+        switch result {
+        case .success:
+            state.showToast(V2Toast(kind: .info, title: "Rule disabled",
+                                    detail: rule.title + " — applies in ~5 s"))
+        case .failure(let msg):
+            state.showToast(V2Toast(kind: .error, title: "Couldn't disable rule", detail: msg))
+        }
     }
 
     private func removeUserOverride(rule: V2MockRule) async {
-        let path = Self.userRulesDir + "/\(rule.id).json"
-        try? FileManager.default.removeItem(atPath: path)
-        touchReloadTick()
-        state.showToast(V2Toast(
-            kind: .info,
-            title: "Rule re-enabled",
-            detail: rule.title + " — daemon will reload in ~5 s"
-        ))
-    }
-
-    /// Update the reload-tick file's mtime so the daemon's polling
-    /// watcher (DaemonSetup.swift) notices and reloads. We rewrite a
-    /// timestamp string rather than `utimes` so the dir is touched
-    /// atomically and we don't need a separate helper.
-    private func touchReloadTick() {
-        let path = Self.reloadTickPath
-        let data = "\(Date().timeIntervalSince1970)\n".data(using: .utf8) ?? Data()
-        try? data.write(to: URL(fileURLWithPath: path))
+        // Route the removal through the daemon's remove-rule inbox verb (same
+        // reason — the app can't mutate the root-owned user_rules dir).
+        let result = UserRuleInstaller.dropInboxRequest(
+            verb: "remove-rule", payload: ["ruleId": rule.id])
+        switch result {
+        case .success:
+            state.showToast(V2Toast(kind: .info, title: "Rule re-enabled",
+                                    detail: rule.title + " — applies in ~5 s"))
+        case .failure(let msg):
+            state.showToast(V2Toast(kind: .error, title: "Couldn't re-enable rule", detail: msg))
+        }
     }
 
     private var rulesTab: some View {

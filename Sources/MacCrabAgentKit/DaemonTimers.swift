@@ -1712,15 +1712,29 @@ enum DaemonTimers {
             guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let rawId = json["ruleId"] as? String, let ruleId = safeRuleBasename(rawId),
-                  let yaml = json["yaml"] as? String, let jsonText = json["json"] as? String,
-                  yaml.utf8.count <= 64 * 1024, jsonText.utf8.count <= 256 * 1024 else {
+                  let jsonText = json["json"] as? String,
+                  jsonText.utf8.count <= 256 * 1024,
+                  ((json["yaml"] as? String) ?? "").utf8.count <= 64 * 1024 else {
                 auditLogInbox(state: state, prefix: "install-rule", id: "-", uid: uid, result: "rejected_malformed")
                 continue
             }
+            // yaml optional: rule INSTALLS carry source yaml (write both .yml +
+            // .json), but a built-in DISABLE/severity OVERRIDE is json-only.
+            let yaml = (json["yaml"] as? String) ?? ""
             let userRulesDir = state.supportDir + "/user_rules"
             do {
                 try fm.createDirectory(atPath: userRulesDir, withIntermediateDirectories: true)
-                try yaml.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/\(ruleId).yml"))
+                // v1.18: enforce secure perms (0755, daemon-owned). The engine's
+                // secure-dir gate (DaemonSetup.isSecureDirectory) REFUSES a
+                // group/world-writable rules dir, so a legacy app-created
+                // root:admin 0775 dir meant "rule installed but never loads".
+                // Routing installs through this root handler + clamping the dir to
+                // 0755 makes the gate accept it — and migrates any legacy 0775 dir
+                // in place on the next install.
+                try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: userRulesDir)
+                if !yaml.isEmpty {
+                    try yaml.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/\(ruleId).yml"))
+                }
                 try jsonText.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/\(ruleId).json"))
                 let tick = "\(Date().timeIntervalSince1970)\n"
                 try? tick.data(using: .utf8)?.write(to: URL(fileURLWithPath: userRulesDir + "/.reload_tick"))

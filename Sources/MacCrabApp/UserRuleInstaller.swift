@@ -33,47 +33,34 @@ enum UserRuleInstaller {
     /// it MUST match the `id:` field inside `yaml` so the engine keys the
     /// override on the same id.
     static func install(ruleId: String, yaml: String) async -> Result {
-        guard ensureOverrideDirWritable() else {
-            return .failure("Admin password is required the first time MacCrab saves a rule.")
-        }
-        let ymlPath = userRulesDir + "/\(ruleId).yml"
-        guard (try? yaml.data(using: .utf8)?.write(to: URL(fileURLWithPath: ymlPath))) != nil else {
-            return .failure("Couldn't write YAML to \(ymlPath)")
-        }
-        let compiled = await compileViaBundledPython(ruleId: ruleId)
-        switch compiled {
-        case .success:
-            touchReloadTick()
-            return .success
-        case .failure(let message):
-            // Keep the YAML on disk so work isn't lost, but the daemon won't
-            // load it until the YAML compiles cleanly.
-            return .failure(message)
-        }
+        // Compile locally in tmp (no privileged write), then route the install
+        // through the daemon's privileged inbox: the ROOT daemon writes it into
+        // the secure root-owned user_rules dir. The engine's secure-dir gate
+        // refuses a user/group-writable rules dir, so the app can't write there
+        // itself — the old osascript-created 0775 dir was exactly why
+        // dashboard-saved rules showed as active but never fired. No admin
+        // prompt now; the daemon applies the rule on its ~5 s inbox poll.
+        let (json, compileError) = await compileViaBundledPython(ruleId: ruleId, yaml: yaml)
+        guard let json else { return .failure(compileError ?? "Rule compile failed") }
+        return dropInboxRequest(verb: "install-rule",
+                                payload: ["ruleId": ruleId, "yaml": yaml, "json": json])
     }
 
-    /// If the override dir doesn't exist or isn't writable, prompt for admin
-    /// once and chmod it 0775 root:admin so this user (admin group) can write
-    /// without elevation on subsequent saves.
-    static func ensureOverrideDirWritable() -> Bool {
-        let fm = FileManager.default
-        let dir = userRulesDir
-        if fm.isWritableFile(atPath: dir) { return true }
-        let shell = "mkdir -p '\(dir)' && chown root:admin '\(dir)' && chmod 0775 '\(dir)'"
-        let escaped = shell.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = "do shell script \"\(escaped)\" with administrator privileges with prompt \"MacCrab needs to create the user-rules directory once so you can save rules without entering your password every time.\""
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", script]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0 && fm.isWritableFile(atPath: dir)
-        } catch {
-            return false
+    static let inboxDir = "/Library/Application Support/MacCrab/inbox"
+
+    /// Drop a JSON request into the daemon's privileged inbox (mode 1777 sticky —
+    /// a non-root user can write, the root daemon validates the owner uid +
+    /// sanitizes the rule id). The daemon, not the app, does the privileged write
+    /// into user_rules. Returns .success once queued (applied on the ~5 s poll).
+    static func dropInboxRequest(verb: String, payload: [String: Any]) -> Result {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            return .failure("Couldn't serialize the \(verb) request")
         }
+        let reqPath = inboxDir + "/\(verb)-\(UUID().uuidString).json"
+        guard FileManager.default.createFile(atPath: reqPath, contents: data) else {
+            return .failure("Couldn't reach MacCrab's inbox at \(inboxDir). Is MacCrab's protection running?")
+        }
+        return .success
     }
 
     /// Run the bundled `compile_rules.py` on JUST the rule being saved, using a
@@ -81,9 +68,9 @@ enum UserRuleInstaller {
     /// `_snapshot_previous_output` step (which tries to create
     /// `<output_dir>.archive/`) doesn't trip over /Library's root-only write
     /// permissions. The produced JSON is then renamed back into user_rules/.
-    static func compileViaBundledPython(ruleId: String) async -> Result {
+    static func compileViaBundledPython(ruleId: String, yaml: String) async -> (json: String?, error: String?) {
         guard let compilerPath = Bundle.main.path(forResource: "compile_rules", ofType: "py", inDirectory: "Compiler") else {
-            return .failure("Bundled compiler not found in MacCrab.app/Contents/Resources/Compiler/")
+            return (nil, "Bundled compiler not found in MacCrab.app/Contents/Resources/Compiler/")
         }
         let pythonPath = (compilerPath as NSString).deletingLastPathComponent
         let tmpRoot = NSTemporaryDirectory() + "maccrab-compile-\(UUID().uuidString)"
@@ -91,14 +78,15 @@ enum UserRuleInstaller {
         do {
             try FileManager.default.createDirectory(atPath: tmpRoot, withIntermediateDirectories: true)
         } catch {
-            return .failure("Couldn't create tmp dir: \(error.localizedDescription)")
+            return (nil, "Couldn't create tmp dir: \(error.localizedDescription)")
         }
-        let ymlSrc = userRulesDir + "/\(ruleId).yml"
+        // Stage the supplied YAML in the tmp dir (no read from the now
+        // root-owned user_rules — the daemon owns that).
         let ymlStaged = tmpRoot + "/\(ruleId).yml"
         do {
-            try FileManager.default.copyItem(atPath: ymlSrc, toPath: ymlStaged)
+            try yaml.data(using: .utf8)?.write(to: URL(fileURLWithPath: ymlStaged))
         } catch {
-            return .failure("Couldn't stage YAML for compile: \(error.localizedDescription)")
+            return (nil, "Couldn't stage YAML for compile: \(error.localizedDescription)")
         }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
@@ -128,7 +116,7 @@ enum UserRuleInstaller {
         do {
             try task.run()
         } catch {
-            return .failure("Couldn't run python3: \(error.localizedDescription)")
+            return (nil, "Couldn't run python3: \(error.localizedDescription)")
         }
         // 10 s timeout (compiling one rule is <100 ms; 100× margin).
         let deadline = DispatchTime.now() + .seconds(10)
@@ -160,26 +148,20 @@ enum UserRuleInstaller {
                 .filter { !$0.isEmpty }
                 .suffix(8)
                 .joined(separator: "\n")
-            return .failure(detail.isEmpty ? "compile_rules.py exited \(task.terminationStatus)" : detail)
+            return (nil, detail.isEmpty ? "compile_rules.py exited \(task.terminationStatus)" : detail)
         }
         let jsonStaged = tmpRoot + "/\(ruleId).json"
-        let jsonDst = userRulesDir + "/\(ruleId).json"
         guard FileManager.default.fileExists(atPath: jsonStaged) else {
-            return .failure("Compiler ran cleanly but produced no JSON — rule may be malformed or product != macos")
+            return (nil, "Compiler ran cleanly but produced no JSON — rule may be malformed or product != macos")
         }
-        // POSIX rename is atomic when both paths share a filesystem (/tmp and
-        // /Library are both on /).
-        let renamed = jsonStaged.withCString { src in
-            jsonDst.withCString { dst in rename(src, dst) == 0 }
+        guard let jsonText = try? String(contentsOf: URL(fileURLWithPath: jsonStaged), encoding: .utf8) else {
+            return (nil, "Couldn't read the compiled JSON")
         }
-        guard renamed else {
-            return .failure("Atomic rename failed: \(String(cString: strerror(errno)))")
-        }
-        return .success
+        // Return the JSON text; the caller routes it through the privileged inbox
+        // so the root daemon writes it into the secure user_rules dir.
+        return (jsonText, nil)
     }
-
-    static func touchReloadTick() {
-        let data = "\(Date().timeIntervalSince1970)\n".data(using: .utf8) ?? Data()
-        try? data.write(to: URL(fileURLWithPath: reloadTickPath))
-    }
+    // (Rule installs/overrides now route through the privileged inbox; the ROOT
+    // daemon writes the rule + touches .reload_tick. The app no longer writes
+    // user_rules or the tick directly — see install()/dropInboxRequest.)
 }
