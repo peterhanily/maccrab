@@ -33,16 +33,24 @@ struct NoiseFilterSuppressibleTests {
 
     @Test("Critical is a must-fire FLOOR; a suppressible non-critical match is still dropped")
     func criticalIsMustFireFloor() {
-        // audit BLOCKER-1 fix: `severity == .critical` is a must-fire floor
-        // (RuleMatch.isMustFire) so the Sequence/Baseline/behavior streams — which
-        // default `suppressible == true` — never silently drop a completed CRITICAL
-        // kill chain on a platform binary. The structural-flaw protection now comes
-        // from the recalibration (296→~19 criticals) + the explicit `suppressible`
-        // flag being the mechanism for everything below critical.
-        var crit = [match(suppressible: true, severity: .critical)]
-        NoiseFilter.apply(&crit, event: event(exec: "/usr/bin/x", signer: .apple, platform: true), isWarmingUp: false)
-        #expect(crit.count == 1, "a critical match survives as the must-fire floor")
+        // v1.19: the old `severity == .critical` blanket must-fire floor is GONE
+        // (it structurally defeated Gates 7/8 for criticals — a trusted-signer
+        // critical-rated NOISE match could never be suppressed). A suppressible
+        // critical is now a must-fire floor ONLY on an UNTRUSTED subject; on a
+        // trusted/Apple subject it is gate-able. Genuine must-fire criticals are
+        // all explicitly suppressible:false and survive regardless.
 
+        // (1) suppressible critical on a TRUSTED Apple binary → now DROPPED.
+        var critTrusted = [match(suppressible: true, severity: .critical)]
+        NoiseFilter.apply(&critTrusted, event: event(exec: "/usr/bin/x", signer: .apple, platform: true), isWarmingUp: false)
+        #expect(critTrusted.isEmpty, "a suppressible critical on a trusted Apple binary is now gate-able")
+
+        // (2) suppressible critical on an UNTRUSTED subject → still bypasses (floor).
+        var critUntrusted = [match(suppressible: true, severity: .critical)]
+        NoiseFilter.apply(&critUntrusted, event: event(exec: "/tmp/dropper", signer: nil), isWarmingUp: false)
+        #expect(critUntrusted.count == 1, "a critical on an untrusted subject still bypasses as the floor")
+
+        // (3) suppressible non-critical on a trusted Apple binary → dropped.
         var high = [match(suppressible: true, severity: .high)]
         NoiseFilter.apply(&high, event: event(exec: "/usr/bin/x", signer: .apple, platform: true), isWarmingUp: false)
         #expect(high.isEmpty, "a suppressible non-critical match is still dropped on a trusted Apple binary")

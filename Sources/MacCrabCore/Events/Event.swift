@@ -194,15 +194,20 @@ public struct RuleMatch: Codable, Sendable, Hashable {
         suppressible = try c.decodeIfPresent(Bool.self, forKey: .suppressible) ?? true
     }
 
-    /// True if this match must survive the NoiseFilter suppression/trust gates.
-    /// Must-fire when the rule explicitly declared `suppressible: false`, OR when
-    /// severity is `.critical`. The `.critical` clause restores the pre-v1.18
-    /// "a critical match always survives every gate" invariant for the match
-    /// streams that do not (yet) carry a per-rule `suppressible` flag —
-    /// SequenceEngine, BaselineEngine, and the behavior composite all default to
-    /// `suppressible == true`, so without this a completed *critical* kill chain
-    /// (e.g. ransomware terminating on `/bin/dd`, an Apple platform binary) would
-    /// be silently gate-dropped. Post-recalibration the critical set is small and
-    /// curated (≈19 single-event rules), so this is not the old blanket bypass.
-    public var isMustFire: Bool { !suppressible || severity == .critical }
+    /// True if this match must survive the NoiseFilter suppression/trust gates
+    /// UNCONDITIONALLY — i.e. the rule explicitly declared `suppressible: false`.
+    ///
+    /// v1.19: the old `|| severity == .critical` clause is GONE. It made every
+    /// critical bypass every gate (NoiseFilter's all-must-fire fast path returned
+    /// before any gate ran), which structurally defeated the trusted-signer gate
+    /// for criticals — a trusted-signer critical-rated *noise* match could never
+    /// be suppressed. The genuine must-fire criticals are all explicitly
+    /// `suppressible: false` (the 18 single-event criticals + the 9 kill-chain
+    /// sequence rules), so they still survive. NoiseFilter keeps a *trust-aware*
+    /// critical floor (`isMustFire(_:trustedSubject:)`) so an unmarked critical on
+    /// an UNTRUSTED subject still bypasses, while a critical on a trusted/Apple
+    /// subject becomes gate-able. SequenceEngine/BaselineEngine/behavior heuristic
+    /// criticals default `suppressible == true` and are now correctly gate-able on
+    /// trusted subjects.
+    public var isMustFire: Bool { !suppressible }
 }
