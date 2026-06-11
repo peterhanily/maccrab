@@ -2,10 +2,18 @@
 
 This document describes the end-to-end signing, notarization, and
 distribution pipeline for MacCrab releases. It is the operator-side
-companion to `docs/TRUST.md` (which covers end-user verification) and
-`SECURITY.md` (which covers the vulnerability-disclosure path).
+companion to `docs/TRUST.md` (which covers end-user verification),
+`docs/CI-ARCHITECTURE.md` (which covers the hosted/self-hosted CI split
+and SLSA provenance), and `SECURITY.md` (which covers the
+vulnerability-disclosure path).
 
 Required reading for anyone who plans to cut a release tag.
+
+Key-rotation procedures live in `docs/runbooks/`:
+- `sparkle-key-rotation.md` — Sparkle EdDSA dual-key transition (bridge release).
+- `rave-catalog-key-rotation.md` — air-gapped rave catalog Ed25519 rotation.
+- `cloudflare-token-rotation.md` — `SITE_REPO_TOKEN` rotation, **with a hard
+  2026-06-30 expiry deadline** and a publish dry-run gate.
 
 ## Why this document exists
 
@@ -87,6 +95,20 @@ boolean-as-value bugs. 0 skips required.
 ### Step 3 — binary build
 
 `VERSION=<version> scripts/build-release.sh`:
+
+> **Composable stages (v1.19.0 / S5-T6):** `build-release.sh` is now
+> decomposed into four ordered stages — `unsigned-build`, `assemble`,
+> `sign`, `publish` — each callable individually
+> (`scripts/build-release.sh <stage>`). Running it with no argument (or
+> `all`) executes all four in one process, byte-for-byte identical to
+> the prior linear flow, which is what `release.sh` Step 3 does. The
+> self-hosted reproducible-build CI runs the **`unsigned-build` stage
+> only** and emits SLSA provenance; the operator then runs `sign` +
+> `publish` locally (or the whole `release.sh`). See
+> `docs/CI-ARCHITECTURE.md`. Single-stage mode persists the staging
+> tree at `.build/maccrab-stage` and carries `VERSION` / `BUILD_NUMBER`
+> / Sparkle config across invocations so the stamped Info.plist matches
+> the signed bundle.
 
 > **Toolchain pin:** release builds use **Xcode 26.x** until the
 > macOS 27 design-QA gate passes (the 27 SDK ignores
@@ -193,6 +215,28 @@ via Sparkle auto-update:
      deactivates the old sysext, and activates the new one — no
      user re-approval prompt unless the team-id changed (it never
      should).
+
+## Continuous integration (hosted) + provenance (self-hosted)
+
+Two GitHub Actions workflows back the local flow (full detail in
+`docs/CI-ARCHITECTURE.md`):
+
+- **`.github/workflows/ci.yml`** — GitHub-hosted application CI on
+  every push / PR. `build-and-test` (swift build + test) and `rules`
+  (compile + lint) are **required**; `audit` (pre-release-audit incl.
+  PASS-L Xcode-27 guards) is **advisory**. CI selects Xcode 26.x
+  explicitly (PASS-K) and fails loud if absent — it never builds on 27.
+- **`.github/workflows/reproducible-build.yml`** — self-hosted, on
+  `tag v*`. Runs `build-release.sh unsigned-build` ONLY and emits a
+  signed SLSA v1 provenance attestation (Build **L2** target; the
+  self-hosted runner means the L3 hosted-builder property is not
+  claimed). **Signing + notarization never run in CI** — the Developer
+  ID cert, notary creds, and Sparkle key stay on the trusted Mac.
+
+Every `uses:` is SHA-pinned with a `# vX.Y.Z` comment; refresh
+deliberately. Neither workflow references any `secrets.*` (signing is
+local), so `pre-release-audit.sh` PASS J (orphan-secret detector)
+stays clean.
 
 ## Verifying the chain end-to-end
 
