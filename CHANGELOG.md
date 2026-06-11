@@ -3,6 +3,55 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.1] — 2026-06-11
+
+A dashboard quality release: localization, triage UX, rendering
+performance, and accessibility.
+
+### Added
+
+- **Inline rule controls.** Enable/disable a detection from the rules
+  table's status dot, and override severity (Critical → Info, or back to
+  Default) from the severity chip's menu — no YAML editing required, for
+  built-in detections and Sigma rules alike. The rule inspector gains the
+  same severity control; severity and disable overrides now compose
+  instead of overwriting each other.
+- **Accessibility:** command-palette selection/result announcements and
+  header semantics; chart summaries for VoiceOver (event histograms +
+  forensic charts); sidebar header traits and an adjustable resize
+  handle; `docs/ACCESSIBILITY.md` checklist.
+- `TRANSLATION.md` translation policy + per-key provenance tracking
+  (`translation-state.json`).
+
+### Changed
+
+- **13 languages now 93–97% translated** (from ~35%): de, es, fr, it,
+  ja, ko, nl, pl, pt-BR, ru, sv, zh-Hans, zh-Hant. Hardcoded-English
+  dashboard section headers localize; detection content stays English by
+  design.
+- **Alert actions reflowed** into a compact action bar (primary on top,
+  secondary paired); the alert notification popover got a
+  severity-tinted visual refresh; History-tab row actions use the shared
+  button component.
+- **Table hover no longer re-sorts.** The shared dashboard table cached
+  its filter/sort result and isolated row hover, eliminating up-to-1,000-row
+  re-sorts on every pointer movement across Alerts, Rules, Intelligence,
+  and System.
+
+### Fixed
+
+- A memory-leak class in the Events aggregate view (parking on >24h
+  ranges accumulated layout constraints).
+- A suppressed recent alert could appear twice in the History tab.
+- The prerelease localization check mis-counted when zero keys were
+  missing.
+
+### Build
+
+- Release pipeline: hard-fail if the localization bundle would ship
+  incomplete; toolchain recorded in `release.json`; releases pinned to
+  Xcode 26.x with source guards against two known Xcode-27 hazards.
+
 ## [1.18.0] — 2026-06-10
 
 A detection-quality release. A corpus-wide review of every rule, sequence,
