@@ -237,12 +237,21 @@ public struct V2MockRule: Identifiable, Sendable, Hashable {
     /// from user-disabled ones. Defaulted so existing call sites are unchanged.
     public let status: String?
 
+    /// Operator's severity override for a built-in detection, as a lowercase
+    /// Severity raw value ("critical", "high", … matching the inspector
+    /// Picker tags). nil when no override is set (the detection runs at its
+    /// default severity). Lets the inspector seed its Picker to the live
+    /// override instead of always showing "Default". Only populated for
+    /// built-in (maccrab.*) rows; nil for Sigma/composite rules.
+    public let severityOverrideRaw: String?
+
     /// True when the rule is parked as deprecated content (ships disabled).
     public var isDeprecated: Bool { status?.lowercased() == "deprecated" }
 
     public init(id: String, title: String, category: String, severity: V2Severity,
                 mitre: [String], isEnabled: Bool, lastFired: Date?, firesLastWeek: Int,
-                isCustom: Bool, description: String, status: String? = nil) {
+                isCustom: Bool, description: String, status: String? = nil,
+                severityOverrideRaw: String? = nil) {
         self.id = id
         self.title = title
         self.category = category
@@ -254,6 +263,7 @@ public struct V2MockRule: Identifiable, Sendable, Hashable {
         self.isCustom = isCustom
         self.description = description
         self.status = status
+        self.severityOverrideRaw = severityOverrideRaw
     }
 }
 

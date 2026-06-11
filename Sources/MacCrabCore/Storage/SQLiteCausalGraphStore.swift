@@ -1489,6 +1489,28 @@ public actor SQLiteCausalGraphStore: CausalGraphStore {
         return rcRestart == SQLITE_OK && restartLog == restartCkpt
     }
 
+    /// TRUNCATE checkpoint — drains the WAL into the main DB AND shrinks
+    /// the `-wal` sidecar back to zero bytes. RESTART (above) drains the
+    /// WAL but leaves the file pinned at its high-water mark, which under
+    /// `journal_size_limit = 64 MiB` means tracegraph.db-wal can sit at
+    /// 64 MiB indefinitely — invisible to a file-only size check yet a
+    /// real 64 MiB of footprint. The size-cap path runs this periodically
+    /// so the WAL can't stay pinned at the journal_size_limit ceiling.
+    /// Best-effort: degrades to RESTART semantics if a reader holds the
+    /// WAL open, which is still progress.
+    @discardableResult
+    public func walCheckpointTruncate() async -> Bool {
+        guard let db = db else { return false }
+        var log: Int32 = 0
+        var ckpt: Int32 = 0
+        let rc = sqlite3_wal_checkpoint_v2(
+            db, nil,
+            Int32(SQLITE_CHECKPOINT_TRUNCATE),
+            &log, &ckpt
+        )
+        return rc == SQLITE_OK
+    }
+
     /// Read the file's current `auto_vacuum` mode. Used by callers
     /// (DaemonTimers) to log the gap when this DB is not in
     /// INCREMENTAL mode (mode 2).

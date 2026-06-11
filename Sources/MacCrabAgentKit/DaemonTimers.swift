@@ -437,8 +437,22 @@ enum DaemonTimers {
                     if orphans.edges > 0 || orphans.entities > 0 {
                         logger.info("TraceGraph substrate sweep: pruned \(orphans.edges) orphan edges + \(orphans.entities) orphan entities (>1h, unreferenced)")
                     }
-                    let size = await causalStore.databaseSizeBytes()
-                    if size > capBytes {
+                    // v1.19: TRUNCATE the WAL every tick so tracegraph.db-wal
+                    // can't sit pinned at the 64 MiB journal_size_limit ceiling.
+                    // RESTART (the old walCheckpoint) drains the WAL but leaves
+                    // the sidecar file at its high-water mark; under a busy
+                    // upsert stream that's a steady 64 MiB of invisible footprint.
+                    _ = await causalStore.walCheckpointTruncate()
+                    // v1.19: trip on the FOOTPRINT (db + WAL + shm), not the
+                    // bare db file. databaseSizeBytes() saw only the .db file, so
+                    // a 213 MB db + a 64 MiB WAL (= 281 MB real footprint) never
+                    // tripped the 250 MB cap and the freelist was never reclaimed
+                    // — matching the events/alerts/campaigns gates that already
+                    // measure footprint via measureDatabaseFootprintMB (MB == 10^6).
+                    let cgPath = state.supportDir + "/tracegraph.db"
+                    let capMB = Int(capBytes / (1024 * 1024))
+                    let footprintMB = measureDatabaseFootprintMB(dbPath: cgPath)
+                    if footprintMB > capMB {
                         // Over cap: drop oldest traces AND evict the oldest
                         // unreferenced substrate (the bulk). Keep looping
                         // until under cap or nothing more can be pruned.
@@ -472,7 +486,6 @@ enum DaemonTimers {
                         // freelist reclaim here; full VACUUM below is the
                         // rare fallback for when incremental can't fit the
                         // budget (or a pre-Wave-9B.1 mode-0 file).
-                        let cgPath = state.supportDir + "/tracegraph.db"
                         let postPruneMB = measureDatabaseFootprintMB(dbPath: cgPath)
                         let mode = await causalStore.autoVacuumMode()
                         let reclaimed = (try? await causalStore.incrementalVacuum(maxPages: 200_000)) ?? 0
@@ -524,20 +537,31 @@ enum DaemonTimers {
                     if pruned > 0 {
                         logger.info("OTLP traces retention sweep: \(pruned) spans older than \(days)d pruned")
                     }
-                    // v1.18 over-prune fix (the traces.db sibling of the
-                    // tracegraph fix): break on LIVE data size, not the file
-                    // footprint. traces.db is auto_vacuum=INCREMENTAL, so DELETEs
-                    // go to the freelist and `databaseSizeBytes()` (file size)
-                    // does not shrink until the post-loop vacuum — keying the
-                    // break on it ran all 5 iterations and over-pruned ~41% of
-                    // spans every sweep.
-                    let size = await traceStore.liveDataSizeBytes()
-                    if size > capBytes {
+                    // v1.19: TRUNCATE the WAL every tick so traces.db-wal can't
+                    // sit pinned at the 64 MiB journal_size_limit ceiling.
+                    _ = await traceStore.walCheckpointTruncate()
+                    // v1.19: TRIP on the FOOTPRINT (db + WAL + shm), not the live
+                    // data size. The prior trip used liveDataSizeBytes() — correct
+                    // for the loop BREAK (avoids over-prune; see comment in loop),
+                    // but as the trip GATE it ignored a 64 MiB pinned WAL, so a
+                    // live-data-just-under-cap + full-WAL footprint never tripped
+                    // and the freelist/WAL were never reclaimed. Mirrors the
+                    // events/alerts/campaigns gates (measureDatabaseFootprintMB).
+                    let tsPath = state.supportDir + "/traces.db"
+                    let capMB = Int(capBytes / (1024 * 1024))
+                    let footprintMB = measureDatabaseFootprintMB(dbPath: tsPath)
+                    if footprintMB > capMB {
+                        // Loop BREAK still keys on LIVE data size, not the file
+                        // footprint. traces.db is auto_vacuum=INCREMENTAL, so
+                        // DELETEs go to the freelist and the file doesn't shrink
+                        // until the post-loop vacuum — keying the break on file
+                        // size ran all 5 iterations and over-pruned ~41% of spans.
                         for _ in 0..<5 {
                             let count = (try? await traceStore.count()) ?? 0
                             let dropTarget = max(500, count / 10)
                             let dropped = (try? await traceStore.pruneOldest(count: dropTarget)) ?? 0
-                            logger.warning("OTLP traces size cap: pruned \(dropped) oldest spans (\(size / 1024 / 1024) MB live > \(capBytes / 1024 / 1024) MB cap)")
+                            let liveMB = await traceStore.liveDataSizeBytes() / 1024 / 1024
+                            logger.warning("OTLP traces size cap: pruned \(dropped) oldest spans (footprint \(footprintMB) MB > \(capMB) MB cap, live \(liveMB) MB)")
                             if dropped == 0 { break }
                             let nowSize = await traceStore.liveDataSizeBytes()
                             if nowSize < capBytes { break }
@@ -548,7 +572,6 @@ enum DaemonTimers {
                         // the tracegraph.db enforcer above. traces.db
                         // is auto_vacuum=INCREMENTAL (since v1.12.6 RC2),
                         // so incrementalVacuum reclaims freed pages.
-                        let tsPath = state.supportDir + "/traces.db"
                         let postPruneMB = measureDatabaseFootprintMB(dbPath: tsPath)
                         let mode = await traceStore.autoVacuumMode()
                         let reclaimed = (try? await traceStore.incrementalVacuum(maxPages: 200_000)) ?? 0

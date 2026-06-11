@@ -302,7 +302,8 @@ public final class V2LiveDataProvider: V2DataProvider {
                 lastFired: nil,
                 firesLastWeek: 0,
                 isCustom: false,
-                description: def.description
+                description: def.description,
+                severityOverrideRaw: s?.severityOverride?.rawValue
             )
         }
         // v1.18: surface multi-step sequence rules and multi-entity graph

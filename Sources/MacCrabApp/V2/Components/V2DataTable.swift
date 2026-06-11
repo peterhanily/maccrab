@@ -97,10 +97,26 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
         self.items = items
         self._selection = selection
         self.searchPrompt = searchPrompt
+        // v1.19: seed displayCache synchronously so the FIRST body eval renders
+        // rows. Previously it started [] and filled in .onAppear, so the first
+        // frame painted an empty table before onAppear ran — a one-frame empty
+        // flash on every mount. At init the filter is "" and no sort column is
+        // set, so the initial display is just `items` (no filter/sort applied).
+        self._displayCache = State(initialValue: Self.computeDisplay(
+            items: items, columns: columns,
+            filterQuery: "", sortColumnId: nil, sortAscending: true))
     }
 
+    /// Pure filter+sort, used both for the init seed and on every input change.
     /// Filter (by any sortable column's text) then sort (by the active column).
-    private func recomputeDisplay() {
+    /// `internal` (not private) so the init-seed contract is unit-testable.
+    static func computeDisplay(
+        items: [Item],
+        columns: [V2DataColumn<Item>],
+        filterQuery: String,
+        sortColumnId: String?,
+        sortAscending: Bool
+    ) -> [Item] {
         var result = items
         let q = filterQuery.trimmingCharacters(in: .whitespaces).lowercased()
         if !q.isEmpty {
@@ -115,7 +131,13 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
                 sortAscending ? key(a) < key(b) : key(b) < key(a)
             }
         }
-        displayCache = result
+        return result
+    }
+
+    private func recomputeDisplay() {
+        displayCache = Self.computeDisplay(
+            items: items, columns: columns,
+            filterQuery: filterQuery, sortColumnId: sortColumnId, sortAscending: sortAscending)
     }
 
     public var body: some View {

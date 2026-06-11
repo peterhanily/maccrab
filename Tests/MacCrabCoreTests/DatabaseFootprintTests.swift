@@ -56,4 +56,33 @@ struct DatabaseFootprintTests {
         let mb = measureDatabaseFootprintMB(dbPath: path)
         #expect(mb == 15)
     }
+
+    /// v1.19 (S6-1/S6-2): the tracegraph/traces over-cap TRIP gates moved
+    /// from `databaseSizeBytes()` (the bare .db file) to the db+WAL footprint.
+    /// Field repro: a 213 MB tracegraph.db + a 64 MiB WAL is a 277 MB on-disk
+    /// footprint that a file-only check (213 MB < 250 MB cap) never tripped, so
+    /// the freelist/WAL was never reclaimed. The footprint trip math must fire.
+    @Test("tracegraph trip math: db-only misses cap, db+WAL footprint trips it")
+    func tracegraphFootprintTripsWhereFileOnlyMissed() throws {
+        let tmp = NSTemporaryDirectory() + "MacCrabFootprint-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let path = tmp + "/tracegraph.db"
+        // 213 MB main file (under the 250 MB cap on its own)…
+        try Data(count: 213 * 1_000_000).write(to: URL(fileURLWithPath: path))
+        // …plus a 64 MiB WAL pinned at journal_size_limit.
+        try Data(count: 67_108_864).write(to: URL(fileURLWithPath: path + "-wal"))
+
+        let capMB = 250
+        // Old (buggy) behaviour: trip on the bare .db file size only.
+        let fileOnlyMB = Int((try FileManager.default.attributesOfItem(atPath: path)[.size] as! Int64) / 1_000_000)
+        #expect(fileOnlyMB == 213)
+        #expect(fileOnlyMB <= capMB, "file-only size must NOT trip — that's the bug being fixed")
+
+        // New behaviour: trip on the footprint (db + WAL + shm).
+        let footprintMB = measureDatabaseFootprintMB(dbPath: path)
+        #expect(footprintMB == 213 + 67, "213 MB db + 64 MiB (≈67 MB) WAL")
+        #expect(footprintMB > capMB, "footprint must trip the cap so the freelist/WAL get reclaimed")
+    }
 }

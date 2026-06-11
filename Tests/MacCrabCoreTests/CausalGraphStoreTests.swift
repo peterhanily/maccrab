@@ -503,4 +503,36 @@ struct SQLiteCausalGraphStoreTests {
         #expect(trace != nil)
         await store2.close()
     }
+
+    // MARK: - WAL TRUNCATE checkpoint (v1.19, S6-3)
+
+    /// `walCheckpointTruncate()` must drain AND shrink the `-wal` sidecar.
+    /// RESTART (the old walCheckpoint) leaves the WAL pinned at its
+    /// high-water mark — under journal_size_limit=64 MiB that's a steady
+    /// 64 MiB of invisible footprint. After a write burst grows the WAL,
+    /// the truncate checkpoint must take it back toward zero.
+    @Test("walCheckpointTruncate shrinks the -wal sidecar")
+    func walTruncateShrinksWal() async throws {
+        let (store, path) = try await makeStore()
+        defer { try? FileManager.default.removeItem(at: path) }
+        let walPath = path.path + "-wal"
+
+        // Write enough to grow the WAL before any checkpoint.
+        for i in 0..<2000 {
+            try await store.upsertEntity(makeEntity(id: "wal-e\(i)"))
+        }
+        let walAfterWrite = (try? FileManager.default.attributesOfItem(atPath: walPath)[.size] as? Int64) ?? 0
+        #expect((walAfterWrite ?? 0) > 0, "WAL should have grown from the write burst")
+
+        let ok = await store.walCheckpointTruncate()
+        #expect(ok, "TRUNCATE checkpoint should succeed with no competing readers")
+
+        let walAfterTruncate = (try? FileManager.default.attributesOfItem(atPath: walPath)[.size] as? Int64) ?? 0
+        // TRUNCATE takes the sidecar to 0 bytes; allow a small slack in case
+        // SQLite re-arms the header. The key invariant: it must NOT stay
+        // pinned near the journal_size_limit ceiling.
+        #expect((walAfterTruncate ?? 0) < (walAfterWrite ?? 0),
+                "truncate must shrink the WAL below its post-write high-water mark")
+        await store.close()
+    }
 }

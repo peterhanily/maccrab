@@ -897,6 +897,13 @@ public struct V2DetectionWorkspace: View {
                     }
                 }
             }
+            // Seed the Picker from the live override so an already-overridden
+            // built-in shows its real severity instead of "Default". Without
+            // this the @State default ("default") always wins on first render
+            // even when rule.severityOverrideRaw is set.
+            .onAppear {
+                severitySel = rule.severityOverrideRaw ?? "default"
+            }
         }
     }
 
