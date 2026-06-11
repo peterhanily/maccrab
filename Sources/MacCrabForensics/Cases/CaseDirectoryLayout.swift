@@ -40,6 +40,14 @@ public struct CaseDirectoryLayout: Sendable {
         caseDirectory.appendingPathComponent("manifest.json", isDirectory: false)
     }
 
+    /// Signed, offline-verifiable evidence-integrity manifest (S2-09).
+    /// Carries the artifact provenance set + Merkle root + chain-of-
+    /// custody head, P256-signed via TrustSubstrate. Sealed on demand;
+    /// absent until the case is sealed.
+    public var evidenceManifestFile: URL {
+        caseDirectory.appendingPathComponent("evidence_manifest.json", isDirectory: false)
+    }
+
     /// Per-blob AES-GCM vault root. Layout:
     ///     vault/blobs/<first-2-hex-of-sha256>/<sha256>
     public var vaultRoot: URL {
