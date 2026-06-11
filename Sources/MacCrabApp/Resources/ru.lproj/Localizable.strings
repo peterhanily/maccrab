@@ -132,7 +132,7 @@
 "settings.high" = "Высокое";
 "settings.criticalOnly" = "Только критическое";
 "settings.aboutTagline" = "Локальный движок обнаружения угроз для macOS";
-"settings.aboutStats" = "7 источников событий | 8 уровней обнаружения | 241 правило";
+"settings.aboutStats" = "17 источников событий | 5 уровней обнаружения | 483 правила обнаружения";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab активен";

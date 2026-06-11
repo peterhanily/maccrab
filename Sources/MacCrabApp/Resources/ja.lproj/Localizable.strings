@@ -132,7 +132,7 @@
 "settings.high" = "高";
 "settings.criticalOnly" = "クリティカルのみ";
 "settings.aboutTagline" = "ローカルファーストmacOS脅威検出エンジン";
-"settings.aboutStats" = "7イベントソース | 8検出レイヤー | 241ルール";
+"settings.aboutStats" = "17イベントソース | 5検出レイヤー | 483検出ルール";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrabアクティブ";

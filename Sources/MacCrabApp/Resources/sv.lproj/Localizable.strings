@@ -132,7 +132,7 @@
 "settings.high" = "Hög";
 "settings.criticalOnly" = "Bara kritisk";
 "settings.aboutTagline" = "Lokal macOS-hotdetekteringsmotor";
-"settings.aboutStats" = "7 händelsekällor | 8 detekteringslager | 241 regler";
+"settings.aboutStats" = "17 händelsekällor | 5 detekteringslager | 483 detekteringsregler";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab aktiv";

@@ -132,7 +132,7 @@
 "settings.high" = "高";
 "settings.criticalOnly" = "仅严重";
 "settings.aboutTagline" = "本地优先macOS威胁检测引擎";
-"settings.aboutStats" = "7个事件源 | 8个检测层 | 241条规则";
+"settings.aboutStats" = "17个事件源 | 5个检测层 | 483条检测规则";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab已激活";

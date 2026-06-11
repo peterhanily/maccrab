@@ -132,7 +132,7 @@
 "settings.high" = "Wysoki";
 "settings.criticalOnly" = "Tylko krytyczny";
 "settings.aboutTagline" = "Lokalny silnik wykrywania zagrożeń macOS";
-"settings.aboutStats" = "7 źródeł zdarzeń | 8 warstw wykrywania | 241 reguł";
+"settings.aboutStats" = "17 źródeł zdarzeń | 5 warstw wykrywania | 483 reguły wykrywania";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab aktywny";

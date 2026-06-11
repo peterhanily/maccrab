@@ -132,7 +132,7 @@
 "settings.high" = "Hoog";
 "settings.criticalOnly" = "Alleen kritiek";
 "settings.aboutTagline" = "Lokale macOS-bedreigingsdetectie-engine";
-"settings.aboutStats" = "7 gebeurtenisbronnen | 8 detectielagen | 241 regels";
+"settings.aboutStats" = "17 gebeurtenisbronnen | 5 detectielagen | 483 detectieregels";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab actief";

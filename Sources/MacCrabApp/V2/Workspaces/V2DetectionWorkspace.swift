@@ -558,14 +558,21 @@ public struct V2DetectionWorkspace: View {
     }
 
     private var rulesStatsRow: some View {
-        let total = rules.count
+        // S7-1: don't show a bare combined count (Sigma + built-ins ≈ 529)
+        // next to the public "483 rules" figure. Split the loaded set into
+        // its two distinct sources: Sigma-compatible rules (single-event YAML
+        // + sequence + graph) vs the hardcoded maccrab.* built-in detections,
+        // identified by membership in BuiltinRuleCatalog.
+        let builtinCount = rules.filter { BuiltinRuleCatalog.byId[$0.id] != nil }.count
+        let sigmaCount = rules.count - builtinCount
         let enabled = rules.filter { $0.isEnabled }.count
         let custom = rules.filter { $0.isCustom }.count
         let firedRecently = rules.reduce(0) { $0 + $1.firesLastWeek }
         return HStack(spacing: 12) {
-            metricCard(title: "Rules loaded", value: "\(total)",
-                       trend: total == 0 ? "no rules" : "\(enabled) enabled",
-                       trendKind: total == 0 ? .neutral : .info,
+            metricCard(title: "Rules loaded", value: "\(sigmaCount)",
+                       trend: rules.isEmpty ? "no rules"
+                            : "+\(builtinCount) built-in · \(enabled) enabled",
+                       trendKind: rules.isEmpty ? .neutral : .info,
                        icon: "shield.lefthalf.filled", iconColor: V2Theme.dataAccent)
             metricCard(title: "Custom rules", value: "\(custom)",
                        trend: custom == 0 ? "none yet" : "user-authored",

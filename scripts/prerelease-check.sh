@@ -214,6 +214,55 @@ else
     info "README.md tests badge = $README_TESTS (run \`swift test\` to validate)"
 fi
 
+# v1.19.0 (S7-7): release.json must be the single source of truth for the
+# public rule total AND its breakdown. Assert the rules total + each class +
+# the built-in count all agree with the canonical compiler counts and
+# BuiltinRuleCatalog.swift. Hard error — a drift here ships a contradictory
+# "483" to the website / app card / About string.
+C_TOTAL=$(echo "$CANON" | sed -E 's/.*total=([0-9]+).*/\1/')
+RJSON="$REPO_ROOT/release.json"
+if [[ -f "$RJSON" ]]; then
+    rj() { grep -oE "\"$1\"[[:space:]]*:[[:space:]]*[0-9]+" "$RJSON" | grep -oE '[0-9]+$' | head -1; }
+    RJ_RULES=$(rj rules); RJ_SINGLE=$(rj rules_single)
+    RJ_SEQ=$(rj rules_sequence); RJ_GRAPH=$(rj rules_graph); RJ_BUILTINS=$(rj builtins)
+    if [[ "$RJ_RULES" == "$C_TOTAL" && "$RJ_SINGLE" == "$C_SINGLE" \
+          && "$RJ_SEQ" == "$C_SEQ" && "$RJ_GRAPH" == "$C_GRAPH" ]]; then
+        ok "release.json rules → $RJ_RULES (single $RJ_SINGLE + seq $RJ_SEQ + graph $RJ_GRAPH)"
+    else
+        err "release.json rules drift: total=$RJ_RULES single=$RJ_SINGLE seq=$RJ_SEQ graph=$RJ_GRAPH, canonical=$C_TOTAL/$C_SINGLE/$C_SEQ/$C_GRAPH"
+    fi
+    # release.json total must equal the sum of its own breakdown.
+    if [[ -n "$RJ_SINGLE" && -n "$RJ_SEQ" && -n "$RJ_GRAPH" ]] \
+       && [[ "$RJ_RULES" -ne $((RJ_SINGLE + RJ_SEQ + RJ_GRAPH)) ]]; then
+        err "release.json: rules ($RJ_RULES) != single+seq+graph ($((RJ_SINGLE + RJ_SEQ + RJ_GRAPH)))"
+    fi
+    CAT_BUILTINS=$(grep -c '\.init("maccrab\.' "$REPO_ROOT/Sources/MacCrabCore/Detection/BuiltinRuleCatalog.swift")
+    if [[ "$RJ_BUILTINS" == "$CAT_BUILTINS" ]]; then
+        ok "release.json builtins → $RJ_BUILTINS (matches BuiltinRuleCatalog)"
+    else
+        err "release.json builtins=$RJ_BUILTINS, BuiltinRuleCatalog.all=$CAT_BUILTINS"
+    fi
+else
+    warn "release.json not found — skipping rule-breakdown sync check"
+fi
+
+# The app's About string (settings.aboutStats) must carry the same rule
+# total. Option A: it states the public "483 detection rules", NOT the
+# Sigma+built-in sum. Assert the en.lproj value and the Swift defaultValue
+# both reference the canonical total.
+ABOUT_EN=$(grep -E '"settings\.aboutStats"' "$REPO_ROOT/Sources/MacCrabApp/Resources/en.lproj/Localizable.strings" | head -1)
+if echo "$ABOUT_EN" | grep -q "$C_TOTAL"; then
+    ok "en.lproj settings.aboutStats → states $C_TOTAL rules"
+else
+    err "en.lproj settings.aboutStats does not reference the canonical total $C_TOTAL: $ABOUT_EN"
+fi
+ABOUT_DEFAULT=$(grep -E 'settings\.aboutStats".*defaultValue:' "$REPO_ROOT/Sources/MacCrabApp/Views/SettingsView.swift" | head -1)
+if echo "$ABOUT_DEFAULT" | grep -q "$C_TOTAL"; then
+    ok "SettingsView aboutStats defaultValue → states $C_TOTAL rules"
+else
+    err "SettingsView settings.aboutStats defaultValue does not reference $C_TOTAL: $ABOUT_DEFAULT"
+fi
+
 # Site
 if [[ -d "$SITE_REPO_PATH" && -f "$SITE_REPO_PATH/index.html" ]]; then
     SITE_HTML="$SITE_REPO_PATH/index.html"

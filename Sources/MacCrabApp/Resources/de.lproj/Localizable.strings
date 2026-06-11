@@ -132,7 +132,7 @@
 "settings.high" = "Hoch";
 "settings.criticalOnly" = "Nur kritisch";
 "settings.aboutTagline" = "Lokale macOS-Bedrohungserkennungs-Engine";
-"settings.aboutStats" = "7 Ereignisquellen | 8 Erkennungsschichten | 241 Regeln";
+"settings.aboutStats" = "17 Ereignisquellen | 5 Erkennungsschichten | 483 Erkennungsregeln";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab aktiv";

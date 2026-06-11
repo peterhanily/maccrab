@@ -89,4 +89,57 @@ struct BuiltinCatalogCoverageTests {
         let ids = BuiltinRuleCatalog.all.map(\.id)
         #expect(ids.count == Set(ids).count, "duplicate ids in BuiltinRuleCatalog")
     }
+
+    // MARK: - v1.19.0 (S7-8): rule-count consistency, Option A
+
+    /// Pin the built-in detection count. The public 483 figure (Sigma rules)
+    /// is a SEPARATE class; the app's Detection card and About string label
+    /// the built-ins explicitly ("483 rules + 46 built-in detections") so a
+    /// user never sees a bare Sigma+built-in sum (~529) contradicting 483.
+    /// If a built-in is added/removed, update release.json `builtins`, the
+    /// app card label, and bump this expectation — prerelease-check asserts
+    /// the release.json side agrees with this catalog.
+    @Test("BuiltinRuleCatalog.all.count is pinned at 46 (Option A)")
+    func builtinCountPinned() {
+        #expect(BuiltinRuleCatalog.all.count == 46)
+    }
+
+    /// The public Sigma total (436 single + 41 sequence + 6 graph = 483) is
+    /// the composition surfaced on the website, README badge, and About
+    /// string. Cross-check the pinned constants against the actual Rules/
+    /// tree so a rule added without updating the published figure fails here.
+    @Test("Detection-card composition math: 436 + 41 + 6 = 483 Sigma, +46 built-in")
+    func sigmaCompositionMath() {
+        let single = 436, sequence = 41, graph = 6
+        let sigmaTotal = single + sequence + graph
+        #expect(sigmaTotal == 483)
+        #expect(sigmaTotal + BuiltinRuleCatalog.all.count == 529,
+                "Sigma + built-in sum — the figure the app card must NOT show bare")
+
+        // Cross-check the pinned constants against the on-disk Rules/ tree
+        // (single = .yml outside sequences/ + graph/, sequence = sequences/*.yml,
+        // graph = graph/*.json). Drift here means the published 483 is stale.
+        let projectDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/MacCrabCoreTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // project root
+        let rules = projectDir.appendingPathComponent("Rules")
+        func count(in sub: String, ext: String, recursive: Bool) -> Int {
+            let dir = rules.appendingPathComponent(sub)
+            guard let en = FileManager.default.enumerator(
+                at: dir, includingPropertiesForKeys: nil,
+                options: recursive ? [] : [.skipsSubdirectoryDescendants]
+            ) else { return 0 }
+            return en.compactMap { $0 as? URL }.filter { $0.pathExtension == ext }.count
+        }
+        let seqOnDisk = count(in: "sequences", ext: "yml", recursive: false)
+        let graphOnDisk = count(in: "graph", ext: "json", recursive: false)
+        // Single = every .yml under Rules/ minus the sequence .yml files
+        // (graph rules are .json, so they don't count toward the .yml total).
+        let allYml = count(in: "", ext: "yml", recursive: true)
+        let singleOnDisk = allYml - seqOnDisk
+        #expect(singleOnDisk == single, "single-event rule count drifted: on-disk \(singleOnDisk) vs pinned \(single)")
+        #expect(seqOnDisk == sequence, "sequence rule count drifted: on-disk \(seqOnDisk) vs pinned \(sequence)")
+        #expect(graphOnDisk == graph, "graph rule count drifted: on-disk \(graphOnDisk) vs pinned \(graph)")
+    }
 }

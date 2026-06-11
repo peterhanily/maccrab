@@ -801,7 +801,17 @@ echo "  Binaries: universal (arm64 + x86_64)"
 # rule count so release.json doesn't ship "428 rules" when the actual
 # count is 427. manifest.json is build-time metadata, not a rule.
 RULE_COUNT=$(find "$STAGING_DIR/compiled_rules" -name "*.json" ! -name "manifest.json" | wc -l | tr -d ' ')
-echo "  Rules: $RULE_COUNT"
+# v1.19.0 (S7-4): record the Sigma breakdown so release.json is the single
+# source of truth for the public 483 figure AND its composition. Counted
+# from the freshly-staged compiled tree so it can never drift from RULE_COUNT
+# (single-event + sequence + graph = total). `builtins` is the hardcoded
+# maccrab.* detection count (BuiltinRuleCatalog.all) — a separate, parallel
+# class, NOT part of the 483.
+RULES_SEQUENCE=$(find "$STAGING_DIR/compiled_rules/sequences" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+RULES_GRAPH=$(find "$STAGING_DIR/compiled_rules/graph" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+RULES_SINGLE=$(( RULE_COUNT - RULES_SEQUENCE - RULES_GRAPH ))
+BUILTINS=$(grep -c '\.init("maccrab\.' "$PROJECT_DIR/Sources/MacCrabCore/Detection/BuiltinRuleCatalog.swift" | tr -d ' ')
+echo "  Rules: $RULE_COUNT (single $RULES_SINGLE + sequence $RULES_SEQUENCE + graph $RULES_GRAPH) + $BUILTINS built-in"
 echo ""
 
 # v1.8.1: write release.json with version + rule + test counts so the
@@ -828,6 +838,10 @@ cat > "$RELEASE_JSON" <<RELEASE_EOF
   "release_date": "$RELEASE_DATE",
   "toolchain": "$TOOLCHAIN",
   "rules": $RULE_COUNT,
+  "rules_single": $RULES_SINGLE,
+  "rules_sequence": $RULES_SEQUENCE,
+  "rules_graph": $RULES_GRAPH,
+  "builtins": $BUILTINS,
   "tests": $TEST_COUNT,
   "test_suites": $SUITE_COUNT,
   "dmg": {

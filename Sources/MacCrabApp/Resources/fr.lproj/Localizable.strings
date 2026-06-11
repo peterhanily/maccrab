@@ -132,7 +132,7 @@
 "settings.high" = "Élevé";
 "settings.criticalOnly" = "Critique uniquement";
 "settings.aboutTagline" = "Moteur de détection de menaces macOS local";
-"settings.aboutStats" = "7 sources d'événements | 8 couches de détection | 241 règles";
+"settings.aboutStats" = "17 sources d'événements | 5 couches de détection | 483 règles de détection";
 
 /* ── Status Bar Menu ── */
 "statusBar.active" = "MacCrab actif";

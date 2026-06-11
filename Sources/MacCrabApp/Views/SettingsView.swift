@@ -1609,7 +1609,7 @@ struct SettingsView: View {
                     .frame(width: 200)
 
                 VStack(spacing: 4) {
-                    Text(String(localized: "settings.aboutStats", defaultValue: "19 event sources | 5 detection layers | hundreds of rules"))
+                    Text(String(localized: "settings.aboutStats", defaultValue: "17 event sources | 5 detection layers | 483 detection rules"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Text(String(localized: "settings.aboutLicense", defaultValue: "Apache 2.0 (code)  |  DRL 1.1 (rules)"))
