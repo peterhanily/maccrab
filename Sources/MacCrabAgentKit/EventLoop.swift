@@ -87,6 +87,11 @@ enum EventLoop {
             // no-op for events that aren't NOTIFY_EXIT.
             if event.eventAction == "exit" {
                 await state.mcpAttributor.processExited(pid: event.process.pid)
+                // v1.19 (S1-T5): evict the AI child→session mapping on exit so a
+                // recycled pid can't inherit a stale AI attribution (the
+                // XProtect-as-Claude-Code misattribution). No-op for unknown
+                // pids; also tears down the session if the AI root itself exits.
+                await state.aiTracker.processExited(pid: event.process.pid)
                 // v1.18 Wave-3 P1b: end the durable agent session when its
                 // AI-tool root exits. The registry retains it for a grace
                 // window so descendant events that outlive the root still
@@ -1906,6 +1911,12 @@ enum EventLoop {
                     // aggregates can be computed at persist time without a
                     // cross-DB join.
                     let techniqueTags = match.tags.filter { $0.contains("t1") }
+                    // v1.19 (S1-T4): mark trusted-subject alerts so the campaign
+                    // detector can exclude LOW/MEDIUM trusted/agent activity from
+                    // tactic-counting (HIGH/CRITICAL still feed). Same trust
+                    // judgement NoiseFilter uses for the must-fire floor.
+                    let isTrustedSubject = NoiseFilter.isTrustedSigner(event: enrichedEvent)
+                        || NoiseFilter.isAppleSystemBinary(event: enrichedEvent)
                     let alertSummary = CampaignDetector.AlertSummary(
                         ruleId: alert.ruleId,
                         ruleTitle: alert.ruleTitle,
@@ -1917,7 +1928,8 @@ enum EventLoop {
                         tactics: Set(tactics),
                         mitreTechniques: Set(techniqueTags),
                         aiTool: enrichedEvent.enrichments["ai_tool"],
-                        processTreeDepth: enrichedEvent.process.ancestors.count
+                        processTreeDepth: enrichedEvent.process.ancestors.count,
+                        isTrustedSubject: isTrustedSubject
                     )
                     let campaigns = await state.campaignDetector.processAlert(alertSummary)
                     for campaign in campaigns {

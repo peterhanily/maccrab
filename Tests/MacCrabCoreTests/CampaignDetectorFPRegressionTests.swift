@@ -160,4 +160,98 @@ struct CampaignDetectorFPRegressionTests {
         let killChains = campaigns.filter { $0.type == .killChain }
         #expect(killChains.isEmpty)
     }
+
+    // MARK: - v1.19 (S1-T4) trust-weighted campaign inputs
+    //
+    // LOW/MEDIUM trusted-subject or agent-lineage alerts are excluded from
+    // kill-chain / coordinated-attack tactic-counting (the FP class minted on
+    // swiftpm-testing-helper / Xcode helpers / agents ~every 2h). HIGH/CRITICAL
+    // trusted/agent alerts STILL feed — slow-burn abuse of trusted-signed or
+    // agent tooling is exactly what campaign correlation is for.
+
+    @Test("S1-T4: LOW/MEDIUM trusted-subject alerts do NOT mint a coordinated attack")
+    func lowMedTrustedNotCoordinated() async {
+        let detector = CampaignDetector()
+        // Two distinct MEDIUM rules on the same trusted (notarized) helper pid,
+        // spanning two tactics. Pre-T4 this minted a HIGH coordinated_attack.
+        _ = await detector.processAlert(
+            .init(ruleId: "rule.a", ruleTitle: "A", severity: .medium,
+                  processPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftpm-testing-helper",
+                  pid: 5500, tactics: ["attack.discovery"], isTrustedSubject: true))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "rule.b", ruleTitle: "B", severity: .medium,
+                  processPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftpm-testing-helper",
+                  pid: 5500, tactics: ["attack.defense_evasion"], isTrustedSubject: true))
+        #expect(campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
+    }
+
+    @Test("S1-T4: LOW/MEDIUM agent-lineage alerts do NOT mint a coordinated attack")
+    func lowMedAgentNotCoordinated() async {
+        let detector = CampaignDetector()
+        _ = await detector.processAlert(
+            .init(ruleId: "rule.a", ruleTitle: "A", severity: .medium,
+                  processPath: "/usr/bin/curl", pid: 5600,
+                  tactics: ["attack.discovery"], aiTool: "claude_code"))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "rule.b", ruleTitle: "B", severity: .medium,
+                  processPath: "/usr/bin/curl", pid: 5600,
+                  tactics: ["attack.command_and_control"], aiTool: "claude_code"))
+        #expect(campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
+    }
+
+    @Test("S1-T4: HIGH trusted-subject alerts STILL feed the coordinated-attack counter")
+    func highTrustedStillCoordinated() async {
+        let detector = CampaignDetector()
+        // Slow-burn abuse of a trusted-signed binary at HIGH severity is exactly
+        // what campaign correlation is for — it must NOT be excluded.
+        _ = await detector.processAlert(
+            .init(ruleId: "rule.a", ruleTitle: "A", severity: .high,
+                  processPath: "/Applications/Trusted.app/Contents/MacOS/tool",
+                  pid: 5700, tactics: ["attack.credential_access"], isTrustedSubject: true))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "rule.b", ruleTitle: "B", severity: .high,
+                  processPath: "/Applications/Trusted.app/Contents/MacOS/tool",
+                  pid: 5700, tactics: ["attack.exfiltration"], isTrustedSubject: true))
+        #expect(!campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
+    }
+
+    @Test("S1-T4: LOW/MEDIUM trusted alerts excluded from kill-chain tactic count")
+    func lowMedTrustedExcludedFromKillChain() async {
+        let detector = CampaignDetector()
+        // 4 distinct MEDIUM tactics, ALL on trusted subjects → would reach the
+        // 4-tactic kill-chain floor pre-T4, but every contributing alert is
+        // LOW/MEDIUM trusted, so none count → no kill chain. (Order avoids any
+        // 2-tactic combo so the only path to a campaign is the 4-tactic floor,
+        // which this filter prevents.)
+        let tactics = ["attack.credential_access", "attack.discovery",
+                       "attack.persistence", "attack.collection"]
+        var allCampaigns: [CampaignDetector.Campaign] = []
+        for (i, t) in tactics.enumerated() {
+            allCampaigns += await detector.processAlert(
+                .init(ruleId: "trusted.\(i)", ruleTitle: "t\(i)", severity: .medium,
+                      processPath: "/Applications/App.app/Contents/MacOS/helper\(i)",
+                      pid: 6000 + i, tactics: [t], isTrustedSubject: true))
+        }
+        #expect(allCampaigns.filter { $0.type == .killChain }.isEmpty)
+    }
+
+    @Test("S1-T4: HIGH trusted alerts STILL feed the kill-chain tactic count")
+    func highTrustedStillKillChain() async {
+        let detector = CampaignDetector()
+        // The credential+persistence+C2 chain, all HIGH trusted alerts. HIGH/
+        // CRITICAL trusted alerts must still feed — slow-burn intrusion via a
+        // trusted-signed binary is the whole point of campaign correlation.
+        // Collect across all calls: the chain can fire as soon as the tactics
+        // accumulate (and dedup then suppresses later same-type campaigns).
+        let tactics = ["attack.credential_access", "attack.persistence",
+                       "attack.command_and_control", "attack.discovery"]
+        var allCampaigns: [CampaignDetector.Campaign] = []
+        for (i, t) in tactics.enumerated() {
+            allCampaigns += await detector.processAlert(
+                .init(ruleId: "trusted.\(i)", ruleTitle: "t\(i)", severity: .high,
+                      processPath: "/Applications/App.app/Contents/MacOS/helper\(i)",
+                      pid: 6100 + i, tactics: [t], isTrustedSubject: true))
+        }
+        #expect(!allCampaigns.filter { $0.type == .killChain }.isEmpty)
+    }
 }

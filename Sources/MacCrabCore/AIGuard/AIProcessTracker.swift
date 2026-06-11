@@ -72,16 +72,48 @@ public actor AIProcessTracker {
         logger.info("AI session started: \(type.rawValue) (PID \(pid)) in \(projectDir)")
     }
 
+    /// SIP-protected / Apple-platform path prefixes. A binary running from one
+    /// of these on a healthy system is Apple-shipped (SIP prevents writes), so
+    /// it must NEVER be promoted to an AI-tool *root* — otherwise XProtect's
+    /// `XProtectRemediatorMRTv3` and friends get mis-identified as "Claude Code"
+    /// and every credential file they touch mints a false
+    /// "Claude Code child process accessed credential" alert. Mirrors
+    /// `NoiseFilter.isAppleSystemBinary`'s path arm (we only have the ancestor's
+    /// path here, not a full `Event`).
+    static func isApplePlatformPath(_ path: String) -> Bool {
+        path.hasPrefix("/bin/") || path.hasPrefix("/sbin/")
+            || path.hasPrefix("/usr/bin/") || path.hasPrefix("/usr/sbin/")
+            || path.hasPrefix("/usr/libexec/")
+            || path.hasPrefix("/System/")
+            || path.hasPrefix("/Library/Apple/")
+    }
+
     /// Check if a process is a child of an active AI session.
     /// Returns the tool type and project directory if it is.
+    ///
+    /// v1.19 (S1-T5): attribution now requires a GENUINE DIRECT-ANCESTOR
+    /// lineage to the AI tool in the *passed* `ancestors` chain. Pre-fix this
+    /// trusted any pid present in `childToSession` (a recycled pid reused by an
+    /// unrelated process — e.g. an XProtect remediator — would inherit the AI
+    /// attribution) and would promote ANY ancestor matching an AI pattern to a
+    /// session root with no platform gate (so an Apple/SIP binary could become a
+    /// fake "Claude Code" root). Both holes drove the false
+    /// "Claude Code child process accessed credential" alerts the audit found.
     public func isAIChild(pid: Int32, ancestors: [ProcessAncestor]) -> (isChild: Bool, toolType: AIToolType?, projectDir: String?) {
-        // Direct lookup
-        if let sessionPid = childToSession[pid], let session = sessions[sessionPid] {
+        // (a) Cached attribution — only honored when the genuine ancestry STILL
+        //     contains the recorded AI session pid. A recycled pid that landed
+        //     in `childToSession` no longer descends from that session, so its
+        //     ancestor chain won't contain `sessionPid`; we fall through and
+        //     re-evaluate rather than returning a stale attribution.
+        if let sessionPid = childToSession[pid],
+           let session = sessions[sessionPid],
+           ancestors.contains(where: { $0.pid == sessionPid }) {
             return (true, session.toolType, session.projectDir)
         }
 
-        // Walk provided ancestry to find AI tool parent
-        let ancestors = ancestors
+        // Walk provided ancestry to find a registered AI-tool parent. This is a
+        // genuine direct-lineage check by construction — the ancestor pid is in
+        // THIS process's actual chain.
         for ancestor in ancestors {
             if let session = sessions[ancestor.pid] {
                 // Register this child for fast future lookups
@@ -91,27 +123,47 @@ public actor AIProcessTracker {
             }
         }
 
-        // Check if any ancestor matches AI tool patterns
-        let (isChild, toolType) = registry.isAIChildProcess(ancestors: ancestors)
-        if isChild, let tool = toolType {
-            // Found an AI ancestor not yet registered — register it
-            if let aiAncestor = ancestors.first(where: { registry.isAITool(executablePath: $0.executable) != nil }) {
-                // Register inline (same actor, no await needed)
-                if sessions[aiAncestor.pid] == nil {
-                    sessions[aiAncestor.pid] = AISession(
-                        aiPid: aiAncestor.pid, toolType: tool, projectDir: "",
-                        startTime: Date(), childPids: [], filesWritten: [],
-                        filesRead: [], networkConnections: [], alertCount: 0
-                    )
-                    updateActiveSessionsFlag()
-                }
-                childToSession[pid] = aiAncestor.pid
-                sessions[aiAncestor.pid]?.childPids.insert(pid)
+        // Check if any ancestor matches AI tool patterns. (b) Skip Apple-
+        // platform / SIP-path ancestors as ROOT candidates — XProtect, MRT, and
+        // other Apple remediators must never be treated as an AI tool. Genuine
+        // agent children (osascript/curl/bash spawned by a real agent) are NOT
+        // affected: they are attributed via their non-Apple AI ANCESTOR, not by
+        // being rejected here as children.
+        if let aiAncestor = ancestors.first(where: {
+            !Self.isApplePlatformPath($0.executable)
+                && registry.isAITool(executablePath: $0.executable) != nil
+        }), let tool = registry.isAITool(executablePath: aiAncestor.executable) {
+            // Found a non-Apple AI ancestor not yet registered — register it.
+            if sessions[aiAncestor.pid] == nil {
+                sessions[aiAncestor.pid] = AISession(
+                    aiPid: aiAncestor.pid, toolType: tool, projectDir: "",
+                    startTime: Date(), childPids: [], filesWritten: [],
+                    filesRead: [], networkConnections: [], alertCount: 0
+                )
+                updateActiveSessionsFlag()
             }
-            return (true, toolType, sessions[childToSession[pid] ?? 0]?.projectDir)
+            childToSession[pid] = aiAncestor.pid
+            sessions[aiAncestor.pid]?.childPids.insert(pid)
+            return (true, tool, sessions[aiAncestor.pid]?.projectDir)
         }
 
         return (false, nil, nil)
+    }
+
+    /// v1.19 (S1-T5): evict a child→session mapping when the child process
+    /// exits, so a later process that recycles the same pid can't inherit a
+    /// stale AI attribution. Mirrors `MCPAttributor.processExited`. Also clears
+    /// the entry from its parent session's `childPids` set. Cheap; safe to call
+    /// on every ES exit event (no-op for unknown pids).
+    public func processExited(pid: Int32) {
+        if let sessionPid = childToSession.removeValue(forKey: pid) {
+            sessions[sessionPid]?.childPids.remove(pid)
+        }
+        // If the exiting pid is itself an AI session root, tear the session down
+        // (also clears its child mappings) — same effect as `removeSession`.
+        if sessions[pid] != nil {
+            removeSession(pid: pid)
+        }
     }
 
     /// Record a file write by an AI session's child process.

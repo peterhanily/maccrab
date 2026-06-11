@@ -41,6 +41,15 @@ struct DaemonConfig: Codable {
     /// false` in daemon_config.json to disable the family independently.
     var subscribeIntrospectionEvents: Bool = true
 
+    /// v1.19 (S1-T6): suppress the self-inflicted honeyfile noise that
+    /// `make test` / `make test-*` generate — the Swift test runner reading
+    /// MacCrab's OWN deployed decoy files and tripping the credential/discovery
+    /// rules that key on those paths. OFF in prod (dev-harness only). The
+    /// must-fire `honeyfile_accessed` rule is UNAFFECTED. JSON key:
+    /// `suppress_selftest_noise`. Also settable via
+    /// `MACCRAB_SUPPRESS_SELFTEST_NOISE=1`.
+    var suppressSelftestNoise: Bool = false
+
     // MARK: - Prompt Injection
     var promptInjectionConfidence: Int = 40
 

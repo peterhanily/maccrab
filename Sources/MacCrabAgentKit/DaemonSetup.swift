@@ -314,6 +314,12 @@ enum DaemonSetup {
         // Load daemon configuration (optional JSON file with tuning overrides)
         let config = DaemonConfig.load(from: supportDir)
 
+        // v1.19 (S1-T6): apply the self-test honeyfile-noise suppression flag
+        // once at startup (config OR env). OFF in prod; the must-fire
+        // `honeyfile_accessed` rule is unaffected.
+        NoiseFilter.selfTestNoiseSuppressionEnabled = config.suppressSelftestNoise
+            || ProcessInfo.processInfo.environment["MACCRAB_SUPPRESS_SELFTEST_NOISE"] == "1"
+
         // Create support directories with restrictive permissions
         try? fm.createDirectory(
             atPath: supportDir,

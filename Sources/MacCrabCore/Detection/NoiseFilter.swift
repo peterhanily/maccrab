@@ -17,6 +17,60 @@ import Foundation
 /// makes the filter trivially testable from the FP-regression harness.
 public enum NoiseFilter {
 
+    // MARK: - v1.19 (S1-T6) self-test noise suppression flag
+    //
+    // OFF by default (prod). When enabled, Gate 4c additionally drops the
+    // self-inflicted noise that `make test` / `make test-*` generate: the
+    // test runner reading MacCrab's OWN deployed honeyfiles and tripping the
+    // credential/discovery rules that key on those decoy paths. This is dev-
+    // harness noise, not threat signal. `honeyfile_accessed` itself is
+    // `suppressible: false` (must-fire) and is therefore UNAFFECTED — it
+    // bypasses every gate, including this one, so the deception detection it
+    // provides is never weakened.
+    //
+    // Enable via the `MACCRAB_SUPPRESS_SELFTEST_NOISE=1` env var (the daemon
+    // bootstrap sets it from `daemon_config.json → suppress_selftest_noise`),
+    // or set `selfTestNoiseSuppressionEnabled` directly from a test. Read once
+    // from the environment at first access; the explicit setter overrides it.
+    nonisolated(unsafe) private static var _selfTestNoiseFlag: Bool? = nil
+
+    /// Whether Gate 4c's self-test honeyfile/runner suppression is active.
+    /// Defaults to the `MACCRAB_SUPPRESS_SELFTEST_NOISE` env var (off in prod).
+    public static var selfTestNoiseSuppressionEnabled: Bool {
+        get {
+            if let v = _selfTestNoiseFlag { return v }
+            let v = Foundation.ProcessInfo.processInfo
+                .environment["MACCRAB_SUPPRESS_SELFTEST_NOISE"] == "1"
+            _selfTestNoiseFlag = v
+            return v
+        }
+        set { _selfTestNoiseFlag = newValue }
+    }
+
+    /// Swift test-runner process names that drive the self-inflicted honeyfile
+    /// noise during `make test`. Scoped narrowly to the toolchain test harness
+    /// — NOT the general dev-tool set — so enabling the flag can't hide a real
+    /// threat masquerading as an unrelated binary.
+    static let selfTestRunnerProcessNames: Set<String> = [
+        "swiftpm-testing-helper",
+        "xctest",
+        "MacCrabPackageTests.xctest",
+    ]
+
+    /// True when the event's subject is a MacCrab self-test runner accessing a
+    /// deployed honeyfile. Gated behind `selfTestNoiseSuppressionEnabled`. The
+    /// honeyfile is identified by the `IsHoneyfile` enrichment (set by
+    /// EventEnricher when the path matches a MacCrab-deployed decoy — these live
+    /// at realistic credential paths like `~/.aws/credentials.bak`, NOT under
+    /// the support dir). Scoping is by the test-runner PROCESS NAME plus the
+    /// honeyfile marker: a REAL intruder tripping the decoy has a different
+    /// process name and is NOT swept in. Off in prod (the flag default).
+    static func isSelfTestHoneyfileAccess(event: Event) -> Bool {
+        guard selfTestNoiseSuppressionEnabled else { return false }
+        guard selfTestRunnerProcessNames.contains(event.process.name) else { return false }
+        return event.enrichments["IsHoneyfile"] == "true"
+    }
+
     /// Apply all three gates to a batch of rule matches. Mutates in place.
     /// Each gate drops non-`.critical` matches; critical rules (ransomware,
     /// SIP disabled, known-malicious-hash) always fire regardless of gate.
@@ -128,6 +182,17 @@ public enum NoiseFilter {
         // critical on any mixed-severity batch, since the critical-only
         // fast path above never fired.)
         if isMacCrabManagedFile(event: event) {
+            matches.removeAll { !Self.isMustFire($0, trustedSubject: trustedSubject) }
+            if matches.isEmpty { return }
+        }
+
+        // Gate 4c — self-test honeyfile noise (v1.19, S1-T6). The make-test
+        // runner reading MacCrab's OWN deployed honeyfiles trips the credential/
+        // discovery rules that key on those decoy paths — dev-harness noise, not
+        // signal. Flag-gated (off in prod) so prod detection is untouched.
+        // `honeyfile_accessed` is must-fire (`suppressible: false`) and survives
+        // this drop, so the deception detection itself is never weakened.
+        if isSelfTestHoneyfileAccess(event: event) {
             matches.removeAll { !Self.isMustFire($0, trustedSubject: trustedSubject) }
             if matches.isEmpty { return }
         }

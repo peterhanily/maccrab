@@ -134,6 +134,17 @@ public actor CampaignDetector {
         /// during a campaign.
         public let processTreeDepth: Int?
 
+        /// v1.19 (S1-T4): the subject is a trusted signer (notarized
+        /// Developer-ID / MacCrab first-party) or an Apple platform binary,
+        /// as judged by `NoiseFilter` at the feed site. Used to exclude
+        /// LOW/MEDIUM trusted-subject alerts from kill-chain / coordinated-
+        /// attack tactic-counting — slow-burn FP campaigns minted on
+        /// swiftpm-testing-helper / Xcode helpers. HIGH/CRITICAL trusted
+        /// alerts still feed (slow-burn abuse of trusted-signed tooling is
+        /// exactly what campaign correlation is for). Defaults `false` so
+        /// existing call sites that don't supply it keep their old behavior.
+        public let isTrustedSubject: Bool
+
         public init(
             ruleId: String,
             ruleTitle: String,
@@ -145,7 +156,8 @@ public actor CampaignDetector {
             tactics: Set<String> = [],
             mitreTechniques: Set<String> = [],
             aiTool: String? = nil,
-            processTreeDepth: Int? = nil
+            processTreeDepth: Int? = nil,
+            isTrustedSubject: Bool = false
         ) {
             self.ruleId = ruleId
             self.ruleTitle = ruleTitle
@@ -158,6 +170,7 @@ public actor CampaignDetector {
             self.mitreTechniques = mitreTechniques
             self.aiTool = aiTool
             self.processTreeDepth = processTreeDepth
+            self.isTrustedSubject = isTrustedSubject
         }
     }
 
@@ -497,6 +510,18 @@ public actor CampaignDetector {
         return isAutoUpdater(processPath: path)
     }
 
+    /// v1.19 (S1-T4): true when an alert must NOT contribute a tactic toward a
+    /// kill-chain / coordinated-attack campaign because its subject is trusted
+    /// (notarized Developer-ID / first-party / Apple platform binary) OR the
+    /// activity is attributed to an AI agent, AND the alert is only LOW/MEDIUM.
+    /// HIGH/CRITICAL trusted/agent alerts STILL count — slow-burn abuse of
+    /// trusted-signed or agent tooling is exactly what campaign correlation is
+    /// for. This stops the FP kill-chains the audit found minting on
+    /// swiftpm-testing-helper / Xcode helpers / agent lineage ~every 2h.
+    private func isLowSignalTrustedOrAgent(_ alert: AlertSummary) -> Bool {
+        (alert.isTrustedSubject || alert.aiTool != nil) && alert.severity < .high
+    }
+
     private func checkKillChain() -> Campaign? {
         // v1.4: only count tactics contributed by medium+ severity alerts.
         // Low-severity discovery rules (ps, lsof, dscl, ioreg, …) produce
@@ -521,6 +546,10 @@ public actor CampaignDetector {
             // Apple system daemons. Auto-updaters routinely touch
             // multiple tactics during a single update cycle.
             && !Self.isKnownBenignProcess(processPath: $0.processPath)
+            // v1.19 (S1-T4): exclude LOW/MEDIUM trusted-subject / agent-lineage
+            // alerts from tactic-counting (HIGH/CRITICAL still feed). Stops the
+            // FP kill-chains on swiftpm-testing-helper / Xcode helpers / agents.
+            && !isLowSignalTrustedOrAgent($0)
         }
         let allTactics = Set(tacticContributingAlerts.flatMap(\.tactics).map(normalizeTactic))
         guard allTactics.count >= 2 else { return nil }
@@ -706,7 +735,15 @@ public actor CampaignDetector {
         }
 
         let cutoff = Date().addingTimeInterval(-campaignWindow)
-        let windowAlerts = recentAlerts.filter { $0.timestamp > cutoff }
+        // v1.19 (S1-T4): exclude LOW/MEDIUM trusted-subject / agent-lineage
+        // alerts from coordinated-attack tactic-counting — the same FP class the
+        // kill-chain path now filters (swiftpm-testing-helper / Xcode helpers /
+        // agents touching 2-3 tactics ~every 2h). HIGH/CRITICAL trusted/agent
+        // alerts STILL feed. Applied to the grouped sets so BOTH the PID and
+        // process-path branches count only genuine multi-step signal.
+        let windowAlerts = recentAlerts.filter {
+            $0.timestamp > cutoff && !isLowSignalTrustedOrAgent($0)
+        }
 
         // v1.17.4 / CAMP-1: an AI coding tool legitimately querying the
         // keychain (`security find-generic-password`) is a breadcrumb, not a
