@@ -15,6 +15,7 @@
 
 import Foundation
 import CryptoKit
+import MacCrabForensics
 
 public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
     public let id: String           // plugin id, e.g. com.maccrab.hosts-collector
@@ -22,6 +23,13 @@ public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
     public let channel: String      // "official" / "contrib"
     public let trustTier: String    // "first-party" / "verified-community" / "unverified"
     public let signerIdentity: String
+    /// O1b: sha256 (hex-lower) of the publisher's bundle signing.key.pub as
+    /// endorsed by the signed catalog. Empty when the catalog entry omits it
+    /// (pre-ceremony catalogs / pre-release entries).
+    public let signerPublicKeySHA256: String
+    /// Entry maturity ("pre-release" vs official). Surfaced so the dashboard
+    /// can badge pre-release entries and explain the unpinned-install caveat.
+    public let status: String
     public let category: String?
     public let tags: [String]
     public let minMaccrabVersion: String?
@@ -33,6 +41,7 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
     case fetchFailed(url: URL, status: Int)
     case signatureMismatch
     case parseFailed(reason: String)
+    case catalogRollback(stored: Int, incoming: Int)
 
     public var description: String {
         switch self {
@@ -41,13 +50,30 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
         case .fetchFailed(let url, let s): return "HTTP \(s) fetching \(url.absoluteString)"
         case .signatureMismatch:    return "Catalog signature does not verify against the bundled key. The catalog may be corrupted or the signing key has rotated."
         case .parseFailed(let r):   return "Catalog parse failed: \(r)"
+        case .catalogRollback(let stored, let incoming):
+            return "Catalog rollback rejected — signed catalog_serial \(incoming) is older than the last-accepted serial \(stored). Showing the prior trusted catalog (stale/replay)."
         }
     }
 }
 
 public actor RaveCatalogClient {
 
-    public init() {}
+    /// S2-AR anti-rollback high-water-mark store. Default location is
+    /// <app-support>/MacCrab/rave_trust_state.json; overridable for tests.
+    private let trustState: RaveTrustStateStore
+
+    public init(trustState: RaveTrustStateStore? = nil) {
+        if let s = trustState {
+            self.trustState = s
+        } else {
+            let support = FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first
+                .map { $0.appendingPathComponent("MacCrab").path }
+                ?? (NSHomeDirectory() + "/Library/Application Support/MacCrab")
+            self.trustState = RaveTrustStateStore.default(supportDir: support)
+        }
+    }
 
     /// Official production catalog. Anything else is "custom"
     /// and gets a warning banner in the dashboard.
@@ -99,7 +125,29 @@ public actor RaveCatalogClient {
         guard key.isValidSignature(sig, for: data) else {
             throw RaveCatalogError.signatureMismatch
         }
+
+        // S2-AR anti-rollback gate on the now signature-verified catalog. A
+        // validly-signed-but-older catalog_serial is a stale/replay; reject it
+        // and keep the prior high-water mark. Missing serial = first-seen so
+        // pre-ceremony catalogs still load.
+        if let serial = parseCatalogSerial(data: data) {
+            switch trustState.evaluateCatalog(incoming: serial) {
+            case .rollback(let stored, let incoming):
+                throw RaveCatalogError.catalogRollback(stored: stored, incoming: incoming)
+            case .firstSeen, .accepted:
+                try? trustState.recordCatalog(serial: serial)
+            }
+        }
         return try parseCatalog(data: data)
+    }
+
+    /// Extract the top-level monotonic catalog_serial (S2-AR). nil when absent
+    /// or non-integer (pre-ceremony catalog) — treated as first-seen upstream.
+    private func parseCatalogSerial(data: Data) -> Int? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return (json["catalog_serial"] as? NSNumber)?.intValue
     }
 
     private func fetch(url: URL) async throws -> Data {
@@ -119,6 +167,13 @@ public actor RaveCatalogClient {
            let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
            data.count == 32,
            let key = try? Curve25519.Signing.PublicKey(rawRepresentation: data) {
+            return key
+        }
+        // S2-13 debug-only staging-key seam: a debug build with
+        // MACCRAB_RAVE_STAGING_PUB set verifies against the staging signing
+        // key. Compiled out / always nil on release builds.
+        if let raw = RaveStagingPubOverride.rawKeyData(),
+           let key = try? Curve25519.Signing.PublicKey(rawRepresentation: raw) {
             return key
         }
         // Bundle key — shipped via Sources/MacCrabApp/Resources/rave-keys/catalog.pub
@@ -155,6 +210,8 @@ public actor RaveCatalogClient {
                 channel: (raw["channel"] as? String) ?? "official",
                 trustTier: (raw["trust_tier"] as? String) ?? "unverified",
                 signerIdentity: (raw["signer_identity"] as? String) ?? "",
+                signerPublicKeySHA256: (raw["signer_public_key_sha256"] as? String)?.lowercased() ?? "",
+                status: (raw["status"] as? String) ?? "official",
                 category: metadata["category"] as? String,
                 tags: (metadata["tags"] as? [String]) ?? [],
                 minMaccrabVersion: metadata["min_maccrab_version"] as? String

@@ -409,12 +409,13 @@ private func pluginDaemonStatus() async throws {
 
 private func pluginInstall(args: [String]) async throws {
     guard let first = args.first else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin install <bundle-dir>|<plugin-id> [--trust-on-install] [--force] [--catalog-base <url>] [--version <ver>]")
+        throw CaseCommandError.usage("Usage: maccrabctl plugin install <bundle-dir>|<plugin-id> [--trust-on-install] [--force] [--catalog-base <url>] [--version <ver>] [--allow-unpinned-prerelease]")
     }
     var trustOnInstall = false
     var force = false
     var catalogBase: String?
     var version: String?
+    var allowUnpinnedPrerelease = false
     var i = 1
     while i < args.count {
         let arg = args[i]
@@ -423,6 +424,8 @@ private func pluginInstall(args: [String]) async throws {
             trustOnInstall = true
         case "--force":
             force = true
+        case "--allow-unpinned-prerelease":
+            allowUnpinnedPrerelease = true
         case "--catalog-base":
             i += 1
             guard i < args.count else { throw CaseCommandError.usage("--catalog-base requires a URL") }
@@ -449,7 +452,8 @@ private func pluginInstall(args: [String]) async throws {
             pluginID: first,
             version: version,
             trustOnInstall: trustOnInstall,
-            force: force
+            force: force,
+            allowUnpinnedPrerelease: allowUnpinnedPrerelease
         )
         print("Installed plugin '\(installed.pluginID)' from \(base)")
     } else {
