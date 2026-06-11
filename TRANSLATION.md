@@ -60,7 +60,7 @@ plural syntax in `.strings` values.
 
 ## Provenance / review state
 
-`Sources/MacCrabApp/Resources/translation-state.json` tracks per-key,
+`translation-state.json (repo root)` tracks per-key,
 per-locale state: `legacy` (pre-v1.18.1, unaudited), `machine-translated`
 (agent fill, awaiting native review), `reviewed` (human-confirmed),
 `source-english` (intentionally untranslated). Update it when reviewing.

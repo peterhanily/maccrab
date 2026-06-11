@@ -255,11 +255,14 @@ else
         | tr -d '"' \
         | sort -u)
 
-    USED_COUNT=$(echo "$USED_KEYS" | grep -c '^' || echo 0)
-    EN_COUNT=$(echo "$EN_KEYS" | grep -c '^' || echo 0)
+    # NB: grep -c prints "0" AND exits 1 on zero matches — `|| echo 0` would
+    # append a second line ("0\n0") and break numeric comparisons (v1.18.1,
+    # first surfaced the day the missing-key list actually reached zero).
+    USED_COUNT=$(echo "$USED_KEYS" | grep -c '^' || true)
+    EN_COUNT=$(echo "$EN_KEYS" | grep -c '^' || true)
     info "Swift uses $USED_COUNT localized keys; en.lproj defines $EN_COUNT"
 
-    MISSING_IN_EN=$(comm -23 <(echo "$USED_KEYS") <(echo "$EN_KEYS") | grep -cE '\S' || echo 0)
+    MISSING_IN_EN=$(comm -23 <(echo "$USED_KEYS") <(echo "$EN_KEYS") | grep -cE '\S' || true)
     if [[ "$MISSING_IN_EN" -gt 0 ]]; then
         warn "$MISSING_IN_EN key(s) used in Swift have no en.lproj entry — defaultValue will be used but adding explicit keys helps translators"
         comm -23 <(echo "$USED_KEYS") <(echo "$EN_KEYS") | head -5 | while read -r k; do
