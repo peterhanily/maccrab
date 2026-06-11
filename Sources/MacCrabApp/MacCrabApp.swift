@@ -31,6 +31,10 @@ struct MacCrabApp: App {
     @AppStorage("hasCompletedSetup") private var hasCompletedSetup = false
     @AppStorage("launchAtLogin") private var launchAtLogin: Bool = true
     @State private var showWelcome = false
+    /// O3c (S2-07): a parsed, validated `maccrab://install/...` deep link
+    /// awaiting operator consent. Non-nil presents the consent sheet; the
+    /// scheme handler NEVER installs without this explicit confirm step.
+    @State private var pendingInstallLink: RaveInstallLink?
     @Environment(\.scenePhase) private var scenePhase
 
     /// True when the running MacCrab.app was installed via Homebrew Cask
@@ -175,11 +179,31 @@ struct MacCrabApp: App {
                         sysextManager.deactivate()
                         return
                     }
+                    // O3c (S2-07): maccrab://install/{plugin|kit}/<id>.
+                    // ACCEPT IDS ONLY — RaveInstallLink.parse rejects any link
+                    // that smuggles a digest / URL / path / version / query.
+                    // A valid link opens the consent sheet; it NEVER installs
+                    // silently. An invalid link is dropped (no sheet, no
+                    // install). Resolve-from-pinned-catalog + explicit confirm
+                    // happen in the sheet, not here.
+                    if url.host == "install" {
+                        if let link = RaveInstallLink.parse(url) {
+                            pendingInstallLink = link
+                        }
+                        // Malformed/hostile install links are intentionally
+                        // ignored — nothing is installed.
+                        return
+                    }
                     NotificationCenter.default.post(
                         name: Notification.Name("maccrab.openURL"),
                         object: nil,
                         userInfo: ["url": url]
                     )
+                }
+                .sheet(item: $pendingInstallLink) { link in
+                    RaveInstallConsentSheet(link: link) {
+                        pendingInstallLink = nil
+                    }
                 }
         }
         .commands {

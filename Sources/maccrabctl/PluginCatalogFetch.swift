@@ -23,6 +23,7 @@
 
 import Foundation
 import CryptoKit
+import MacCrabCore
 import MacCrabForensics
 
 enum PluginCatalogFetchError: Error, CustomStringConvertible {
@@ -42,6 +43,7 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     case revocationsRollback(stored: Int, incoming: Int)
     case revocationsParseFailed(reason: String)
     case pluginRevoked(id: String, version: String, reason: String, code: String)
+    case versionFloor(reason: String)
 
     var description: String {
         switch self {
@@ -77,6 +79,8 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
             return "Revocations list parse failed: \(reason). Refusing to proceed without a valid revocation list (fail-closed)."
         case .pluginRevoked(let id, let version, let reason, let code):
             return "Refusing to install \(id)@\(version): revoked by the signed revocation list [\(code)] — \(reason)."
+        case .versionFloor(let reason):
+            return reason
         }
     }
 }
@@ -87,8 +91,17 @@ struct PluginCatalogFetcher {
     /// S2-AR anti-rollback high-water-mark store. Defaults to
     /// <maccrabDataDir>/rave_trust_state.json; overridable for tests.
     let trustState: RaveTrustStateStore
+    /// O3b (S2-06) signed install-receipt store. Defaults to a
+    /// filesystem-substrate-backed store under <maccrabDataDir>; injectable
+    /// for tests. A receipt is emitted best-effort after each successful
+    /// install — a write/sign failure never unwinds a completed install.
+    let receiptStore: PluginInstallReceiptStore
 
-    init(catalogBase: String, trustState: RaveTrustStateStore? = nil) throws {
+    init(
+        catalogBase: String,
+        trustState: RaveTrustStateStore? = nil,
+        receiptStore: PluginInstallReceiptStore? = nil
+    ) throws {
         var trimmed = catalogBase
         if !trimmed.hasSuffix("/") { trimmed += "/" }
         guard let url = URL(string: trimmed) else {
@@ -96,7 +109,20 @@ struct PluginCatalogFetcher {
         }
         self.catalogBase = url
         self.catalogPublicKey = try Self.loadCatalogPublicKey()
-        self.trustState = trustState ?? RaveTrustStateStore.default(supportDir: maccrabDataDir())
+        let dataDir = maccrabDataDir()
+        self.trustState = trustState ?? RaveTrustStateStore.default(supportDir: dataDir)
+        self.receiptStore = receiptStore ?? Self.defaultReceiptStore(dataDir: dataDir)
+    }
+
+    /// Default receipt store: receipts under <dataDir>/plugin_receipts/, signed
+    /// by the same P256 TrustSubstrate key that signs trace/evidence bundles
+    /// (keys under <dataDir>/keys/).
+    private static func defaultReceiptStore(dataDir: String) -> PluginInstallReceiptStore {
+        let keysDir = URL(fileURLWithPath: dataDir).appendingPathComponent("keys")
+        let storage = FilesystemTrustSubstrateStorage(baseDirectory: keysDir)
+        let substrate = TrustSubstrate(storage: storage)
+        let receiptsDir = URL(fileURLWithPath: dataDir).appendingPathComponent("plugin_receipts")
+        return PluginInstallReceiptStore(receiptsDir: receiptsDir, substrate: substrate)
     }
 
     private static func loadCatalogPublicKey() throws -> Curve25519.Signing.PublicKey {
@@ -209,6 +235,21 @@ struct PluginCatalogFetcher {
             throw PluginCatalogFetchError.versionNotFound(id: pluginID, version: resolvedVersion)
         }
 
+        // Step 3.5 (O3a): version-floor gate. Refuse the install when the
+        // running build is older than the entry's declared
+        // metadata.min_maccrab_version — before download. Fail-closed: an
+        // unparseable floor (or running version) is a refusal, never a silent
+        // pass. Shared policy with the dashboard path (RaveVersionFloor).
+        do {
+            try RaveVersionFloor.enforce(
+                pluginID: pluginID,
+                floor: parsed.minMaccrabVersion,
+                running: MacCrabVersion.current
+            )
+        } catch let e as RaveVersionFloorError {
+            throw PluginCatalogFetchError.versionFloor(reason: e.description)
+        }
+
         // Step 4: resolve binary URL (RFC6570-ish; {tag} {file} only).
         let zipFile = "\(pluginID).zip"
         var rendered = parsed.releaseURLTemplate
@@ -284,6 +325,25 @@ struct PluginCatalogFetcher {
         // not unwind a completed install.
         if let serial = catalog.catalogSerial {
             try? trustState.recordCatalog(serial: serial)
+        }
+
+        // O3b: emit a signed, offline-verifiable install receipt recording
+        // exactly what was installed against which trust state. Best-effort —
+        // a sign/write failure must not unwind a completed install.
+        let receiptBody = PluginInstallReceiptBody(
+            pluginID: pluginID,
+            version: resolvedVersion,
+            artifactSHA256: versionEntry.artifactSHA256,
+            signerPublicKeySHA256: parsed.signerPublicKeySHA256 ?? "",
+            catalogSerial: catalog.catalogSerial,
+            revocationSerial: revocations.serial,
+            appVersion: MacCrabVersion.current,
+            timestamp: ISO8601DateFormatter().string(from: Date())
+        )
+        if let url = try? await receiptStore.emit(receiptBody) {
+            FileHandle.standardError.write(Data(
+                "MacCrab: wrote signed install receipt → \(url.path)\n".utf8
+            ))
         }
         return result
     }
@@ -421,6 +481,10 @@ struct PluginCatalogFetcher {
         /// signer pin behind an explicit opt-in; anything else is treated as
         /// an official channel and fails closed when the pin is absent.
         let status: String?
+        /// O3a (S2-05) version floor: `metadata.min_maccrab_version`. nil when
+        /// the (pre-ceremony) entry omits it. Enforced against the running
+        /// build before download.
+        let minMaccrabVersion: String?
     }
     private struct ParsedVersion {
         let tag: String
@@ -482,11 +546,19 @@ struct PluginCatalogFetcher {
             signerKey = lowered
         }
         let status = json["status"] as? String
+        // O3a version floor: metadata.min_maccrab_version (catalog-entry
+        // schema). Optional only so pre-ceremony entries parse; an absent
+        // floor means "no version gate" (the signer pin remains the trust
+        // gate). A present-but-non-string value is treated as absent here and
+        // the floor policy fails closed downstream if it can't parse.
+        let metadata = json["metadata"] as? [String: Any]
+        let minMaccrabVersion = metadata?["min_maccrab_version"] as? String
         return ParsedEntry(
             releaseURLTemplate: urlTemplate,
             versions: versions,
             signerPublicKeySHA256: signerKey,
-            status: status
+            status: status,
+            minMaccrabVersion: minMaccrabVersion
         )
     }
 }

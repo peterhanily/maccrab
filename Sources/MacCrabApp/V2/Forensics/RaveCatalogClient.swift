@@ -15,6 +15,7 @@
 
 import Foundation
 import CryptoKit
+import MacCrabCore
 import MacCrabForensics
 
 public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
@@ -45,6 +46,7 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
     case revocationsSignatureMismatch
     case revocationsParseFailed(reason: String)
     case revocationsRollback(stored: Int, incoming: Int)
+    case versionFloor(reason: String)
 
     public var description: String {
         switch self {
@@ -61,6 +63,8 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
             return "Revocations parse failed: \(r). Keeping the prior revocation state (fail-closed)."
         case .revocationsRollback(let stored, let incoming):
             return "Revocations rollback rejected — signed serial \(incoming) is older than the last-accepted serial \(stored). Keeping the prior revocation state (un-revoke replay)."
+        case .versionFloor(let reason):
+            return reason
         }
     }
 }
@@ -113,6 +117,59 @@ public actor RaveCatalogClient {
     /// operator doesn't confuse a local-dev catalog for production.
     public var isUsingOfficialSource: Bool {
         baseURL == Self.officialBaseURL
+    }
+
+    /// O3a (S2-05) app-side TRUST FLOOR. The store refuses a real-binary
+    /// install of any catalog entry whose declared `min_maccrab_version` is
+    /// below this — even if the running build technically satisfies a lower
+    /// declared floor. This is the version below which the trust-floor client
+    /// will not vouch for a plugin's compatibility/provenance contract on this
+    /// release line. Plugins published before this floor must be re-cut against
+    /// a supported MacCrab before the dashboard will install them.
+    public static let trustFloorMinVersion = "1.17.0"
+
+    /// Evaluate the version-floor gate for a catalog entry against the running
+    /// build. Throws `RaveCatalogError.versionFloor` when install must be
+    /// refused; returns the resolved floor (for display) on success.
+    ///
+    /// Two gates, both fail-closed:
+    ///   1. Trust floor — the entry's declared min_maccrab_version must be at
+    ///      or above `trustFloorMinVersion` (the store won't install ancient
+    ///      plugins on this release line).
+    ///   2. Running floor — the running build must be at or above the entry's
+    ///      declared min_maccrab_version (don't install a plugin newer than
+    ///      this engine).
+    /// An absent declared floor skips both gates (signer pin remains the trust
+    /// gate); an unparseable declared floor is a fail-closed refusal.
+    public nonisolated func checkVersionFloor(
+        entry: RaveCatalogEntry
+    ) throws {
+        // Gate 1: trust-floor minimum (store-level refusal).
+        if let declared = entry.minMaccrabVersion, !declared.isEmpty {
+            switch MacCrabSemverCompare.satisfiesFloor(
+                running: declared, floor: Self.trustFloorMinVersion
+            ) {
+            case .some(true):
+                break
+            case .some(false):
+                throw RaveCatalogError.versionFloor(reason:
+                    "Refusing to install \(entry.id): it targets MacCrab \(declared), which is below this release line's trust floor (\(Self.trustFloorMinVersion)). The plugin must be re-published against a supported MacCrab.")
+            case .none:
+                throw RaveCatalogError.versionFloor(reason:
+                    "Refusing to install \(entry.id): its declared min_maccrab_version '\(declared)' is not a valid MAJOR.MINOR.PATCH version (fail-closed).")
+            }
+        }
+
+        // Gate 2: running-version floor (shared policy with the CLI path).
+        do {
+            try RaveVersionFloor.enforce(
+                pluginID: entry.id,
+                floor: entry.minMaccrabVersion,
+                running: MacCrabVersion.current
+            )
+        } catch let e as RaveVersionFloorError {
+            throw RaveCatalogError.versionFloor(reason: e.description)
+        }
     }
 
     private func parse(_ raw: String) -> URL? {
