@@ -21,24 +21,23 @@ import Foundation
 
 struct V2RaveCatalogBrowserView: View {
     @State private var entries: [RaveCatalogEntry] = []
+    /// Per-entry resolved install state (trust badges + install-pill gating),
+    /// keyed by plugin id. Computed once per reload from the verified index +
+    /// revocation list so the UI never re-runs policy on every redraw.
+    @State private var stateByID: [String: RaveCatalogEntryState] = [:]
     @State private var loading = true
     @State private var error: String? = nil
     @State private var baseURL: String = ""
     @State private var selectedID: String? = nil
     @State private var selectedCategory: String? = nil  // nil = All
     @State private var showFeaturedOnly = false
-    @State private var copiedID: String? = nil
     @State private var usingOfficial: Bool = true
+    /// S4-X2: the verified install path. Selecting Install presents the SAME
+    /// consent sheet the maccrab://install handler drives (resolve-from-pinned-
+    /// catalog → version-floor → consent → verified hand-off). nil = no sheet.
+    @State private var installLink: RaveInstallLink? = nil
 
     private let client = RaveCatalogClient()
-
-    /// First-release gate. The Rave catalog backend exists and is
-    /// signed, but it isn't publicly launched yet — so for v1.17 the
-    /// in-app tab shows an intentional "coming soon" instead of fetching
-    /// (which would either expose an unlaunched catalog or, when the
-    /// endpoint is gated, show an error-toned "not reachable" panel).
-    /// Flip to `false` in the release that launches the catalog.
-    private static let catalogComingSoon = true
 
     private var categories: [String] {
         let set = Set(entries.compactMap { $0.category })
@@ -57,31 +56,34 @@ struct V2RaveCatalogBrowserView: View {
         entries.first { $0.id == selectedID }
     }
 
+    /// Resolved state for an entry, defaulting to a fail-closed
+    /// "awaiting signed binary" when (for any reason) we haven't computed one.
+    private func state(for entry: RaveCatalogEntry) -> RaveCatalogEntryState {
+        stateByID[entry.id] ?? RaveCatalogEntryState(
+            entry: entry,
+            installability: .awaitingSignedBinary,
+            isRevoked: false,
+            revocationReason: nil
+        )
+    }
+
     var body: some View {
-        Group {
-            if Self.catalogComingSoon {
-                ComingSoonCatalogView()
-            } else {
-                liveCatalog
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        liveCatalog
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var liveCatalog: some View {
         VStack(spacing: 0) {
-            header
-            if !usingOfficial {
-                nonOfficialBanner
-            }
-            Divider()
-            if loading {
-                loadingView
-            } else if let err = error {
-                errorView(err)
-            } else if entries.isEmpty {
-                emptyView
+            if loading || error != nil || entries.isEmpty {
+                // Offline / empty / first-load: the branded ComingSoon panel is
+                // the honest fallback when the catalog isn't reachable yet.
+                ComingSoonCatalogView()
             } else {
+                header
+                if !usingOfficial {
+                    nonOfficialBanner
+                }
+                Divider()
                 HStack(spacing: 0) {
                     sidebar
                     Divider()
@@ -92,6 +94,9 @@ struct V2RaveCatalogBrowserView: View {
             }
         }
         .task { await reload() }
+        .sheet(item: $installLink) { link in
+            RaveInstallConsentSheet(link: link) { installLink = nil }
+        }
     }
 
     // MARK: - Header
@@ -258,9 +263,12 @@ struct V2RaveCatalogBrowserView: View {
                             .scaledSystem(10)
                             .foregroundStyle(.secondary)
                     }
-                    Text("v\(e.currentVersion)")
-                        .scaledSystem(10)
-                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 5) {
+                        Text("v\(e.currentVersion)")
+                            .scaledSystem(10)
+                            .foregroundStyle(.tertiary)
+                        statusBadge(state(for: e))
+                    }
                 }
             }
             .padding(10)
@@ -327,6 +335,7 @@ struct V2RaveCatalogBrowserView: View {
                     HStack(spacing: 6) {
                         trustBadge(e.trustTier)
                         channelBadge(e.channel)
+                        statusBadge(state(for: e))
                     }
                     Text(e.id)
                         .scaledSystem(10, design: .monospaced)
@@ -344,9 +353,10 @@ struct V2RaveCatalogBrowserView: View {
                     detailSection(String(localized: "raveDetail.requires", defaultValue: "Requires"), body: "MacCrab v\(min) or newer")
                 }
                 detailSection(String(localized: "raveDetail.signedBy", defaultValue: "Signed by"), body: e.signerIdentity.isEmpty ? "—" : e.signerIdentity)
+                trustStateRow(state(for: e))
 
                 Divider()
-                installCommand(e)
+                installAction(e)
             }
             .padding(18)
         }
@@ -376,84 +386,117 @@ struct V2RaveCatalogBrowserView: View {
         }
     }
 
-    private func installCommand(_ e: RaveCatalogEntry) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    /// Install action — drives the SAME verified path the maccrab://install
+    /// deep-link handler uses. The pill is only LIVE for an entry whose state
+    /// resolves to `.installable` (real operator-signed binary + version-floor
+    /// passes + not revoked). Everything else shows status, not a live pill —
+    /// the dashboard never fakes an install.
+    private func installAction(_ e: RaveCatalogEntry) -> some View {
+        let st = state(for: e)
+        return VStack(alignment: .leading, spacing: 6) {
             Text("Install")
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
-            HStack(spacing: 6) {
-                Text("maccrabctl plugin install \(e.id)")
-                    .scaledSystem(10, design: .monospaced)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.black.opacity(0.06))
-                    .cornerRadius(4)
-                    .textSelection(.enabled)
-            }
-            Button {
-                let cmd = "maccrabctl plugin install \(e.id)"
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(cmd, forType: .string)
-                copiedID = e.id
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    if copiedID == e.id { copiedID = nil }
+            if st.showsInstallPill {
+                Button {
+                    // Construct the id-only install link and let the SAME
+                    // consent flow the URL handler uses resolve it from the
+                    // pinned catalog (signer pin + version floor + consent +
+                    // receipt). No bypass: this only OPENS the verified path.
+                    installLink = RaveInstallLink(kind: .plugin, id: e.id)
+                } label: {
+                    Label("Install", systemImage: "checkmark.shield")
                 }
-            } label: {
-                if copiedID == e.id {
-                    Label("Copied", systemImage: "checkmark")
-                } else {
-                    Label("Copy install command", systemImage: "doc.on.clipboard")
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Text("Opens the verified install path: signer-pin + version-floor checks, then your explicit confirmation.")
+                    .scaledSystem(10)
+                    .foregroundStyle(.tertiary)
+            } else {
+                // Disabled placeholder pill + the honest reason.
+                Button {} label: {
+                    Label(disabledPillLabel(st), systemImage: disabledPillIcon(st))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(true)
+                if let reason = st.disabledReason {
+                    Text(reason)
+                        .scaledSystem(10)
+                        .foregroundStyle(.tertiary)
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            Text("In-dashboard install is coming. Run this in Terminal to install today.")
-                .scaledSystem(10)
-                .foregroundStyle(.tertiary)
         }
     }
 
-    // MARK: - Empty / loading / error
-
-    private var loadingView: some View {
-        VStack(spacing: 10) {
-            ProgressView()
-            Text("Fetching catalog…")
-                .scaledSystem(12)
-                .foregroundStyle(.secondary)
+    private func disabledPillLabel(_ st: RaveCatalogEntryState) -> String {
+        switch st.installability {
+        case .installable:            return "Install"
+        case .awaitingSignedBinary:   return "Operator-signed binary required"
+        case .preRelease:             return "Pre-release"
+        case .versionFloorBlocked:    return "Unavailable on this MacCrab"
+        case .revoked:                return "Revoked"
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func errorView(_ err: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "wifi.exclamationmark")
-                .scaledSystem(40)
-                .foregroundStyle(.orange)
-            Text("Catalog not reachable")
-                .font(.headline)
-            Text("The rave plugin catalog at \(baseURL.isEmpty ? "rave.maccrab.com" : baseURL) couldn't be fetched. This usually means the catalog is still being built out, or you're offline.")
-                .scaledSystem(12)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
-            Text(err).scaledSystem(10, design: .monospaced)
-                .foregroundStyle(.tertiary).padding(.top, 8)
-            Button("Try again") { Task { await reload() } }
-                .padding(.top, 8)
+    private func disabledPillIcon(_ st: RaveCatalogEntryState) -> String {
+        switch st.installability {
+        case .installable:            return "checkmark.shield"
+        case .awaitingSignedBinary:   return "hourglass"
+        case .preRelease:             return "clock.badge"
+        case .versionFloorBlocked:    return "exclamationmark.triangle"
+        case .revoked:                return "xmark.octagon"
         }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var emptyView: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "shippingbox").scaledSystem(36).foregroundStyle(.tertiary)
-            Text("Catalog has no scanners yet.")
-                .scaledSystem(13, weight: .medium)
-                .foregroundStyle(.secondary)
+    /// Compact badge for cards + detail header reflecting install state.
+    @ViewBuilder
+    private func statusBadge(_ st: RaveCatalogEntryState) -> some View {
+        switch st.installability {
+        case .installable:
+            if st.isSignerPinned {
+                badge("Pinned", icon: "checkmark.shield.fill", color: .green)
+            }
+        case .awaitingSignedBinary:
+            badge("Coming soon", icon: "hourglass", color: .secondary)
+        case .preRelease:
+            badge("Pre-release", icon: "clock.badge", color: .orange)
+        case .versionFloorBlocked:
+            badge("Needs newer MacCrab", icon: "exclamationmark.triangle.fill", color: .orange)
+        case .revoked:
+            badge("Revoked", icon: "xmark.octagon.fill", color: .red)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func badge(_ label: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).scaledSystem(8)
+            Text(label).scaledSystem(9, weight: .medium)
+        }
+        .padding(.horizontal, 5).padding(.vertical, 1)
+        .background(color.opacity(0.16))
+        .foregroundStyle(color)
+        .cornerRadius(3)
+    }
+
+    /// Trust-state detail row: signer-pin status + (when blocked/revoked) the
+    /// reason. Shown in the detail panel under "Signed by".
+    @ViewBuilder
+    private func trustStateRow(_ st: RaveCatalogEntryState) -> some View {
+        detailSection("Trust state", view: VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: st.isSignerPinned ? "checkmark.shield.fill" : "shield.slash")
+                    .scaledSystem(10)
+                    .foregroundStyle(st.isSignerPinned ? Color.green : Color.secondary)
+                Text(st.isSignerPinned ? "Publisher key pinned" : "Publisher key not yet pinned")
+                    .scaledSystem(11)
+            }
+            if let reason = st.disabledReason {
+                Text(reason)
+                    .scaledSystem(10)
+                    .foregroundStyle(st.isRevoked ? Color.red : Color.secondary)
+            }
+        })
     }
 
     // MARK: - Helpers
@@ -533,11 +576,33 @@ struct V2RaveCatalogBrowserView: View {
         baseURL = await client.baseURL.absoluteString
         usingOfficial = await client.isUsingOfficialSource
         do {
-            entries = try await client.fetchEntries()
+            let fetched = try await client.fetchEntries()
+
+            // Best-effort load of the signed revocation list so revoked
+            // entries are badged + their install pills withheld. A failure
+            // here (offline / not-yet-published) is non-fatal: the catalog
+            // still renders, and the per-entry signer-pin + version-floor
+            // gates still apply. fetchAndReconcileRevocations is fail-closed
+            // on a BAD signature (throws) — that's the safe outcome.
+            let revocations = try? await client.fetchAndReconcileRevocations()
+
+            var states: [String: RaveCatalogEntryState] = [:]
+            states.reserveCapacity(fetched.count)
+            for e in fetched {
+                states[e.id] = RaveCatalogEntryState.compute(
+                    entry: e,
+                    revocations: revocations,
+                    floorCheck: client.checkVersionFloor   // nonisolated, shared policy
+                )
+            }
+
+            entries = fetched
+            stateByID = states
             if selectedID == nil { selectedID = entries.first?.id }
         } catch {
             self.error = "\(error)"
             entries = []
+            stateByID = [:]
         }
         loading = false
     }
