@@ -109,9 +109,13 @@ struct PluginCatalogFetcher {
         }
         self.catalogBase = url
         self.catalogPublicKey = try Self.loadCatalogPublicKey()
-        let dataDir = maccrabDataDir()
-        self.trustState = trustState ?? RaveTrustStateStore.default(supportDir: dataDir)
-        self.receiptStore = receiptStore ?? Self.defaultReceiptStore(dataDir: dataDir)
+        // Client-owned WRITABLE trust artifacts (anti-rollback high-water mark +
+        // signed receipts) go in the user-domain dir, NOT maccrabDataDir() (which
+        // prefers the root-owned dir the non-root CLI can't write — v1.19 dry-run
+        // Finding 2). Installs land in the same user-domain tree.
+        let writableDir = maccrabUserWritableDataDir()
+        self.trustState = trustState ?? RaveTrustStateStore.default(supportDir: writableDir)
+        self.receiptStore = receiptStore ?? Self.defaultReceiptStore(dataDir: writableDir)
     }
 
     /// Default receipt store: receipts under <dataDir>/plugin_receipts/, signed
@@ -210,6 +214,14 @@ struct PluginCatalogFetcher {
         // revocation sync. Fail-closed: a bad signature / malformed list /
         // older serial aborts the install.
         let revocations = try await fetchVerifiedRevocations()
+        // Reconcile quarantine FIRST — before the per-install refusal — so that
+        // re-running `plugin install <id>` for an ALREADY-INSTALLED, now-revoked
+        // plugin quarantines the on-disk copy instead of just refusing while the
+        // stale copy keeps loading. (v1.19 dry-run Finding 1: the refusal `throw`
+        // short-circuited the reconcile, so quarantine-on-revoke only self-healed
+        // when the operator happened to install some OTHER plugin.) Best-effort:
+        // a reconcile write failure must not block a non-revoked install.
+        try? await Self.reconcileInstalledQuarantine(against: revocations)
         if case .refused(let hit) = RevocationEnforcer.evaluateInstall(
             pluginID: pluginID, version: resolvedVersion, against: revocations
         ) {
@@ -217,10 +229,6 @@ struct PluginCatalogFetcher {
                 id: pluginID, version: resolvedVersion, reason: hit.reason, code: hit.code
             )
         }
-        // Reconcile quarantine for already-installed plugins against the fresh
-        // signed list (best-effort: a reconcile write failure must not block a
-        // non-revoked install).
-        try? await Self.reconcileInstalledQuarantine(against: revocations)
 
         // Step 3: per-plugin catalog entry + signature.
         let entryPath = "catalog/\(pluginID).json"

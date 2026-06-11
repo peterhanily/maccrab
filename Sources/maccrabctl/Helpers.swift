@@ -65,6 +65,25 @@ func maccrabDataDir() -> String {
     return systemDir
 }
 
+/// The USER-domain MacCrab data dir, ALWAYS (never the root-owned system dir).
+///
+/// `maccrabDataDir()` prefers the root `/Library/Application Support/MacCrab`
+/// whenever its `events.db` is newer — which is always true on a machine with
+/// the root daemon running. That's correct for READING daemon state, but WRONG
+/// for client-owned artifacts the non-root CLI (uid 501) must WRITE: the rave
+/// anti-rollback high-water mark and the signed install receipts. Writing them
+/// under the root dir silently no-ops (best-effort `try?`), so anti-rollback
+/// wasn't durable across CLI installs and no receipt trail was left (v1.19
+/// dry-run Finding 2). These artifacts co-locate with the user-domain install
+/// tree that `PluginInstaller` writes to, and the CLI's P256 receipt keys live
+/// here in filesystem mode (no dependence on the root daemon's Secure-Enclave
+/// key, which the CLI can't reach).
+func maccrabUserWritableDataDir() -> String {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first.map { $0.appendingPathComponent("MacCrab").path }
+        ?? NSHomeDirectory() + "/Library/Application Support/MacCrab"
+}
+
 extension MacCrabCtl {
     static func printUsage() {
         // LOCALIZE: All CLI usage/help strings below are candidates for future localization.
