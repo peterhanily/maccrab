@@ -85,7 +85,11 @@ public struct V2DataTable<Item: Identifiable & Hashable>: View {
     /// boundary crossing while hover was table-level state. Recomputed only
     /// when an input actually changes (same discipline as EventStream's
     /// filteredCache).
-    @State private var displayCache: [Item] = []
+    /// v1.19: NO inline default — it is seeded in init() via
+    /// State(initialValue:). An inline default here would be discarded by
+    /// Xcode 27's @State macro (TN3211), re-introducing the empty-frame flash
+    /// the init seed fixes (and pre-release-audit PASS-L2 flags the combo).
+    @State private var displayCache: [Item]
 
     public init(
         columns: [V2DataColumn<Item>],
