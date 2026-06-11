@@ -3,6 +3,50 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] — 2026-06-11
+
+A detection-quality and trust release: far fewer false alerts, an
+end-to-end-verified plugin catalog, and bounded storage.
+
+### Added
+
+- **Plugin catalog trust floor.** The rave catalog now verifies trust
+  before install: publisher-key pinning bound to the signed catalog
+  entry, a signed revocation list (revoked plugins are refused;
+  installed-then-revoked plugins are quarantined, never deleted),
+  minimum-version floors, anti-rollback on stale catalog/revocation
+  replays, and a signed, offline-verifiable install receipt. The
+  in-app catalog browser is live behind this verified path.
+- **Forensic evidence integrity.** Collected case artifacts carry a
+  signed, append-only chain-of-custody verifiable offline.
+- **CI + provenance.** SHA-pinned continuous integration with SLSA
+  build provenance; the release pipeline is decomposed into
+  reproducible stages; key-rotation runbooks.
+
+### Changed
+
+- **Trusted-signer criticals are no longer a blanket filter bypass.** A
+  critical-severity match on an Apple platform binary or notarized
+  Developer-ID app is now trust-filtered like any other match; the
+  curated must-fire set (ransomware, SIP/Gatekeeper/AMFI tampering,
+  revoked certs, C2, credential theft) still always fires.
+- **Attack-campaign correlation ignores routine dev/agent tooling** at
+  low/medium severity (high/critical still contribute), so build
+  helpers, test runners, and AI coding tools stop minting false
+  multi-stage campaigns.
+- Rule-count surfaces are consistent across the app, README, and site
+  (483 Sigma rules + 46 built-in detections).
+
+### Fixed
+
+- Apple background remediators (XProtect) are no longer mis-attributed
+  as AI-coding-tool activity (removes spurious credential-access alerts).
+- Trace-graph and trace databases now honor their size caps (the
+  trace-graph file could previously grow past its limit).
+- The built-in rule severity control reflects the active override
+  instead of always showing "Default."
+- Dashboard tables no longer flash empty for one frame on open.
+
 ## [1.18.1] — 2026-06-11
 
 A dashboard quality release: localization, triage UX, rendering
