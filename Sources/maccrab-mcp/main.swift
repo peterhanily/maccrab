@@ -982,6 +982,20 @@ private func tierBStatusPayload(_ status: TierBBootstrap.Status) -> [String: Any
                 "reason": f.reason,
             ]
         },
+        // O2: installed plugins quarantined by a signed revocation. On disk
+        // (evidence preserved) but refused load.
+        "quarantined": status.quarantined.map { q -> [String: Any] in
+            var entry: [String: Any] = [
+                "plugin_id": q.pluginID,
+                "installed_version": q.installedVersion,
+                "reason": q.reason,
+                "code": q.code,
+                "quarantined_at": q.quarantinedAt,
+            ]
+            if let s = q.revocationsSerial { entry["revocations_serial"] = s }
+            if let u = q.advisoryURL { entry["advisory_url"] = u }
+            return entry
+        },
     ]
 }
 

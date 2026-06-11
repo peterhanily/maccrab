@@ -454,6 +454,134 @@ public actor PluginInstaller {
         ) { $0.remove(keyHex) }
     }
 
+    // MARK: - Remote-revocation quarantine (O2, S2-03/04)
+
+    /// File holding installed plugins quarantined because the rave signed
+    /// revocation list (revocations.json) revokes their id+version. This is a
+    /// SEPARATE store from `revoked-keys.json`: that list is the operator's
+    /// key-hex set (manual + augmented by --revoke), keyed by publisher key;
+    /// the remote signed list is keyed by plugin_id+version and AUGMENTS — it
+    /// never rewrites — the operator list. Quarantine is non-destructive: a
+    /// quarantined plugin is kept on disk (evidence preserved) but refused
+    /// load by TierBRegistry.
+    ///
+    ///   quarantine.json  {"quarantined": {"<plugin-id>": {<record>}, ...}}
+    private var quarantinePath: String {
+        pluginsRoot.appendingPathComponent("quarantine.json").path
+    }
+
+    /// Per-plugin quarantine record. Carries the operator-facing reason so the
+    /// dashboard / CLI can explain WHY a plugin stopped running, plus the
+    /// signed revocations `serial` that was in effect when it was quarantined
+    /// (provenance: "revoked as of serial N").
+    public struct QuarantineRecord: Sendable, Equatable {
+        public let pluginID: String
+        public let installedVersion: String
+        public let reason: String
+        public let code: String
+        public let advisoryURL: String?
+        /// The revocations.json serial in effect when quarantined (nil for a
+        /// pre-ceremony list with no serial).
+        public let revocationsSerial: Int?
+        public let quarantinedAt: String
+
+        public init(
+            pluginID: String,
+            installedVersion: String,
+            reason: String,
+            code: String,
+            advisoryURL: String?,
+            revocationsSerial: Int?,
+            quarantinedAt: String
+        ) {
+            self.pluginID = pluginID
+            self.installedVersion = installedVersion
+            self.reason = reason
+            self.code = code
+            self.advisoryURL = advisoryURL
+            self.revocationsSerial = revocationsSerial
+            self.quarantinedAt = quarantinedAt
+        }
+    }
+
+    /// Current quarantine set (plugin-id → record). Missing/garbage file → empty.
+    public func currentQuarantine() async -> [String: QuarantineRecord] {
+        Self.readQuarantine(path: quarantinePath)
+    }
+
+    /// True iff `pluginID` is currently quarantined by the remote revocation
+    /// reconciliation. TierBRegistry consults this before producing a runnable
+    /// binary so a revoked-after-install plugin stops running.
+    public func isQuarantined(_ pluginID: String) async -> Bool {
+        Self.readQuarantine(path: quarantinePath)[pluginID] != nil
+    }
+
+    /// Reconcile the quarantine set against a freshly-verified revocation
+    /// reconciliation result. NON-DESTRUCTIVE: nothing on disk is deleted —
+    /// we only mark/unmark quarantine. Entries no longer revoked (e.g. a
+    /// version bump that escapes the scope, or a list that no longer revokes
+    /// the id) are un-quarantined so a legitimately-superseded plugin can run
+    /// again. Returns the records that are quarantined after reconciliation.
+    @discardableResult
+    public func applyQuarantine(_ records: [QuarantineRecord]) async throws -> [QuarantineRecord] {
+        try ensureRoot()
+        let map = Dictionary(uniqueKeysWithValues: records.map { ($0.pluginID, $0) })
+        try Self.writeQuarantine(path: quarantinePath, map: map)
+        return records
+    }
+
+    private static func readQuarantine(path: String) -> [String: QuarantineRecord] {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let q = obj["quarantined"] as? [String: [String: Any]] else {
+            return [:]
+        }
+        var out: [String: QuarantineRecord] = [:]
+        for (id, rec) in q {
+            let installedVersion = (rec["installed_version"] as? String) ?? ""
+            let reason = (rec["reason"] as? String) ?? ""
+            let code = (rec["code"] as? String) ?? ""
+            let advisory = rec["advisory_url"] as? String
+            let serial = (rec["revocations_serial"] as? NSNumber)?.intValue
+            let at = (rec["quarantined_at"] as? String) ?? ""
+            out[id] = QuarantineRecord(
+                pluginID: id,
+                installedVersion: installedVersion,
+                reason: reason,
+                code: code,
+                advisoryURL: advisory,
+                revocationsSerial: serial,
+                quarantinedAt: at
+            )
+        }
+        return out
+    }
+
+    private static func writeQuarantine(path: String, map: [String: QuarantineRecord]) throws {
+        var q: [String: Any] = [:]
+        for (id, rec) in map {
+            var entry: [String: Any] = [
+                "installed_version": rec.installedVersion,
+                "reason": rec.reason,
+                "code": rec.code,
+                "quarantined_at": rec.quarantinedAt,
+            ]
+            if let s = rec.revocationsSerial { entry["revocations_serial"] = s }
+            if let u = rec.advisoryURL { entry["advisory_url"] = u }
+            q[id] = entry
+        }
+        let payload: [String: Any] = ["quarantined": q]
+        let data = try JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: path
+        )
+    }
+
     private func ensureRoot() throws {
         try FileManager.default.createDirectory(
             at: pluginsRoot,

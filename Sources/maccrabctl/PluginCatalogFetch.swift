@@ -39,6 +39,9 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     case signerKeyMismatch(expected: String, actual: String)
     case signerKeyAbsentOnOfficial(id: String)
     case catalogRollback(stored: Int, incoming: Int)
+    case revocationsRollback(stored: Int, incoming: Int)
+    case revocationsParseFailed(reason: String)
+    case pluginRevoked(id: String, version: String, reason: String, code: String)
 
     var description: String {
         switch self {
@@ -68,6 +71,12 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
             return "Catalog entry for \(id) has no signer_public_key_sha256 on an official (non-pre-release) channel. Refusing to install (fail-closed). Set --allow-unpinned-prerelease only for pre-release entries."
         case .catalogRollback(let stored, let incoming):
             return "Catalog rollback rejected — signed catalog_serial \(incoming) is older than the last-accepted serial \(stored). Keeping the prior trusted catalog (stale/replay)."
+        case .revocationsRollback(let stored, let incoming):
+            return "Revocations rollback rejected — signed revocations serial \(incoming) is older than the last-accepted serial \(stored). Keeping the prior revocation state (un-revoke replay)."
+        case .revocationsParseFailed(let reason):
+            return "Revocations list parse failed: \(reason). Refusing to proceed without a valid revocation list (fail-closed)."
+        case .pluginRevoked(let id, let version, let reason, let code):
+            return "Refusing to install \(id)@\(version): revoked by the signed revocation list [\(code)] — \(reason)."
         }
     }
 }
@@ -167,6 +176,25 @@ struct PluginCatalogFetcher {
             throw PluginCatalogFetchError.pluginNotInCatalog(id: pluginID)
         }
         let resolvedVersion = version ?? entry.currentVersion
+
+        // Step 2.5 (O2): fetch + verify + anti-rollback the signed revocation
+        // list, then refuse the install if THIS id@version is revoked —
+        // before download. The list is also reconciled against everything
+        // already installed (quarantine) so a `plugin install` doubles as a
+        // revocation sync. Fail-closed: a bad signature / malformed list /
+        // older serial aborts the install.
+        let revocations = try await fetchVerifiedRevocations()
+        if case .refused(let hit) = RevocationEnforcer.evaluateInstall(
+            pluginID: pluginID, version: resolvedVersion, against: revocations
+        ) {
+            throw PluginCatalogFetchError.pluginRevoked(
+                id: pluginID, version: resolvedVersion, reason: hit.reason, code: hit.code
+            )
+        }
+        // Reconcile quarantine for already-installed plugins against the fresh
+        // signed list (best-effort: a reconcile write failure must not block a
+        // non-revoked install).
+        try? await Self.reconcileInstalledQuarantine(against: revocations)
 
         // Step 3: per-plugin catalog entry + signature.
         let entryPath = "catalog/\(pluginID).json"
@@ -314,6 +342,62 @@ struct PluginCatalogFetcher {
         guard catalogPublicKey.isValidSignature(signature, for: data) else {
             throw PluginCatalogFetchError.signatureVerifyFailed(url: url)
         }
+    }
+
+    // MARK: - Revocations (O2)
+
+    /// Fetch revocations.json + .sig, Ed25519-verify against the pinned
+    /// catalog.pub (same key path as the catalog), parse, and enforce the
+    /// monotonic-serial anti-rollback high-water mark. Returns the verified
+    /// list. Throws on bad signature (signatureVerifyFailed), malformed body
+    /// (revocationsParseFailed), or an older serial (revocationsRollback).
+    /// Advances the persisted revocations high-water mark on accept.
+    func fetchVerifiedRevocations() async throws -> RaveRevocationList {
+        let revURL = catalogBase.appendingPathComponent("revocations.json")
+        let revSigURL = catalogBase.appendingPathComponent("revocations.json.sig")
+        let revData = try await fetch(url: revURL)
+        let revSig = try await fetch(url: revSigURL)
+        try verify(data: revData, signature: revSig, url: revURL)
+
+        let list: RaveRevocationList
+        do {
+            list = try RaveRevocationList.parse(data: revData)
+        } catch {
+            throw PluginCatalogFetchError.revocationsParseFailed(reason: "\(error)")
+        }
+
+        // Anti-rollback on the now signature-verified list. A validly-signed-
+        // but-older serial is an un-revoke replay; reject it and keep the
+        // prior revocation state. Missing serial = first-seen.
+        if let serial = list.serial {
+            switch trustState.evaluateRevocations(incoming: serial) {
+            case .rollback(let stored, let incoming):
+                throw PluginCatalogFetchError.revocationsRollback(stored: stored, incoming: incoming)
+            case .firstSeen, .accepted:
+                try? trustState.recordRevocations(serial: serial)
+            }
+        }
+        return list
+    }
+
+    /// Reconcile the on-disk quarantine set against a verified revocation
+    /// list: quarantine every installed plugin the list now revokes (by
+    /// id+manifest-version), and un-quarantine any that have escaped (e.g. a
+    /// version that no longer matches a range). Non-destructive — only marks.
+    static func reconcileInstalledQuarantine(against list: RaveRevocationList) async throws {
+        let installer = PluginInstaller()
+        let installed = try await installer.list()
+        var refs: [RevocationEnforcer.InstalledRef] = []
+        refs.reserveCapacity(installed.count)
+        for p in installed {
+            // Resolve the installed version from the bundle manifest; a bundle
+            // with no readable manifest gets an empty version (matched only by
+            // all_versions — the safe fail-closed default).
+            let version = (try? TierBManifest.load(fromBundlePath: p.installRoot))?.version ?? ""
+            refs.append(.init(pluginID: p.pluginID, version: version))
+        }
+        let records = RevocationEnforcer.reconcileQuarantine(installed: refs, against: list)
+        try await installer.applyQuarantine(records)
     }
 
     // MARK: - Catalog parsing

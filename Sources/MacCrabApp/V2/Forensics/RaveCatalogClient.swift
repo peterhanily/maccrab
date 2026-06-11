@@ -42,6 +42,9 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
     case signatureMismatch
     case parseFailed(reason: String)
     case catalogRollback(stored: Int, incoming: Int)
+    case revocationsSignatureMismatch
+    case revocationsParseFailed(reason: String)
+    case revocationsRollback(stored: Int, incoming: Int)
 
     public var description: String {
         switch self {
@@ -52,6 +55,12 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
         case .parseFailed(let r):   return "Catalog parse failed: \(r)"
         case .catalogRollback(let stored, let incoming):
             return "Catalog rollback rejected — signed catalog_serial \(incoming) is older than the last-accepted serial \(stored). Showing the prior trusted catalog (stale/replay)."
+        case .revocationsSignatureMismatch:
+            return "Revocations signature does not verify against the bundled key. Keeping the prior revocation state."
+        case .revocationsParseFailed(let r):
+            return "Revocations parse failed: \(r). Keeping the prior revocation state (fail-closed)."
+        case .revocationsRollback(let stored, let incoming):
+            return "Revocations rollback rejected — signed serial \(incoming) is older than the last-accepted serial \(stored). Keeping the prior revocation state (un-revoke replay)."
         }
     }
 }
@@ -139,6 +148,61 @@ public actor RaveCatalogClient {
             }
         }
         return try parseCatalog(data: data)
+    }
+
+    /// O2 — fetch + Ed25519-verify the signed revocation list, enforce the
+    /// monotonic-serial anti-rollback high-water mark, and reconcile the
+    /// quarantine set for every installed plugin the list now revokes
+    /// (quarantine-not-delete). Returns the verified list so the dashboard can
+    /// badge revoked catalog entries. Fail-closed: a bad signature / malformed
+    /// list / older serial throws and the prior revocation state is kept.
+    ///
+    /// `installer` defaults to the standard plugins root; injectable for tests.
+    public func fetchAndReconcileRevocations(
+        installer: PluginInstaller = PluginInstaller()
+    ) async throws -> RaveRevocationList {
+        let key = try loadCatalogPublicKey()
+        let base = baseURL
+        let revURL = base.appendingPathComponent("revocations.json")
+        let sigURL = base.appendingPathComponent("revocations.json.sig")
+
+        async let dataF = fetch(url: revURL)
+        async let sigF = fetch(url: sigURL)
+        let data = try await dataF
+        let sig = try await sigF
+        guard key.isValidSignature(sig, for: data) else {
+            throw RaveCatalogError.revocationsSignatureMismatch
+        }
+
+        let list: RaveRevocationList
+        do {
+            list = try RaveRevocationList.parse(data: data)
+        } catch {
+            throw RaveCatalogError.revocationsParseFailed(reason: "\(error)")
+        }
+
+        // Anti-rollback gate. A validly-signed-but-older serial is an
+        // un-revoke replay; reject and keep the prior state + high-water mark.
+        if let serial = list.serial {
+            switch trustState.evaluateRevocations(incoming: serial) {
+            case .rollback(let stored, let incoming):
+                throw RaveCatalogError.revocationsRollback(stored: stored, incoming: incoming)
+            case .firstSeen, .accepted:
+                try? trustState.recordRevocations(serial: serial)
+            }
+        }
+
+        // Reconcile quarantine for everything already installed.
+        let installed = try await installer.list()
+        var refs: [RevocationEnforcer.InstalledRef] = []
+        refs.reserveCapacity(installed.count)
+        for p in installed {
+            let version = (try? TierBManifest.load(fromBundlePath: p.installRoot))?.version ?? ""
+            refs.append(.init(pluginID: p.pluginID, version: version))
+        }
+        let records = RevocationEnforcer.reconcileQuarantine(installed: refs, against: list)
+        try await installer.applyQuarantine(records)
+        return list
     }
 
     /// Extract the top-level monotonic catalog_serial (S2-AR). nil when absent

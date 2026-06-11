@@ -20,6 +20,7 @@ public actor TierBRegistry {
         case manifestUnreadable(pluginID: String, message: String)
         case verificationFailed(pluginID: String, reason: String)
         case binaryNotExecutable(pluginID: String, path: String)
+        case quarantined(pluginID: String, reason: String)
 
         public var description: String {
             switch self {
@@ -27,6 +28,7 @@ public actor TierBRegistry {
             case .manifestUnreadable(let id, let m): return "TierBRegistry: manifest unreadable for \(id): \(m)"
             case .verificationFailed(let id, let r): return "TierBRegistry: verification failed for \(id): \(r)"
             case .binaryNotExecutable(let id, let p): return "TierBRegistry: binary not executable for \(id) at \(p)"
+            case .quarantined(let id, let r): return "TierBRegistry: \(id) is quarantined by a signed revocation (\(r)) — refusing to load"
             }
         }
     }
@@ -70,6 +72,14 @@ public actor TierBRegistry {
         let installed = try await installer.list()
         guard let entry = installed.first(where: { $0.pluginID == pluginID }) else {
             throw RegistryError.notInstalled(pluginID: pluginID)
+        }
+        // O2 runtime quarantine: a plugin the signed revocation list revoked
+        // after install is quarantined (not deleted). Refuse to produce a
+        // runnable binary for it — checked BEFORE signature verification so a
+        // revoked-but-still-validly-signed plugin still stops running.
+        let quarantine = await installer.currentQuarantine()
+        if let q = quarantine[pluginID] {
+            throw RegistryError.quarantined(pluginID: pluginID, reason: q.reason)
         }
         let trusted = await installer.currentTrustedKeys()
         let revoked = await installer.currentRevokedKeys()

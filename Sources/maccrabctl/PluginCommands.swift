@@ -388,6 +388,7 @@ private func pluginDaemonStatus() async throws {
     print("Revoked keys:       \(status.revokedKeyCount)")
     print("Verified plugins:   \(status.verified.count)")
     print("Failed plugins:     \(status.failed.count)")
+    print("Quarantined:        \(status.quarantined.count)")
     if !status.verified.isEmpty {
         print("")
         print("Verified:")
@@ -401,6 +402,20 @@ private func pluginDaemonStatus() async throws {
         for f in status.failed {
             print("  \(f.pluginID)")
             print("    Reason: \(f.reason)")
+        }
+    }
+    if !status.quarantined.isEmpty {
+        print("")
+        print("Quarantined (revoked — on disk, refused load):")
+        for q in status.quarantined {
+            print("  \(q.pluginID)  v\(q.installedVersion)  [\(q.code)]")
+            print("    Reason: \(q.reason)")
+            if let serial = q.revocationsSerial {
+                print("    Revoked as of revocations serial \(serial)")
+            }
+            if let url = q.advisoryURL {
+                print("    Advisory: \(url)")
+            }
         }
     }
 }

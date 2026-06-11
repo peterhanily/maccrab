@@ -30,6 +30,18 @@ public actor TierBBootstrap {
         public let reason: String
     }
 
+    /// An installed plugin quarantined by the signed rave revocation list
+    /// (O2). On disk but refused load; surfaced so the operator sees WHY.
+    public struct QuarantinedSummary: Sendable {
+        public let pluginID: String
+        public let installedVersion: String
+        public let reason: String
+        public let code: String
+        public let advisoryURL: String?
+        public let revocationsSerial: Int?
+        public let quarantinedAt: String
+    }
+
     public struct Status: Sendable {
         public let pluginsRoot: String
         public let verifiedAt: Date
@@ -37,8 +49,30 @@ public actor TierBBootstrap {
         public let revokedKeyCount: Int
         public let verified: [VerifiedSummary]
         public let failed: [FailedSummary]
+        /// Plugins quarantined by a signed revocation (O2). Read offline from
+        /// the persisted quarantine.json; populated by the catalog clients'
+        /// revocation reconciliation, not by this bootstrap.
+        public let quarantined: [QuarantinedSummary]
 
         public var allVerified: Bool { failed.isEmpty }
+
+        public init(
+            pluginsRoot: String,
+            verifiedAt: Date,
+            trustedKeyCount: Int,
+            revokedKeyCount: Int,
+            verified: [VerifiedSummary],
+            failed: [FailedSummary],
+            quarantined: [QuarantinedSummary]
+        ) {
+            self.pluginsRoot = pluginsRoot
+            self.verifiedAt = verifiedAt
+            self.trustedKeyCount = trustedKeyCount
+            self.revokedKeyCount = revokedKeyCount
+            self.verified = verified
+            self.failed = failed
+            self.quarantined = quarantined
+        }
     }
 
     /// Returns the cached status, refreshing if either:
@@ -63,6 +97,10 @@ public actor TierBBootstrap {
         let report = await registry.verifyAll()
         let trusted = await installer.currentTrustedKeys()
         let revoked = await installer.currentRevokedKeys()
+        // Offline read of the persisted O2 quarantine set (populated by the
+        // catalog clients' revocation reconciliation). Surfaced separately
+        // from `failed` so an operator can tell "revoked" apart from "broke".
+        let quarantineMap = await installer.currentQuarantine()
         let verified = report.verified.map { p in
             VerifiedSummary(
                 pluginID: p.pluginID,
@@ -76,16 +114,33 @@ public actor TierBBootstrap {
         for p in report.verified {
             registry.cleanupVerifiedBinary(p)
         }
-        let failed = report.failed.map { f in
-            FailedSummary(pluginID: f.pluginID, reason: f.reason)
-        }
+        // A quarantined plugin fails resolve() (RegistryError.quarantined); pull
+        // those out of `failed` into the dedicated `quarantined` bucket so the
+        // failed bucket stays "genuinely broken" and quarantine reads cleanly.
+        let failed = report.failed
+            .filter { quarantineMap[$0.pluginID] == nil }
+            .map { FailedSummary(pluginID: $0.pluginID, reason: $0.reason) }
+        let quarantined = quarantineMap.values
+            .sorted { $0.pluginID < $1.pluginID }
+            .map { r in
+                QuarantinedSummary(
+                    pluginID: r.pluginID,
+                    installedVersion: r.installedVersion,
+                    reason: r.reason,
+                    code: r.code,
+                    advisoryURL: r.advisoryURL,
+                    revocationsSerial: r.revocationsSerial,
+                    quarantinedAt: r.quarantinedAt
+                )
+            }
         let s = Status(
             pluginsRoot: installer.pluginsRootPath,
             verifiedAt: Date(),
             trustedKeyCount: trusted.count,
             revokedKeyCount: revoked.count,
             verified: verified,
-            failed: failed
+            failed: failed,
+            quarantined: quarantined
         )
         cachedStatus = s
         Self.logger.info("TierBBootstrap refresh: \(report.verified.count) verified, \(report.failed.count) failed, plugins_root=\(installer.pluginsRootPath, privacy: .public)")
