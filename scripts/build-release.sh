@@ -25,11 +25,52 @@
 #   bin/maccrab-mcp                         (MCP server, no entitlement)
 #   install.sh                              (thin wrapper; cask + manual installers call this)
 #   compiled_rules/*.json
+#
+# ─── Composable stages (v1.19.0 / S5-T6) ─────────────────────────────
+# The release build is decomposed into four ordered stages that can be
+# run individually OR as one non-interactive flow. The default (no
+# argument) runs every stage in order in a single process with a
+# per-PID staging dir — byte-for-byte identical to the pre-S5-T6 linear
+# script. Individual stage invocation is what the reproducible-build CI
+# workflow (.github/workflows/reproducible-build.yml) uses: it runs the
+# `unsigned-build` stage ONLY (signing stays on the trusted Mac).
+#
+#   scripts/build-release.sh                   # all four stages (default)
+#   scripts/build-release.sh all               # explicit equivalent
+#   scripts/build-release.sh unsigned-build    # stage 1: compile + rules + manifest
+#   scripts/build-release.sh assemble          # stage 2: .app + sysext bundle layout
+#   scripts/build-release.sh sign              # stage 3: codesign + Sparkle embed + guards
+#   scripts/build-release.sh publish           # stage 4: DMG + notarize + release.json + cask
+#
+# Stage handoff: in single-stage mode the staging tree persists at a
+# DETERMINISTIC path ($PROJECT_DIR/.build/maccrab-stage) so stage N can
+# pick up where stage N-1 left off across separate process invocations.
+# In all-stages mode it lives under /tmp/maccrab-release-$$ and is
+# trap-cleaned on exit, exactly as before. Every stage is idempotent
+# enough to re-run; `unsigned-build` resets the staging tree.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# ─── Stage selection ─────────────────────────────────────────────────
+# First positional arg selects the stage. Absent / "all" runs the full
+# ordered pipeline in one process (the historical behavior). Any other
+# value runs exactly that one stage against the persisted staging tree.
+STAGE="${1:-all}"
+case "$STAGE" in
+    all|unsigned-build|assemble|sign|publish) ;;
+    -h|--help|help)
+        sed -n '/^# ─── Composable stages/,/resets the staging tree\./p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
+    *)
+        echo "ERROR: unknown stage '$STAGE'. Valid: all | unsigned-build | assemble | sign | publish" >&2
+        exit 2
+        ;;
+esac
+
 # Default to the latest annotated git tag (strip leading 'v') so
 # we never accidentally ship MacCrab-v1.0.0.dmg when the operator
 # forgets to pass VERSION=. Falls back to 1.0.0 only if there are
@@ -54,23 +95,43 @@ VERSION="${VERSION:-${DEFAULT_VERSION:-1.0.0}}"
 # fallback (make dev / standalone build-release.sh): there you rebuild the
 # same VERSION with changed code, so a distinct tuple each time is REQUIRED
 # to force sysextd to swap the active extension.
+#
+# v1.19.0 (S5-T6): when running individual stages, the BUILD_NUMBER must
+# be IDENTICAL across `assemble` and `sign`/`publish` (the Info.plist
+# stamped in assemble must match the bundle that gets signed). A
+# per-second epoch computed fresh in each stage process would drift.
+# So stage mode persists BUILD_NUMBER into the staging dir during
+# unsigned-build and re-reads it in later stages.
 if [ -z "${BUILD_NUMBER:-}" ]; then
     export BUILD_NUMBER="${VERSION}.$(date +%s)"
 fi
-echo "  CFBundleShortVersionString: $VERSION"
-echo "  CFBundleVersion           : $BUILD_NUMBER"
 BUILD_DIR="$PROJECT_DIR/.build/release"
-STAGING_DIR="/tmp/maccrab-release-$$"
 
-# Clean up the staging dir on any exit path. Without this trap, every
-# failed release run (Sparkle resolve failure, codesign failure,
-# hdiutil failure, notarize timeout) leaks a multi-MB staged dir to
-# /tmp; ten failed runs filled the dev disk before the audit caught
-# this. The trap fires after the rm at line 446 too, so successful
-# runs still pass through cleanly (the dir is already gone).
-trap 'rm -rf "$STAGING_DIR"' EXIT
+# Staging dir + EXIT-trap policy depend on the run mode.
+#   all-stages: per-PID dir under /tmp, trap-cleaned on exit (historical).
+#   single-stage: deterministic dir under .build so the next stage finds
+#                 it; NOT trap-cleaned (the pipeline owns its lifetime —
+#                 `unsigned-build` clears it, `publish` removes it at the
+#                 end just like the all-stages flow did).
+if [ "$STAGE" = "all" ]; then
+    STAGING_DIR="/tmp/maccrab-release-$$"
+    # Clean up the staging dir on any exit path. Without this trap, every
+    # failed release run (Sparkle resolve failure, codesign failure,
+    # hdiutil failure, notarize timeout) leaks a multi-MB staged dir to
+    # /tmp; ten failed runs filled the dev disk before the audit caught
+    # this. The trap fires after the final rm too, so successful runs
+    # still pass through cleanly (the dir is already gone).
+    trap 'rm -rf "$STAGING_DIR"' EXIT
+else
+    STAGING_DIR="$PROJECT_DIR/.build/maccrab-stage"
+fi
 
 cd "$PROJECT_DIR"
+
+# State carried between stage processes. unsigned-build writes it; the
+# later stages source it so VERSION / BUILD_NUMBER / SU_* stay pinned
+# to the values the bundle was actually stamped with.
+STAGE_ENV="$STAGING_DIR/.build-release-stage-env"
 
 # ─── Sparkle config: single source of truth ──────────────────────────
 # The shipped app's Info.plist (heredoc below) used to HARDCODE SUPublicEDKey
@@ -81,12 +142,14 @@ cd "$PROJECT_DIR"
 # auto-update for every installed user (a yank-class failure). Derive both
 # from Xcode/project.yml (canonical) at build time and fail hard if absent, so
 # there is exactly ONE source and no drift surface.
-SU_EDKEY=$(grep -E '^[[:space:]]*SUPublicEDKey:' Xcode/project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-SU_FEEDURL=$(grep -E '^[[:space:]]*SUFeedURL:' Xcode/project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-if [ -z "$SU_EDKEY" ] || [ -z "$SU_FEEDURL" ]; then
-    echo "  ERROR: could not read SUPublicEDKey / SUFeedURL from Xcode/project.yml — refusing to build a DMG with missing Sparkle config" >&2
-    exit 1
-fi
+load_sparkle_config() {
+    SU_EDKEY=$(grep -E '^[[:space:]]*SUPublicEDKey:' Xcode/project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    SU_FEEDURL=$(grep -E '^[[:space:]]*SUFeedURL:' Xcode/project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    if [ -z "$SU_EDKEY" ] || [ -z "$SU_FEEDURL" ]; then
+        echo "  ERROR: could not read SUPublicEDKey / SUFeedURL from Xcode/project.yml — refusing to build a DMG with missing Sparkle config" >&2
+        exit 1
+    fi
+}
 
 # Source credentials from env file if it exists
 ENV_FILE="$HOME/.maccrab-release-env"
@@ -94,226 +157,261 @@ if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
 fi
 
-echo "Building MacCrab v$VERSION..."
-echo "  Sparkle: feed=$SU_FEEDURL key=${SU_EDKEY:0:8}… (from project.yml)"
+# ═════════════════════════════════════════════════════════════════════
+# STAGE 1 — unsigned-build
+#   Compile both architectures, lipo universal binaries, compile rules,
+#   stamp the bundle-version marker + the rule-manifest hashes. Produces
+#   $STAGING_DIR/bin + $STAGING_DIR/compiled_rules + rules_source. No
+#   .app, no signing, no Apple round-trip — this is the ONLY stage the
+#   self-hosted reproducible-build CI runs.
+# ═════════════════════════════════════════════════════════════════════
+stage_unsigned_build() {
+    load_sparkle_config
+    echo "Building MacCrab v$VERSION..."
+    echo "  CFBundleShortVersionString: $VERSION"
+    echo "  CFBundleVersion           : $BUILD_NUMBER"
+    echo "  Sparkle: feed=$SU_FEEDURL key=${SU_EDKEY:0:8}… (from project.yml)"
 
-# ─── Compile for both architectures ──────────────────────────────────
-echo "  Building arm64..."
-swift build -c release --arch arm64 2>&1 | tail -1
+    # Fresh staging tree for this build. In single-stage mode this clears
+    # any leftover from a prior run so the manifest/hashes can't go stale.
+    rm -rf "$STAGING_DIR"
+    mkdir -p "$STAGING_DIR/bin"
 
-echo "  Building x86_64..."
-swift build -c release --arch x86_64 2>&1 | tail -1
+    # Persist the build identity so the assemble / sign / publish stages
+    # stamp + sign the SAME version + build number this stage compiled.
+    cat > "$STAGE_ENV" <<STAGE_ENV_EOF
+VERSION="$VERSION"
+BUILD_NUMBER="$BUILD_NUMBER"
+SU_EDKEY="$SU_EDKEY"
+SU_FEEDURL="$SU_FEEDURL"
+STAGE_ENV_EOF
 
-# Create universal binaries for every product. maccrabd still builds
-# (it's the legacy SPM target used during `swift run` development) but
-# isn't shipped — the system extension replaces it in the installed .app.
-mkdir -p "$STAGING_DIR/bin"
-for binary in maccrabctl maccrab-mcp MacCrabApp MacCrabAgent; do
-    ARM_BIN="$PROJECT_DIR/.build/arm64-apple-macosx/release/$binary"
-    X86_BIN="$PROJECT_DIR/.build/x86_64-apple-macosx/release/$binary"
-    if [ -f "$ARM_BIN" ] && [ -f "$X86_BIN" ]; then
-        lipo -create "$ARM_BIN" "$X86_BIN" -output "$STAGING_DIR/bin/$binary"
-        echo "    ✓ $binary (universal)"
-    elif [ -f "$ARM_BIN" ]; then
-        cp "$ARM_BIN" "$STAGING_DIR/bin/$binary"
-        echo "    ✓ $binary (arm64 only)"
-    fi
-done
+    # ─── Compile for both architectures ──────────────────────────────
+    echo "  Building arm64..."
+    swift build -c release --arch arm64 2>&1 | tail -1
 
-# ─── Rules ───────────────────────────────────────────────────────────
-echo "  Compiling detection rules..."
-python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir "$STAGING_DIR/compiled_rules" 2>&1 | tail -1
-cp -r Rules/ "$STAGING_DIR/rules_source/"
-# v1.12.0: graph rules (Rules/graph/*.json) are already JSON — no
-# compilation step. Stage them next to the compiled single-event
-# rules so GraphRuleEvaluator can load them at daemon start. Pre-fix
-# the release DMG shipped without these and `maccrab_worm_self_propagation`
-# (the flagship Wave-1 detection) silently never fired in production.
-mkdir -p "$STAGING_DIR/compiled_rules/graph"
-cp Rules/graph/*.json "$STAGING_DIR/compiled_rules/graph/" 2>/dev/null || true
-# v1.4.2: also stamp a bundle version marker so RuleBundle on app
-# launch can compare against the installed rules and copy when newer.
-echo "$VERSION" > "$STAGING_DIR/compiled_rules/.bundle_version"
+    echo "  Building x86_64..."
+    swift build -c release --arch x86_64 2>&1 | tail -1
 
-# v1.4.3: tamper-detection manifest. For every compiled_rules file
-# we stamp a SHA-256 into manifest.json. RuleBundleInstaller verifies
-# the installed tree against this manifest before trusting it; a
-# mismatch (attacker modified the installed rules tree post-sync)
-# surfaces a dashboard banner and refuses to sync further. Generated
-# at build time so the manifest is signed inside the .app bundle
-# and can't be swapped independently of the app.
-echo "  Generating rule-manifest hashes..."
-(
-    cd "$STAGING_DIR/compiled_rules"
-    # Build a JSON object keyed by relative path with SHA-256 hex values.
-    # Excludes the manifest itself and the .bundle_version marker.
-    {
-        echo '{'
-        echo '  "schema_version": 1,'
-        echo "  \"bundle_version\": \"$VERSION\","
-        echo '  "hashes": {'
-        find . -type f ! -name "manifest.json" ! -name ".bundle_version" \
-            | sort \
-            | while IFS= read -r f; do
-                rel="${f#./}"
-                sum=$(shasum -a 256 "$f" | awk '{print $1}')
-                echo "    \"$rel\": \"$sum\","
-            done \
-            | sed '$ s/,$//'     # trim trailing comma on final entry
-        echo '  }'
-        echo '}'
-    } > manifest.json
-)
-echo "  Manifest: $(wc -l < "$STAGING_DIR/compiled_rules/manifest.json") lines"
+    # Create universal binaries for every product. maccrabd still builds
+    # (it's the legacy SPM target used during `swift run` development) but
+    # isn't shipped — the system extension replaces it in the installed .app.
+    for binary in maccrabctl maccrab-mcp MacCrabApp MacCrabAgent; do
+        ARM_BIN="$PROJECT_DIR/.build/arm64-apple-macosx/release/$binary"
+        X86_BIN="$PROJECT_DIR/.build/x86_64-apple-macosx/release/$binary"
+        if [ -f "$ARM_BIN" ] && [ -f "$X86_BIN" ]; then
+            lipo -create "$ARM_BIN" "$X86_BIN" -output "$STAGING_DIR/bin/$binary"
+            echo "    ✓ $binary (universal)"
+        elif [ -f "$ARM_BIN" ]; then
+            cp "$ARM_BIN" "$STAGING_DIR/bin/$binary"
+            echo "    ✓ $binary (arm64 only)"
+        fi
+    done
 
-# ─── App bundle skeleton ─────────────────────────────────────────────
-echo "  Creating MacCrab.app bundle..."
-APP="$STAGING_DIR/MacCrab.app"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$STAGING_DIR/bin/MacCrabApp" "$APP/Contents/MacOS/MacCrab"
+    # ─── Rules ───────────────────────────────────────────────────────
+    echo "  Compiling detection rules..."
+    python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir "$STAGING_DIR/compiled_rules" 2>&1 | tail -1
+    cp -r Rules/ "$STAGING_DIR/rules_source/"
+    # v1.12.0: graph rules (Rules/graph/*.json) are already JSON — no
+    # compilation step. Stage them next to the compiled single-event
+    # rules so GraphRuleEvaluator can load them at daemon start. Pre-fix
+    # the release DMG shipped without these and `maccrab_worm_self_propagation`
+    # (the flagship Wave-1 detection) silently never fired in production.
+    mkdir -p "$STAGING_DIR/compiled_rules/graph"
+    cp Rules/graph/*.json "$STAGING_DIR/compiled_rules/graph/" 2>/dev/null || true
+    # v1.4.2: also stamp a bundle version marker so RuleBundle on app
+    # launch can compare against the installed rules and copy when newer.
+    echo "$VERSION" > "$STAGING_DIR/compiled_rules/.bundle_version"
 
-# v1.18 localization fix. SPM bundles the MacCrabApp target's .lproj into
-# Bundle.module (MacCrab_MacCrabApp.bundle), but all 396 String(localized:) call
-# sites resolve via Bundle.main — so without a top-level copy NONE of the 14
-# locales loaded at runtime (long-standing bug: the Settings language picker set
-# AppleLanguages + restarted, but Bundle.main had no .lproj to match → every key
-# fell back to its English defaultValue). Copy them to the app's top-level
-# Resources (the standard .app localization layout) so Bundle.main resolves them.
-# Also restores the correct region casing (zh-Hans, pt-BR) that SPM lowercases.
-lproj_count=0
-for lproj in Sources/MacCrabApp/Resources/*.lproj; do
-    [ -d "$lproj" ] || continue
-    cp -R "$lproj" "$APP/Contents/Resources/"
-    lproj_count=$((lproj_count + 1))
-done
-# v1.18.1 guard: the glob silently matches zero dirs if the source layout
-# changes (e.g. a .strings → .xcstrings migration), which would ship an
-# all-English app — the exact bug 345f079 fixed. 14 is the shipped locale
-# count; bump it deliberately when adding a locale.
-if [ "$lproj_count" -ne 14 ]; then
-    echo "ERROR: expected 14 .lproj localizations, found $lproj_count — aborting (Bundle.main localization would silently regress)" >&2
-    exit 1
-fi
-# Bundle.main lookup is case-sensitive and SPM lowercases these two in
-# Bundle.module; the source-tree copy must preserve the correct casing.
-for cased in zh-Hans pt-BR; do
-    if [ ! -d "$APP/Contents/Resources/${cased}.lproj" ]; then
-        echo "ERROR: ${cased}.lproj missing or mis-cased in app Resources" >&2
+    # v1.4.3: tamper-detection manifest. For every compiled_rules file
+    # we stamp a SHA-256 into manifest.json. RuleBundleInstaller verifies
+    # the installed tree against this manifest before trusting it; a
+    # mismatch (attacker modified the installed rules tree post-sync)
+    # surfaces a dashboard banner and refuses to sync further. Generated
+    # at build time so the manifest is signed inside the .app bundle
+    # and can't be swapped independently of the app.
+    echo "  Generating rule-manifest hashes..."
+    (
+        cd "$STAGING_DIR/compiled_rules"
+        # Build a JSON object keyed by relative path with SHA-256 hex values.
+        # Excludes the manifest itself and the .bundle_version marker.
+        {
+            echo '{'
+            echo '  "schema_version": 1,'
+            echo "  \"bundle_version\": \"$VERSION\","
+            echo '  "hashes": {'
+            find . -type f ! -name "manifest.json" ! -name ".bundle_version" \
+                | sort \
+                | while IFS= read -r f; do
+                    rel="${f#./}"
+                    sum=$(shasum -a 256 "$f" | awk '{print $1}')
+                    echo "    \"$rel\": \"$sum\","
+                done \
+                | sed '$ s/,$//'     # trim trailing comma on final entry
+            echo '  }'
+            echo '}'
+        } > manifest.json
+    )
+    echo "  Manifest: $(wc -l < "$STAGING_DIR/compiled_rules/manifest.json") lines"
+}
+
+# ═════════════════════════════════════════════════════════════════════
+# STAGE 2 — assemble
+#   Hand-assemble MacCrab.app: app binary, 14 top-level *.lproj, bundled
+#   rule compiler + PyYAML, UUID-named rule YAML, compiled rules, SPM
+#   resource bundles (+ macOS-26 plist patch), bundled CLIs, the app
+#   Info.plist heredoc, and the .systemextension bundle layout. No
+#   signing. Reads $STAGING_DIR/bin from stage 1.
+# ═════════════════════════════════════════════════════════════════════
+stage_assemble() {
+    # ─── App bundle skeleton ─────────────────────────────────────────
+    echo "  Creating MacCrab.app bundle..."
+    APP="$STAGING_DIR/MacCrab.app"
+    mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+    cp "$STAGING_DIR/bin/MacCrabApp" "$APP/Contents/MacOS/MacCrab"
+
+    # v1.18 localization fix. SPM bundles the MacCrabApp target's .lproj into
+    # Bundle.module (MacCrab_MacCrabApp.bundle), but all 396 String(localized:) call
+    # sites resolve via Bundle.main — so without a top-level copy NONE of the 14
+    # locales loaded at runtime (long-standing bug: the Settings language picker set
+    # AppleLanguages + restarted, but Bundle.main had no .lproj to match → every key
+    # fell back to its English defaultValue). Copy them to the app's top-level
+    # Resources (the standard .app localization layout) so Bundle.main resolves them.
+    # Also restores the correct region casing (zh-Hans, pt-BR) that SPM lowercases.
+    lproj_count=0
+    for lproj in Sources/MacCrabApp/Resources/*.lproj; do
+        [ -d "$lproj" ] || continue
+        cp -R "$lproj" "$APP/Contents/Resources/"
+        lproj_count=$((lproj_count + 1))
+    done
+    # v1.18.1 guard: the glob silently matches zero dirs if the source layout
+    # changes (e.g. a .strings → .xcstrings migration), which would ship an
+    # all-English app — the exact bug 345f079 fixed. 14 is the shipped locale
+    # count; bump it deliberately when adding a locale.
+    if [ "$lproj_count" -ne 14 ]; then
+        echo "ERROR: expected 14 .lproj localizations, found $lproj_count — aborting (Bundle.main localization would silently regress)" >&2
         exit 1
     fi
-done
-echo "    ✓ Bundled $lproj_count localizations → Resources/*.lproj (Bundle.main)"
+    # Bundle.main lookup is case-sensitive and SPM lowercases these two in
+    # Bundle.module; the source-tree copy must preserve the correct casing.
+    for cased in zh-Hans pt-BR; do
+        if [ ! -d "$APP/Contents/Resources/${cased}.lproj" ]; then
+            echo "ERROR: ${cased}.lproj missing or mis-cased in app Resources" >&2
+            exit 1
+        fi
+    done
+    echo "    ✓ Bundled $lproj_count localizations → Resources/*.lproj (Bundle.main)"
 
-# v1.12.0 RC16 (in-dashboard Sigma editor): bundle compile_rules.py
-# plus a vendored copy of PyYAML's pure-Python module so the dashboard
-# can compile user-edited YAML to the daemon-readable JSON format on
-# save. macOS ships Python 3 at /usr/bin/python3 but NOT PyYAML, so we
-# vendor PyYAML's source files (~624 KB, no C extension required —
-# the pure-Python fallback works fine for our throughput).
-mkdir -p "$APP/Contents/Resources/Compiler/yaml"
-cp Compiler/compile_rules.py "$APP/Contents/Resources/Compiler/compile_rules.py"
-PYYAML_SRC=$(/usr/bin/python3 -c "import yaml, os; print(os.path.dirname(yaml.__file__))" 2>/dev/null)
-if [ -n "$PYYAML_SRC" ] && [ -d "$PYYAML_SRC" ]; then
-    cp "$PYYAML_SRC"/*.py "$APP/Contents/Resources/Compiler/yaml/"
-    echo "    ✓ Bundled Compiler + PyYAML ($(ls "$APP/Contents/Resources/Compiler/yaml/" | wc -l | tr -d ' ') yaml/ files) → Resources/Compiler/"
-else
-    # v1.12.0 RC25 (release-eng): hard failure when PyYAML is missing.
-    # Pre-fix this was a warning, so a CI machine without PyYAML
-    # silently shipped a DMG whose in-dashboard Sigma editor couldn't
-    # compile rules. Fail loud so the release pipeline never produces
-    # a half-working artifact.
-    echo "    ✗ ERROR: PyYAML not found at build time. The in-dashboard Sigma editor"
-    echo "      requires it. Aborting release build."
-    echo "      Install with: /usr/bin/python3 -m pip install --user pyyaml"
-    exit 1
-fi
-
-# v1.12.0 fix (Edit-YAML): ship the rule YAML sources inside the .app
-# at Resources/rules/, named by the rule's Sigma `id:` UUID. The
-# dashboard's V2DetectionWorkspace passes `rule.id` (the YAML's `id:`
-# UUID like `d1a2b3c4-1003-4000-a000-000000001003`) to
-# `Bundle.main.path(forResource:ofType:"yml", inDirectory:"rules")`,
-# not the filename slug — so we need files named by UUID, not by slug.
-# We also copy the slug name for human browsing / debugging. Bundle
-# size cost: ~1 MB total for 463 rules; negligible vs the 80 MB DMG.
-mkdir -p "$APP/Contents/Resources/rules"
-# Pass 1: slug-named copies (filename-based browsing / debugging).
-find Rules -name '*.yml' -not -path 'Rules/graph/*' -exec cp {} "$APP/Contents/Resources/rules/" \;
-# Pass 2: UUID-named copies (Bundle.main.path lookup target).
-uuid_copied=0
-while IFS= read -r f; do
-    uuid=$(grep -m1 '^id:' "$f" | awk '{print $2}' | tr -d "'\"" | tr -d '[:space:]')
-    if [ -n "$uuid" ]; then
-        cp "$f" "$APP/Contents/Resources/rules/$uuid.yml"
-        uuid_copied=$((uuid_copied + 1))
+    # v1.12.0 RC16 (in-dashboard Sigma editor): bundle compile_rules.py
+    # plus a vendored copy of PyYAML's pure-Python module so the dashboard
+    # can compile user-edited YAML to the daemon-readable JSON format on
+    # save. macOS ships Python 3 at /usr/bin/python3 but NOT PyYAML, so we
+    # vendor PyYAML's source files (~624 KB, no C extension required —
+    # the pure-Python fallback works fine for our throughput).
+    mkdir -p "$APP/Contents/Resources/Compiler/yaml"
+    cp Compiler/compile_rules.py "$APP/Contents/Resources/Compiler/compile_rules.py"
+    PYYAML_SRC=$(/usr/bin/python3 -c "import yaml, os; print(os.path.dirname(yaml.__file__))" 2>/dev/null)
+    if [ -n "$PYYAML_SRC" ] && [ -d "$PYYAML_SRC" ]; then
+        cp "$PYYAML_SRC"/*.py "$APP/Contents/Resources/Compiler/yaml/"
+        echo "    ✓ Bundled Compiler + PyYAML ($(ls "$APP/Contents/Resources/Compiler/yaml/" | wc -l | tr -d ' ') yaml/ files) → Resources/Compiler/"
+    else
+        # v1.12.0 RC25 (release-eng): hard failure when PyYAML is missing.
+        # Pre-fix this was a warning, so a CI machine without PyYAML
+        # silently shipped a DMG whose in-dashboard Sigma editor couldn't
+        # compile rules. Fail loud so the release pipeline never produces
+        # a half-working artifact.
+        echo "    ✗ ERROR: PyYAML not found at build time. The in-dashboard Sigma editor"
+        echo "      requires it. Aborting release build."
+        echo "      Install with: /usr/bin/python3 -m pip install --user pyyaml"
+        exit 1
     fi
-done < <(find Rules -name '*.yml' -not -path 'Rules/graph/*')
-echo "    ✓ Bundled $(ls "$APP/Contents/Resources/rules/" | wc -l | tr -d ' ') YAML files → Resources/rules/ ($uuid_copied UUID-named)"
 
-# v1.4.2: ship compiled rules INSIDE the .app bundle so Sparkle
-# auto-updates (which replace only the .app, not the cask-postflight
-# state under /Library/Application Support) still refresh rule JSON.
-# The app's RuleBundleInstaller compares the bundled
-# `.bundle_version` against `/Library/Application Support/MacCrab/
-# compiled_rules/.bundle_version` on launch and syncs when the
-# bundled copy is newer. Without this, every Sparkle update left
-# users on whatever rule set their original brew install shipped —
-# v1.3.11's compiler fix and every rule severity change since then
-# never reached Sparkle-updated installs.
-cp -r "$STAGING_DIR/compiled_rules" "$APP/Contents/Resources/compiled_rules"
+    # v1.12.0 fix (Edit-YAML): ship the rule YAML sources inside the .app
+    # at Resources/rules/, named by the rule's Sigma `id:` UUID. The
+    # dashboard's V2DetectionWorkspace passes `rule.id` (the YAML's `id:`
+    # UUID like `d1a2b3c4-1003-4000-a000-000000001003`) to
+    # `Bundle.main.path(forResource:ofType:"yml", inDirectory:"rules")`,
+    # not the filename slug — so we need files named by UUID, not by slug.
+    # We also copy the slug name for human browsing / debugging. Bundle
+    # size cost: ~1 MB total for 463 rules; negligible vs the 80 MB DMG.
+    mkdir -p "$APP/Contents/Resources/rules"
+    # Pass 1: slug-named copies (filename-based browsing / debugging).
+    find Rules -name '*.yml' -not -path 'Rules/graph/*' -exec cp {} "$APP/Contents/Resources/rules/" \;
+    # Pass 2: UUID-named copies (Bundle.main.path lookup target).
+    uuid_copied=0
+    while IFS= read -r f; do
+        uuid=$(grep -m1 '^id:' "$f" | awk '{print $2}' | tr -d "'\"" | tr -d '[:space:]')
+        if [ -n "$uuid" ]; then
+            cp "$f" "$APP/Contents/Resources/rules/$uuid.yml"
+            uuid_copied=$((uuid_copied + 1))
+        fi
+    done < <(find Rules -name '*.yml' -not -path 'Rules/graph/*')
+    echo "    ✓ Bundled $(ls "$APP/Contents/Resources/rules/" | wc -l | tr -d ' ') YAML files → Resources/rules/ ($uuid_copied UUID-named)"
 
-ICON_SRC="$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns"
-if [ -f "$ICON_SRC" ]; then
-    cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.icns"
-fi
+    # v1.4.2: ship compiled rules INSIDE the .app bundle so Sparkle
+    # auto-updates (which replace only the .app, not the cask-postflight
+    # state under /Library/Application Support) still refresh rule JSON.
+    # The app's RuleBundleInstaller compares the bundled
+    # `.bundle_version` against `/Library/Application Support/MacCrab/
+    # compiled_rules/.bundle_version` on launch and syncs when the
+    # bundled copy is newer. Without this, every Sparkle update left
+    # users on whatever rule set their original brew install shipped —
+    # v1.3.11's compiler fix and every rule severity change since then
+    # never reached Sparkle-updated installs.
+    cp -r "$STAGING_DIR/compiled_rules" "$APP/Contents/Resources/compiled_rules"
 
-# v1.12.0 RC2 fix (B9): copy SPM-generated MacCrab_MacCrabCore.bundle
-# into the .app's Resources directory. Without this, Bundle.module
-# returns nil at runtime in the shipped .app, and TyposquatDatabase
-# falls back to its in-source ~30-entry starter corpus instead of the
-# bundled top-200 npm + top-200 PyPI JSON files that
-# Sources/MacCrabCore/Resources/typosquat-top-*.json carry. SPM emits
-# the bundle into .build/<arch>/release/. We probe both Apple-silicon
-# (arm64) and Intel (x86_64) trees so universal builds get coverage.
-for arch in arm64-apple-macosx x86_64-apple-macosx; do
-    SPM_BUNDLE="$PROJECT_DIR/.build/$arch/release/MacCrab_MacCrabCore.bundle"
-    if [ -d "$SPM_BUNDLE" ]; then
-        cp -R "$SPM_BUNDLE" "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle"
-        echo "    ✓ Bundled MacCrab_MacCrabCore resource bundle ($arch) → Resources/"
-        break
+    ICON_SRC="$PROJECT_DIR/Sources/MacCrabApp/Resources/AppIcon.icns"
+    if [ -f "$ICON_SRC" ]; then
+        cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.icns"
     fi
-done
-# rc.4 — also copy the MacCrabApp resource bundle so bundled
-# rave kits + catalog signing key reach Bundle.main.resourceURL.
-for arch in arm64-apple-macosx x86_64-apple-macosx; do
-    SPM_APP_BUNDLE="$PROJECT_DIR/.build/$arch/release/MacCrab_MacCrabApp.bundle"
-    if [ -d "$SPM_APP_BUNDLE" ]; then
-        cp -R "$SPM_APP_BUNDLE" "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle"
-        echo "    ✓ Bundled MacCrab_MacCrabApp resource bundle ($arch) → Resources/"
-        break
-    fi
-done
-if [ ! -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
-    echo "    ✗ WARNING: MacCrab_MacCrabCore.bundle not found in .build/*/release/"
-    echo "      TyposquatDatabase will fall back to in-source starter corpus."
-fi
 
-# v1.12.4 fix (macOS 26 Tahoe crash): SwiftPM emits a stripped Info.plist
-# in the resource bundle that contains only CFBundleDevelopmentRegion.
-# macOS ≤ 25 accepts the minimal plist; macOS 26 rejects it — `Bundle(url:)`
-# returns nil — and SwiftPM's auto-generated `Bundle.module` accessor
-# then fatalError("unable to find bundle MacCrab_MacCrabCore"). Crash
-# fires on first Intelligence-tab click because PackageScanner lazily
-# instantiates TyposquatDatabase the first time .packages() is read.
-#
-# TyposquatDatabase itself no longer touches Bundle.module (it builds
-# resource URLs directly), but other future SPM-resource consumers
-# might — so write a complete CFBundle Info.plist over the SPM stub
-# so the bundle validates on every macOS version. Keys mirror what
-# Xcode emits for a typical resource bundle target.
-BUNDLE_PLIST="$APP/Contents/Resources/MacCrab_MacCrabCore.bundle/Info.plist"
-if [ -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
-    cat > "$BUNDLE_PLIST" <<'PLIST'
+    # v1.12.0 RC2 fix (B9): copy SPM-generated MacCrab_MacCrabCore.bundle
+    # into the .app's Resources directory. Without this, Bundle.module
+    # returns nil at runtime in the shipped .app, and TyposquatDatabase
+    # falls back to its in-source ~30-entry starter corpus instead of the
+    # bundled top-200 npm + top-200 PyPI JSON files that
+    # Sources/MacCrabCore/Resources/typosquat-top-*.json carry. SPM emits
+    # the bundle into .build/<arch>/release/. We probe both Apple-silicon
+    # (arm64) and Intel (x86_64) trees so universal builds get coverage.
+    for arch in arm64-apple-macosx x86_64-apple-macosx; do
+        SPM_BUNDLE="$PROJECT_DIR/.build/$arch/release/MacCrab_MacCrabCore.bundle"
+        if [ -d "$SPM_BUNDLE" ]; then
+            cp -R "$SPM_BUNDLE" "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle"
+            echo "    ✓ Bundled MacCrab_MacCrabCore resource bundle ($arch) → Resources/"
+            break
+        fi
+    done
+    # rc.4 — also copy the MacCrabApp resource bundle so bundled
+    # rave kits + catalog signing key reach Bundle.main.resourceURL.
+    for arch in arm64-apple-macosx x86_64-apple-macosx; do
+        SPM_APP_BUNDLE="$PROJECT_DIR/.build/$arch/release/MacCrab_MacCrabApp.bundle"
+        if [ -d "$SPM_APP_BUNDLE" ]; then
+            cp -R "$SPM_APP_BUNDLE" "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle"
+            echo "    ✓ Bundled MacCrab_MacCrabApp resource bundle ($arch) → Resources/"
+            break
+        fi
+    done
+    if [ ! -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
+        echo "    ✗ WARNING: MacCrab_MacCrabCore.bundle not found in .build/*/release/"
+        echo "      TyposquatDatabase will fall back to in-source starter corpus."
+    fi
+
+    # v1.12.4 fix (macOS 26 Tahoe crash): SwiftPM emits a stripped Info.plist
+    # in the resource bundle that contains only CFBundleDevelopmentRegion.
+    # macOS ≤ 25 accepts the minimal plist; macOS 26 rejects it — `Bundle(url:)`
+    # returns nil — and SwiftPM's auto-generated `Bundle.module` accessor
+    # then fatalError("unable to find bundle MacCrab_MacCrabCore"). Crash
+    # fires on first Intelligence-tab click because PackageScanner lazily
+    # instantiates TyposquatDatabase the first time .packages() is read.
+    #
+    # TyposquatDatabase itself no longer touches Bundle.module (it builds
+    # resource URLs directly), but other future SPM-resource consumers
+    # might — so write a complete CFBundle Info.plist over the SPM stub
+    # so the bundle validates on every macOS version. Keys mirror what
+    # Xcode emits for a typical resource bundle target.
+    BUNDLE_PLIST="$APP/Contents/Resources/MacCrab_MacCrabCore.bundle/Info.plist"
+    if [ -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
+        cat > "$BUNDLE_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -335,18 +433,18 @@ if [ -d "$APP/Contents/Resources/MacCrab_MacCrabCore.bundle" ]; then
 </dict>
 </plist>
 PLIST
-    echo "    ✓ Patched MacCrab_MacCrabCore.bundle/Info.plist (macOS 26 Bundle(url:) compatibility)"
-fi
+        echo "    ✓ Patched MacCrab_MacCrabCore.bundle/Info.plist (macOS 26 Bundle(url:) compatibility)"
+    fi
 
-# Same macOS-26 Bundle(url:) patch for the MacCrabApp resource bundle — it
-# ships the same stripped SwiftPM Info.plist (only CFBundleDevelopmentRegion),
-# which pre-release-audit.sh Pass B flags as missing CFBundleIdentifier /
-# CFBundlePackageType / CFBundleInfoDictionaryVersion. Patch it too so the
-# whole app validates on macOS 26 regardless of which bundle a future
-# Bundle.module consumer touches.
-APP_BUNDLE_PLIST="$APP/Contents/Resources/MacCrab_MacCrabApp.bundle/Info.plist"
-if [ -d "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle" ]; then
-    cat > "$APP_BUNDLE_PLIST" <<'PLIST'
+    # Same macOS-26 Bundle(url:) patch for the MacCrabApp resource bundle — it
+    # ships the same stripped SwiftPM Info.plist (only CFBundleDevelopmentRegion),
+    # which pre-release-audit.sh Pass B flags as missing CFBundleIdentifier /
+    # CFBundlePackageType / CFBundleInfoDictionaryVersion. Patch it too so the
+    # whole app validates on macOS 26 regardless of which bundle a future
+    # Bundle.module consumer touches.
+    APP_BUNDLE_PLIST="$APP/Contents/Resources/MacCrab_MacCrabApp.bundle/Info.plist"
+    if [ -d "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle" ]; then
+        cat > "$APP_BUNDLE_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -368,31 +466,31 @@ if [ -d "$APP/Contents/Resources/MacCrab_MacCrabApp.bundle" ]; then
 </dict>
 </plist>
 PLIST
-    echo "    ✓ Patched MacCrab_MacCrabApp.bundle/Info.plist (macOS 26 Bundle(url:) compatibility)"
-fi
+        echo "    ✓ Patched MacCrab_MacCrabApp.bundle/Info.plist (macOS 26 Bundle(url:) compatibility)"
+    fi
 
-# v1.10.0: bundle maccrabctl + maccrab-mcp inside the .app at
-# Contents/Resources/bin/. Pre-fix the dashboard's runMaccrabctl
-# probed Bundle.main first, but the binary was only ever shipped to
-# /usr/local/bin via install.sh. Brew users with v1.5.1's CLI at
-# /opt/homebrew/bin/maccrabctl saw the dashboard call the OLD CLI
-# (no `intel refresh`, no `unsuppress --id`, etc.) — every dashboard
-# action that shells out failed silently with "Unknown command".
-# Now the .app carries the matching CLI and the path probe finds it
-# first.
-mkdir -p "$APP/Contents/Resources/bin"
-if [ -x "$STAGING_DIR/bin/maccrabctl" ]; then
-    cp "$STAGING_DIR/bin/maccrabctl" "$APP/Contents/Resources/bin/maccrabctl"
-    chmod 755 "$APP/Contents/Resources/bin/maccrabctl"
-    echo "    ✓ Bundled maccrabctl into MacCrab.app/Contents/Resources/bin/"
-fi
-if [ -x "$STAGING_DIR/bin/maccrab-mcp" ]; then
-    cp "$STAGING_DIR/bin/maccrab-mcp" "$APP/Contents/Resources/bin/maccrab-mcp"
-    chmod 755 "$APP/Contents/Resources/bin/maccrab-mcp"
-    echo "    ✓ Bundled maccrab-mcp into MacCrab.app/Contents/Resources/bin/"
-fi
+    # v1.10.0: bundle maccrabctl + maccrab-mcp inside the .app at
+    # Contents/Resources/bin/. Pre-fix the dashboard's runMaccrabctl
+    # probed Bundle.main first, but the binary was only ever shipped to
+    # /usr/local/bin via install.sh. Brew users with v1.5.1's CLI at
+    # /opt/homebrew/bin/maccrabctl saw the dashboard call the OLD CLI
+    # (no `intel refresh`, no `unsuppress --id`, etc.) — every dashboard
+    # action that shells out failed silently with "Unknown command".
+    # Now the .app carries the matching CLI and the path probe finds it
+    # first.
+    mkdir -p "$APP/Contents/Resources/bin"
+    if [ -x "$STAGING_DIR/bin/maccrabctl" ]; then
+        cp "$STAGING_DIR/bin/maccrabctl" "$APP/Contents/Resources/bin/maccrabctl"
+        chmod 755 "$APP/Contents/Resources/bin/maccrabctl"
+        echo "    ✓ Bundled maccrabctl into MacCrab.app/Contents/Resources/bin/"
+    fi
+    if [ -x "$STAGING_DIR/bin/maccrab-mcp" ]; then
+        cp "$STAGING_DIR/bin/maccrab-mcp" "$APP/Contents/Resources/bin/maccrab-mcp"
+        chmod 755 "$APP/Contents/Resources/bin/maccrab-mcp"
+        echo "    ✓ Bundled maccrab-mcp into MacCrab.app/Contents/Resources/bin/"
+    fi
 
-cat > "$APP/Contents/Info.plist" << PLIST
+    cat > "$APP/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -442,17 +540,17 @@ cat > "$APP/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# ─── System extension bundle ─────────────────────────────────────────
-AGENT_ID="com.maccrab.agent"
-SYSEXT_BUNDLE="$APP/Contents/Library/SystemExtensions/${AGENT_ID}.systemextension"
-mkdir -p "$SYSEXT_BUNDLE/Contents/MacOS"
+    # ─── System extension bundle ─────────────────────────────────────
+    AGENT_ID="com.maccrab.agent"
+    SYSEXT_BUNDLE="$APP/Contents/Library/SystemExtensions/${AGENT_ID}.systemextension"
+    mkdir -p "$SYSEXT_BUNDLE/Contents/MacOS"
 
-# Mach-O executable name inside the sysext bundle. Convention: match
-# the bundle identifier so Apple's extension registration tooling
-# (systemextensionsctl, sysextd) locates it consistently.
-cp "$STAGING_DIR/bin/MacCrabAgent" "$SYSEXT_BUNDLE/Contents/MacOS/${AGENT_ID}"
+    # Mach-O executable name inside the sysext bundle. Convention: match
+    # the bundle identifier so Apple's extension registration tooling
+    # (systemextensionsctl, sysextd) locates it consistently.
+    cp "$STAGING_DIR/bin/MacCrabAgent" "$SYSEXT_BUNDLE/Contents/MacOS/${AGENT_ID}"
 
-cat > "$SYSEXT_BUNDLE/Contents/Info.plist" << PLIST
+    cat > "$SYSEXT_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -477,362 +575,390 @@ cat > "$SYSEXT_BUNDLE/Contents/Info.plist" << PLIST
 </dict>
 </plist>
 PLIST
-echo "    ✓ System extension bundle layout created"
+    echo "    ✓ System extension bundle layout created"
 
-# Strip any quarantine xattrs the filesystem picked up during staging.
-xattr -cr "$APP" 2>/dev/null || true
+    # Strip any quarantine xattrs the filesystem picked up during staging.
+    xattr -cr "$APP" 2>/dev/null || true
+}
 
-# ─── Code signing ────────────────────────────────────────────────────
-# Provisioning profile + two entitlements files (one per target).
-# Both live under the version-controlled paths so the signing flow is
-# reproducible.
-DEVELOPER_ID="${DEVELOPER_ID:-}"
-APP_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabApp.entitlements"
-AGENT_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabAgent.entitlements"
+# ═════════════════════════════════════════════════════════════════════
+# STAGE 3 — sign
+#   codesign every Mach-O with Developer ID (CLIs, sysext Mach-O +
+#   bundle with the ES entitlement, embedded Sparkle.framework + helpers,
+#   rpath patch, bundled CLIs, app inner exe, and the outer .app — the
+#   --deep-LESS outer sign that v1.12.2 settled on). Runs the
+#   nested-entitlement leak guard. Ad-hoc signs when DEVELOPER_ID unset.
+#   Requires the signing identity + provisioning profile on this Mac;
+#   this stage never runs in CI.
+# ═════════════════════════════════════════════════════════════════════
+stage_sign() {
+    APP="$STAGING_DIR/MacCrab.app"
+    AGENT_ID="com.maccrab.agent"
+    SYSEXT_BUNDLE="$APP/Contents/Library/SystemExtensions/${AGENT_ID}.systemextension"
 
-if [ -n "$DEVELOPER_ID" ]; then
-    echo "  Signing with Developer ID..."
-    if ! security find-identity -v -p codesigning | grep -q "$DEVELOPER_ID"; then
-        echo "  ERROR: Certificate not found in keychain: $DEVELOPER_ID"
-        exit 1
-    fi
+    # ─── Code signing ────────────────────────────────────────────────
+    # Provisioning profile + two entitlements files (one per target).
+    # Both live under the version-controlled paths so the signing flow is
+    # reproducible.
+    DEVELOPER_ID="${DEVELOPER_ID:-}"
+    APP_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabApp.entitlements"
+    AGENT_ENT="$PROJECT_DIR/Xcode/Resources/MacCrabAgent.entitlements"
 
-    PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/.maccrab-signing/MacCrab.provisionprofile}"
-    if [ ! -f "$PROVISION_PROFILE" ]; then
-        echo "  ERROR: Provisioning profile not found at $PROVISION_PROFILE"
-        echo "  The ES system extension cannot be signed without it — v1.3.0 has no fallback path."
-        exit 1
-    fi
-    echo "  Provisioning profile: $PROVISION_PROFILE"
-
-    # Embed the profile at BOTH bundle levels. AMFI walks up from any
-    # Mach-O to the nearest enclosing Contents/embedded.provisionprofile;
-    # shipping it at both the sysext bundle and the app bundle covers
-    # every discovery path Apple uses.
-    cp "$PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
-    cp "$PROVISION_PROFILE" "$SYSEXT_BUNDLE/Contents/embedded.provisionprofile"
-
-    # Remove raw MacCrabApp / MacCrabAgent from bin/ — the real copies
-    # live inside the .app now. Leaving extra unsigned Mach-Os in the
-    # DMG would cause notarization to reject the whole package.
-    rm -f "$STAGING_DIR/bin/MacCrabApp"
-    rm -f "$STAGING_DIR/bin/MacCrabAgent"
-
-    # 1. CLI tools. No entitlements, just hardened runtime.
-    for binary in "$STAGING_DIR"/bin/*; do
-        if [ -f "$binary" ] && file "$binary" | grep -q "Mach-O"; then
-            codesign --sign "$DEVELOPER_ID" \
-                --options runtime \
-                --timestamp \
-                --force \
-                "$binary"
-            echo "    ✓ $(basename "$binary") (hardened runtime)"
+    if [ -n "$DEVELOPER_ID" ]; then
+        echo "  Signing with Developer ID..."
+        if ! security find-identity -v -p codesigning | grep -q "$DEVELOPER_ID"; then
+            echo "  ERROR: Certificate not found in keychain: $DEVELOPER_ID"
+            exit 1
         fi
-    done
 
-    # 2. System extension Mach-O — signed with ES entitlement +
-    # provisioning-profile-bound identifier. AMFI matches the identifier
-    # against application-identifier in the embedded profile.
-    codesign --sign "$DEVELOPER_ID" \
-        --identifier "$AGENT_ID" \
-        --options runtime \
-        --entitlements "$AGENT_ENT" \
-        --timestamp \
-        --force \
-        "$SYSEXT_BUNDLE/Contents/MacOS/${AGENT_ID}"
-
-    # 3. System extension bundle — the bundle-level sign creates
-    # _CodeSignature/CodeResources and seals the Info.plist + embedded
-    # profile + Mach-O together.
-    codesign --sign "$DEVELOPER_ID" \
-        --identifier "$AGENT_ID" \
-        --options runtime \
-        --entitlements "$AGENT_ENT" \
-        --timestamp \
-        --force \
-        "$SYSEXT_BUNDLE"
-    echo "    ✓ Signed sysext bundle ($AGENT_ID, ES entitlement)"
-
-    # 4a. Embed Sparkle.framework. SPM links MacCrabApp against Sparkle
-    # (added in v1.3.5 Wave 1) but does NOT copy the framework into
-    # the output bundle — that's an Xcode build-phase feature SPM
-    # lacks. Without this step the dyld loader fails at launch with
-    # "Library not loaded: @rpath/Sparkle.framework/Versions/B/Sparkle"
-    # and the process aborts before SwiftUI gets a chance to render.
-    SPARKLE_SRC="$PROJECT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
-    if [ ! -d "$SPARKLE_SRC" ]; then
-        # SPM extracts the xcframework on first build. If it's not
-        # present it means swift build hasn't run yet; run a quick
-        # release build to get it.
-        echo "  Resolving Sparkle framework via swift build..."
-        swift build -c release --product MacCrabApp 2>&1 | tail -3
-    fi
-    if [ ! -d "$SPARKLE_SRC" ]; then
-        echo "  ERROR: Sparkle.framework not found at $SPARKLE_SRC"
-        echo "  Ensure Package.swift declares the Sparkle SPM dep and swift build runs clean."
-        exit 1
-    fi
-
-    FRAMEWORKS_DIR="$APP/Contents/Frameworks"
-    mkdir -p "$FRAMEWORKS_DIR"
-    # -R preserves the framework's internal symlinks (Versions/B ↔ Current).
-    # Without -R, macOS treats the copy as malformed and codesign rejects it.
-    cp -R "$SPARKLE_SRC" "$FRAMEWORKS_DIR/"
-    echo "    ✓ Embedded Sparkle.framework"
-
-    # Re-sign Sparkle's bundled helpers + the framework itself with
-    # our Developer ID. The framework arrives from the SPM artifact
-    # already signed (by the Sparkle project's team); re-signing with
-    # our identity keeps the whole app bundle's code-signing chain
-    # consistent for notarization.
-    for bundle in "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/XPCServices"/*.xpc \
-                  "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Autoupdate" \
-                  "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Updater.app"; do
-        if [ -e "$bundle" ]; then
-            codesign --sign "$DEVELOPER_ID" \
-                --options runtime \
-                --timestamp \
-                --force \
-                "$bundle" 2>/dev/null && echo "    ✓ Signed $(basename "$bundle")"
+        PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/.maccrab-signing/MacCrab.provisionprofile}"
+        if [ ! -f "$PROVISION_PROFILE" ]; then
+            echo "  ERROR: Provisioning profile not found at $PROVISION_PROFILE"
+            echo "  The ES system extension cannot be signed without it — v1.3.0 has no fallback path."
+            exit 1
         fi
-    done
-    codesign --sign "$DEVELOPER_ID" \
-        --options runtime \
-        --timestamp \
-        --force \
-        "$FRAMEWORKS_DIR/Sparkle.framework"
-    echo "    ✓ Signed Sparkle.framework"
+        echo "  Provisioning profile: $PROVISION_PROFILE"
 
-    # SPM builds executables without `@executable_path/../Frameworks/`
-    # in their rpath — that's Xcode's default for .app targets, which
-    # SwiftPM doesn't know we're assembling. Without this, dyld
-    # searches only `@executable_path/` (Contents/MacOS/) for
-    # Sparkle.framework, misses our Contents/Frameworks/ copy, and
-    # aborts at launch with "Library not loaded: @rpath/Sparkle.framework".
-    # Add the rpath BEFORE signing so the code signature seals the
-    # patched load commands.
-    if ! otool -l "$APP/Contents/MacOS/MacCrab" | grep -q "@executable_path/../Frameworks"; then
-        install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/MacCrab"
-        echo "    ✓ Added @executable_path/../Frameworks rpath"
-    fi
+        # Embed the profile at BOTH bundle levels. AMFI walks up from any
+        # Mach-O to the nearest enclosing Contents/embedded.provisionprofile;
+        # shipping it at both the sysext bundle and the app bundle covers
+        # every discovery path Apple uses.
+        cp "$PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
+        cp "$PROVISION_PROFILE" "$SYSEXT_BUNDLE/Contents/embedded.provisionprofile"
 
-    # 4a-bin. Sign the bundled CLI binaries that ride inside the app
-    # at Contents/Resources/bin/. They have no entitlement (just
-    # hardened runtime + Developer ID + timestamp). Without explicit
-    # signing here, --deep on the app-level sign treats them as
-    # ordinary resources and notarization rejects unsigned Mach-Os.
-    for bin in "$APP/Contents/Resources/bin/maccrabctl" \
-               "$APP/Contents/Resources/bin/maccrab-mcp"; do
-        if [ -x "$bin" ]; then
-            codesign --sign "$DEVELOPER_ID" \
-                --identifier "com.maccrab.$(basename "$bin")" \
-                --options runtime \
-                --timestamp \
-                --force \
-                "$bin"
+        # Remove raw MacCrabApp / MacCrabAgent from bin/ — the real copies
+        # live inside the .app now. Leaving extra unsigned Mach-Os in the
+        # DMG would cause notarization to reject the whole package.
+        rm -f "$STAGING_DIR/bin/MacCrabApp"
+        rm -f "$STAGING_DIR/bin/MacCrabAgent"
+
+        # 1. CLI tools. No entitlements, just hardened runtime.
+        for binary in "$STAGING_DIR"/bin/*; do
+            if [ -f "$binary" ] && file "$binary" | grep -q "Mach-O"; then
+                codesign --sign "$DEVELOPER_ID" \
+                    --options runtime \
+                    --timestamp \
+                    --force \
+                    "$binary"
+                echo "    ✓ $(basename "$binary") (hardened runtime)"
+            fi
+        done
+
+        # 2. System extension Mach-O — signed with ES entitlement +
+        # provisioning-profile-bound identifier. AMFI matches the identifier
+        # against application-identifier in the embedded profile.
+        codesign --sign "$DEVELOPER_ID" \
+            --identifier "$AGENT_ID" \
+            --options runtime \
+            --entitlements "$AGENT_ENT" \
+            --timestamp \
+            --force \
+            "$SYSEXT_BUNDLE/Contents/MacOS/${AGENT_ID}"
+
+        # 3. System extension bundle — the bundle-level sign creates
+        # _CodeSignature/CodeResources and seals the Info.plist + embedded
+        # profile + Mach-O together.
+        codesign --sign "$DEVELOPER_ID" \
+            --identifier "$AGENT_ID" \
+            --options runtime \
+            --entitlements "$AGENT_ENT" \
+            --timestamp \
+            --force \
+            "$SYSEXT_BUNDLE"
+        echo "    ✓ Signed sysext bundle ($AGENT_ID, ES entitlement)"
+
+        # 4a. Embed Sparkle.framework. SPM links MacCrabApp against Sparkle
+        # (added in v1.3.5 Wave 1) but does NOT copy the framework into
+        # the output bundle — that's an Xcode build-phase feature SPM
+        # lacks. Without this step the dyld loader fails at launch with
+        # "Library not loaded: @rpath/Sparkle.framework/Versions/B/Sparkle"
+        # and the process aborts before SwiftUI gets a chance to render.
+        SPARKLE_SRC="$PROJECT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+        if [ ! -d "$SPARKLE_SRC" ]; then
+            # SPM extracts the xcframework on first build. If it's not
+            # present it means swift build hasn't run yet; run a quick
+            # release build to get it.
+            echo "  Resolving Sparkle framework via swift build..."
+            swift build -c release --product MacCrabApp 2>&1 | tail -3
         fi
-    done
+        if [ ! -d "$SPARKLE_SRC" ]; then
+            echo "  ERROR: Sparkle.framework not found at $SPARKLE_SRC"
+            echo "  Ensure Package.swift declares the Sparkle SPM dep and swift build runs clean."
+            exit 1
+        fi
 
-    # 4b. App's inner executable. The app needs the
-    # system-extension.install entitlement so OSSystemExtensionRequest
-    # can talk to sysextd.
-    codesign --sign "$DEVELOPER_ID" \
-        --identifier "com.maccrab.app" \
-        --options runtime \
-        --entitlements "$APP_ENT" \
-        --timestamp \
-        --force \
-        "$APP/Contents/MacOS/MacCrab"
+        FRAMEWORKS_DIR="$APP/Contents/Frameworks"
+        mkdir -p "$FRAMEWORKS_DIR"
+        # -R preserves the framework's internal symlinks (Versions/B ↔ Current).
+        # Without -R, macOS treats the copy as malformed and codesign rejects it.
+        cp -R "$SPARKLE_SRC" "$FRAMEWORKS_DIR/"
+        echo "    ✓ Embedded Sparkle.framework"
 
-    # 5. App bundle — signs the outer container last so the bundle
-    # signature seals the sysext + the profile + the inner executable.
-    #
-    # Resources/* sealing (compiled_rules, rules, Compiler) is provided
-    # by codesign's bundle-mode `_CodeSignature/CodeResources` hash
-    # list — built automatically when signing the bundle, NO --deep
-    # required. The original v1.12.0 RC28 audit fix added --deep on
-    # the assumption that --deep was needed for Resources sealing;
-    # that assumption was wrong — --deep is for recursing into nested
-    # SIGNED code (frameworks, XPC services), not for sealing data
-    # resources. CodeResources covers data resources unconditionally.
-    #
-    # v1.12.2 fix (Sparkle install FP): drop --deep. With --deep on,
-    # codesign re-signed every nested Mach-O (Sparkle.framework's
-    # Autoupdate, Updater.app, Downloader.xpc, Installer.xpc) and
-    # propagated our main-app entitlements
-    # (`com.apple.developer.system-extension.install` +
-    # keychain-access-groups) onto each. macOS refuses to launch a
-    # Sparkle XPC helper carrying the system-extension.install
-    # entitlement, which surfaced as the generic "An error occurred
-    # while running the updater" on every Sparkle upgrade. Tried
-    # --preserve-metadata=entitlements first (v1.12.1) — turns out
-    # codesign doesn't "preserve" the *absence* of entitlements, so
-    # the propagation still happened. Dropping --deep is the actual
-    # fix: Sparkle's helpers keep their step-4a signatures (no
-    # entitlements), and the outer .app sign just seals the bundle
-    # via its own primary executable (which already carries APP_ENT
-    # from step 4b) plus the CodeResources hash list.
-    codesign --sign "$DEVELOPER_ID" \
-        --identifier "com.maccrab.app" \
-        --options runtime \
-        --entitlements "$APP_ENT" \
-        --timestamp \
-        --force \
-        "$APP"
-    echo "    ✓ Signed MacCrab.app (CodeResources seals Resources/, nested code kept own signatures)"
+        # Re-sign Sparkle's bundled helpers + the framework itself with
+        # our Developer ID. The framework arrives from the SPM artifact
+        # already signed (by the Sparkle project's team); re-signing with
+        # our identity keeps the whole app bundle's code-signing chain
+        # consistent for notarization.
+        for bundle in "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/XPCServices"/*.xpc \
+                      "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Autoupdate" \
+                      "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Updater.app"; do
+            if [ -e "$bundle" ]; then
+                codesign --sign "$DEVELOPER_ID" \
+                    --options runtime \
+                    --timestamp \
+                    --force \
+                    "$bundle" 2>/dev/null && echo "    ✓ Signed $(basename "$bundle")"
+            fi
+        done
+        codesign --sign "$DEVELOPER_ID" \
+            --options runtime \
+            --timestamp \
+            --force \
+            "$FRAMEWORKS_DIR/Sparkle.framework"
+        echo "    ✓ Signed Sparkle.framework"
 
-    # Verify before handing off to notarization — catches staging
-    # layout mistakes fast. --deep emits many lines now that
-    # Sparkle.framework is embedded (each helper + XPC service is
-    # validated); head -5 closes the pipe early and triggers SIGPIPE
-    # under `set -o pipefail`. Pipe through a shell function that
-    # swallows SIGPIPE explicitly instead.
-    codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | { head -5; cat >/dev/null; } || true
+        # SPM builds executables without `@executable_path/../Frameworks/`
+        # in their rpath — that's Xcode's default for .app targets, which
+        # SwiftPM doesn't know we're assembling. Without this, dyld
+        # searches only `@executable_path/` (Contents/MacOS/) for
+        # Sparkle.framework, misses our Contents/Frameworks/ copy, and
+        # aborts at launch with "Library not loaded: @rpath/Sparkle.framework".
+        # Add the rpath BEFORE signing so the code signature seals the
+        # patched load commands.
+        if ! otool -l "$APP/Contents/MacOS/MacCrab" | grep -q "@executable_path/../Frameworks"; then
+            install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/MacCrab"
+            echo "    ✓ Added @executable_path/../Frameworks rpath"
+        fi
 
-    # ── Nested-entitlement guard (v1.13 audit improvement; see the v1.12.0
-    # Sparkle brick above). No nested helper may carry a privileged APP
-    # entitlement: the v1.12.0 regression propagated system-extension.install
-    # onto Sparkle's Installer.xpc and macOS refused to launch the updater.
-    # Read-only; fails loud. Does NOT trip on a correct build (Sparkle XPCs
-    # carry none; the sysext carries only endpoint-security.client).
-    echo "  Verifying nested-binary entitlements (no privileged leak)..."
-    ent_leak=0
-    while IFS= read -r _xpc; do
-        _exe=$(/usr/bin/find "$_xpc/Contents/MacOS" -maxdepth 1 -type f -print -quit 2>/dev/null)
-        [ -n "$_exe" ] || continue
-        if codesign -d --entitlements - "$_exe" 2>/dev/null | grep -qiE 'system-extension\.install|endpoint-security'; then
-            echo "    ✗ ENTITLEMENT LEAK: $(basename "$_xpc") carries a privileged app entitlement (v1.12.0-class regression)"
+        # 4a-bin. Sign the bundled CLI binaries that ride inside the app
+        # at Contents/Resources/bin/. They have no entitlement (just
+        # hardened runtime + Developer ID + timestamp). Without explicit
+        # signing here, --deep on the app-level sign treats them as
+        # ordinary resources and notarization rejects unsigned Mach-Os.
+        for bin in "$APP/Contents/Resources/bin/maccrabctl" \
+                   "$APP/Contents/Resources/bin/maccrab-mcp"; do
+            if [ -x "$bin" ]; then
+                codesign --sign "$DEVELOPER_ID" \
+                    --identifier "com.maccrab.$(basename "$bin")" \
+                    --options runtime \
+                    --timestamp \
+                    --force \
+                    "$bin"
+            fi
+        done
+
+        # 4b. App's inner executable. The app needs the
+        # system-extension.install entitlement so OSSystemExtensionRequest
+        # can talk to sysextd.
+        codesign --sign "$DEVELOPER_ID" \
+            --identifier "com.maccrab.app" \
+            --options runtime \
+            --entitlements "$APP_ENT" \
+            --timestamp \
+            --force \
+            "$APP/Contents/MacOS/MacCrab"
+
+        # 5. App bundle — signs the outer container last so the bundle
+        # signature seals the sysext + the profile + the inner executable.
+        #
+        # Resources/* sealing (compiled_rules, rules, Compiler) is provided
+        # by codesign's bundle-mode `_CodeSignature/CodeResources` hash
+        # list — built automatically when signing the bundle, NO --deep
+        # required. The original v1.12.0 RC28 audit fix added --deep on
+        # the assumption that --deep was needed for Resources sealing;
+        # that assumption was wrong — --deep is for recursing into nested
+        # SIGNED code (frameworks, XPC services), not for sealing data
+        # resources. CodeResources covers data resources unconditionally.
+        #
+        # v1.12.2 fix (Sparkle install FP): drop --deep. With --deep on,
+        # codesign re-signed every nested Mach-O (Sparkle.framework's
+        # Autoupdate, Updater.app, Downloader.xpc, Installer.xpc) and
+        # propagated our main-app entitlements
+        # (`com.apple.developer.system-extension.install` +
+        # keychain-access-groups) onto each. macOS refuses to launch a
+        # Sparkle XPC helper carrying the system-extension.install
+        # entitlement, which surfaced as the generic "An error occurred
+        # while running the updater" on every Sparkle upgrade. Tried
+        # --preserve-metadata=entitlements first (v1.12.1) — turns out
+        # codesign doesn't "preserve" the *absence* of entitlements, so
+        # the propagation still happened. Dropping --deep is the actual
+        # fix: Sparkle's helpers keep their step-4a signatures (no
+        # entitlements), and the outer .app sign just seals the bundle
+        # via its own primary executable (which already carries APP_ENT
+        # from step 4b) plus the CodeResources hash list.
+        codesign --sign "$DEVELOPER_ID" \
+            --identifier "com.maccrab.app" \
+            --options runtime \
+            --entitlements "$APP_ENT" \
+            --timestamp \
+            --force \
+            "$APP"
+        echo "    ✓ Signed MacCrab.app (CodeResources seals Resources/, nested code kept own signatures)"
+
+        # Verify before handing off to notarization — catches staging
+        # layout mistakes fast. --deep emits many lines now that
+        # Sparkle.framework is embedded (each helper + XPC service is
+        # validated); head -5 closes the pipe early and triggers SIGPIPE
+        # under `set -o pipefail`. Pipe through a shell function that
+        # swallows SIGPIPE explicitly instead.
+        codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | { head -5; cat >/dev/null; } || true
+
+        # ── Nested-entitlement guard (v1.13 audit improvement; see the v1.12.0
+        # Sparkle brick above). No nested helper may carry a privileged APP
+        # entitlement: the v1.12.0 regression propagated system-extension.install
+        # onto Sparkle's Installer.xpc and macOS refused to launch the updater.
+        # Read-only; fails loud. Does NOT trip on a correct build (Sparkle XPCs
+        # carry none; the sysext carries only endpoint-security.client).
+        echo "  Verifying nested-binary entitlements (no privileged leak)..."
+        ent_leak=0
+        while IFS= read -r _xpc; do
+            _exe=$(/usr/bin/find "$_xpc/Contents/MacOS" -maxdepth 1 -type f -print -quit 2>/dev/null)
+            [ -n "$_exe" ] || continue
+            if codesign -d --entitlements - "$_exe" 2>/dev/null | grep -qiE 'system-extension\.install|endpoint-security'; then
+                echo "    ✗ ENTITLEMENT LEAK: $(basename "$_xpc") carries a privileged app entitlement (v1.12.0-class regression)"
+                ent_leak=1
+            fi
+        done < <(/usr/bin/find "$APP/Contents/Frameworks" -name '*.xpc' -type d 2>/dev/null)
+        _sysexe="$APP/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
+        if [ -f "$_sysexe" ] && codesign -d --entitlements - "$_sysexe" 2>/dev/null | grep -qi 'system-extension\.install'; then
+            echo "    ✗ ENTITLEMENT LEAK: system extension carries system-extension.install (app-only entitlement)"
             ent_leak=1
         fi
-    done < <(/usr/bin/find "$APP/Contents/Frameworks" -name '*.xpc' -type d 2>/dev/null)
-    _sysexe="$APP/Contents/Library/SystemExtensions/com.maccrab.agent.systemextension/Contents/MacOS/com.maccrab.agent"
-    if [ -f "$_sysexe" ] && codesign -d --entitlements - "$_sysexe" 2>/dev/null | grep -qi 'system-extension\.install'; then
-        echo "    ✗ ENTITLEMENT LEAK: system extension carries system-extension.install (app-only entitlement)"
-        ent_leak=1
+        if [ "$ent_leak" != "0" ]; then
+            echo "  ERROR: nested-entitlement guard failed — refusing to ship (see the v1.12.0 Sparkle brick)."
+            exit 1
+        fi
+        echo "    ✓ no privileged entitlement leaked to Sparkle XPC / sysext"
+
+        # NOTE on stapling the .app bundle (intentionally NOT done): we validated
+        # it and it does NOT work for this app. Even after a standalone app
+        # notarization returns `status: Accepted`, `xcrun stapler staple
+        # MacCrab.app` fails with Error 73 (no ticket) — a known finicky case for
+        # apps that EMBED a System Extension. It's also unnecessary: `spctl -a -t
+        # exec` already accepts the app as "Notarized Developer ID" (online
+        # Gatekeeper, the real-world path), and the DMG below IS stapled for the
+        # offline download/mount. So we sign + notarize (via the DMG) and skip the
+        # per-build app-notarize round-trip that buys nothing here.
+    else
+        echo "  Ad-hoc signing (set DEVELOPER_ID for distribution signing)"
+        codesign --force --sign - "$APP" 2>/dev/null || true
     fi
-    if [ "$ent_leak" != "0" ]; then
-        echo "  ERROR: nested-entitlement guard failed — refusing to ship (see the v1.12.0 Sparkle brick)."
+}
+
+# ═════════════════════════════════════════════════════════════════════
+# STAGE 4 — publish
+#   Stage supporting files + install.sh, run the never-ship-private-keys
+#   guard, build the DMG (attach + ditto + convert), sign + notarize the
+#   DMG (via notarize.sh when creds are present), write release.json with
+#   the rule breakdown + toolchain provenance, and sed-bump the Homebrew
+#   cask sha256. Removes the staging tree at the end.
+# ═════════════════════════════════════════════════════════════════════
+stage_publish() {
+    APP="$STAGING_DIR/MacCrab.app"
+
+    # ─── Supporting files + install.sh ───────────────────────────────
+    cp "$PROJECT_DIR/LICENSE" "$STAGING_DIR/"
+    cp "$PROJECT_DIR/README.md" "$STAGING_DIR/"
+
+    cp "$SCRIPT_DIR/install.sh" "$STAGING_DIR/install.sh"
+    chmod +x "$STAGING_DIR/install.sh"
+
+    # ─── Guard: never ship private-key material ──────────────────────
+    # Regression guard for the security review's F7 ("dev/test keys ship")
+    # concern. Scans the fully-assembled staging tree for PEM private-key
+    # blocks. The marker "PRIVATE KEY" is unambiguous — it appears in real
+    # private keys and nowhere legitimate in a shipped app (public keys say
+    # "PUBLIC KEY"), so this cannot false-block a clean build. A match is a
+    # stop-the-release event.
+    if grep -rlI 'PRIVATE KEY' "$STAGING_DIR" >/dev/null 2>&1; then
+        echo "  ✗ ABORT: private-key material found in the staging tree — refusing to package:"
+        grep -rlI 'PRIVATE KEY' "$STAGING_DIR" | sed 's/^/      /'
         exit 1
     fi
-    echo "    ✓ no privileged entitlement leaked to Sparkle XPC / sysext"
+    echo "    ✓ No private-key material in the staging tree"
 
-    # NOTE on stapling the .app bundle (intentionally NOT done): we validated
-    # it and it does NOT work for this app. Even after a standalone app
-    # notarization returns `status: Accepted`, `xcrun stapler staple
-    # MacCrab.app` fails with Error 73 (no ticket) — a known finicky case for
-    # apps that EMBED a System Extension. It's also unnecessary: `spctl -a -t
-    # exec` already accepts the app as "Notarized Developer ID" (online
-    # Gatekeeper, the real-world path), and the DMG below IS stapled for the
-    # offline download/mount. So we sign + notarize (via the DMG) and skip the
-    # per-build app-notarize round-trip that buys nothing here.
-else
-    echo "  Ad-hoc signing (set DEVELOPER_ID for distribution signing)"
-    codesign --force --sign - "$APP" 2>/dev/null || true
-fi
+    # ─── DMG ─────────────────────────────────────────────────────────
+    echo "  Creating DMG..."
+    DMG_NAME="MacCrab-v$VERSION.dmg"
+    DMG_PATH="$PROJECT_DIR/.build/$DMG_NAME"
 
-# ─── Supporting files + install.sh ───────────────────────────────────
-cp "$PROJECT_DIR/LICENSE" "$STAGING_DIR/"
-cp "$PROJECT_DIR/README.md" "$STAGING_DIR/"
+    ln -s /Applications "$STAGING_DIR/Applications"
 
-cp "$SCRIPT_DIR/install.sh" "$STAGING_DIR/install.sh"
-chmod +x "$STAGING_DIR/install.sh"
+    # v1.18: build the DMG via attach + ditto + convert rather than
+    # `hdiutil create -srcfolder`. The latter's internal copy fails with
+    # "could not access .../MacCrab.app - Operation not permitted" once MacCrab is
+    # INSTALLED on the build host (macOS App-Management protects the registered
+    # com.maccrab.app from the diskimages-helper copy) — which is the normal
+    # developer situation, and silently bricked the build the moment the dev dog-
+    # fooded a prior RC. `ditto` into an explicitly-attached RW image is unaffected
+    # and preserves the bundle + the /Applications symlink. The mountpoint is under
+    # /tmp (not /Volumes) so a crash can't leave a stale /Volumes/MacCrab… volume.
+    STAGE_KB=$(du -sk "$STAGING_DIR" | cut -f1)
+    RW_DMG="${DMG_PATH%.dmg}.rw.dmg"
+    DMG_MNT="/tmp/maccrab-dmg-mnt-$$"
+    rm -f "$RW_DMG"
+    hdiutil create -size "$(( STAGE_KB / 1024 + 150 ))m" -volname "MacCrab v$VERSION" \
+        -fs HFS+ -ov "$RW_DMG" >/dev/null
+    mkdir -p "$DMG_MNT"
+    hdiutil attach "$RW_DMG" -nobrowse -mountpoint "$DMG_MNT" >/dev/null
+    ditto "$STAGING_DIR/" "$DMG_MNT/"
+    hdiutil detach "$DMG_MNT" -force >/dev/null
+    rmdir "$DMG_MNT" 2>/dev/null || true
+    hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
+    rm -f "$RW_DMG"
 
-# ─── Guard: never ship private-key material ──────────────────────────
-# Regression guard for the security review's F7 ("dev/test keys ship")
-# concern. Scans the fully-assembled staging tree for PEM private-key
-# blocks. The marker "PRIVATE KEY" is unambiguous — it appears in real
-# private keys and nowhere legitimate in a shipped app (public keys say
-# "PUBLIC KEY"), so this cannot false-block a clean build. A match is a
-# stop-the-release event.
-if grep -rlI 'PRIVATE KEY' "$STAGING_DIR" >/dev/null 2>&1; then
-    echo "  ✗ ABORT: private-key material found in the staging tree — refusing to package:"
-    grep -rlI 'PRIVATE KEY' "$STAGING_DIR" | sed 's/^/      /'
-    exit 1
-fi
-echo "    ✓ No private-key material in the staging tree"
+    # Sign and notarize if credentials are available
+    if [ -n "${DEVELOPER_ID:-}" ] || [ -n "${APPLE_ID:-}" ]; then
+        echo "  Signing and notarizing DMG..."
+        "$SCRIPT_DIR/notarize.sh" "$DMG_PATH"
+    else
+        echo "  Skipping code signing (set DEVELOPER_ID for Developer ID signing)"
+    fi
 
-# ─── DMG ─────────────────────────────────────────────────────────────
-echo "  Creating DMG..."
-DMG_NAME="MacCrab-v$VERSION.dmg"
-DMG_PATH="$PROJECT_DIR/.build/$DMG_NAME"
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  MacCrab v$VERSION Release Built"
+    echo "═══════════════════════════════════════"
+    echo ""
+    echo "  DMG: $DMG_PATH"
+    echo "  Size: $(du -h "$DMG_PATH" | cut -f1)"
+    echo "  Binaries: universal (arm64 + x86_64)"
+    # v1.11.0 RC2 (audit ship MEDIUM): exclude `manifest.json` from the
+    # rule count so release.json doesn't ship "428 rules" when the actual
+    # count is 427. manifest.json is build-time metadata, not a rule.
+    RULE_COUNT=$(find "$STAGING_DIR/compiled_rules" -name "*.json" ! -name "manifest.json" | wc -l | tr -d ' ')
+    # v1.19.0 (S7-4): record the Sigma breakdown so release.json is the single
+    # source of truth for the public 483 figure AND its composition. Counted
+    # from the freshly-staged compiled tree so it can never drift from RULE_COUNT
+    # (single-event + sequence + graph = total). `builtins` is the hardcoded
+    # maccrab.* detection count (BuiltinRuleCatalog.all) — a separate, parallel
+    # class, NOT part of the 483.
+    RULES_SEQUENCE=$(find "$STAGING_DIR/compiled_rules/sequences" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    RULES_GRAPH=$(find "$STAGING_DIR/compiled_rules/graph" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    RULES_SINGLE=$(( RULE_COUNT - RULES_SEQUENCE - RULES_GRAPH ))
+    BUILTINS=$(grep -c '\.init("maccrab\.' "$PROJECT_DIR/Sources/MacCrabCore/Detection/BuiltinRuleCatalog.swift" | tr -d ' ')
+    echo "  Rules: $RULE_COUNT (single $RULES_SINGLE + sequence $RULES_SEQUENCE + graph $RULES_GRAPH) + $BUILTINS built-in"
+    echo ""
 
-ln -s /Applications "$STAGING_DIR/Applications"
-
-# v1.18: build the DMG via attach + ditto + convert rather than
-# `hdiutil create -srcfolder`. The latter's internal copy fails with
-# "could not access .../MacCrab.app - Operation not permitted" once MacCrab is
-# INSTALLED on the build host (macOS App-Management protects the registered
-# com.maccrab.app from the diskimages-helper copy) — which is the normal
-# developer situation, and silently bricked the build the moment the dev dog-
-# fooded a prior RC. `ditto` into an explicitly-attached RW image is unaffected
-# and preserves the bundle + the /Applications symlink. The mountpoint is under
-# /tmp (not /Volumes) so a crash can't leave a stale /Volumes/MacCrab… volume.
-STAGE_KB=$(du -sk "$STAGING_DIR" | cut -f1)
-RW_DMG="${DMG_PATH%.dmg}.rw.dmg"
-DMG_MNT="/tmp/maccrab-dmg-mnt-$$"
-rm -f "$RW_DMG"
-hdiutil create -size "$(( STAGE_KB / 1024 + 150 ))m" -volname "MacCrab v$VERSION" \
-    -fs HFS+ -ov "$RW_DMG" >/dev/null
-mkdir -p "$DMG_MNT"
-hdiutil attach "$RW_DMG" -nobrowse -mountpoint "$DMG_MNT" >/dev/null
-ditto "$STAGING_DIR/" "$DMG_MNT/"
-hdiutil detach "$DMG_MNT" -force >/dev/null
-rmdir "$DMG_MNT" 2>/dev/null || true
-hdiutil convert "$RW_DMG" -format UDZO -ov -o "$DMG_PATH" >/dev/null
-rm -f "$RW_DMG"
-
-# Sign and notarize if credentials are available
-if [ -n "${DEVELOPER_ID:-}" ] || [ -n "${APPLE_ID:-}" ]; then
-    echo "  Signing and notarizing DMG..."
-    "$SCRIPT_DIR/notarize.sh" "$DMG_PATH"
-else
-    echo "  Skipping code signing (set DEVELOPER_ID for Developer ID signing)"
-fi
-
-echo ""
-echo "═══════════════════════════════════════"
-echo "  MacCrab v$VERSION Release Built"
-echo "═══════════════════════════════════════"
-echo ""
-echo "  DMG: $DMG_PATH"
-echo "  Size: $(du -h "$DMG_PATH" | cut -f1)"
-echo "  Binaries: universal (arm64 + x86_64)"
-# v1.11.0 RC2 (audit ship MEDIUM): exclude `manifest.json` from the
-# rule count so release.json doesn't ship "428 rules" when the actual
-# count is 427. manifest.json is build-time metadata, not a rule.
-RULE_COUNT=$(find "$STAGING_DIR/compiled_rules" -name "*.json" ! -name "manifest.json" | wc -l | tr -d ' ')
-# v1.19.0 (S7-4): record the Sigma breakdown so release.json is the single
-# source of truth for the public 483 figure AND its composition. Counted
-# from the freshly-staged compiled tree so it can never drift from RULE_COUNT
-# (single-event + sequence + graph = total). `builtins` is the hardcoded
-# maccrab.* detection count (BuiltinRuleCatalog.all) — a separate, parallel
-# class, NOT part of the 483.
-RULES_SEQUENCE=$(find "$STAGING_DIR/compiled_rules/sequences" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
-RULES_GRAPH=$(find "$STAGING_DIR/compiled_rules/graph" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
-RULES_SINGLE=$(( RULE_COUNT - RULES_SEQUENCE - RULES_GRAPH ))
-BUILTINS=$(grep -c '\.init("maccrab\.' "$PROJECT_DIR/Sources/MacCrabCore/Detection/BuiltinRuleCatalog.swift" | tr -d ' ')
-echo "  Rules: $RULE_COUNT (single $RULES_SINGLE + sequence $RULES_SEQUENCE + graph $RULES_GRAPH) + $BUILTINS built-in"
-echo ""
-
-# v1.8.1: write release.json with version + rule + test counts so the
-# website can fetch authoritative metadata instead of being hand-edited.
-# Eliminates the version-drift class of bug that the v1.8.0 external
-# review caught (website still showed 1.7.12 / 929 tests).
-RELEASE_JSON="$PROJECT_DIR/release.json"
-DMG_SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
-DMG_SIZE_BYTES=$(stat -f%z "$DMG_PATH" 2>/dev/null || stat -c%s "$DMG_PATH")
-# `set -e` + grep returning 1 on no match would abort the script; route
-# through `|| true` so a missing test pattern doesn't kill the build.
-TEST_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Test\|^    @Test' {} + 2>/dev/null | wc -l | tr -d ' ' || true)
-SUITE_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Suite' {} + 2>/dev/null | wc -l | tr -d ' ' || true)
-TEST_COUNT="${TEST_COUNT:-0}"
-SUITE_COUNT="${SUITE_COUNT:-0}"
-RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-# v1.18.1: record the toolchain for provenance — RELEASE_PROCESS.md notes
-# historical builds were unreproducible without this.
-TOOLCHAIN=$(xcodebuild -version 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
-TOOLCHAIN="${TOOLCHAIN:-unknown}"
-cat > "$RELEASE_JSON" <<RELEASE_EOF
+    # v1.8.1: write release.json with version + rule + test counts so the
+    # website can fetch authoritative metadata instead of being hand-edited.
+    # Eliminates the version-drift class of bug that the v1.8.0 external
+    # review caught (website still showed 1.7.12 / 929 tests).
+    RELEASE_JSON="$PROJECT_DIR/release.json"
+    DMG_SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
+    DMG_SIZE_BYTES=$(stat -f%z "$DMG_PATH" 2>/dev/null || stat -c%s "$DMG_PATH")
+    # `set -e` + grep returning 1 on no match would abort the script; route
+    # through `|| true` so a missing test pattern doesn't kill the build.
+    TEST_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Test\|^    @Test' {} + 2>/dev/null | wc -l | tr -d ' ' || true)
+    SUITE_COUNT=$(find Tests -name '*.swift' -exec grep -h '^@Suite' {} + 2>/dev/null | wc -l | tr -d ' ' || true)
+    TEST_COUNT="${TEST_COUNT:-0}"
+    SUITE_COUNT="${SUITE_COUNT:-0}"
+    RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    # v1.18.1: record the toolchain for provenance — RELEASE_PROCESS.md notes
+    # historical builds were unreproducible without this.
+    TOOLCHAIN=$(xcodebuild -version 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    TOOLCHAIN="${TOOLCHAIN:-unknown}"
+    cat > "$RELEASE_JSON" <<RELEASE_EOF
 {
   "version": "$VERSION",
   "release_date": "$RELEASE_DATE",
@@ -855,20 +981,82 @@ cat > "$RELEASE_JSON" <<RELEASE_EOF
   "min_macos": "13.0"
 }
 RELEASE_EOF
-echo "  release.json written → $RELEASE_JSON"
+    echo "  release.json written → $RELEASE_JSON"
 
-# v1.18: bump the Homebrew cask sha256 to the freshly-built DMG. Pre-this it was
-# a manual step that lagged (a release shipped with the PRIOR version's cask
-# sha256, so `brew install --cask maccrab` failed checksum verification). The
-# DMG sha is authoritative here, so sync the cask(s) in the same breath.
-for cask in "$PROJECT_DIR/Casks/maccrab.rb" "$PROJECT_DIR/homebrew/maccrab.rb"; do
-    [ -f "$cask" ] || continue
-    /usr/bin/sed -i '' -E "s/sha256 \"[a-f0-9]{64}\"/sha256 \"$DMG_SHA\"/" "$cask"
-done
-echo "  Homebrew cask sha256 synced to the DMG ($DMG_SHA)"
-echo ""
+    # v1.18: bump the Homebrew cask sha256 to the freshly-built DMG. Pre-this it was
+    # a manual step that lagged (a release shipped with the PRIOR version's cask
+    # sha256, so `brew install --cask maccrab` failed checksum verification). The
+    # DMG sha is authoritative here, so sync the cask(s) in the same breath.
+    for cask in "$PROJECT_DIR/Casks/maccrab.rb" "$PROJECT_DIR/homebrew/maccrab.rb"; do
+        [ -f "$cask" ] || continue
+        /usr/bin/sed -i '' -E "s/sha256 \"[a-f0-9]{64}\"/sha256 \"$DMG_SHA\"/" "$cask"
+    done
+    echo "  Homebrew cask sha256 synced to the DMG ($DMG_SHA)"
+    echo ""
 
-rm -rf "$STAGING_DIR"
+    rm -rf "$STAGING_DIR"
 
-echo "To create a GitHub release:"
-echo "  gh release create v$VERSION '$DMG_PATH' --title 'MacCrab v$VERSION' --notes-file RELEASE_NOTES.md"
+    echo "To create a GitHub release:"
+    echo "  gh release create v$VERSION '$DMG_PATH' --title 'MacCrab v$VERSION' --notes-file RELEASE_NOTES.md"
+}
+
+# ─── Stage handoff helper ────────────────────────────────────────────
+# Stages 2-4, when run individually, must reuse the VERSION / BUILD_NUMBER
+# / Sparkle config the unsigned-build stage stamped — otherwise the
+# Info.plist that `assemble` wrote and the bundle that `sign` seals would
+# disagree (a re-derived per-second BUILD_NUMBER, or a Sparkle key that
+# rotated between invocations). Source the persisted env if present; the
+# operator's explicit env vars still win for VERSION (so a single-stage
+# re-run can target a different tag deliberately).
+load_stage_env() {
+    if [ -f "$STAGE_ENV" ]; then
+        # shellcheck disable=SC1090
+        source "$STAGE_ENV"
+        export BUILD_NUMBER
+    else
+        echo "ERROR: stage '$STAGE' needs the staging tree from a prior 'unsigned-build' run," >&2
+        echo "       but $STAGE_ENV was not found. Run:  scripts/build-release.sh unsigned-build" >&2
+        exit 1
+    fi
+    # assemble re-stamps Info.plist from SU_* — ensure they're loaded even
+    # if the env file predates this field set.
+    if [ -z "${SU_EDKEY:-}" ] || [ -z "${SU_FEEDURL:-}" ]; then
+        load_sparkle_config
+    fi
+}
+
+# ─── Dispatch ────────────────────────────────────────────────────────
+case "$STAGE" in
+    all)
+        # Single-process, ordered pipeline — historical behavior. The
+        # per-PID staging dir + EXIT trap (set above) own cleanup.
+        stage_unsigned_build
+        stage_assemble
+        stage_sign
+        stage_publish
+        ;;
+    unsigned-build)
+        stage_unsigned_build
+        echo ""
+        echo "  Stage 'unsigned-build' complete → $STAGING_DIR (bin/ + compiled_rules/)"
+        echo "  Next: scripts/build-release.sh assemble"
+        ;;
+    assemble)
+        load_stage_env
+        stage_assemble
+        echo ""
+        echo "  Stage 'assemble' complete → $STAGING_DIR/MacCrab.app"
+        echo "  Next: scripts/build-release.sh sign"
+        ;;
+    sign)
+        load_stage_env
+        stage_sign
+        echo ""
+        echo "  Stage 'sign' complete."
+        echo "  Next: scripts/build-release.sh publish"
+        ;;
+    publish)
+        load_stage_env
+        stage_publish
+        ;;
+esac
