@@ -933,7 +933,7 @@ final class AppState: ObservableObject {
     /// repeat calls when the compiled-rules dir hasn't changed —
     /// previously the `rulesLoaded_cached` gate skipped the function
     /// entirely, but a dashboard re-launch (or any manual call after
-    /// a SIGHUP-driven recompile) re-parsed all 427 JSON files
+    /// a SIGHUP-driven recompile) re-parsed all compiled JSON files
     /// regardless. Tracks the dir mtime of whichever candidate path
     /// won the load.
     private var rulesCacheDirMtime: Date?
@@ -2159,7 +2159,7 @@ final class AppState: ObservableObject {
                 // v1.11.1 (audit perf MEDIUM): mtime gate. If the
                 // dir we'd load from is the same one we last loaded
                 // AND its mtime is unchanged, the parsed `rules`
-                // array is still authoritative — skip the 427-file
+                // array is still authoritative — skip the full-directory
                 // contentsOfDirectory + JSONDecoder.decode pass.
                 let mtime = (try? FileManager.default.attributesOfItem(atPath: dir))?[.modificationDate] as? Date
                 if dir == rulesCacheDirPath, let mtime, mtime == rulesCacheDirMtime, !rules.isEmpty {

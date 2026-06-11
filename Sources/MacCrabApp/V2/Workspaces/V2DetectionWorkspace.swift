@@ -17,7 +17,7 @@ public struct V2DetectionWorkspace: View {
     /// (id, title, category, mitre joined, description) — so an operator
     /// can find a rule by its id, its name/title (= the alert name), its
     /// MITRE tag, OR free text from its description. Pre-fix the rulesTable
-    /// rebuilt this concatenation + lowercased per row × 427 rules
+    /// rebuilt this concatenation + lowercased per row × the loaded rules
     /// per keystroke — that's 1700+ string allocations per char
     /// typed in the search box. Now: precompute once + cheap
     /// `contains(q)` per row per keystroke.
@@ -25,7 +25,7 @@ public struct V2DetectionWorkspace: View {
     @State private var filteredRules: [V2MockRule] = []
     /// Debounced query — driven by ruleQuery via .task(id:). Pre-fix
     /// the filter ran inline in body, so every keystroke re-filtered
-    /// 427 rules synchronously on @MainActor. Now the filter result
+    /// the loaded rules synchronously on @MainActor. Now the filter result
     /// is cached, filterTask coalesces fast typing.
     @State private var debouncedRuleQuery: String = ""
     @State private var presentingNewRule = false
@@ -125,7 +125,7 @@ public struct V2DetectionWorkspace: View {
             // v1.12.6 Wave 9P: write each piece of @State as soon as
             // its await resolves. Pre-9P all four fields were gated
             // behind one trailing MainActor.run after four awaits —
-            // and `rules()` alone reads ~430 compiled-rule JSON files
+            // and `rules()` alone reads the compiled-rule JSON files
             // + parses each, which can exceed the 5s refreshTick on
             // cold cache. Same shape as Wave 9G in V2Intelligence.
             //

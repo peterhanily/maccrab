@@ -25,7 +25,7 @@ public final class V2LiveDataProvider: V2DataProvider {
     private let causalStore: SQLiteCausalGraphStore?
 
     /// Cached V2-shape rules + the directory mtime used to compute
-    /// the cache. Pre-fix `rules()` re-loaded all 427 JSON files +
+    /// the cache. Pre-fix `rules()` re-loaded all compiled JSON files +
     /// re-decoded them on every 5s refresh tick — even when nothing
     /// in `compiled_rules/` had changed. The compiled_rules dir is
     /// only mutated when the daemon recompiles or an operator drops

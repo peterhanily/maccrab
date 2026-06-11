@@ -129,4 +129,57 @@ struct RuleEngineReloadTests {
         #expect(try await engine.reloadRules(from: slightly) == 18)
         #expect(await engine.ruleCount == 18)
     }
+
+    // v1.18.1 regression: the live compiled_rules dir ships a manifest.json
+    // (build integrity metadata). It is not a CompiledRule, so decoding it
+    // throws — which on RELOAD tripped the "any decode failure rolls back"
+    // guard, making every SIGHUP / .reload_tick reload (and dashboard rule
+    // edits) silently no-op until a daemon restart. loadRules now excludes it.
+    @Test("manifest.json in the rules dir does not break reload")
+    func manifestJsonIgnoredOnReload() async throws {
+        let dir = try makeRulesDir(count: 20)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = #"{"generated":"2026-06-11","rule_count":20,"sha256":"deadbeef"}"#
+        try manifest.write(to: dir.appendingPathComponent("manifest.json"),
+                           atomically: true, encoding: .utf8)
+        let engine = RuleEngine()
+        #expect(try await engine.loadRules(from: dir) == 20, "manifest must not be counted/loaded as a rule")
+        #expect(try await engine.reloadRules(from: dir) == 20, "reload must succeed with manifest.json present")
+        #expect(await engine.lastLoadFailedCount == 0, "manifest must not register as a decode failure")
+        #expect(await engine.ruleCount == 20)
+    }
+
+    // v1.18.1 regression: a user_rules override of a bundled rule (same id,
+    // loaded by a second loadRules call) was de-duped in allRules but APPENDED
+    // to the dispatch index, so both copies fired and the bundled rule shadowed
+    // the override's severity/enabled — a dashboard Sigma-rule severity/disable
+    // change had no runtime effect.
+    @Test("same-id overlay replaces in the dispatch index instead of duplicating")
+    func sameIdOverlayDeduplicates() async throws {
+        let base = try makeRulesDir(count: 20)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let baseJson = try FileManager.default
+            .contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
+            .first { $0.pathExtension == "json" }!
+        var obj = try JSONSerialization.jsonObject(with: Data(contentsOf: baseJson)) as! [String: Any]
+        let id = obj["id"] as! String
+        let category = (obj["logsource"] as! [String: Any])["category"] as! String
+        let originalLevel = obj["level"] as! String
+        let overrideLevel = originalLevel == "critical" ? "low" : "critical"
+        obj["level"] = overrideLevel
+        let overrideDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("override-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: overrideDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: overrideDir) }
+        try JSONSerialization.data(withJSONObject: obj)
+            .write(to: overrideDir.appendingPathComponent("\(id).json"))
+
+        let engine = RuleEngine()
+        _ = try await engine.loadRules(from: base)        // bundled
+        _ = try await engine.loadRules(from: overrideDir) // overlay (no clear)
+
+        let inIndex = await engine.listRules(category: category).filter { $0.id == id }
+        #expect(inIndex.count == 1, "the dispatch index must hold exactly one copy of an overridden rule, got \(inIndex.count)")
+        #expect(inIndex.first?.level.rawValue == overrideLevel, "the override severity must win, not the bundled default")
+    }
 }

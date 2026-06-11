@@ -497,8 +497,15 @@ public actor RuleEngine {
             options: [.skipsHiddenFiles]
         )
 
-        let jsonFiles = contents.filter { $0.pathExtension == "json" }
-        logger.info("Found \(contents.count) files in \(directory.path), \(jsonFiles.count) are .json")
+        // Exclude manifest.json — it is build-time integrity metadata, not a
+        // CompiledRule. Decoding it always throws, which on RELOAD trips the
+        // "any decode failure rolls back" guard below, so SIGHUP / .reload_tick
+        // reloads (and dashboard rule edits) silently no-op until a restart.
+        // (StatusCommand + build-release.sh already exclude it for counts.)
+        let jsonFiles = contents.filter {
+            $0.pathExtension == "json" && $0.lastPathComponent != "manifest.json"
+        }
+        logger.info("Found \(contents.count) files in \(directory.path), \(jsonFiles.count) are rule .json")
         if jsonFiles.isEmpty {
             logger.warning("No .json rule files found in \(directory.path)")
         }
@@ -511,6 +518,15 @@ public actor RuleEngine {
             do {
                 let data = try Data(contentsOf: file)
                 let rule = try decoder.decode(CompiledRule.self, from: data)
+                // Same-id overlay (a user_rules override of a bundled rule, loaded
+                // by a second loadRules call without a clear): replace in the
+                // dispatch index, don't duplicate. allRules dedups by id, but an
+                // un-deduped ruleIndex would fire BOTH copies and let the bundled
+                // rule shadow the override's severity/enabled — so a dashboard
+                // severity/disable change on a Sigma rule had no runtime effect.
+                if let existing = allRules[rule.id] {
+                    ruleIndex[existing.logsource.category]?.removeAll { $0.id == rule.id }
+                }
                 allRules[rule.id] = rule
                 ruleIndex[rule.logsource.category, default: []].append(rule)
                 loaded += 1
