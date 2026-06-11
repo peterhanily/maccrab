@@ -1,0 +1,143 @@
+# MacCrab app CI — build + swift test + rule compilation.
+#
+# Re-adds the application CI that was deleted during the v1.12.6 opsec
+# sweep (the `ci-local.sh` "replaces GitHub Actions" note marks the gap).
+# This is the GitHub-hosted half of the pipeline: it proves the source
+# compiles, the test suite is green, and the rules compile clean on a
+# fresh machine. The SIGNED release build stays on the trusted Mac
+# (Developer ID + notary creds never reach a hosted runner) — see
+# .github/workflows/reproducible-build.yml for the self-hosted half.
+#
+# Toolchain pin (PASS-K reconciliation): release builds are pinned to
+# Xcode 26.x until the macOS 27 design-QA gate passes (the 27 SDK
+# ignores UIDesignRequiresCompatibility and carries the TN3211 @State /
+# Swift Charts hazards). CI selects Xcode 26.x explicitly so a hosted
+# runner's default Xcode bump can't silently move CI off the release
+# toolchain. PASS-L source-compat guards run in the advisory `audit`
+# job so an Xcode-27-hazard regression surfaces in PRs even while the
+# build itself stays on 26.x.
+#
+# Every action is SHA-pinned (S5-T4): a moving tag is a supply-chain
+# hole — a compromised action tag would run with repo-write secrets.
+# Refresh a pin deliberately (resolve the new release tag → commit SHA,
+# keep the `# vX.Y.Z` trailing comment for human review).
+#
+# Job criticality:
+#   build-and-test  REQUIRED  — must pass to merge.
+#   rules           REQUIRED  — must pass to merge.
+#   audit           ADVISORY  — informational; does not block (it runs
+#                               the full architectural audit + PASS-L
+#                               Xcode-27 guards, some of which are
+#                               release-time gates, not per-PR gates).
+name: CI
+
+on:
+  push:
+    branches: [main, "v*"]
+  pull_request:
+    branches: [main, "v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pin to the release toolchain (PASS-K). The minor is intentionally
+  # loose (`26`) so a hosted-runner Xcode 26.x patch bump still matches;
+  # the MAJOR is what the design-QA gate fixes.
+  PINNED_XCODE_MAJOR: "26"
+
+jobs:
+  # ── REQUIRED ────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build + test (required)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Select Xcode ${{ env.PINNED_XCODE_MAJOR }}.x (PASS-K pin)
+        run: |
+          set -euo pipefail
+          # Pick the highest-installed Xcode whose MAJOR matches the pin.
+          # Fail loud if the runner image has dropped Xcode 26 entirely —
+          # that means CI has drifted off the release toolchain and the
+          # pin must be re-evaluated (do NOT silently build on 27).
+          want="${PINNED_XCODE_MAJOR}"
+          best=""
+          for app in /Applications/Xcode_${want}*.app /Applications/Xcode.app; do
+            [ -d "$app" ] || continue
+            ver=$("$app/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | sed -n 's/^Xcode \([0-9][0-9]*\).*/\1/p')
+            if [ "$ver" = "$want" ]; then best="$app"; break; fi
+          done
+          if [ -z "$best" ]; then
+            echo "::error::No Xcode ${want}.x found on this runner — CI is pinned to the release toolchain (PASS-K). Available:" >&2
+            ls -d /Applications/Xcode*.app 2>/dev/null >&2 || true
+            exit 1
+          fi
+          sudo xcode-select -s "$best/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      - name: Resolve dependencies (pinned)
+        run: swift package resolve
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Build tests
+        run: swift build --build-tests
+
+      - name: Run tests
+        run: swift test
+
+  # ── REQUIRED ────────────────────────────────────────────────────────
+  rules:
+    name: Rules compile + lint (required)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: python3 -m pip install --user pyyaml
+
+      - name: Compile rules (0 skips required)
+        run: |
+          set -euo pipefail
+          out=$(python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir /tmp/ci_compiled_rules 2>&1)
+          echo "$out"
+          # prerelease-check.sh enforces the same invariant: 0 rules skipped.
+          echo "$out" | grep -qE 'Rules skipped:[[:space:]]+0\b' \
+            || { echo "::error::compile_rules reported skipped rules"; exit 1; }
+
+      - name: Rule lint (filter coverage)
+        run: ./scripts/rule-lint.sh
+
+  # ── ADVISORY ────────────────────────────────────────────────────────
+  audit:
+    name: Architectural audit (advisory)
+    runs-on: macos-15
+    timeout-minutes: 30
+    # Advisory: informational only. The audit includes release-time
+    # gates (e.g. PASS-L Xcode-27 source-compat guards) that are not
+    # per-PR blockers. continue-on-error surfaces findings in the PR
+    # checks UI without failing the run.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Pre-release architectural audit
+        run: ./scripts/pre-release-audit.sh
