@@ -104,7 +104,16 @@ struct DaemonConfig: Codable {
         /// tightens the cutoff (1h → 30m → 15m) if needed to stay under
         /// this. Last-resort row-count prune kicks in if even the tightest
         /// cutoff can't fit.
-        var eventsMaxSizeMB: Int = 200
+        ///
+        /// v1.19.0: raised 200 → 350. The events.db FILE holds more than the
+        /// events table — it also carries `alert_evidence` (its own ~100 MB
+        /// sub-cap) and the events FTS5 search index (~60 MB on a busy host).
+        /// Those two alone are ~160 MB before a single event row, so a 200 MB
+        /// file cap could never be honoured on an active machine (the file
+        /// settled ~300 MB; rc.2 live-test finding D4). 350 is honest about the
+        /// file's real components. The events working set is still bounded by
+        /// `eventsHotTierMinutes`; this only relaxes the whole-FILE ceiling.
+        var eventsMaxSizeMB: Int = 350
 
         /// Cadence (in minutes) for the events.db size-cap enforcer.
         ///

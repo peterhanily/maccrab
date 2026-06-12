@@ -227,8 +227,22 @@ public struct CredentialFence: Sendable {
     }
 
     /// Check a file path and return a detailed description for alerting.
-    public func checkAccessDetailed(filePath: String, aiToolName: String) -> (type: CredentialType, description: String)? {
+    ///
+    /// When `aiToolType` is supplied and the path lies inside THAT tool's own
+    /// config/state dir, the read is the tool using its own auth (not exfil)
+    /// and is down-weighted by returning nil. Hard guard: only the tool's own
+    /// dirs count — shared/system stores (~/.aws, ~/.ssh, ~/.npmrc, .env,
+    /// login.keychain-db, browser logins) are never "own", so cross-credential
+    /// reads still alert, and the Sigma cred-theft rules (NoiseFilter Gate-8)
+    /// are unaffected by this advisory path entirely.
+    public func checkAccessDetailed(filePath: String, aiToolName: String, aiToolType: AIToolType? = nil) -> (type: CredentialType, description: String)? {
         guard let credType = checkAccess(filePath: filePath) else { return nil }
+
+        // v1.19.0 (D1 FP tuning): AI tool reading a credential file inside its
+        // OWN store (e.g. Claude → ~/.claude/.credentials.json) is benign.
+        if let aiToolType, AIToolRegistry.isOwnedByTool(filePath: filePath, toolType: aiToolType) {
+            return nil
+        }
 
         let filename = (filePath as NSString).lastPathComponent
         let description = "\(aiToolName) child process accessed \(credType.rawValue): \(filename) at \(filePath). " +

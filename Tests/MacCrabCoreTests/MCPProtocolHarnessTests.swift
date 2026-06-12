@@ -227,6 +227,51 @@ struct MCPProtocolHarnessTests {
         }
     }
 
+    /// v1.19.0 (D6): fail-open guard for the capability gate. `agentToolCapability`
+    /// (AgentControl.swift) returns nil → ALLOW for any tool not in the map, so a
+    /// new engine-mutating tool added to `handleToolCall` but forgotten in the map
+    /// silently bypasses the gate — the exact class of the v1.18 capability-bypass.
+    /// This pins the set of mutating-verb-prefixed tools advertised by tools/list
+    /// to the known gated surface, so a NEW ungated mutator fails the build. It
+    /// executes nothing (safe on any host). The forensics.* / dotted plugin
+    /// namespace is local-evidence/analysis, intentionally outside the
+    /// engine-mutation tier, and is excluded.
+    @Test("every engine-mutating tool stays in the capability gate (fail-open guard)")
+    func mutatingToolsAreGated() {
+        let objs = drive([
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ])
+        let names = Set(((byId(objs, 2)?["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? [])
+            .compactMap { $0["name"] as? String })
+        #expect(!names.isEmpty, "tools/list returned no tools")
+
+        // Engine mutators follow a verb-prefix convention. Dotted plugin tools
+        // (forensics.*) write app-side evidence, not engine detection state, and
+        // are intentionally outside the gate — excluded here.
+        let mutatingPrefixes = ["create_", "delete_", "set_", "suppress_", "reload_", "refresh_"]
+        let observed = names.filter { n in
+            !n.contains(".") && mutatingPrefixes.contains { n.hasPrefix($0) }
+        }
+
+        // The canonical gated engine-mutation surface (mirrors agentToolCapability
+        // in AgentControl.swift). Adding a mutating tool to handleToolCall means
+        // adding it to agentToolCapability AND here — otherwise it fails OPEN.
+        let expectedGated: Set<String> = [
+            "create_rule", "delete_rule",
+            "set_builtin_rule_setting", "set_daemon_config",
+            "reload_rules", "refresh_threat_intel",
+            "suppress_alert", "suppress_campaign",
+        ]
+        for n in observed {
+            #expect(expectedGated.contains(n),
+                    "mutating-verb tool '\(n)' is advertised but not in the known capability-gated set — add it to agentToolCapability (AgentControl.swift) AND this test, or it fails OPEN (the v1.18 bypass class)")
+        }
+        for n in expectedGated {
+            #expect(names.contains(n), "expected gated tool missing from tools/list: \(n)")
+        }
+    }
+
     @Test("JSON-RPC error codes for protocol-level failures")
     func jsonRpcErrorCodes() {
         let objs = drive([

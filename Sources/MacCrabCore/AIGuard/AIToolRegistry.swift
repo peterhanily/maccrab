@@ -36,6 +36,28 @@ public enum AIToolType: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// Per-tool ownership metadata: the config/state directories a tool legitimately
+/// reads/writes, and the API endpoints it legitimately talks to. Used to tell a
+/// tool touching ITS OWN store / backend (benign, down-weighted) apart from
+/// cross-tool / shared-credential access or beaconing to an unknown host
+/// (must-fire). Directory entries use a leading "~" expanded to the current
+/// user's home at lookup time.
+///
+/// IMPORTANT (must-fire safety): `ownDirs` deliberately lists ONLY each tool's
+/// own config/state directories. Shared or system credential locations
+/// (~/.aws, ~/.ssh, ~/.npmrc, .env, ~/Library/Keychains/login.keychain-db,
+/// browser login stores) are NEVER listed here, so an AI tool reading those
+/// still fires. The Sigma cred-theft rules (NoiseFilter Gate-8) are unaffected
+/// by this metadata regardless.
+public struct AIToolMetadata: Sendable {
+    public let ownDirs: [String]
+    public let knownEndpoints: [String]
+    public init(ownDirs: [String] = [], knownEndpoints: [String] = []) {
+        self.ownDirs = ownDirs
+        self.knownEndpoints = knownEndpoints
+    }
+}
+
 /// Identifies AI coding tools from executable paths and process ancestry.
 ///
 /// Uses pattern matching against known binary paths, directory structures,
@@ -113,6 +135,73 @@ public struct AIToolRegistry: Sendable {
             "kiro-helper",
         ]),
     ]
+
+    /// Per-tool own config/state dirs + known API endpoints (v1.19.0, D1 FP
+    /// tuning). Each tool's OWN store only — shared/system credential locations
+    /// are intentionally absent (see `AIToolMetadata`).
+    private static let toolMetadata: [AIToolType: AIToolMetadata] = [
+        .claudeCode: .init(
+            ownDirs: ["~/.claude", "~/.config/claude", "~/.local/share/claude", "~/.local/state/claude"],
+            knownEndpoints: ["api.anthropic.com", "anthropic.com", "claude.ai", "statsig.anthropic.com"]),
+        .codex: .init(
+            ownDirs: ["~/.codex", "~/.config/codex"],
+            knownEndpoints: ["api.openai.com", "openai.com", "chatgpt.com"]),
+        .openClaw: .init(
+            ownDirs: ["~/.openclaw", "~/.config/openclaw"],
+            knownEndpoints: []),
+        .cursor: .init(
+            ownDirs: ["~/.cursor", "~/Library/Application Support/Cursor", "~/.config/cursor"],
+            knownEndpoints: ["api.cursor.com", "cursor.sh", "api2.cursor.sh"]),
+        .aider: .init(
+            ownDirs: ["~/.aider", "~/.config/aider"],
+            knownEndpoints: ["aider.chat"]),
+        .copilot: .init(
+            ownDirs: ["~/.config/github-copilot", "~/.config/gh-copilot"],
+            knownEndpoints: ["api.githubcopilot.com", "copilot.github.com", "copilot-proxy.githubusercontent.com"]),
+        .continuedev: .init(
+            ownDirs: ["~/.continue", "~/.config/continue"],
+            knownEndpoints: ["continue.dev", "api.continue.dev"]),
+        .windsurf: .init(
+            ownDirs: ["~/.windsurf", "~/Library/Application Support/Codeium/Windsurf", "~/.codeium", "~/.config/codeium"],
+            knownEndpoints: ["codeium.com", "api.codeium.com", "server.codeium.com"]),
+        .kiro: .init(
+            ownDirs: ["~/.kiro", "~/Library/Application Support/Kiro", "~/.config/kiro"],
+            knownEndpoints: ["kiro.dev"]),
+    ]
+
+    /// Metadata (own dirs / endpoints) for a recognized tool, if modeled.
+    public static func metadata(for tool: AIToolType) -> AIToolMetadata? {
+        toolMetadata[tool]
+    }
+
+    /// True if `filePath` lies within `toolType`'s OWN config/state directory.
+    /// Conservative by construction: only the tool's own dirs are matched, so
+    /// shared/system credential reads (~/.aws, ~/.ssh, ~/.npmrc, login.keychain-db,
+    /// browser stores) never count as "own store" and are not down-weighted here.
+    public static func isOwnedByTool(filePath: String, toolType: AIToolType) -> Bool {
+        guard let meta = toolMetadata[toolType], !meta.ownDirs.isEmpty else { return false }
+        let home = NSHomeDirectory()
+        let file = (filePath as NSString).standardizingPath
+        for dir in meta.ownDirs {
+            let expanded = dir.hasPrefix("~") ? home + String(dir.dropFirst()) : dir
+            let normDir = (expanded as NSString).standardizingPath
+            if file == normDir || file.hasPrefix(normDir + "/") {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True if `hostname` is one of `toolType`'s known API endpoints. Suffix
+    /// match so subdomains (`foo.api.anthropic.com`) count, but lookalikes
+    /// (`evilanthropic.com`) do not.
+    public static func isKnownEndpoint(hostname: String, toolType: AIToolType) -> Bool {
+        guard let meta = toolMetadata[toolType], !meta.knownEndpoints.isEmpty else { return false }
+        let host = hostname.lowercased()
+        return meta.knownEndpoints.contains { ep in
+            host == ep || host.hasSuffix("." + ep)
+        }
+    }
 
     /// Custom patterns loaded from config (user-extensible).
     private let customPatterns: [(AIToolType, [String])]

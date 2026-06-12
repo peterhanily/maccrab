@@ -139,7 +139,7 @@ struct EventsSizeCapIntervalTests {
         let cfg = DaemonConfig.load(from: tmp, applyOverrides: false)
         #expect(cfg.storage.eventsSizeCapIntervalMinutes == 10)
         // Sibling storage fields untouched
-        #expect(cfg.storage.eventsMaxSizeMB == 200)
+        #expect(cfg.storage.eventsMaxSizeMB == 350)   // v1.19.0 default
         #expect(cfg.storage.eventsHotTierMinutes == 30)
         #expect(cfg.storage.alertsRetentionDays == 365)
         // Unrelated top-level field untouched

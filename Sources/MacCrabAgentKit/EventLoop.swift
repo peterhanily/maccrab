@@ -405,7 +405,8 @@ enum EventLoop {
                        !credFenceSigningTools.contains(credFenceSubject) {
                         if let (credType, credDesc) = state.credentialFence.checkAccessDetailed(
                             filePath: filePath,
-                            aiToolName: aiType?.displayName ?? "AI tool"
+                            aiToolName: aiType?.displayName ?? "AI tool",
+                            aiToolType: aiType
                         ) {
                             let alert = Alert(
                                 ruleId: "maccrab.ai-guard.credential-access",
@@ -1133,6 +1134,8 @@ enum EventLoop {
                     processPath: enrichedEvent.process.executable,
                     destinationIP: net.destinationIp,
                     destinationPort: net.destinationPort,
+                    destinationHostname: net.destinationHostname,
+                    aiTool: enrichedEvent.enrichments["ai_tool"].flatMap(AIToolType.init(rawValue:)),
                     timestamp: enrichedEvent.timestamp
                 ) {
                     let alert = Alert(

@@ -155,6 +155,8 @@ public actor TLSFingerprinter {
         processPath: String,
         destinationIP: String,
         destinationPort: UInt16,
+        destinationHostname: String? = nil,
+        aiTool: AIToolType? = nil,
         timestamp: Date
     ) -> TLSAlert? {
         // Skip browsers and system processes
@@ -204,6 +206,16 @@ public actor TLSFingerprinter {
 
         // Beacon detection: regular interval connections from same process to same dest
         if destinationPort == 443 {
+            // v1.19.0 (D1 FP tuning): a recognized AI coding tool polling its
+            // OWN API backend is API traffic, not C2 — skip the beacon
+            // heuristic for (AI tool → its known endpoint) by hostname, or
+            // (AI tool → a well-known AI/cloud IP prefix) when DNS wasn't
+            // correlated. Real C2 to an unknown dest still beacons; the
+            // C2-port / suspicious-port checks above and the per-destIP
+            // history for OTHER destinations are unaffected.
+            if let aiTool, Self.isOwnAIBackend(aiTool: aiTool, hostname: destinationHostname, ip: destinationIP) {
+                return nil
+            }
             let key = "\(processPath):\(destinationIP)"
             var history = connectionHistory[key] ?? []
             history.append(timestamp)
@@ -244,6 +256,22 @@ public actor TLSFingerprinter {
         }
 
         return nil
+    }
+
+    /// True when `aiTool` is talking to its own/known AI backend — by hostname
+    /// (precise, per-tool), or, when DNS wasn't correlated, by a well-known
+    /// AI/cloud IP prefix (the same list `AINetworkSandbox` already trusts for
+    /// AI-tool traffic). Only recognized AI tools get this skip; an arbitrary
+    /// process beaconing to the same prefix still fires.
+    static func isOwnAIBackend(aiTool: AIToolType, hostname: String?, ip: String) -> Bool {
+        if let host = hostname, !host.isEmpty,
+           AIToolRegistry.isKnownEndpoint(hostname: host, toolType: aiTool) {
+            return true
+        }
+        for prefix in AINetworkSandbox.wellKnownCloudPrefixes where ip.hasPrefix(prefix) {
+            return true
+        }
+        return false
     }
 
     // MARK: - Maintenance

@@ -265,7 +265,7 @@ Optional `daemon_config.json` in the support directory overrides defaults:
   "rootkit_poll_interval": 120,
   "storage": {
     "events_hot_tier_minutes": 30,
-    "events_max_size_mb": 200,
+    "events_max_size_mb": 350,
     "events_size_cap_interval_minutes": 60,
     "aggregate_days": 90,
     "alerts_retention_days": 365,
@@ -282,7 +282,7 @@ Optional `daemon_config.json` in the support directory overrides defaults:
 }
 ```
 
-All keys are optional — missing keys use defaults from `DaemonConfig.swift`. Since v1.8 the per-tier retention/size knobs live under `storage{}`; the legacy v1.7 top-level keys (`retention_days`, `max_database_size_mb`) still decode and are folded onto the storage block at load time. Since v1.18 the `tracegraph_*` and `traces_*` caps (previously hardcoded in `DaemonTimers`) are tunable here, and `tracegraph.db`'s global entity/edge substrate gets its own orphan-aware retention sweep (`SQLiteCausalGraphStore.pruneOrphanedGraph` / `pruneOldestGraph`) — before v1.18 nothing pruned `trace_edges` / `trace_entities`, so the file grew unbounded. Forensic-scan (`Cases/`) retention is an app-side setting (`forensics.retentionDays`, default 365d), enforced by `CaseManager.pruneCases` at dashboard launch and via Settings → "Run cleanup now".
+All keys are optional — missing keys use defaults from `DaemonConfig.swift`. Note `events_max_size_mb` is a whole-**file** cap: `events.db` also carries `alert_evidence` (its own ~100 MB sub-cap) and the events FTS5 search index (~60 MB on a busy host), so on an active machine the file floor is ~300 MB regardless of the events working set. v1.19.0 raised the default 200 → 350 to be honest about those components (the events working set itself is still bounded by `events_hot_tier_minutes`). Since v1.8 the per-tier retention/size knobs live under `storage{}`; the legacy v1.7 top-level keys (`retention_days`, `max_database_size_mb`) still decode and are folded onto the storage block at load time. Since v1.18 the `tracegraph_*` and `traces_*` caps (previously hardcoded in `DaemonTimers`) are tunable here, and `tracegraph.db`'s global entity/edge substrate gets its own orphan-aware retention sweep (`SQLiteCausalGraphStore.pruneOrphanedGraph` / `pruneOldestGraph`) — before v1.18 nothing pruned `trace_edges` / `trace_entities`, so the file grew unbounded. Forensic-scan (`Cases/`) retention is an app-side setting (`forensics.retentionDays`, default 365d), enforced by `CaseManager.pruneCases` at dashboard launch and via Settings → "Run cleanup now".
 
 ## Data Locations
 

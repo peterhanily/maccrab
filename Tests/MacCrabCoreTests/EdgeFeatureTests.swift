@@ -43,6 +43,60 @@ struct TLSFingerprinterTests {
         let result = await fp.analyze(processName: "Safari", processPath: "/Applications/Safari.app/Contents/MacOS/Safari", destinationIP: "1.2.3.4", destinationPort: 443, timestamp: Date())
         #expect(result == nil)
     }
+
+    // v1.19.0 (D1): a recognized AI tool polling its OWN API backend at a
+    // regular interval is API traffic, not C2 — the beacon heuristic must skip
+    // it. Real C2 (unknown dest) and non-AI processes still beacon (must-fire).
+
+    /// Feed `count` regular-interval (default 60s) port-443 connections from the
+    /// same process→dest and return the last analyze() result.
+    private func feedBeacon(_ fp: TLSFingerprinter, processName: String, processPath: String,
+                            ip: String, hostname: String?, aiTool: AIToolType?,
+                            count: Int = 5, interval: TimeInterval = 60) async -> TLSFingerprinter.TLSAlert? {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        var last: TLSFingerprinter.TLSAlert?
+        for i in 0..<count {
+            last = await fp.analyze(
+                processName: processName, processPath: processPath,
+                destinationIP: ip, destinationPort: 443,
+                destinationHostname: hostname, aiTool: aiTool,
+                timestamp: base.addingTimeInterval(Double(i) * interval))
+        }
+        return last
+    }
+
+    @Test("Beacon fires for a non-AI process (regression — heuristic intact)")
+    func beaconFiresForNonAITool() async {
+        let r = await feedBeacon(TLSFingerprinter(), processName: "implant",
+                                 processPath: "/tmp/implant",
+                                 ip: "203.0.113.7", hostname: nil, aiTool: nil)
+        #expect(r?.alertType == .beaconDetected)
+    }
+
+    @Test("AI tool polling its OWN endpoint (by hostname) is not a beacon")
+    func aiOwnEndpointHostnameSuppressed() async {
+        let r = await feedBeacon(TLSFingerprinter(), processName: "claude",
+                                 processPath: "/Users/u/.local/share/claude/versions/2.1.0/claude",
+                                 ip: "203.0.113.7", hostname: "api.anthropic.com", aiTool: .claudeCode)
+        #expect(r == nil)
+    }
+
+    @Test("AI tool polling its OWN backend by IP prefix (DNS uncorrelated) is not a beacon")
+    func aiOwnEndpointIPPrefixSuppressed() async {
+        // 160.79.104.* is Anthropic's Fastly-fronted prefix (AINetworkSandbox).
+        let r = await feedBeacon(TLSFingerprinter(), processName: "claude",
+                                 processPath: "/Users/u/.local/share/claude/versions/2.1.0/claude",
+                                 ip: "160.79.104.10", hostname: nil, aiTool: .claudeCode)
+        #expect(r == nil)
+    }
+
+    @Test("AI tool beaconing to an UNKNOWN dest still fires (must-fire guard)")
+    func aiNonOwnDestStillBeacons() async {
+        let r = await feedBeacon(TLSFingerprinter(), processName: "claude",
+                                 processPath: "/Users/u/.local/share/claude/versions/2.1.0/claude",
+                                 ip: "203.0.113.7", hostname: "exfil.example.com", aiTool: .claudeCode)
+        #expect(r?.alertType == .beaconDetected)
+    }
 }
 
 @Suite("Git Security Monitor")

@@ -425,3 +425,74 @@ struct CredentialFenceTrustStoreTests {
         #expect(fence.checkAccess(filePath: "/Users/x/.ssh/id_rsa") == .sshKey)
     }
 }
+
+/// v1.19.0 (D1 FP tuning): an AI tool touching ITS OWN config/state store or
+/// polling ITS OWN API backend is benign and down-weighted; cross-tool,
+/// shared/system-credential, and unknown-dest activity must still fire.
+@Suite("AI Guard: D1 own-store / own-endpoint tuning (v1.19.0)")
+struct AIGuardD1TuningTests {
+
+    // MARK: isOwnedByTool — only a tool's OWN config/state dir counts.
+
+    @Test("isOwnedByTool: a tool's own config/state dir is recognized")
+    func ownDirRecognized() {
+        let home = NSHomeDirectory()
+        #expect(AIToolRegistry.isOwnedByTool(filePath: home + "/.claude/.credentials.json", toolType: .claudeCode))
+        #expect(AIToolRegistry.isOwnedByTool(filePath: home + "/.local/share/claude/versions/2.1.0/x", toolType: .claudeCode))
+        #expect(AIToolRegistry.isOwnedByTool(filePath: home + "/.codex/.env", toolType: .codex))
+    }
+
+    @Test("isOwnedByTool: cross-tool + shared/system creds are NEVER 'own' (hard guard)")
+    func crossAndSharedNotOwned() {
+        let home = NSHomeDirectory()
+        // Claude reading codex's store = cross-tool → not owned.
+        #expect(!AIToolRegistry.isOwnedByTool(filePath: home + "/.codex/.env", toolType: .claudeCode))
+        // Shared / system credential locations are never any tool's "own" store.
+        #expect(!AIToolRegistry.isOwnedByTool(filePath: home + "/.aws/credentials", toolType: .claudeCode))
+        #expect(!AIToolRegistry.isOwnedByTool(filePath: home + "/.ssh/id_rsa", toolType: .claudeCode))
+        #expect(!AIToolRegistry.isOwnedByTool(filePath: home + "/Library/Keychains/login.keychain-db", toolType: .claudeCode))
+        #expect(!AIToolRegistry.isOwnedByTool(filePath: home + "/.npmrc", toolType: .claudeCode))
+        // A sibling dir that merely PREFIXES the name must not match (~/.claudex).
+        #expect(!AIToolRegistry.isOwnedByTool(filePath: home + "/.claudex/secret", toolType: .claudeCode))
+    }
+
+    // MARK: isKnownEndpoint — suffix match, anti-lookalike, per-tool.
+
+    @Test("isKnownEndpoint: own endpoint + subdomains match; lookalikes + other tools do not")
+    func knownEndpointMatching() {
+        #expect(AIToolRegistry.isKnownEndpoint(hostname: "api.anthropic.com", toolType: .claudeCode))
+        #expect(AIToolRegistry.isKnownEndpoint(hostname: "edge.api.anthropic.com", toolType: .claudeCode))   // subdomain
+        #expect(!AIToolRegistry.isKnownEndpoint(hostname: "evilanthropic.com", toolType: .claudeCode))        // lookalike
+        #expect(!AIToolRegistry.isKnownEndpoint(hostname: "api.anthropic.com.evil.net", toolType: .claudeCode))
+        #expect(!AIToolRegistry.isKnownEndpoint(hostname: "api.openai.com", toolType: .claudeCode))            // other tool
+        #expect(AIToolRegistry.isKnownEndpoint(hostname: "api.openai.com", toolType: .codex))
+    }
+
+    // MARK: CredentialFence — own-store read down-weighted; everything else fires.
+
+    @Test("CredentialFence: AI tool reading its OWN store is down-weighted (nil)")
+    func ownStoreReadDownWeighted() {
+        let fence = CredentialFence()
+        let home = NSHomeDirectory()
+        // codex reading a credential-shaped file inside ~/.codex → not exfil → nil.
+        #expect(fence.checkAccessDetailed(filePath: home + "/.codex/.env", aiToolName: "Codex", aiToolType: .codex) == nil)
+    }
+
+    @Test("CredentialFence: cross-cred / cross-tool / system reads STILL fire (must-fire guard)")
+    func crossReadsStillFire() {
+        let fence = CredentialFence()
+        let home = NSHomeDirectory()
+        // Same .env name, but in a SHARED home location (not the tool's own dir) → fires.
+        #expect(fence.checkAccessDetailed(filePath: home + "/.env", aiToolName: "Codex", aiToolType: .codex) != nil)
+        // System keychain read by an AI tool → fires.
+        #expect(fence.checkAccessDetailed(filePath: home + "/Library/Keychains/login.keychain-db", aiToolName: "Claude Code", aiToolType: .claudeCode) != nil)
+        // ~/.aws/credentials by an AI tool → fires.
+        #expect(fence.checkAccessDetailed(filePath: home + "/.aws/credentials", aiToolName: "Claude Code", aiToolType: .claudeCode) != nil)
+        // SSH private key by an AI tool → fires.
+        #expect(fence.checkAccessDetailed(filePath: home + "/.ssh/id_rsa", aiToolName: "Claude Code", aiToolType: .claudeCode) != nil)
+        // CROSS-TOOL: Claude reading codex's own dir is NOT Claude's own store → fires.
+        #expect(fence.checkAccessDetailed(filePath: home + "/.codex/.env", aiToolName: "Claude Code", aiToolType: .claudeCode) != nil)
+        // No tool context (aiToolType nil) → unchanged behavior, still fires.
+        #expect(fence.checkAccessDetailed(filePath: home + "/.codex/.env", aiToolName: "AI tool") != nil)
+    }
+}
