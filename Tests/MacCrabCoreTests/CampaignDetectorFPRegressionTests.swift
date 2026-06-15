@@ -81,13 +81,20 @@ struct CampaignDetectorFPRegressionTests {
     @Test("Guard is scoped: same keychain rules WITHOUT AI attribution still form a campaign")
     func nonAiKeychainStillCoordinated() async {
         let detector = CampaignDetector()
+        // v1.19.0: the rc.3 severity floor now excludes LOW alerts from the
+        // coordinated-attack counter regardless of AI attribution (the floor
+        // generalizes the older AI-only keychain-breadcrumb guard; the LOW
+        // behavior is covered by devRuntimeLowMediumNotCoordinated). This test
+        // keeps proving the AI-keychain guard is SCOPED to AI by lifting the
+        // (non-AI) keychain rules to MEDIUM — above the floor, so absent AI
+        // attribution they still correlate into a campaign.
         _ = await detector.processAlert(
             .init(ruleId: "d1a2b3c4-0448-4000-a000-000000000448", ruleTitle: "Keychain Unlock",
-                  severity: .low, processPath: "/usr/bin/security", pid: 7000,
+                  severity: .medium, processPath: "/usr/bin/security", pid: 7000,
                   tactics: ["attack.credential_access"]))
         let campaigns = await detector.processAlert(
             .init(ruleId: "d1a2b3c4-0501-4000-a000-000000000501", ruleTitle: "Wi-Fi Password",
-                  severity: .low, processPath: "/usr/bin/security", pid: 7000,
+                  severity: .medium, processPath: "/usr/bin/security", pid: 7000,
                   tactics: ["attack.credential_access", "attack.wireless"]))
         #expect(!campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
     }
@@ -253,5 +260,48 @@ struct CampaignDetectorFPRegressionTests {
                       pid: 6100 + i, tactics: [t], isTrustedSubject: true))
         }
         #expect(!allCampaigns.filter { $0.type == .killChain }.isEmpty)
+    }
+
+    // MARK: - v1.19.0 (rc.3 live finding): coordinated-attack severity floor
+    //
+    // CAMP-995FA329: a benign Cloudflare wrangler dev runtime (workerd) minted a
+    // CRITICAL "Persistent Threat Actor" from a LOW "node_modules exec" + a
+    // MEDIUM "curl|exec" alert spanning 3 tactics on one PID. The coordinated-
+    // attack tactic counter lacked the severity floor (and benign-process /
+    // usb / crypto-token excludes) that checkKillChain already has; now mirrored.
+
+    @Test("rc.3: a benign dev runtime's LOW+MEDIUM alerts do NOT mint a CRITICAL coordinated attack (workerd FP)")
+    func devRuntimeLowMediumNotCoordinated() async {
+        let detector = CampaignDetector()
+        let workerd = "/Users/x/node_modules/@cloudflare/workerd-darwin-arm64/bin/workerd"
+        _ = await detector.processAlert(
+            .init(ruleId: "exec.node_modules", ruleTitle: "Binary Executed Directly from node_modules Directory",
+                  severity: .low, processPath: workerd, pid: 51409,
+                  tactics: ["attack.execution", "attack.initial_access"]))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "exec.curl_pipe", ruleTitle: "Curl/Wget Fetch Followed By Execution From User-Writable Path",
+                  severity: .medium, processPath: workerd, pid: 51409,
+                  tactics: ["attack.execution", "attack.command_and_control", "attack.initial_access"]))
+        // The LOW alert is below the .medium floor and drops out, leaving one
+        // distinct rule → the existing >=2-ruleIds gate rejects → no campaign.
+        #expect(campaigns.filter { $0.type == .coordinatedAttack }.isEmpty)
+    }
+
+    @Test("rc.3: severity floor preserves a genuine medium+ multi-rule coordinated attack")
+    func genuineMediumMultiRuleStillCoordinated() async {
+        let detector = CampaignDetector()
+        // Two DISTINCT medium rules on one non-benign pid spanning 3 tactics —
+        // a real coordinated attack must STILL mint CRITICAL after the floor.
+        _ = await detector.processAlert(
+            .init(ruleId: "exec.a", ruleTitle: "A", severity: .medium,
+                  processPath: "/tmp/implant", pid: 52000,
+                  tactics: ["attack.execution"]))
+        let campaigns = await detector.processAlert(
+            .init(ruleId: "c2.b", ruleTitle: "B", severity: .medium,
+                  processPath: "/tmp/implant", pid: 52000,
+                  tactics: ["attack.command_and_control", "attack.initial_access"]))
+        let coordinated = campaigns.filter { $0.type == .coordinatedAttack }
+        #expect(!coordinated.isEmpty)
+        #expect(coordinated.first?.severity == .critical)  // 3 tactics → CRITICAL Persistent Threat Actor
     }
 }

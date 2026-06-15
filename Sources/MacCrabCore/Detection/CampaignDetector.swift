@@ -741,8 +741,24 @@ public actor CampaignDetector {
         // agents touching 2-3 tactics ~every 2h). HIGH/CRITICAL trusted/agent
         // alerts STILL feed. Applied to the grouped sets so BOTH the PID and
         // process-path branches count only genuine multi-step signal.
+        // v1.19.0 (rc.3 live-test finding): the coordinated-attack tactic
+        // counter must apply the SAME contributing-alert filter as
+        // checkKillChain (above) — a severity floor + the benign-process /
+        // usb / crypto-token excludes. Pre-this it had NONE (the comment below
+        // admits it), so a benign dev runtime (workerd / wrangler) minted a
+        // CRITICAL "Persistent Threat Actor" from a LOW "node_modules exec" +
+        // a MEDIUM "curl|exec" alert spanning 3 tactics on one PID
+        // (CAMP-995FA329). With the >= .medium floor the LOW alert drops out,
+        // leaving one distinct rule, which the `distinctRuleIds.count >= 2`
+        // gate below already rejects. Genuine multi-rule medium+ attacks on a
+        // single PID still mint the campaign (must-fire preserved).
         let windowAlerts = recentAlerts.filter {
-            $0.timestamp > cutoff && !isLowSignalTrustedOrAgent($0)
+            $0.timestamp > cutoff
+            && $0.severity >= .medium
+            && !$0.ruleId.hasPrefix("maccrab.usb.")
+            && !$0.ruleId.hasPrefix("maccrab.deep.crypto_token_extension")
+            && !Self.isKnownBenignProcess(processPath: $0.processPath)
+            && !isLowSignalTrustedOrAgent($0)
         }
 
         // v1.17.4 / CAMP-1: an AI coding tool legitimately querying the

@@ -16,7 +16,10 @@ extension MacCrabCtl {
             return
         }
 
-        let jsonFiles = files.filter { $0.hasSuffix(".json") }.sorted()
+        // v1.19.0: exclude manifest.json (the rule-bundle manifest, not a rule —
+        // it has no `level` key) so the count matches the engine's loaded total
+        // (436) instead of inflating to 437 / showing a phantom "unknown" level.
+        let jsonFiles = files.filter { $0.hasSuffix(".json") && $0 != "manifest.json" }.sorted()
 
         print("Detection Rules (\(jsonFiles.count) total)")
         print("══════════════════════════════════════════════════════════════")
@@ -65,7 +68,9 @@ extension MacCrabCtl {
         var bySeverity: [String: Int] = [:]
         var byCategory: [String: Int] = [:]
 
-        for file in files where file.hasSuffix(".json") {
+        // v1.19.0: skip manifest.json (not a rule, no `level`) so `rules count`
+        // doesn't show a phantom "unknown: 1" severity or a 437 total.
+        for file in files where file.hasSuffix(".json") && file != "manifest.json" {
             let path = compiledDir + "/" + file
             guard let data = FileManager.default.contents(atPath: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
