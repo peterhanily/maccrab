@@ -102,6 +102,7 @@ struct V2ForensicsSettingsSheet: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(friendlyName(p.pluginID))
                     .scaledSystem(13, weight: .semibold)
+                provenanceBadge(p)
                 Text("Publisher key: \(p.publicKeyHex.prefix(16))…")
                     .scaledSystem(10, design: .monospaced)
                     .foregroundStyle(.secondary)
@@ -117,6 +118,19 @@ struct V2ForensicsSettingsSheet: View {
             .controlSize(.small)
         }
         .padding(.vertical, 4)
+    }
+
+    /// v1.19.0: provenance badge for an installed (Tier B) plugin — "Store"
+    /// (carries a signed rave-catalog install receipt) vs "Third-party"
+    /// (operator-trusted local sideload). First-party scanners ship built-in and
+    /// aren't listed in this Tier-B section.
+    private func provenanceBadge(_ p: InstalledPlugin) -> some View {
+        let receiptsDir = URL(fileURLWithPath: (installer.pluginsRootPath as NSString).deletingLastPathComponent)
+            .appendingPathComponent("plugin_receipts")
+        let prov = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
+        return Label(prov.displayName, systemImage: prov.symbolName)
+            .scaledSystem(10)
+            .foregroundStyle(prov == .store ? Color.green : Color.orange)
     }
 
     private var trustSection: some View {

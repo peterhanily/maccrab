@@ -23,6 +23,10 @@ public actor TierBBootstrap {
         public let version: String
         public let bundleRoot: String
         public let publicKeyHex: String
+        /// v1.19.0: where this installed plugin came from — `.store` (has a
+        /// signed rave-catalog receipt) or `.thirdParty` (operator-trusted
+        /// sideload). Built-in (Tier A) plugins are `.builtIn` elsewhere.
+        public let provenance: PluginProvenance
     }
 
     public struct FailedSummary: Sendable {
@@ -101,12 +105,16 @@ public actor TierBBootstrap {
         // catalog clients' revocation reconciliation). Surfaced separately
         // from `failed` so an operator can tell "revoked" apart from "broke".
         let quarantineMap = await installer.currentQuarantine()
+        // Receipts live next to the plugins dir: <supportDir>/plugin_receipts.
+        let supportDir = (installer.pluginsRootPath as NSString).deletingLastPathComponent
+        let receiptsDir = URL(fileURLWithPath: supportDir).appendingPathComponent("plugin_receipts")
         let verified = report.verified.map { p in
             VerifiedSummary(
                 pluginID: p.pluginID,
                 version: p.manifest.version,
                 bundleRoot: p.bundleRoot,
-                publicKeyHex: p.publicKeyHex
+                publicKeyHex: p.publicKeyHex,
+                provenance: PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
             )
         }
         // After resolving, registry stamps temp binaries on disk.

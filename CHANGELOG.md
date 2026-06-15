@@ -19,6 +19,10 @@ end-to-end-verified plugin catalog, and bounded storage.
   in-app catalog browser is live behind this verified path.
 - **Forensic evidence integrity.** Collected case artifacts carry a
   signed, append-only chain-of-custody verifiable offline.
+- **Plugin provenance labels.** The dashboard, CLI, and agent surfaces
+  label each plugin as built-in (first-party), third-party
+  (operator-trusted publisher key), or store (catalog-installed, with a
+  signed install receipt), so a scanner's origin is always clear.
 - **CI + provenance.** SHA-pinned continuous integration with SLSA
   build provenance; the release pipeline is decomposed into
   reproducible stages; key-rotation runbooks.
@@ -30,10 +34,13 @@ end-to-end-verified plugin catalog, and bounded storage.
   Developer-ID app is now trust-filtered like any other match; the
   curated must-fire set (ransomware, SIP/Gatekeeper/AMFI tampering,
   revoked certs, C2, credential theft) still always fires.
-- **Attack-campaign correlation ignores routine dev/agent tooling** at
-  low/medium severity (high/critical still contribute), so build
-  helpers, test runners, and AI coding tools stop minting false
-  multi-stage campaigns.
+- **Attack-campaign correlation applies a consistent severity floor +
+  benign-process filter across BOTH correlators** (kill-chain and
+  coordinated-attack), so build helpers, test runners, AI coding tools,
+  and local dev runtimes that trip a few low/medium tactic rules stop
+  minting false multi-stage / "Persistent Threat Actor" campaigns.
+  Genuine medium-and-above, multi-rule activity still correlates
+  (high/critical from trusted or agent tooling included).
 - Rule-count surfaces are consistent across the app, README, and site
   (483 Sigma rules + 46 built-in detections).
 
@@ -46,6 +53,16 @@ end-to-end-verified plugin catalog, and bounded storage.
 - The built-in rule severity control reflects the active override
   instead of always showing "Default."
 - Dashboard tables no longer flash empty for one frame on open.
+- Coordinated-attack correlation no longer mints a critical "Persistent
+  Threat Actor" from a benign dev runtime that trips a couple of
+  low/medium tactic rules on one process — the coordinated-attack path
+  now carries the same severity floor and benign-process filter the
+  kill-chain path already had.
+- The events database stays within an honest size cap (the default was
+  raised to account for the full-text search index and captured evidence
+  the file also holds, which it previously overshot).
+- `maccrabctl rules list` / `rules count` no longer miscount the
+  rule-bundle manifest as a rule (now a consistent 436 single-event).
 
 ## [1.18.1] — 2026-06-11
 

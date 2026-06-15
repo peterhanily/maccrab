@@ -176,9 +176,15 @@ private func pluginList(args: [String] = []) async {
                 }
                 // Don't double-print under filter=all if there are none
             } else {
-                print("Installed third-party plugins:")
+                // v1.19.0: label each install by provenance — store (signed
+                // rave-catalog receipt) vs operator-trusted third-party sideload.
+                // Receipts live at <supportDir>/plugin_receipts.
+                let receiptsDir = URL(fileURLWithPath: (installer.pluginsRootPath as NSString).deletingLastPathComponent)
+                    .appendingPathComponent("plugin_receipts")
+                print("Installed plugins:")
                 for p in installed {
-                    print("  \(p.pluginID)  key=\(p.publicKeyHex.prefix(16))…")
+                    let prov = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
+                    print("  \(p.pluginID)  [\(prov.displayName)]  key=\(p.publicKeyHex.prefix(16))…")
                     print("    Root: \(p.installRoot)")
                 }
             }

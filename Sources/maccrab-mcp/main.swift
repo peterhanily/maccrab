@@ -974,6 +974,9 @@ private func tierBStatusPayload(_ status: TierBBootstrap.Status) -> [String: Any
                 "version": v.version,
                 "bundle_root": v.bundleRoot,
                 "publisher_key_hex": v.publicKeyHex,
+                // v1.19.0: "store" (signed rave-catalog receipt) vs "third-party"
+                // (operator-trusted sideload). Built-ins are listed separately.
+                "provenance": v.provenance.rawValue,
             ]
         },
         "failed": status.failed.map { f -> [String: Any] in
@@ -2548,6 +2551,9 @@ func handleForensicsListPlugins(_ args: [String: Any]) async -> Any {
             // MCP surface today (their declared mcpTools appear in tools/list);
             // other types declare tools that ship when their run-path lands.
             "runnable_via_mcp": m.type == .collector,
+            // v1.19.0: forensics.list_plugins enumerates the Tier A first-party
+            // catalog shipped inside the app — all built-in by definition.
+            "provenance": PluginProvenance.builtIn.rawValue,
         ]
     }
     return ["content": [["type": "text", "text": jsonStringify(["plugins": payload])]]]
