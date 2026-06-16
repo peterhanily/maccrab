@@ -35,10 +35,29 @@ public enum RaveNamespaceGuard {
     /// "MacCrab iMessage", "Mac-Crab  iMessage!", and "MacCr4b iMessage" all
     /// collapse to the same key.
     static func normalize(_ s: String) -> String {
+        // Width-fold (fullwidth/halfwidth → ASCII), strip diacritics, and
+        // case-fold first, so "ＭａｃＣｒａｂ" and "Mäccrab" collapse toward the
+        // ASCII key before homoglyph mapping.
+        let width = s.folding(
+            options: [.widthInsensitive, .diacriticInsensitive, .caseInsensitive],
+            locale: nil
+        )
+        // Map common look-alikes to their Latin twin: ASCII leetspeak/symbols
+        // AND cross-script homoglyphs (Cyrillic + Greek), so a Cyrillic "а" or a
+        // Greek "ο" can't impersonate an ASCII first-party name. (C-F Unicode
+        // hardening — width-folding alone keeps non-ASCII letters as-is.)
         let homoglyphs: [Character: Character] = [
+            // leetspeak / symbols
             "0": "o", "1": "l", "5": "s", "3": "e", "4": "a", "@": "a", "$": "s", "7": "t",
+            // Cyrillic look-alikes
+            "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y",
+            "к": "k", "м": "m", "т": "t", "в": "b", "н": "h", "і": "i", "ѕ": "s",
+            "ј": "j", "ԁ": "d", "ɡ": "g", "ո": "n",
+            // Greek look-alikes
+            "α": "a", "ο": "o", "ε": "e", "ρ": "p", "ν": "v", "τ": "t", "κ": "k",
+            "ι": "i", "β": "b", "ϲ": "c", "υ": "u", "χ": "x", "μ": "m",
         ]
-        let folded = s.lowercased().map { homoglyphs[$0] ?? $0 }
+        let folded = width.lowercased().map { homoglyphs[$0] ?? $0 }
         return String(String(folded).unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
     }
 

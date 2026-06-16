@@ -49,6 +49,25 @@ struct RaveNamespaceGuardTests {
         if case .confusableDisplayName = e {} else { Issue.record("expected confusable, got \(e)") }
     }
 
+    @Test("C-F Unicode: Cyrillic / Greek / fullwidth homoglyph names are flagged confusable")
+    func unicodeConfusables() {
+        // Cyrillic а,С,r,а look-alikes for "MacCrab iMessage Collector".
+        let cyr = RaveNamespaceGuard.evaluate(
+            id: "com.x.cyr", displayName: "Mа\u{0441}Crab iMessage Collector",
+            isFirstParty: false, firstPartyDisplayNames: firstPartyNames)
+        if case .confusableDisplayName = cyr {} else { Issue.record("expected confusable (Cyrillic), got \(cyr)") }
+        // Fullwidth Latin "ＡｐｐｌｅＳｃｒｉｐｔ Ｒｕｎｔｉｍｅ".
+        let fw = RaveNamespaceGuard.evaluate(
+            id: "com.x.fw", displayName: "\u{FF21}\u{FF50}\u{FF50}\u{FF4C}\u{FF45}\u{FF33}\u{FF43}\u{FF52}\u{FF49}\u{FF50}\u{FF54} \u{FF32}\u{FF55}\u{FF4E}\u{FF54}\u{FF49}\u{FF4D}\u{FF45}",
+            isFirstParty: false, firstPartyDisplayNames: firstPartyNames)
+        if case .confusableDisplayName = fw {} else { Issue.record("expected confusable (fullwidth), got \(fw)") }
+        // Greek ο look-alike inside "TCC Grants" is distinct enough; use a Greek-folded "TCC Grαnts".
+        let gr = RaveNamespaceGuard.evaluate(
+            id: "com.x.gr", displayName: "TCC Gr\u{03B1}nts",
+            isFirstParty: false, firstPartyDisplayNames: firstPartyNames)
+        if case .confusableDisplayName = gr {} else { Issue.record("expected confusable (Greek), got \(gr)") }
+    }
+
     @Test("a genuinely distinct third-party name is OK")
     func distinctNameOK() {
         let v = RaveNamespaceGuard.evaluate(id: "com.acme.scanner", displayName: "Acme Disk Scanner",
