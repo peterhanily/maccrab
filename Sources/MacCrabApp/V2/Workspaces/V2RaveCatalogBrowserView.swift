@@ -436,6 +436,7 @@ struct V2RaveCatalogBrowserView: View {
         case .preRelease:             return "Pre-release"
         case .versionFloorBlocked:    return "Unavailable on this MacCrab"
         case .revoked:                return "Revoked"
+        case .impersonation:          return "Impersonation — refused"
         }
     }
 
@@ -446,6 +447,7 @@ struct V2RaveCatalogBrowserView: View {
         case .preRelease:             return "clock.badge"
         case .versionFloorBlocked:    return "exclamationmark.triangle"
         case .revoked:                return "xmark.octagon"
+        case .impersonation:          return "exclamationmark.shield"
         }
     }
 
@@ -465,6 +467,8 @@ struct V2RaveCatalogBrowserView: View {
             badge("Needs newer MacCrab", icon: "exclamationmark.triangle.fill", color: .orange)
         case .revoked:
             badge("Revoked", icon: "xmark.octagon.fill", color: .red)
+        case .impersonation:
+            badge("Impersonation", icon: "exclamationmark.shield.fill", color: .red)
         }
     }
 

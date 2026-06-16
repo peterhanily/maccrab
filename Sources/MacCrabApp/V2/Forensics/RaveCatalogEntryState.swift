@@ -49,6 +49,9 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
         case versionFloorBlocked(reason: String)
         /// No pill — the entry is revoked by the signed revocation list.
         case revoked(reason: String)
+        /// No pill — a non-first-party entry claims the reserved com.maccrab.*
+        /// namespace (first-party impersonation). Never offered. (C-F)
+        case impersonation(reason: String)
     }
 
     public let entry: RaveCatalogEntry
@@ -95,6 +98,8 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
             return reason
         case .revoked(let reason):
             return "Revoked: \(reason)"
+        case .impersonation(let reason):
+            return reason
         }
     }
 
@@ -118,6 +123,24 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
         revocations: RaveRevocationList?,
         floorCheck: (RaveCatalogEntry) throws -> Void
     ) -> RaveCatalogEntryState {
+        // 0. Namespace impersonation (C-F) — a non-first-party entry must never
+        //    claim the reserved com.maccrab.* id space. Refuse before anything
+        //    else. (The display-name confusable check activates once the catalog
+        //    display_name is decoded; the reserved-namespace check needs only
+        //    id + trust_tier, both present here.)
+        if case .reservedNamespaceImpersonation = RaveNamespaceGuard.evaluate(
+            id: entry.id, displayName: entry.id,
+            isFirstParty: entry.trustTier == "first-party",
+            firstPartyDisplayNames: []
+        ) {
+            return RaveCatalogEntryState(
+                entry: entry,
+                installability: .impersonation(reason: "Reserved namespace 'com.maccrab.*' used by a non-first-party publisher — refused to prevent first-party impersonation."),
+                isRevoked: false,
+                revocationReason: nil
+            )
+        }
+
         // 1. Revocation (highest precedence — never offer a revoked plugin).
         if let list = revocations {
             let hits = list.entriesRevoking(pluginID: entry.id, version: entry.currentVersion)
