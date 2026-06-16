@@ -135,6 +135,17 @@ public struct RaveTrustStateStore: Sendable {
         try save(state)
     }
 
+    /// Highest catalog_serial ever accepted from a signature-verified catalog,
+    /// or nil if none has been seen. v1.19.0: lets a consumer reject a
+    /// serial→serial-less REGRESSION (an old, pre-serial signed catalog replayed
+    /// after a serial'd one was already accepted) without forging a lower serial.
+    public func currentCatalogSerial() -> Int? { load().catalogSerial }
+
+    /// Highest revocations serial ever accepted, or nil. Same regression guard
+    /// as `currentCatalogSerial` — closes the replay of a pre-serial signed
+    /// revocations.json that would otherwise silently un-revoke a plugin.
+    public func currentRevocationsSerial() -> Int? { load().revocationsSerial }
+
     static func decide(stored: Int?, incoming: Int) -> RaveSerialDecision {
         guard let stored = stored else { return .firstSeen }
         if incoming < stored { return .rollback(stored: stored, incoming: incoming) }

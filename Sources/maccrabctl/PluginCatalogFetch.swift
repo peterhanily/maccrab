@@ -41,6 +41,8 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     case signerKeyAbsentOnOfficial(id: String)
     case catalogRollback(stored: Int, incoming: Int)
     case revocationsRollback(stored: Int, incoming: Int)
+    case catalogSerialMissing
+    case revocationsSerialMissing
     case revocationsParseFailed(reason: String)
     case pluginRevoked(id: String, version: String, reason: String, code: String)
     case versionFloor(reason: String)
@@ -75,6 +77,10 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
             return "Catalog rollback rejected — signed catalog_serial \(incoming) is older than the last-accepted serial \(stored). Keeping the prior trusted catalog (stale/replay)."
         case .revocationsRollback(let stored, let incoming):
             return "Revocations rollback rejected — signed revocations serial \(incoming) is older than the last-accepted serial \(stored). Keeping the prior revocation state (un-revoke replay)."
+        case .catalogSerialMissing:
+            return "Refusing to install — the signature-verified catalog carries no catalog_serial. Post-launch every official rave catalog is serial-stamped; an absent serial is a pre-ceremony or replayed catalog and is rejected (fail-closed anti-rollback)."
+        case .revocationsSerialMissing:
+            return "Refusing to install — the signature-verified revocation list carries no serial. An absent serial is a pre-ceremony or replayed list that could silently un-revoke a plugin; rejected (fail-closed anti-rollback)."
         case .revocationsParseFailed(let reason):
             return "Revocations list parse failed: \(reason). Refusing to proceed without a valid revocation list (fail-closed)."
         case .pluginRevoked(let id, let version, let reason, let code):
@@ -193,13 +199,19 @@ struct PluginCatalogFetcher {
         // and is rejected; the prior trusted catalog (and its high-water mark)
         // is kept untouched. A missing serial is treated as first-seen so
         // pre-ceremony catalogs (serial not yet signed in) still install.
-        if let serial = catalog.catalogSerial {
-            switch trustState.evaluateCatalog(incoming: serial) {
-            case .rollback(let stored, let incoming):
-                throw PluginCatalogFetchError.catalogRollback(stored: stored, incoming: incoming)
-            case .firstSeen, .accepted:
-                break
-            }
+        // v1.19.0: REQUIRE the serial on the install path (fail-closed). A
+        // signature-verified catalog with no catalog_serial post-launch is a
+        // pre-ceremony or replayed catalog — refuse rather than accept-as-
+        // first-seen, which would let an old serial-less signed catalog defeat
+        // anti-rollback.
+        guard let serial = catalog.catalogSerial else {
+            throw PluginCatalogFetchError.catalogSerialMissing
+        }
+        switch trustState.evaluateCatalog(incoming: serial) {
+        case .rollback(let stored, let incoming):
+            throw PluginCatalogFetchError.catalogRollback(stored: stored, incoming: incoming)
+        case .firstSeen, .accepted:
+            break
         }
 
         guard let entry = catalog.plugins[pluginID] else {
@@ -437,13 +449,14 @@ struct PluginCatalogFetcher {
         // Anti-rollback on the now signature-verified list. A validly-signed-
         // but-older serial is an un-revoke replay; reject it and keep the
         // prior revocation state. Missing serial = first-seen.
-        if let serial = list.serial {
-            switch trustState.evaluateRevocations(incoming: serial) {
-            case .rollback(let stored, let incoming):
-                throw PluginCatalogFetchError.revocationsRollback(stored: stored, incoming: incoming)
-            case .firstSeen, .accepted:
-                try? trustState.recordRevocations(serial: serial)
-            }
+        guard let serial = list.serial else {
+            throw PluginCatalogFetchError.revocationsSerialMissing
+        }
+        switch trustState.evaluateRevocations(incoming: serial) {
+        case .rollback(let stored, let incoming):
+            throw PluginCatalogFetchError.revocationsRollback(stored: stored, incoming: incoming)
+        case .firstSeen, .accepted:
+            try? trustState.recordRevocations(serial: serial)
         }
         return list
     }

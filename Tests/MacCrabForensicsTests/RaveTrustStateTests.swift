@@ -30,6 +30,21 @@ struct RaveTrustStateTests {
         #expect(store.evaluateCatalog(incoming: 0) == .firstSeen)
     }
 
+    @Test("v1.19.0: current{Catalog,Revocations}Serial expose the high-water mark (nil until seen)")
+    func currentSerialAccessors() throws {
+        let store = Self.freshStore()
+        // nil → never accepted a serial; the browse-path regression rule lets a
+        // serial-less (pre-ceremony) catalog through as first-seen.
+        #expect(store.currentCatalogSerial() == nil)
+        #expect(store.currentRevocationsSerial() == nil)
+        try store.recordCatalog(serial: 4)
+        try store.recordRevocations(serial: 9)
+        // non-nil → a serial was accepted, so a later absent serial is a
+        // pre-serial replay and the regression rule rejects it.
+        #expect(store.currentCatalogSerial() == 4)
+        #expect(store.currentRevocationsSerial() == 9)
+    }
+
     @Test("newer serial accepted, equal serial accepted")
     func acceptNewerAndEqual() throws {
         let store = Self.freshStore()

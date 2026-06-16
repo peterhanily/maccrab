@@ -43,9 +43,11 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
     case signatureMismatch
     case parseFailed(reason: String)
     case catalogRollback(stored: Int, incoming: Int)
+    case catalogSerialMissing(lastAccepted: Int)
     case revocationsSignatureMismatch
     case revocationsParseFailed(reason: String)
     case revocationsRollback(stored: Int, incoming: Int)
+    case revocationsSerialMissing(lastAccepted: Int)
     case versionFloor(reason: String)
 
     public var description: String {
@@ -57,6 +59,10 @@ public enum RaveCatalogError: Error, CustomStringConvertible {
         case .parseFailed(let r):   return "Catalog parse failed: \(r)"
         case .catalogRollback(let stored, let incoming):
             return "Catalog rollback rejected — signed catalog_serial \(incoming) is older than the last-accepted serial \(stored). Showing the prior trusted catalog (stale/replay)."
+        case .catalogSerialMissing(let lastAccepted):
+            return "Catalog freshness regression rejected — a serial-stamped catalog (serial \(lastAccepted)) was accepted before, but this signature-verified catalog carries no catalog_serial. An old pre-serial catalog is being replayed; keeping the prior trusted catalog."
+        case .revocationsSerialMissing(let lastAccepted):
+            return "Revocation-list freshness regression rejected — serial \(lastAccepted) was accepted before, but this signature-verified list carries no serial (a pre-serial list replayed to silently un-revoke). Keeping the prior revocation state."
         case .revocationsSignatureMismatch:
             return "Revocations signature does not verify against the bundled key. Keeping the prior revocation state."
         case .revocationsParseFailed(let r):
@@ -203,6 +209,10 @@ public actor RaveCatalogClient {
             case .firstSeen, .accepted:
                 try? trustState.recordCatalog(serial: serial)
             }
+        } else if let lastAccepted = trustState.currentCatalogSerial() {
+            // v1.19.0: a serial'd catalog was accepted before; an absent serial
+            // now is a pre-serial catalog being replayed. Reject the regression.
+            throw RaveCatalogError.catalogSerialMissing(lastAccepted: lastAccepted)
         }
         return try parseCatalog(data: data)
     }
@@ -247,6 +257,8 @@ public actor RaveCatalogClient {
             case .firstSeen, .accepted:
                 try? trustState.recordRevocations(serial: serial)
             }
+        } else if let lastAccepted = trustState.currentRevocationsSerial() {
+            throw RaveCatalogError.revocationsSerialMissing(lastAccepted: lastAccepted)
         }
 
         // Reconcile quarantine for everything already installed.
