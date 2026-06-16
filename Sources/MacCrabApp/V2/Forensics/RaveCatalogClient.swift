@@ -20,6 +20,11 @@ import MacCrabForensics
 
 public struct RaveCatalogEntry: Identifiable, Hashable, Sendable {
     public let id: String           // plugin id, e.g. com.maccrab.hosts-collector
+    /// Human-facing name from the signed catalog. Falls back to `id` when the
+    /// entry omits it. Surfaced in the consent sheet and fed to the C-F
+    /// confusable-name guard (a non-first-party name confusably close to a
+    /// first-party one is flagged as impersonation).
+    public let displayName: String
     public let currentVersion: String
     public let channel: String      // "official" / "contrib"
     public let trustTier: String    // "first-party" / "verified-community" / "unverified"
@@ -360,6 +365,7 @@ public actor RaveCatalogClient {
             let metadata = (raw["metadata"] as? [String: Any]) ?? [:]
             entries.append(RaveCatalogEntry(
                 id: id,
+                displayName: (raw["display_name"] as? String) ?? id,
                 currentVersion: current,
                 channel: (raw["channel"] as? String) ?? "official",
                 trustTier: (raw["trust_tier"] as? String) ?? "unverified",

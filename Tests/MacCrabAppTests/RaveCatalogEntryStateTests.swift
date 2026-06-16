@@ -28,6 +28,7 @@ struct RaveCatalogEntryStateTests {
 
     static func entry(
         id: String = "com.maccrab.hosts-collector",
+        displayName: String? = nil,
         version: String = "1.0.0",
         channel: String = "official",
         trustTier: String = "first-party",
@@ -37,6 +38,7 @@ struct RaveCatalogEntryStateTests {
     ) -> RaveCatalogEntry {
         RaveCatalogEntry(
             id: id,
+            displayName: displayName ?? id,
             currentVersion: version,
             channel: channel,
             trustTier: trustTier,
@@ -190,5 +192,61 @@ struct RaveCatalogEntryStateTests {
             )
             #expect(!st.showsInstallPill, "\(inst) must never show a live install pill")
         }
+    }
+
+    // MARK: - C-F impersonation (namespace + confusable display name)
+
+    @Test("C-F: a non-first-party entry claiming com.maccrab.* → impersonation, no pill")
+    func reservedNamespaceImpersonation() {
+        let st = RaveCatalogEntryState.compute(
+            entry: Self.entry(id: "com.maccrab.forensics.evil", trustTier: "unverified"),
+            revocations: nil,
+            firstPartyDisplayNames: [],
+            floorCheck: Self.floorOK
+        )
+        guard case .impersonation = st.installability else {
+            Issue.record("expected impersonation, got \(st.installability)"); return
+        }
+        #expect(!st.showsInstallPill)
+    }
+
+    @Test("C-F: a non-first-party display name confusably close to a first-party one → impersonation")
+    func confusableDisplayNameImpersonation() {
+        // "MacCr4b Hosts" homoglyph-folds (4→a) to the first-party "MacCrab Hosts".
+        let st = RaveCatalogEntryState.compute(
+            entry: Self.entry(id: "com.evil.collector", displayName: "MacCr4b Hosts", trustTier: "unverified"),
+            revocations: nil,
+            firstPartyDisplayNames: ["MacCrab Hosts"],
+            floorCheck: Self.floorOK
+        )
+        guard case .impersonation = st.installability else {
+            Issue.record("expected impersonation, got \(st.installability)"); return
+        }
+        #expect(!st.showsInstallPill)
+    }
+
+    @Test("C-F: a genuinely distinct third-party name is NOT impersonation")
+    func distinctThirdPartyNameOK() {
+        let st = RaveCatalogEntryState.compute(
+            entry: Self.entry(id: "com.acme.scanner", displayName: "Acme Disk Scanner", trustTier: "unverified"),
+            revocations: nil,
+            firstPartyDisplayNames: ["MacCrab Hosts"],
+            floorCheck: Self.floorOK
+        )
+        if case .impersonation = st.installability {
+            Issue.record("a distinct third-party name must not be flagged as impersonation")
+        }
+    }
+
+    @Test("C-F: a FIRST-PARTY entry is never flagged, even sharing its own name")
+    func firstPartyNeverImpersonates() {
+        let st = RaveCatalogEntryState.compute(
+            entry: Self.entry(id: "com.maccrab.hosts-collector", displayName: "MacCrab Hosts", trustTier: "first-party"),
+            revocations: nil,
+            firstPartyDisplayNames: ["MacCrab Hosts"],
+            floorCheck: Self.floorOK
+        )
+        // First-party + pinned + floor-pass → installable, not impersonation.
+        #expect(st.showsInstallPill)
     }
 }

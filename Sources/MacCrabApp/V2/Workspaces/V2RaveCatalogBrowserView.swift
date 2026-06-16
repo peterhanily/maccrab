@@ -590,12 +590,20 @@ struct V2RaveCatalogBrowserView: View {
             // on a BAD signature (throws) — that's the safe outcome.
             let revocations = try? await client.fetchAndReconcileRevocations()
 
+            // First-party display names from the verified catalog — the C-F
+            // confusable guard flags a non-first-party entry whose display name
+            // is confusably close to one of these (homoglyph / spacing / 1-edit).
+            let firstPartyNames = fetched
+                .filter { $0.trustTier == "first-party" }
+                .map { $0.displayName }
+
             var states: [String: RaveCatalogEntryState] = [:]
             states.reserveCapacity(fetched.count)
             for e in fetched {
                 states[e.id] = RaveCatalogEntryState.compute(
                     entry: e,
                     revocations: revocations,
+                    firstPartyDisplayNames: firstPartyNames,
                     floorCheck: client.checkVersionFloor   // nonisolated, shared policy
                 )
             }

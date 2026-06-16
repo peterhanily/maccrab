@@ -121,24 +121,37 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
     public static func compute(
         entry: RaveCatalogEntry,
         revocations: RaveRevocationList?,
+        firstPartyDisplayNames: [String] = [],
         floorCheck: (RaveCatalogEntry) throws -> Void
     ) -> RaveCatalogEntryState {
         // 0. Namespace impersonation (C-F) — a non-first-party entry must never
-        //    claim the reserved com.maccrab.* id space. Refuse before anything
-        //    else. (The display-name confusable check activates once the catalog
-        //    display_name is decoded; the reserved-namespace check needs only
-        //    id + trust_tier, both present here.)
-        if case .reservedNamespaceImpersonation = RaveNamespaceGuard.evaluate(
-            id: entry.id, displayName: entry.id,
+        //    claim the reserved com.maccrab.* id space, NOR wear a display name
+        //    confusably close to a first-party one. Refuse before anything else.
+        //    The caller passes the curated set of first-party display names from
+        //    the verified catalog so the confusable check has something to match;
+        //    an empty set degrades to the reserved-namespace check only.
+        switch RaveNamespaceGuard.evaluate(
+            id: entry.id,
+            displayName: entry.displayName,
             isFirstParty: entry.trustTier == "first-party",
-            firstPartyDisplayNames: []
+            firstPartyDisplayNames: firstPartyDisplayNames
         ) {
+        case .reservedNamespaceImpersonation:
             return RaveCatalogEntryState(
                 entry: entry,
                 installability: .impersonation(reason: "Reserved namespace 'com.maccrab.*' used by a non-first-party publisher — refused to prevent first-party impersonation."),
                 isRevoked: false,
                 revocationReason: nil
             )
+        case .confusableDisplayName(_, let matchesFirstParty):
+            return RaveCatalogEntryState(
+                entry: entry,
+                installability: .impersonation(reason: "Display name is confusably close to the first-party plugin “\(matchesFirstParty)” — refused to prevent impersonation."),
+                isRevoked: false,
+                revocationReason: nil
+            )
+        case .ok:
+            break
         }
 
         // 1. Revocation (highest precedence — never offer a revoked plugin).

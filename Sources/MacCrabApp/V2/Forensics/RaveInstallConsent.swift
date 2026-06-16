@@ -121,7 +121,7 @@ public struct RaveInstallConsentResolver: Sendable {
         return RaveInstallConsentFacts(
             kind: link.kind,
             id: entry.id,
-            displayName: entry.signerIdentity.isEmpty ? entry.id : entry.id,
+            displayName: entry.displayName,
             resolvedVersion: entry.currentVersion,
             signerPublicKeySHA256: entry.signerPublicKeySHA256,
             signerIdentity: entry.signerIdentity,
