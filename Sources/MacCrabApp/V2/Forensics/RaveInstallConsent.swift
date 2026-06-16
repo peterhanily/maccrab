@@ -32,6 +32,14 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
     public let versionFloorRefusal: String?
     /// True iff the catalog source is the official production one.
     public let officialSource: Bool
+    /// C-B: first-party means the maccrab-maintainer-reviewed-and-signed tier
+    /// served from the OFFICIAL catalog. Anything else — a community/unverified
+    /// trust tier, or any unofficial source — extends trust to a publisher
+    /// MacCrab did not author, and requires explicit operator acknowledgement.
+    public let isFirstParty: Bool
+    /// C-E: freshness of the client's revocation data at consent time. When
+    /// stale/never, "not revoked" may be out of date and the sheet warns.
+    public let revocationFreshness: RaveRevocationFreshness
 
     public init(
         kind: RaveInstallLink.Kind,
@@ -43,7 +51,9 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         trustTier: String,
         declaredMinVersion: String?,
         versionFloorRefusal: String?,
-        officialSource: Bool
+        officialSource: Bool,
+        isFirstParty: Bool,
+        revocationFreshness: RaveRevocationFreshness
     ) {
         self.kind = kind
         self.id = id
@@ -55,10 +65,31 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         self.declaredMinVersion = declaredMinVersion
         self.versionFloorRefusal = versionFloorRefusal
         self.officialSource = officialSource
+        self.isFirstParty = isFirstParty
+        self.revocationFreshness = revocationFreshness
     }
 
     /// The operator may only confirm an install when the version floor passed.
+    /// (C-B's third-party acknowledgement is a UI-state gate layered on top of
+    /// this in the sheet, not a property of the resolved facts.)
     public var canConfirm: Bool { versionFloorRefusal == nil }
+
+    /// C-B: a non-first-party (or unofficial-source) plugin requires the
+    /// operator to explicitly acknowledge the elevated trust before confirming.
+    public var requiresThirdPartyConsent: Bool { !isFirstParty }
+
+    /// C-E: human-facing staleness warning, or nil when revocation data is fresh.
+    public var revocationStalenessWarning: String? {
+        switch revocationFreshness {
+        case .fresh:
+            return nil
+        case .never:
+            return "MacCrab hasn't verified a revocation list yet, so it can't confirm this plugin wasn't revoked. Connect to refresh before installing."
+        case .stale(let age):
+            let days = Int((age / 86400).rounded())
+            return "Revocation data is ~\(days) day\(days == 1 ? "" : "s") old — a recently-revoked plugin could still look installable. Refresh before installing."
+        }
+    }
 
     /// The verified install command the confirm action surfaces. Resolved id
     /// only — never anything from the link.
@@ -118,6 +149,17 @@ public struct RaveInstallConsentResolver: Sendable {
         }
 
         let official = await client.isUsingOfficialSource
+        // C-B: first-party trust requires BOTH the first-party tier AND the
+        // official catalog source — a first-party tier served from an unofficial
+        // mirror does not earn the default-trusted posture.
+        let isFirstParty = (entry.trustTier == "first-party") && official
+
+        // C-E: refresh revocations if our local copy is stale (best-effort — a
+        // failed refresh while offline keeps the prior state), then read the
+        // freshness so the sheet can warn that "not revoked" may be out of date.
+        _ = try? await client.refreshRevocationsIfStale()
+        let freshness = await client.revocationFreshness()
+
         return RaveInstallConsentFacts(
             kind: link.kind,
             id: entry.id,
@@ -128,7 +170,9 @@ public struct RaveInstallConsentResolver: Sendable {
             trustTier: entry.trustTier,
             declaredMinVersion: entry.minMaccrabVersion,
             versionFloorRefusal: floorRefusal,
-            officialSource: official
+            officialSource: official,
+            isFirstParty: isFirstParty,
+            revocationFreshness: freshness
         )
     }
 }

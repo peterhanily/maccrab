@@ -15,6 +15,9 @@ struct RaveInstallConsentSheet: View {
     @State private var loadError: String?
     @State private var loading = true
     @State private var copied = false
+    /// C-B: explicit operator acknowledgement required before a non-first-party
+    /// install can be confirmed.
+    @State private var thirdPartyAck = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -52,6 +55,9 @@ struct RaveInstallConsentSheet: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                    // C-B: a non-first-party install stays disabled until the
+                    // operator ticks the trust acknowledgement above.
+                    .disabled(facts.requiresThirdPartyConsent && !thirdPartyAck)
                 }
             }
         }
@@ -92,6 +98,47 @@ struct RaveInstallConsentSheet: View {
                     Text("Catalog source is NOT the official rave.maccrab.com.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+
+            // C-B: first-party affirmation vs. third-party trust posture.
+            if f.isFirstParty {
+                Label("First-party — reviewed & signed by the MacCrab maintainer.",
+                      systemImage: "checkmark.seal.fill")
+                    .font(.caption2).foregroundStyle(.green)
+            }
+
+            // C-D: honest capability/enforcement disclosure. Plugin execution is
+            // NOT yet sandboxed, so be explicit about what installing grants.
+            VStack(alignment: .leading, spacing: 4) {
+                Label("What installing this grants", systemImage: "lock.open.trianglebadge.exclamationmark")
+                    .font(.caption.weight(.semibold))
+                Text("MacCrab does not yet sandbox plugins. A plugin you install can run with the same access MacCrab has — including any Full-Disk-Access or privacy permissions granted to it. Install only plugins from a publisher you trust.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(Color.orange.opacity(0.08))
+            .cornerRadius(6)
+
+            // C-E: warn when the client's revocation data is stale/never-fetched.
+            if let stale = f.revocationStalenessWarning {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "clock.badge.exclamationmark").foregroundStyle(.yellow)
+                    Text(stale).font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(8)
+                .background(Color.yellow.opacity(0.08))
+                .cornerRadius(6)
+            }
+
+            // C-B: a non-first-party install requires explicit acknowledgement.
+            if f.requiresThirdPartyConsent {
+                Toggle(isOn: $thirdPartyAck) {
+                    Text("This is not a first-party MacCrab plugin. I trust “\(f.signerIdentity.isEmpty ? f.trustTier : f.signerIdentity)” and understand it will run with full access.")
+                        .font(.caption)
+                }
+                .toggleStyle(.checkbox)
+                .padding(.top, 2)
             }
 
             Text("This link can only name a catalog id — every install detail above was resolved from the signed catalog, not the link.")

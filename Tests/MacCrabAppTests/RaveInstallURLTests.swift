@@ -11,6 +11,7 @@ import Testing
 import Foundation
 @testable import MacCrabApp
 @testable import MacCrabForensics
+@testable import MacCrabForensics
 
 @Suite("RaveInstallLink (S2-07 install URL handler)")
 struct RaveInstallURLTests {
@@ -93,7 +94,8 @@ struct RaveInstallURLTests {
             kind: .plugin, id: "com.maccrab.x", displayName: "x",
             resolvedVersion: "1.0.0", signerPublicKeySHA256: "",
             signerIdentity: "maccrab-rave:first-party", trustTier: "first-party",
-            declaredMinVersion: "1.17.0", versionFloorRefusal: nil, officialSource: true
+            declaredMinVersion: "1.17.0", versionFloorRefusal: nil, officialSource: true,
+            isFirstParty: true, revocationFreshness: .fresh(age: 0)
         )
         #expect(ok.canConfirm)
         #expect(ok.verifiedInstallCommand == "maccrabctl plugin install com.maccrab.x")
@@ -104,8 +106,37 @@ struct RaveInstallURLTests {
             resolvedVersion: "1.0.0", signerPublicKeySHA256: "",
             signerIdentity: "", trustTier: "unverified",
             declaredMinVersion: "9.9.9",
-            versionFloorRefusal: "requires MacCrab 9.9.9 or newer", officialSource: true
+            versionFloorRefusal: "requires MacCrab 9.9.9 or newer", officialSource: true,
+            isFirstParty: false, revocationFreshness: .fresh(age: 0)
         )
         #expect(!blocked.canConfirm)
+    }
+
+    // MARK: - C-B / C-E consent posture
+
+    private static func facts(
+        trustTier: String = "first-party",
+        officialSource: Bool = true,
+        isFirstParty: Bool = true,
+        freshness: RaveRevocationFreshness = .fresh(age: 0)
+    ) -> RaveInstallConsentFacts {
+        RaveInstallConsentFacts(
+            kind: .plugin, id: "com.maccrab.x", displayName: "x",
+            resolvedVersion: "1.0.0", signerPublicKeySHA256: "", signerIdentity: "m",
+            trustTier: trustTier, declaredMinVersion: nil, versionFloorRefusal: nil,
+            officialSource: officialSource, isFirstParty: isFirstParty, revocationFreshness: freshness)
+    }
+
+    @Test("C-B: first-party needs no extra consent; non-first-party requires acknowledgement")
+    func thirdPartyConsentPosture() {
+        #expect(!Self.facts(isFirstParty: true).requiresThirdPartyConsent)
+        #expect(Self.facts(trustTier: "unverified", isFirstParty: false).requiresThirdPartyConsent)
+    }
+
+    @Test("C-E: staleness warning surfaces only for stale/never revocation data")
+    func stalenessWarningSurfacing() {
+        #expect(Self.facts(freshness: .fresh(age: 10)).revocationStalenessWarning == nil)
+        #expect(Self.facts(freshness: .never).revocationStalenessWarning != nil)
+        #expect(Self.facts(freshness: .stale(age: 8 * 86400)).revocationStalenessWarning != nil)
     }
 }

@@ -300,6 +300,16 @@ public actor RaveCatalogClient {
         return try await fetchAndReconcileRevocations(installer: installer)
     }
 
+    /// C-E: current freshness of the persisted revocation data against the
+    /// staleness ceiling (reads the trust-state clock; no network). The consent
+    /// gate reads this AFTER a best-effort refresh to decide whether to warn
+    /// that "not revoked" may be out of date.
+    public func revocationFreshness(
+        ceiling: TimeInterval = RaveTrustStateStore.defaultRevocationStalenessCeiling
+    ) -> RaveRevocationFreshness {
+        trustState.revocationFreshness(ceiling: ceiling)
+    }
+
     /// Extract the top-level monotonic catalog_serial (S2-AR). nil when absent
     /// or non-integer (pre-ceremony catalog) — treated as first-seen upstream.
     private func parseCatalogSerial(data: Data) -> Int? {
