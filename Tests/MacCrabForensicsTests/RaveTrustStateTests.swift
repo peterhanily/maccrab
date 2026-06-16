@@ -125,4 +125,62 @@ struct RaveTrustStateTests {
         #expect(store.load() == RaveTrustState())
         #expect(store.evaluateCatalog(incoming: 1) == .firstSeen)
     }
+
+    // MARK: - C-E revocation freshness / staleness ceiling
+
+    @Test("C-E: recordRevocations stamps + round-trips the freshness clock")
+    func revocationClockRoundTrips() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("rave-trust-state-\(UUID().uuidString).json")
+        let a = RaveTrustStateStore(path: path)
+        #expect(a.lastRevocationsVerifiedAt() == nil)
+        let t = Date(timeIntervalSince1970: 1_700_000_000)
+        try a.recordRevocations(serial: 5, verifiedAt: t)
+        // Persists across instances (ISO8601 round-trip, ~second precision).
+        let b = RaveTrustStateStore(path: path)
+        let got = try #require(b.lastRevocationsVerifiedAt())
+        #expect(abs(got.timeIntervalSince(t)) < 1.0)
+        #expect(b.currentRevocationsSerial() == 5)
+    }
+
+    @Test("C-E: re-verifying the SAME serial refreshes the clock but never lowers the mark")
+    func revocationClockRefreshesWithoutAdvancing() throws {
+        let store = Self.freshStore()
+        let t1 = Date(timeIntervalSince1970: 1_700_000_000)
+        let t2 = t1.addingTimeInterval(3600)
+        try store.recordRevocations(serial: 7, verifiedAt: t1)
+        try store.recordRevocations(serial: 7, verifiedAt: t2) // same serial, later time
+        #expect(store.currentRevocationsSerial() == 7)
+        let got = try #require(store.lastRevocationsVerifiedAt())
+        #expect(abs(got.timeIntervalSince(t2)) < 1.0)          // clock advanced to t2
+    }
+
+    @Test("C-E: revocation freshness policy — never / fresh / stale / future-clamp")
+    func revocationFreshnessPolicy() {
+        let ceiling: TimeInterval = 7 * 24 * 3600
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        // never verified → .never (treated as stale by the UI)
+        #expect(RaveTrustStateStore.revocationFreshness(lastVerified: nil, now: now, ceiling: ceiling) == .never)
+        // within ceiling → fresh
+        if case .fresh(let age) = RaveTrustStateStore.revocationFreshness(
+            lastVerified: now.addingTimeInterval(-3600), now: now, ceiling: ceiling) {
+            #expect(abs(age - 3600) < 1.0)
+        } else { Issue.record("expected fresh") }
+        // older than ceiling → stale
+        #expect(RaveTrustStateStore.revocationFreshness(
+            lastVerified: now.addingTimeInterval(-(ceiling + 86400)), now: now, ceiling: ceiling).isStale)
+        // future timestamp (clock skew/tamper) clamps to age 0 → fresh, not stale
+        if case .fresh(let age) = RaveTrustStateStore.revocationFreshness(
+            lastVerified: now.addingTimeInterval(99_999), now: now, ceiling: ceiling) {
+            #expect(age == 0)
+        } else { Issue.record("expected fresh (clamped)") }
+    }
+
+    @Test("C-E: store.revocationFreshness reads the persisted clock")
+    func storeFreshnessReadsDisk() throws {
+        let store = Self.freshStore()
+        #expect(store.revocationFreshness().isStale)  // never verified → warn
+        try store.recordRevocations(serial: 1, verifiedAt: Date())
+        #expect(!store.revocationFreshness().isStale) // just verified → fresh
+    }
 }

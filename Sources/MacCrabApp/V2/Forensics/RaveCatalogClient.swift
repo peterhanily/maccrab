@@ -274,6 +274,27 @@ public actor RaveCatalogClient {
         return list
     }
 
+    /// C-E: refresh + reconcile revocations only if the persisted freshness
+    /// clock is older than `minInterval` (default 1h). The throttle reads the
+    /// clock locally and reuses the pure freshness policy as the ceiling, so a
+    /// tight poll loop costs a timestamp comparison, not a network round-trip —
+    /// the actual fetch happens at most once per interval. Returns the verified
+    /// list when a refresh occurred, or nil when skipped as still-fresh.
+    ///
+    /// Fail-closed like `fetchAndReconcileRevocations`: a bad signature /
+    /// malformed list / rollback throws and the prior revocation + quarantine
+    /// state is kept. A successful refresh advances the freshness clock (via
+    /// `recordRevocations`), which is what later staleness checks read.
+    public func refreshRevocationsIfStale(
+        installer: PluginInstaller = PluginInstaller(),
+        minInterval: TimeInterval = 3600
+    ) async throws -> RaveRevocationList? {
+        if case .fresh = trustState.revocationFreshness(ceiling: minInterval) {
+            return nil
+        }
+        return try await fetchAndReconcileRevocations(installer: installer)
+    }
+
     /// Extract the top-level monotonic catalog_serial (S2-AR). nil when absent
     /// or non-integer (pre-ceremony catalog) — treated as first-seen upstream.
     private func parseCatalogSerial(data: Data) -> Int? {

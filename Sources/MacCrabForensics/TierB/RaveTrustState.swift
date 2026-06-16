@@ -32,10 +32,42 @@ public struct RaveTrustState: Sendable, Equatable {
     /// Highest revocations serial ever accepted from a signature-verified
     /// revocations.json. `nil` means first-seen. (Wired in Stage 2.)
     public var revocationsSerial: Int?
+    /// When the client last successfully verified a revocations.json (C-E).
+    /// `nil` means a revocations list has never been verified on this client.
+    /// Re-verifying the SAME serial still refreshes this clock — it is freshness,
+    /// not the anti-rollback mark. Drives the staleness ceiling: install-time
+    /// consent warns when the only revocation data we hold is older than the
+    /// ceiling (we may not know a plugin was revoked since).
+    public var revocationsVerifiedAt: Date?
 
-    public init(catalogSerial: Int? = nil, revocationsSerial: Int? = nil) {
+    public init(
+        catalogSerial: Int? = nil,
+        revocationsSerial: Int? = nil,
+        revocationsVerifiedAt: Date? = nil
+    ) {
         self.catalogSerial = catalogSerial
         self.revocationsSerial = revocationsSerial
+        self.revocationsVerifiedAt = revocationsVerifiedAt
+    }
+}
+
+/// Result of evaluating how old the client's revocation data is against a
+/// staleness ceiling (C-E). Pure value type so the policy is unit-testable.
+public enum RaveRevocationFreshness: Sendable, Equatable {
+    /// A revocations list has never been verified on this client.
+    case never
+    /// Verified within the ceiling — trustworthy.
+    case fresh(age: TimeInterval)
+    /// Verified, but older than the ceiling — we may have missed a revocation.
+    case stale(age: TimeInterval)
+
+    /// True when the data is older than the ceiling or was never fetched —
+    /// i.e. the UI should warn before treating "not revoked" as authoritative.
+    public var isStale: Bool {
+        switch self {
+        case .fresh: return false
+        case .stale, .never: return true
+        }
     }
 }
 
@@ -80,7 +112,11 @@ public struct RaveTrustStateStore: Sendable {
         // JSONSerialization decodes integers as NSNumber; pull as Int.
         let cat = (obj["catalog_serial"] as? NSNumber)?.intValue
         let rev = (obj["revocations_serial"] as? NSNumber)?.intValue
-        return RaveTrustState(catalogSerial: cat, revocationsSerial: rev)
+        // C-E: round-trip the revocations freshness clock (a malformed/absent
+        // timestamp degrades to "never verified" → the staleness ceiling warns).
+        let verifiedAt = (obj["revocations_verified_at"] as? String)
+            .flatMap { ISO8601DateFormatter().date(from: $0) }
+        return RaveTrustState(catalogSerial: cat, revocationsSerial: rev, revocationsVerifiedAt: verifiedAt)
     }
 
     /// Atomically persist the state, locking the file to 0o600.
@@ -91,6 +127,9 @@ public struct RaveTrustStateStore: Sendable {
         ]
         if let c = state.catalogSerial { payload["catalog_serial"] = c }
         if let r = state.revocationsSerial { payload["revocations_serial"] = r }
+        if let v = state.revocationsVerifiedAt {
+            payload["revocations_verified_at"] = ISO8601DateFormatter().string(from: v)
+        }
         let data = try JSONSerialization.data(
             withJSONObject: payload,
             options: [.prettyPrinted, .sortedKeys]
@@ -127,11 +166,19 @@ public struct RaveTrustStateStore: Sendable {
         try save(state)
     }
 
-    /// Advance the persisted revocations high-water mark. (Stage 2.)
-    public func recordRevocations(serial: Int) throws {
+    /// Advance the persisted revocations high-water mark AND refresh the
+    /// freshness clock (C-E). The serial mark only ever moves upward (monotonic
+    /// anti-rollback); but `revocationsVerifiedAt` is updated on EVERY accepted
+    /// verification — including a re-fetch of the same serial — because that is
+    /// still a successful refresh and must reset the staleness ceiling. The
+    /// caller has already accepted the document (via `evaluateRevocations`)
+    /// before calling this, so a rollback serial never reaches here. (Stage 2.)
+    public func recordRevocations(serial: Int, verifiedAt: Date = Date()) throws {
         var state = load()
-        if let stored = state.revocationsSerial, stored >= serial { return }
-        state.revocationsSerial = serial
+        if state.revocationsSerial == nil || serial > state.revocationsSerial! {
+            state.revocationsSerial = serial
+        }
+        state.revocationsVerifiedAt = verifiedAt
         try save(state)
     }
 
@@ -145,6 +192,36 @@ public struct RaveTrustStateStore: Sendable {
     /// as `currentCatalogSerial` — closes the replay of a pre-serial signed
     /// revocations.json that would otherwise silently un-revoke a plugin.
     public func currentRevocationsSerial() -> Int? { load().revocationsSerial }
+
+    /// When the client last verified a revocations list, or nil if never. (C-E.)
+    public func lastRevocationsVerifiedAt() -> Date? { load().revocationsVerifiedAt }
+
+    /// Default staleness ceiling for revocation data: 7 days. Beyond this the
+    /// install-consent UI warns that the client may not yet know about a recent
+    /// revocation. Callers may pass a stricter ceiling (e.g. for third-party).
+    public static let defaultRevocationStalenessCeiling: TimeInterval = 7 * 24 * 3600
+
+    /// Pure freshness policy (C-E): classify `lastVerified` against `ceiling` as
+    /// of `now`. A future timestamp (clock skew / tamper) clamps to age 0 so a
+    /// skewed-forward clock can never read as "fresh forever" past the ceiling —
+    /// it reads as just-verified, which is the safe direction for a warning.
+    public static func revocationFreshness(
+        lastVerified: Date?,
+        now: Date,
+        ceiling: TimeInterval
+    ) -> RaveRevocationFreshness {
+        guard let last = lastVerified else { return .never }
+        let age = max(0, now.timeIntervalSince(last))
+        return age <= ceiling ? .fresh(age: age) : .stale(age: age)
+    }
+
+    /// Freshness of the persisted revocation data as of `now` (reads from disk).
+    public func revocationFreshness(
+        now: Date = Date(),
+        ceiling: TimeInterval = RaveTrustStateStore.defaultRevocationStalenessCeiling
+    ) -> RaveRevocationFreshness {
+        Self.revocationFreshness(lastVerified: load().revocationsVerifiedAt, now: now, ceiling: ceiling)
+    }
 
     static func decide(stored: Int?, incoming: Int) -> RaveSerialDecision {
         guard let stored = stored else { return .firstSeen }
