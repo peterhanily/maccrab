@@ -39,6 +39,12 @@ public enum PluginRunnerError: Error, CustomStringConvertible {
     case constructionFailed(id: String, message: String)
     case runtimeError(id: String, message: String)
     case inputsEncodeFailed(message: String)
+    /// A `.tierB` (subprocess-sandboxed) plugin was asked to RUN. Tier B
+    /// execution is fail-closed until the out-of-process sandboxed runtime
+    /// lands: a Tier B plugin must NEVER fall back to running in-process, where
+    /// it would inherit the host's Full-Disk-Access / TCC grants with its
+    /// manifest capabilities unenforced. (v1.19.0, C-C)
+    case tierBExecutionUnsupported(id: String)
 
     public var description: String {
         switch self {
@@ -52,6 +58,8 @@ public enum PluginRunnerError: Error, CustomStringConvertible {
             return "PluginRunner: plugin '\(id)' threw at runtime: \(m)"
         case .inputsEncodeFailed(let m):
             return "PluginRunner: couldn't serialize inputs: \(m)"
+        case .tierBExecutionUnsupported(let id):
+            return "PluginRunner: refusing to run Tier B plugin '\(id)' in-process — Tier B execution requires the sandboxed out-of-process runtime, which is not available in this build. (A Tier B plugin must never inherit the host's Full-Disk-Access / TCC.)"
         }
     }
 }
@@ -76,6 +84,26 @@ public actor PluginRunner {
     ///   - .scheduled when the case scheduler fires
     ///   - .mcpFromAgent when invoked via maccrab-mcp
     public static let defaultMode: ConsentMode = .interactive
+
+    /// C-C fail-closed guard: refuse to EXECUTE any `.tierB` plugin in-process.
+    /// Tier B is reserved for the sandboxed out-of-process runtime; until that
+    /// lands, a Tier B plugin must never run here, where it would inherit the
+    /// host's Full-Disk-Access / TCC with its manifest capabilities unenforced.
+    /// Every run* entry point calls this immediately after resolving the
+    /// registration, so the invariant holds even if a Tier B factory is ever
+    /// (mis)registered. Tier B plugins may still be installed / listed /
+    /// displayed — only execution is gated.
+    ///
+    /// `internal` (not public) so the invariant is unit-testable directly: a
+    /// `.tierB` registration can't be inserted through `PluginRegistry.register`
+    /// (its `validate()` already rejects Tier B), so the integration path can't
+    /// reach this guard today — but it MUST stay correct for when the sandboxed
+    /// runtime lands and `validate()` is relaxed to accept Tier B.
+    static func assertExecutableRuntime(_ registration: PluginRegistration) throws {
+        if registration.manifest.runtime == .tierB {
+            throw PluginRunnerError.tierBExecutionUnsupported(id: registration.manifest.id)
+        }
+    }
 
     /// Check the consent layer before invoking. Surfaces the
     /// verdict's `denied` reason as `runtimeError` so the CLI /
@@ -139,6 +167,7 @@ public actor PluginRunner {
         guard let registration = await registry.registration(forID: id) else {
             throw PluginRunnerError.pluginNotFound(id: id)
         }
+        try Self.assertExecutableRuntime(registration)  // C-C: no in-process Tier B
         guard registration.manifest.type == .collector else {
             throw PluginRunnerError.pluginKindMismatch(
                 expected: .collector,
@@ -258,6 +287,7 @@ public actor PluginRunner {
         guard let registration = await registry.registration(forID: id) else {
             throw PluginRunnerError.pluginNotFound(id: id)
         }
+        try Self.assertExecutableRuntime(registration)  // C-C: no in-process Tier B
         guard registration.manifest.type == .enricher else {
             throw PluginRunnerError.pluginKindMismatch(
                 expected: .enricher,
@@ -332,6 +362,7 @@ public actor PluginRunner {
         guard let registration = await registry.registration(forID: id) else {
             throw PluginRunnerError.pluginNotFound(id: id)
         }
+        try Self.assertExecutableRuntime(registration)  // C-C: no in-process Tier B
         guard registration.manifest.type == .analyzer else {
             throw PluginRunnerError.pluginKindMismatch(
                 expected: .analyzer,

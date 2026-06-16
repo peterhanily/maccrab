@@ -177,3 +177,55 @@ struct FixturePluginTests {
         return r
     }
 }
+
+// C-C: Tier B (subprocess-sandboxed) plugins must NEVER execute in-process,
+// where they would inherit the host's Full-Disk-Access / TCC with their
+// manifest capabilities unenforced. `PluginManifest.validate()` already rejects
+// Tier B at registration; this exercises the second, execution-chokepoint guard
+// that stays correct for when the sandboxed runtime lands and validate() relaxes.
+@Suite("PluginRunner Tier B execution guard (C-C)")
+struct PluginRunnerTierBGuardTests {
+
+    private static func manifest(runtime: PluginRuntime) -> PluginManifest {
+        PluginManifest(
+            id: "com.maccrab.forensics.tierb-fixture",
+            version: "1.0.0",
+            displayName: "Tier B Fixture",
+            description: "Reserved Tier B plugin used to prove execution is fail-closed.",
+            type: .collector,
+            runtime: runtime,
+            tccRequirements: [],
+            inputs: [],
+            outputs: [],
+            mcpTools: [],
+            schemaVersion: 1,
+            stability: .preview
+        )
+    }
+
+    @Test("a .tierB registration is refused at the execution chokepoint")
+    func tierBRefused() {
+        // PluginRegistration init does not validate, so we can build a Tier B
+        // registration the way a future non-validating path might.
+        let reg = PluginRegistration(manifest: Self.manifest(runtime: .tierB),
+                                     factory: { try await FixturePlugin() })
+        do {
+            try PluginRunner.assertExecutableRuntime(reg)
+            Issue.record("expected tierBExecutionUnsupported")
+        } catch let e as PluginRunnerError {
+            guard case .tierBExecutionUnsupported(let id) = e else {
+                Issue.record("expected tierBExecutionUnsupported, got \(e)"); return
+            }
+            #expect(id == "com.maccrab.forensics.tierb-fixture")
+        } catch {
+            Issue.record("unexpected error \(error)")
+        }
+    }
+
+    @Test("a .tierA registration passes the execution guard")
+    func tierAAllowed() throws {
+        let reg = PluginRegistration(manifest: Self.manifest(runtime: .tierA),
+                                     factory: { try await FixturePlugin() })
+        try PluginRunner.assertExecutableRuntime(reg)  // must not throw
+    }
+}
