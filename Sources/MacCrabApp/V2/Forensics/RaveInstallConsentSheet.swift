@@ -82,13 +82,17 @@ struct RaveInstallConsentSheet: View {
                 row("Requires", "MacCrab v\(min) or newer")
             }
 
-            if let refusal = f.versionFloorRefusal {
+            // Why this entry can't be installed (operator-signed binary required /
+            // pre-release / version floor / impersonation) — the SAME gate the
+            // catalog browser applies. Shown in place of an enabled Confirm so the
+            // deep-link path can't over-claim availability (storefront honesty).
+            if !f.isInstallable, let reason = f.installBlockReason {
                 HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(.red)
-                    Text(refusal).font(.caption).foregroundStyle(.red)
+                    Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(.orange)
+                    Text(reason).font(.caption).foregroundStyle(.orange)
                 }
                 .padding(8)
-                .background(Color.red.opacity(0.08))
+                .background(Color.orange.opacity(0.10))
                 .cornerRadius(6)
             }
 
@@ -100,11 +104,19 @@ struct RaveInstallConsentSheet: View {
                 }
             }
 
-            // C-B: first-party affirmation vs. third-party trust posture.
+            // C-B: first-party affirmation — only when a real signed, installable
+            // binary exists; otherwise downgrade (storefront honesty: never claim
+            // "reviewed & signed" for a pre-release/awaiting-binary entry).
             if f.isFirstParty {
-                Label("First-party — reviewed & signed by the MacCrab maintainer.",
-                      systemImage: "checkmark.seal.fill")
-                    .font(.caption2).foregroundStyle(.green)
+                if f.isInstallable {
+                    Label("First-party — reviewed & signed by the MacCrab maintainer.",
+                          systemImage: "checkmark.seal.fill")
+                        .font(.caption2).foregroundStyle(.green)
+                } else {
+                    Label("First-party plugin — not yet available for one-click install.",
+                          systemImage: "seal")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
 
             // C-D: honest capability/enforcement disclosure. Plugin execution is

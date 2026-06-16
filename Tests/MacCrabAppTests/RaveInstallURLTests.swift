@@ -95,19 +95,21 @@ struct RaveInstallURLTests {
             resolvedVersion: "1.0.0", signerPublicKeySHA256: "",
             signerIdentity: "maccrab-rave:first-party", trustTier: "first-party",
             declaredMinVersion: "1.17.0", versionFloorRefusal: nil, officialSource: true,
-            isFirstParty: true, revocationFreshness: .fresh(age: 0)
+            isFirstParty: true, revocationFreshness: .fresh(age: 0),
+            isInstallable: true, installBlockReason: nil
         )
         #expect(ok.canConfirm)
         #expect(ok.verifiedInstallCommand == "maccrabctl plugin install com.maccrab.x")
 
-        // Floor refused → confirm blocked.
+        // Floor refused → not installable → confirm blocked.
         let blocked = RaveInstallConsentFacts(
             kind: .plugin, id: "com.maccrab.y", displayName: "y",
             resolvedVersion: "1.0.0", signerPublicKeySHA256: "",
             signerIdentity: "", trustTier: "unverified",
             declaredMinVersion: "9.9.9",
             versionFloorRefusal: "requires MacCrab 9.9.9 or newer", officialSource: true,
-            isFirstParty: false, revocationFreshness: .fresh(age: 0)
+            isFirstParty: false, revocationFreshness: .fresh(age: 0),
+            isInstallable: false, installBlockReason: "requires MacCrab 9.9.9 or newer"
         )
         #expect(!blocked.canConfirm)
     }
@@ -118,13 +120,23 @@ struct RaveInstallURLTests {
         trustTier: String = "first-party",
         officialSource: Bool = true,
         isFirstParty: Bool = true,
-        freshness: RaveRevocationFreshness = .fresh(age: 0)
+        freshness: RaveRevocationFreshness = .fresh(age: 0),
+        isInstallable: Bool = true
     ) -> RaveInstallConsentFacts {
         RaveInstallConsentFacts(
             kind: .plugin, id: "com.maccrab.x", displayName: "x",
             resolvedVersion: "1.0.0", signerPublicKeySHA256: "", signerIdentity: "m",
             trustTier: trustTier, declaredMinVersion: nil, versionFloorRefusal: nil,
-            officialSource: officialSource, isFirstParty: isFirstParty, revocationFreshness: freshness)
+            officialSource: officialSource, isFirstParty: isFirstParty, revocationFreshness: freshness,
+            isInstallable: isInstallable, installBlockReason: isInstallable ? nil : "operator-signed binary required")
+    }
+
+    @Test("honesty: a non-installable entry (pre-release / awaiting signed binary) cannot be confirmed even when the floor passes")
+    func nonInstallableCannotConfirm() {
+        // versionFloorRefusal is nil (floor OK) but there is no signed binary yet.
+        let f = Self.facts(isInstallable: false)
+        #expect(!f.canConfirm)
+        #expect(f.installBlockReason != nil)
     }
 
     @Test("C-B: first-party needs no extra consent; non-first-party requires acknowledgement")

@@ -40,6 +40,15 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
     /// C-E: freshness of the client's revocation data at consent time. When
     /// stale/never, "not revoked" may be out of date and the sheet warns.
     public let revocationFreshness: RaveRevocationFreshness
+    /// Mirrors the catalog browser's install gating (storefront honesty, S4-X2):
+    /// true only when the entry has a real operator-signed binary, passes the
+    /// version floor, is not pre-release, and is not a namespace/confusable
+    /// impersonation. The maccrab://install consent path must NOT offer Confirm
+    /// (or a "reviewed & signed" affirmation) otherwise.
+    public let isInstallable: Bool
+    /// Why the entry is not installable (operator-signed binary required /
+    /// pre-release / version floor / impersonation), or nil when installable.
+    public let installBlockReason: String?
 
     public init(
         kind: RaveInstallLink.Kind,
@@ -53,7 +62,9 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         versionFloorRefusal: String?,
         officialSource: Bool,
         isFirstParty: Bool,
-        revocationFreshness: RaveRevocationFreshness
+        revocationFreshness: RaveRevocationFreshness,
+        isInstallable: Bool,
+        installBlockReason: String?
     ) {
         self.kind = kind
         self.id = id
@@ -67,12 +78,17 @@ public struct RaveInstallConsentFacts: Equatable, Sendable {
         self.officialSource = officialSource
         self.isFirstParty = isFirstParty
         self.revocationFreshness = revocationFreshness
+        self.isInstallable = isInstallable
+        self.installBlockReason = installBlockReason
     }
 
-    /// The operator may only confirm an install when the version floor passed.
-    /// (C-B's third-party acknowledgement is a UI-state gate layered on top of
-    /// this in the sheet, not a property of the resolved facts.)
-    public var canConfirm: Bool { versionFloorRefusal == nil }
+    /// The operator may only confirm an install when the entry is actually
+    /// installable — a real operator-signed binary, floor passes, not
+    /// pre-release, not an impersonation (the SAME gate the catalog browser
+    /// applies). `isInstallable` already encodes the version-floor result.
+    /// (C-B's third-party acknowledgement is an additional UI-state gate layered
+    /// on top of this in the sheet, not a property of the resolved facts.)
+    public var canConfirm: Bool { isInstallable }
 
     /// C-B: a non-first-party (or unofficial-source) plugin requires the
     /// operator to explicitly acknowledge the elevated trust before confirming.
@@ -160,6 +176,24 @@ public struct RaveInstallConsentResolver: Sendable {
         _ = try? await client.refreshRevocationsIfStale()
         let freshness = await client.revocationFreshness()
 
+        // Mirror the catalog browser's install gating (storefront honesty): the
+        // deep-link path must NOT offer Confirm or a "reviewed & signed"
+        // affirmation for a pre-release / awaiting-signed-binary / floor-blocked
+        // / impersonating entry. Reuse the SAME pure policy the browser uses —
+        // RaveCatalogEntryState.compute — which also applies the C-F
+        // namespace/confusable guard the deep-link path previously skipped.
+        // (Revocation stays enforced fail-closed downstream by the CLI install
+        // path; the consent sheet keys honesty off availability + impersonation.)
+        let firstPartyNames = entries
+            .filter { $0.trustTier == "first-party" }
+            .map { $0.displayName }
+        let state = RaveCatalogEntryState.compute(
+            entry: entry,
+            revocations: nil,
+            firstPartyDisplayNames: firstPartyNames,
+            floorCheck: client.checkVersionFloor
+        )
+
         return RaveInstallConsentFacts(
             kind: link.kind,
             id: entry.id,
@@ -172,7 +206,9 @@ public struct RaveInstallConsentResolver: Sendable {
             versionFloorRefusal: floorRefusal,
             officialSource: official,
             isFirstParty: isFirstParty,
-            revocationFreshness: freshness
+            revocationFreshness: freshness,
+            isInstallable: state.showsInstallPill,
+            installBlockReason: state.disabledReason
         )
     }
 }
