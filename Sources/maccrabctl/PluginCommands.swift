@@ -342,7 +342,7 @@ private func pluginRun(args: [String]) async throws {
         // FirstPartyTrustRoot this refuses cleanly (anchor unset); third-party
         // bundles always refuse. The spawn runs inside maccrabctl, which ignores
         // SIGPIPE (the host requirement for FirstPartyTierBRunner).
-        try await runFirstPartyTierBCollector(id: id, handle: handle)
+        try await runFirstPartyTierBCollector(id: id, handle: handle, window: window)
         return
     }
     switch registration.manifest.type {
@@ -395,7 +395,7 @@ private func pluginRun(args: [String]) async throws {
 /// production caller. Fail-closed: a non-installed id, a third-party bundle, or
 /// the unset publisher anchor all refuse here. The spawn (FirstPartyTierBRunner)
 /// runs in maccrabctl, which ignores SIGPIPE.
-private func runFirstPartyTierBCollector(id: String, handle: CaseHandle) async throws {
+private func runFirstPartyTierBCollector(id: String, handle: CaseHandle, window: TimeWindow?) async throws {
     let env = ProcessInfo.processInfo.environment
     // Defense-in-depth catalog-context flags for the execution gate: a catalog
     // trust-root override being set, or a non-official base URL, force a refusal.
@@ -432,18 +432,40 @@ private func runFirstPartyTierBCollector(id: String, handle: CaseHandle) async t
     try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: scratch) }
 
-    // (Window plumbing across the IPC + invocation-row recording for the Tier-B
-    // path are follow-ons; the hero collector is an unbounded all-metadata scan.)
-    let outcome = try FirstPartyTierBRunner().run(verified: verified, scratchDir: scratch)
-    let result = await TierBArtifactBridge.commit(
-        outcome: outcome, caseID: handle.caseID, manifest: verified.manifest,
-        caseAllowsSensitive: allowsSensitive, output: StoreCollectorOutput(store: handle.store))
+    // Window plumbed across the IPC (the hero is unbounded, but windowed
+    // collectors get the bounds); the run is recorded in plugin_invocations for
+    // the same audit trail Tier-A runs get.
+    let startU = window?.start.map { Int64($0.timeIntervalSince1970) }
+    let endU = window?.end.map { Int64($0.timeIntervalSince1970) }
+    let invID = try await handle.store.recordInvocationStart(
+        caseID: handle.caseID, pluginID: id,
+        pluginVersion: verified.manifest.version, inputsJSON: "{}")
+    let result: CollectionResult
+    do {
+        let outcome = try FirstPartyTierBRunner().run(
+            verified: verified, scratchDir: scratch,
+            windowStartUnix: startU, windowEndUnix: endU)
+        result = await TierBArtifactBridge.commit(
+            outcome: outcome, caseID: handle.caseID, manifest: verified.manifest,
+            caseAllowsSensitive: allowsSensitive, output: StoreCollectorOutput(store: handle.store))
+    } catch {
+        try? await handle.store.recordInvocationEnd(
+            id: invID, exitStatus: "error", artifactsCommitted: 0, artifactsRejected: 0,
+            errorMessage: "\(error)", snapshotHash: nil)
+        throw error
+    }
+    try? await handle.store.recordInvocationEnd(
+        id: invID, exitStatus: result.status.rawValue,
+        artifactsCommitted: Int64(result.artifactsCommitted),
+        artifactsRejected: Int64(result.artifactsRejected),
+        errorMessage: result.notes.isEmpty ? nil : result.notes.joined(separator: "; "),
+        snapshotHash: nil)
 
     print("Ran first-party Tier-B collector \(id) on case \(handle.caseID)")
+    print("  Invocation id:        \(invID)")
     print("  Status:               \(result.status.rawValue)")
     print("  Artifacts committed:  \(result.artifactsCommitted)")
     print("  Artifacts rejected:   \(result.artifactsRejected)")
-    if outcome.timedOut { print("  (timed out)") }
     if !result.notes.isEmpty {
         print("  Notes:")
         for note in result.notes.prefix(20) { print("    - \(note)") }

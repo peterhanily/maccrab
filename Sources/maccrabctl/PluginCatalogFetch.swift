@@ -35,6 +35,8 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
     case pluginNotInCatalog(id: String)
     case versionNotFound(id: String, version: String)
     case artifactHashMismatch(expected: String, actual: String)
+    case bundleComponentHashMismatch(component: String, expected: String, actual: String)
+    case kindMismatch(catalog: String, manifest: String)
     case unzipFailed(status: Int32)
     case extractedBundleNotFound(extractDir: String)
     case signerKeyMismatch(expected: String, actual: String)
@@ -65,6 +67,10 @@ enum PluginCatalogFetchError: Error, CustomStringConvertible {
             return "Plugin \(id) has no version entry for \(version) in the catalog."
         case .artifactHashMismatch(let expected, let actual):
             return "Artifact SHA-256 mismatch — expected \(expected), got \(actual)"
+        case .bundleComponentHashMismatch(let component, let expected, let actual):
+            return "Bundle \(component) SHA-256 mismatch — catalog pins \(expected), extracted bundle has \(actual). Refusing to install (O3)."
+        case .kindMismatch(let catalog, let manifest):
+            return "Plugin kind mismatch — catalog declares kind=\(catalog) but the bundle manifest declares kind=\(manifest). Refusing to install."
         case .unzipFailed(let status):
             return "/usr/bin/unzip exited with status \(status)"
         case .extractedBundleNotFound(let extractDir):
@@ -325,6 +331,36 @@ struct PluginCatalogFetcher {
             throw PluginCatalogFetchError.extractedBundleNotFound(extractDir: extractDir.path)
         }
 
+        // O3 (granular, defense-in-depth): when the catalog pins real (non-zero)
+        // per-component hashes, the extracted bundle's signature + manifest bytes
+        // must match. artifact_sha256 (the whole zip) already gates these
+        // transitively; this catches a per-file swap explicitly. Skipped on
+        // placeholder-zero (pre-ceremony) values.
+        let zeroHash = String(repeating: "0", count: 64)
+        if let sigHash = versionEntry.signatureSHA256, sigHash != zeroHash, RaveSignerPin.isSHA256Hex(sigHash) {
+            let actual = (try? Data(contentsOf: bundleDir.appendingPathComponent("signature")))
+                .map { SHA256.hash(data: $0).hexLower }
+            guard actual == sigHash else {
+                throw PluginCatalogFetchError.bundleComponentHashMismatch(
+                    component: "signature", expected: sigHash, actual: actual ?? "<missing>")
+            }
+        }
+        if let manHash = versionEntry.manifestSHA256, manHash != zeroHash, RaveSignerPin.isSHA256Hex(manHash) {
+            let actual = (try? Data(contentsOf: bundleDir.appendingPathComponent("manifest.json")))
+                .map { SHA256.hash(data: $0).hexLower }
+            guard actual == manHash else {
+                throw PluginCatalogFetchError.bundleComponentHashMismatch(
+                    component: "manifest.json", expected: manHash, actual: actual ?? "<missing>")
+            }
+        }
+        // #7: the catalog-declared kind must match the bundle manifest's kind when
+        // both declare one (catches a kind-spoof between catalog and bundle).
+        if let catalogKind = parsed.kind,
+           let manifestKind = (try? TierBManifest.load(fromBundlePath: bundleDir.path))?.kind?.rawValue,
+           catalogKind != manifestKind {
+            throw PluginCatalogFetchError.kindMismatch(catalog: catalogKind, manifest: manifestKind)
+        }
+
         // Step 6.5 (O1b): publisher-key pin. Bind *which* signer key the
         // catalog endorsed to *which* key the bundle actually carries —
         // independent of artifact_sha256 (transport) and the bundle's own
@@ -511,10 +547,17 @@ struct PluginCatalogFetcher {
         /// the (pre-ceremony) entry omits it. Enforced against the running
         /// build before download.
         let minMaccrabVersion: String?
+        /// Plugin role from the catalog ("collector"/"analyzer"). #7: must match
+        /// the installed bundle manifest's kind when both declare one. nil when absent.
+        let kind: String?
     }
     private struct ParsedVersion {
         let tag: String
         let artifactSHA256: String
+        /// O3 granular per-component anchors (hex-lower). nil/placeholder-zero on
+        /// pre-ceremony entries; asserted against the extracted bundle when real.
+        let signatureSHA256: String?
+        let manifestSHA256: String?
     }
 
     private func parseCatalogIndex(data: Data) throws -> CatalogIndex {
@@ -555,7 +598,12 @@ struct PluginCatalogFetcher {
                   let artifactHash = fields["artifact_sha256"] as? String else {
                 throw PluginCatalogFetchError.catalogParseFailed(reason: "version \(v) missing tag or artifact_sha256")
             }
-            versions[v] = ParsedVersion(tag: tag, artifactSHA256: artifactHash)
+            versions[v] = ParsedVersion(
+                tag: tag,
+                artifactSHA256: artifactHash,
+                signatureSHA256: (fields["signature_sha256"] as? String)?.lowercased(),
+                manifestSHA256: (fields["manifest_sha256"] as? String)?.lowercased()
+            )
         }
         // O1b publisher-key pin. Validate shape (^[0-9a-f]{64}$) so a
         // malformed value can't masquerade as a valid pin; a present-but-bad
@@ -579,12 +627,14 @@ struct PluginCatalogFetcher {
         // the floor policy fails closed downstream if it can't parse.
         let metadata = json["metadata"] as? [String: Any]
         let minMaccrabVersion = metadata?["min_maccrab_version"] as? String
+        let kind = json["kind"] as? String
         return ParsedEntry(
             releaseURLTemplate: urlTemplate,
             versions: versions,
             signerPublicKeySHA256: signerKey,
             status: status,
-            minMaccrabVersion: minMaccrabVersion
+            minMaccrabVersion: minMaccrabVersion,
+            kind: kind
         )
     }
 }
