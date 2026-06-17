@@ -131,4 +131,76 @@ struct TierBRegistryTests {
         #expect(report.failed.first?.pluginID == "com.test.tier-b.b")
     }
 
+    // MARK: - Shape 2 Phase 1: first-party execution gate at the resolve chokepoint
+    // We don't spawn at this layer, so any executable serves as the bundle binary.
+
+    /// Install a validly-signed bundle and return (registry, the bundle key's
+    /// publisher fingerprint as base resolve() computes it).
+    static func installForExec(id: String) async throws -> (TierBRegistry, PluginInstaller, String) {
+        let m = TierBManifest(id: id, displayName: "x", version: "1.0", schemaVersion: 1, description: "x")
+        let (src, _) = try Self.signedBundle(manifest: m, binaryPath: "/usr/bin/true")
+        defer { try? FileManager.default.removeItem(at: src) }
+        let installer = Self.freshInstaller()
+        _ = try await installer.install(sourceDir: src, trustOnInstall: true)
+        let registry = TierBRegistry(installer: installer)
+        let base = try await registry.resolve(pluginID: id)
+        registry.cleanupVerifiedBinary(base)
+        return (registry, installer, base.publicKeySHA256)
+    }
+
+    @Test("first-party exec: matching publisher fingerprint + official + no override → allow (isFirstParty)")
+    func firstPartyAllow() async throws {
+        let (registry, installer, fp) = try await Self.installForExec(id: "com.test.fp.allow")
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let v = try await registry.resolveForFirstPartyExecution(
+            pluginID: "com.test.fp.allow", officialSource: true, catalogOverrideActive: false,
+            expectedPublisherFingerprint: fp, anchorConfigured: true)
+        #expect(v.isFirstParty)
+        #expect(FileManager.default.isExecutableFile(atPath: v.binaryPath))
+        registry.cleanupVerifiedBinary(v)
+    }
+
+    @Test("first-party exec: unconfigured anchor (the ship default) → refuse")
+    func firstPartyDenyUnconfigured() async throws {
+        let (registry, installer, _) = try await Self.installForExec(id: "com.test.fp.unconf")
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        // Public API → pins to FirstPartyTrustRoot (unset sentinel → fail-closed).
+        await #expect(throws: TierBRegistry.RegistryError.self) {
+            _ = try await registry.resolveForFirstPartyExecution(
+                pluginID: "com.test.fp.unconf", officialSource: true, catalogOverrideActive: false)
+        }
+    }
+
+    @Test("first-party exec: a DIFFERENT (third-party) key → refuse, even with a configured anchor")
+    func firstPartyDenyWrongKey() async throws {
+        let (registry, installer, _) = try await Self.installForExec(id: "com.test.fp.wrong")
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        await #expect(throws: TierBRegistry.RegistryError.self) {
+            _ = try await registry.resolveForFirstPartyExecution(
+                pluginID: "com.test.fp.wrong", officialSource: true, catalogOverrideActive: false,
+                expectedPublisherFingerprint: String(repeating: "c", count: 64), anchorConfigured: true)
+        }
+    }
+
+    @Test("first-party exec: matching key but non-official source → refuse (defense in depth)")
+    func firstPartyDenyNonOfficial() async throws {
+        let (registry, installer, fp) = try await Self.installForExec(id: "com.test.fp.unofficial")
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        await #expect(throws: TierBRegistry.RegistryError.self) {
+            _ = try await registry.resolveForFirstPartyExecution(
+                pluginID: "com.test.fp.unofficial", officialSource: false, catalogOverrideActive: false,
+                expectedPublisherFingerprint: fp, anchorConfigured: true)
+        }
+    }
+
+    @Test("first-party exec: matching key but catalog override active → refuse (defense in depth)")
+    func firstPartyDenyOverride() async throws {
+        let (registry, installer, fp) = try await Self.installForExec(id: "com.test.fp.override")
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        await #expect(throws: TierBRegistry.RegistryError.self) {
+            _ = try await registry.resolveForFirstPartyExecution(
+                pluginID: "com.test.fp.override", officialSource: true, catalogOverrideActive: true,
+                expectedPublisherFingerprint: fp, anchorConfigured: true)
+        }
+    }
 }

@@ -21,6 +21,10 @@ public actor TierBRegistry {
         case verificationFailed(pluginID: String, reason: String)
         case binaryNotExecutable(pluginID: String, path: String)
         case quarantined(pluginID: String, reason: String)
+        /// The bundle verified, but the first-party EXECUTION gate refused it
+        /// (not the publisher key / unconfigured anchor / non-official / override).
+        /// Third-party plugins always hit this — execution stays fail-closed.
+        case firstPartyExecutionRefused(pluginID: String, reason: String)
 
         public var description: String {
             switch self {
@@ -29,6 +33,7 @@ public actor TierBRegistry {
             case .verificationFailed(let id, let r): return "TierBRegistry: verification failed for \(id): \(r)"
             case .binaryNotExecutable(let id, let p): return "TierBRegistry: binary not executable for \(id) at \(p)"
             case .quarantined(let id, let r): return "TierBRegistry: \(id) is quarantined by a signed revocation (\(r)) — refusing to load"
+            case .firstPartyExecutionRefused(let id, let r): return "TierBRegistry: refusing first-party execution of \(id): \(r)"
             }
         }
     }
@@ -43,6 +48,14 @@ public actor TierBRegistry {
         /// verification and Process.run.
         public let binaryPath: String
         public let publicKeyHex: String
+        /// SHA-256 (lowercase hex) of the raw signing.key.pub bytes — the value
+        /// the first-party execution gate compares against the FirstPartyTrustRoot
+        /// publisher anchor. (Shape 2.)
+        public let publicKeySHA256: String
+        /// True ONLY when resolved via resolveForFirstPartyExecution AND the
+        /// FirstPartyExecutionGate allowed (publisher-key match + defense-in-depth
+        /// checks). Base resolve() never evaluates first-party authority → false.
+        public var isFirstParty: Bool = false
     }
 
     public struct VerifyAllReport: Sendable {
@@ -95,6 +108,7 @@ public actor TierBRegistry {
         // semantics via Data(contentsOf:) on URLs we control.
         let bundleBinaryURL = bundleURL.appendingPathComponent("binary")
         let verifiedBinaryBytes: Data
+        var resolvedPublisherFingerprint = ""
         do {
             _ = try PluginSignatureVerifier.verify(
                 bundle: PluginSignatureVerifier.BundleLayout(bundleRoot: bundleURL),
@@ -108,6 +122,7 @@ public actor TierBRegistry {
             // it. Cheap belt-and-suspenders.
             let sig = try Data(contentsOf: bundleURL.appendingPathComponent("signature"))
             let pubKeyData = try Data(contentsOf: bundleURL.appendingPathComponent("signing.key.pub"))
+            resolvedPublisherFingerprint = FirstPartyTrustRoot.fingerprint(ofSigningKey: pubKeyData)
             let pubKey = try CryptoSigning.publicKey(rawRepresentation: pubKeyData)
             let manifestData = try Data(contentsOf: bundleURL.appendingPathComponent("manifest.json"))
             let payload = PluginSignatureVerifier.canonicalSignedPayload(
@@ -170,8 +185,63 @@ public actor TierBRegistry {
             manifest: manifest,
             bundleRoot: entry.installRoot,
             binaryPath: tempBinaryPath,
-            publicKeyHex: entry.publicKeyHex
+            publicKeyHex: entry.publicKeyHex,
+            publicKeySHA256: resolvedPublisherFingerprint
         )
+    }
+
+    /// Resolve a plugin AND gate it for UNSANDBOXED first-party execution
+    /// (Shape 2). This is the ONLY path that may yield a runnable first-party
+    /// binary: it runs the full resolve() chain (quarantine → verify → TOCTOU
+    /// re-verify → 0o500 temp) and THEN the FirstPartyExecutionGate. On any deny
+    /// it DELETES the verified temp (cleanupVerifiedBinary) so no runnable binary
+    /// is ever left behind, and throws `firstPartyExecutionRefused`. Third-party
+    /// bundles (any key != the publisher anchor) always deny — fail-closed.
+    ///
+    /// `officialSource` / `catalogOverrideActive` are supplied by the caller (the
+    /// app/CLI knows the catalog context); they are defense-in-depth refusals.
+    public func resolveForFirstPartyExecution(
+        pluginID: String,
+        officialSource: Bool,
+        catalogOverrideActive: Bool
+    ) async throws -> VerifiedPlugin {
+        try await resolveForFirstPartyExecution(
+            pluginID: pluginID,
+            officialSource: officialSource,
+            catalogOverrideActive: catalogOverrideActive,
+            expectedPublisherFingerprint: FirstPartyTrustRoot.publisherKeyFingerprint,
+            anchorConfigured: FirstPartyTrustRoot.isConfigured
+        )
+    }
+
+    /// Testable core — the public overload pins the anchor to FirstPartyTrustRoot;
+    /// this `internal` form lets tests inject a fingerprint matching a fixture
+    /// bundle's throwaway key. Production callers never see the override params,
+    /// so they cannot pass a bogus fingerprint.
+    func resolveForFirstPartyExecution(
+        pluginID: String,
+        officialSource: Bool,
+        catalogOverrideActive: Bool,
+        expectedPublisherFingerprint: String,
+        anchorConfigured: Bool
+    ) async throws -> VerifiedPlugin {
+        var verified = try await resolve(pluginID: pluginID)
+        let decision = FirstPartyExecutionGate.evaluate(
+            bundleSigningKeyPubSHA256: verified.publicKeySHA256,
+            expectedPublisherFingerprint: expectedPublisherFingerprint,
+            anchorConfigured: anchorConfigured,
+            catalogOverrideActive: catalogOverrideActive,
+            officialSource: officialSource
+        )
+        guard case .allow = decision else {
+            // Never leave a verified runnable binary behind on a refusal.
+            cleanupVerifiedBinary(verified)
+            let reason: String
+            if case .deny(let r) = decision { reason = r } else { reason = "denied" }
+            throw RegistryError.firstPartyExecutionRefused(pluginID: pluginID, reason: reason)
+        }
+        verified.isFirstParty = true
+        return verified
     }
 
     /// Clean up the per-resolve verified-binary temp file. The
