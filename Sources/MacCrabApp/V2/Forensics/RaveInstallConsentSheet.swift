@@ -14,10 +14,13 @@ struct RaveInstallConsentSheet: View {
     @State private var facts: RaveInstallConsentFacts?
     @State private var loadError: String?
     @State private var loading = true
-    @State private var copied = false
     /// C-B: explicit operator acknowledgement required before a non-first-party
     /// install can be confirmed.
     @State private var thirdPartyAck = false
+    // In-app install (P4): drives the bundled, verified maccrabctl install path.
+    @State private var installing = false
+    @State private var installOutput: String?
+    @State private var installOK: Bool?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -39,31 +42,98 @@ struct RaveInstallConsentSheet: View {
                 factsBody(facts)
             }
 
+            // In-app install result (the verified maccrabctl path's output).
+            if let installOutput {
+                ScrollView {
+                    Text(installOutput)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 120)
+                .padding(8)
+                .background((installOK == true ? Color.green : Color.orange).opacity(0.08))
+                .cornerRadius(6)
+            }
+
             Divider()
             HStack {
-                Button("Cancel", role: .cancel) { onClose() }
+                Button(installOK == true ? "Close" : "Cancel", role: .cancel) { onClose() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 if let facts, facts.canConfirm {
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(facts.verifiedInstallCommand, forType: .string)
-                        copied = true
-                    } label: {
-                        Label(copied ? "Copied" : "Confirm & copy install command",
-                              systemImage: copied ? "checkmark" : "checkmark.shield")
+                    if installing {
+                        ProgressView().controlSize(.small)
+                        Text("Installing…").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Button {
+                            installing = true
+                            installOutput = nil
+                            Task {
+                                let r = await installViaBundledCLI(id: facts.id)
+                                installOK = r.ok
+                                installOutput = r.output
+                                installing = false
+                            }
+                        } label: {
+                            Label(installOK == true ? "Installed" : "Install plugin",
+                                  systemImage: installOK == true ? "checkmark.circle.fill" : "arrow.down.circle")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                        // C-B: stays disabled for a non-first-party plugin until the
+                        // trust acknowledgement is ticked; disabled once installed.
+                        .disabled((facts.requiresThirdPartyConsent && !thirdPartyAck) || installOK == true)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    // C-B: a non-first-party install stays disabled until the
-                    // operator ticks the trust acknowledgement above.
-                    .disabled(facts.requiresThirdPartyConsent && !thirdPartyAck)
                 }
             }
         }
         .padding(20)
         .frame(width: 460)
         .task { await load() }
+    }
+
+    /// Run the BUNDLED maccrabctl's verified install path (`plugin install <id>`)
+    /// as the user. The app is not sandboxed; the install + (later) any spawn run
+    /// inside maccrabctl, which ignores SIGPIPE. All fail-closed gates (serial,
+    /// signer pin, version floor, revocation, artifact hash) are re-enforced there,
+    /// so on the pre-release catalog this refuses cleanly and reports why.
+    private func installViaBundledCLI(id: String) async -> (ok: Bool, output: String) {
+        guard let cli = Self.bundledMaccrabctlPath() else {
+            return (false, "Bundled maccrabctl not found. Install from a terminal:\n  maccrabctl plugin install \(id)")
+        }
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global().async {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: cli)
+                p.arguments = ["plugin", "install", id]
+                let pipe = Pipe()
+                p.standardOutput = pipe
+                p.standardError = pipe
+                do {
+                    try p.run()
+                } catch {
+                    cont.resume(returning: (false, "Failed to launch maccrabctl: \(error.localizedDescription)"))
+                    return
+                }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()  // read then reap
+                p.waitUntilExit()
+                let out = String(data: data, encoding: .utf8) ?? ""
+                cont.resume(returning: (p.terminationStatus == 0,
+                                        out.isEmpty ? "maccrabctl exited \(p.terminationStatus)" : out))
+            }
+        }
+    }
+
+    /// Locate the maccrabctl bundled into the app at Resources/bin/maccrabctl.
+    static func bundledMaccrabctlPath() -> String? {
+        let fm = FileManager.default
+        var candidates: [String] = []
+        if let res = Bundle.main.resourceURL {
+            candidates.append(res.appendingPathComponent("bin/maccrabctl").path)
+        }
+        candidates.append("/Applications/MacCrab.app/Contents/Resources/bin/maccrabctl")
+        return candidates.first { fm.isExecutableFile(atPath: $0) }
     }
 
     @ViewBuilder

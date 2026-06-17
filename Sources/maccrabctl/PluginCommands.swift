@@ -336,7 +336,14 @@ private func pluginRun(args: [String]) async throws {
     // surface; Analyzers get the analyze() surface (and findings
     // round-trip back through the ArtifactStore as artifacts).
     guard let registration = await PluginRegistry.shared.registration(forID: id) else {
-        throw CaseCommandError.underlying("Plugin '\(id)' is not registered.")
+        // Not a Tier-A (built-in) plugin. Try the first-party Tier-B path: an
+        // INSTALLED, publisher-key-signed bundle run OUT-OF-PROCESS (Shape 2).
+        // Fail-closed — until the operator bakes the publisher fingerprint into
+        // FirstPartyTrustRoot this refuses cleanly (anchor unset); third-party
+        // bundles always refuse. The spawn runs inside maccrabctl, which ignores
+        // SIGPIPE (the host requirement for FirstPartyTierBRunner).
+        try await runFirstPartyTierBCollector(id: id, handle: handle)
+        return
     }
     switch registration.manifest.type {
     case .collector:
@@ -376,6 +383,64 @@ private func pluginRun(args: [String]) async throws {
         throw CaseCommandError.underlying(
             "Plugin '\(id)' is type=\(registration.manifest.type.rawValue); use 'maccrabctl fingerprint' for fingerprinters or the forensics.* MCP tool surface for enrichers."
         )
+    }
+}
+
+
+// MARK: - first-party Tier-B run (Shape 2)
+
+/// Run an installed FIRST-PARTY Tier-B collector out-of-process and commit its
+/// artifacts to the open case. The execution authority is the Phase-1 gate
+/// (resolveForFirstPartyExecution → publisher-fingerprint match); this is its
+/// production caller. Fail-closed: a non-installed id, a third-party bundle, or
+/// the unset publisher anchor all refuse here. The spawn (FirstPartyTierBRunner)
+/// runs in maccrabctl, which ignores SIGPIPE.
+private func runFirstPartyTierBCollector(id: String, handle: CaseHandle) async throws {
+    let env = ProcessInfo.processInfo.environment
+    // Defense-in-depth catalog-context flags for the execution gate: a catalog
+    // trust-root override being set, or a non-official base URL, force a refusal.
+    let overrideActive = !(env["MACCRAB_RAVE_CATALOG_PUB_PATH"] ?? "").isEmpty
+    let base = env["MACCRAB_RAVE_BASE_URL"] ?? ""
+    let officialSource = base.isEmpty
+        || base == "https://rave.maccrab.com" || base == "https://rave.maccrab.com/"
+
+    let registry = TierBRegistry()
+    let verified: TierBRegistry.VerifiedPlugin
+    do {
+        verified = try await registry.resolveForFirstPartyExecution(
+            pluginID: id, officialSource: officialSource, catalogOverrideActive: overrideActive)
+    } catch let e as TierBRegistry.RegistryError {
+        if case .notInstalled = e {
+            throw CaseCommandError.underlying(
+                "Plugin '\(id)' is not a built-in (Tier A) plugin and is not installed (Tier B).")
+        }
+        // firstPartyExecutionRefused / quarantined / verificationFailed → fail-closed.
+        throw CaseCommandError.underlying("\(e)")
+    }
+    defer { registry.cleanupVerifiedBinary(verified) }
+
+    let caseRow = try await handle.store.fetchCase(id: handle.caseID)
+    let allowsSensitive = (caseRow?.encryptionState ?? .plaintext) != .plaintext
+
+    let scratch = NSTemporaryDirectory() + "maccrab-tierb-scratch-\(UUID().uuidString)"
+    try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: scratch) }
+
+    // (Window plumbing across the IPC + invocation-row recording for the Tier-B
+    // path are follow-ons; the hero collector is an unbounded all-metadata scan.)
+    let outcome = try FirstPartyTierBRunner().run(verified: verified, scratchDir: scratch)
+    let result = await TierBArtifactBridge.commit(
+        outcome: outcome, caseID: handle.caseID, manifest: verified.manifest,
+        caseAllowsSensitive: allowsSensitive, output: StoreCollectorOutput(store: handle.store))
+
+    print("Ran first-party Tier-B collector \(id) on case \(handle.caseID)")
+    print("  Status:               \(result.status.rawValue)")
+    print("  Artifacts committed:  \(result.artifactsCommitted)")
+    print("  Artifacts rejected:   \(result.artifactsRejected)")
+    if outcome.timedOut { print("  (timed out)") }
+    if !result.notes.isEmpty {
+        print("  Notes:")
+        for note in result.notes.prefix(20) { print("    - \(note)") }
     }
 }
 
