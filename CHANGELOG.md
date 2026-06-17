@@ -3,7 +3,7 @@
 All notable changes to MacCrab. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [1.19.0] — 2026-06-11
+## [1.19.0] — 2026-06-17
 
 A detection-quality and trust release: far fewer false alerts, an
 end-to-end-verified plugin catalog, and bounded storage.
@@ -43,6 +43,15 @@ end-to-end-verified plugin catalog, and bounded storage.
   (high/critical from trusted or agent tooling included).
 - Rule-count surfaces are consistent across the app, README, and site
   (483 Sigma rules + 46 built-in detections).
+- **Honest first-run dashboard.** Before the engine has produced data
+  (a fresh install, or before the system extension is approved), the
+  dashboard shows an empty/offline state instead of sample data.
+- **Plugin catalog shows only active, installable plugins**, with a
+  clear pre-launch ("coming soon") state until plugins are published —
+  matching the website.
+- **Bundled threat-intelligence set curated to verified indicators**;
+  current indicators are delivered by the live feeds, reducing false
+  positives.
 
 ### Fixed
 
