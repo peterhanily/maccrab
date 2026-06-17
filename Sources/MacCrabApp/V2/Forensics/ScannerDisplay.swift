@@ -57,7 +57,9 @@ public enum ScannerDisplay {
         "com.maccrab.forensics.archive-walker":         "Archive walker",
         "com.maccrab.forensics.document-analyzer":      "Document analyzer",
         "com.maccrab.forensics.office-document-analyzer":"Office document analyzer",
-        "com.maccrab.forensics.fixture":                "Fixture (dev only)",
+        // (No fixture entry: FixturePlugin is #if DEBUG-only and never surfaces in
+        // release, so its display label is omitted to keep all fixture strings out
+        // of release binaries. In DEBUG the dev fixture just shows its raw id.)
     ]
 
     private static let contentTypeNames: [String: String] = [
