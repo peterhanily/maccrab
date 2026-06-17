@@ -95,6 +95,12 @@ public struct FirstPartyTierBRunner: Sendable {
             throw FirstPartyTierBRunnerError.spawnFailed(pluginID: verified.pluginID, message: "\(error)")
         }
 
+        // Per-fd SIGPIPE suppression (audit HIGH #1): a write to a child that has
+        // closed its stdin read end returns EPIPE (a throwable `write` error)
+        // instead of raising SIGPIPE — which `try?` cannot catch and which would
+        // kill a host process that doesn't globally ignore SIGPIPE.
+        _ = fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+
         // Background drain of stdout with a running cap (avoids pipe-buffer
         // deadlock and unbounded memory).
         readQ.async {
@@ -157,8 +163,16 @@ public struct FirstPartyTierBRunner: Sendable {
 
         proc.waitUntilExit()
         timer.cancel()
-        outDone.wait()
-        errDone.wait()
+        // Bound the post-exit drains (audit HIGH #2): a forked descendant still
+        // holding the stdout/stderr write end means availableData never EOFs, so
+        // an unbounded wait would hang run() forever. On expiry we proceed with
+        // what we captured (the direct child's output is already drained); the
+        // background read returns when the orphan eventually dies. CLEANLY reaping
+        // such a descendant requires a process-group spawn (posix_spawn setpgid +
+        // kill(-pgid)) — a hard prerequisite before WIRING this runner into a host
+        // (MacCrabApp / maccrab-mcp / maccrabd), tracked for the wiring milestone.
+        _ = outDone.wait(timeout: .now() + 3.0)
+        _ = errDone.wait(timeout: .now() + 3.0)
 
         lock.lock()
         let finalOut = outBuf

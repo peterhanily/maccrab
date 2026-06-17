@@ -143,4 +143,43 @@ struct FirstPartyTierBRunnerTests {
         let out = try await Self.runScript(id: "com.test.run.hang", script: script, timeout: 1)
         #expect(out.timedOut)
     }
+
+    @Test("audit HIGH#1: F_SETNOSIGPIPE makes a write to a closed-read-end pipe throw, not crash")
+    func sigpipeIsThrowableNotFatal() throws {
+        // The mechanism the runner relies on: with F_SETNOSIGPIPE on the write fd,
+        // writing to a pipe whose read end is closed surfaces EPIPE as a throwable
+        // (try? can swallow it) instead of raising SIGPIPE (which would kill the host).
+        let pipe = Pipe()
+        #expect(fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0)
+        try pipe.fileHandleForReading.close()
+        var threw = false
+        do { try pipe.fileHandleForWriting.write(contentsOf: Data([0x41, 0x42, 0x43])) }
+        catch { threw = true }
+        #expect(threw)
+    }
+
+    @Test("a plugin that exits without reading stdin does not crash the host (SIGPIPE-safe write)")
+    func spawnPluginIgnoresStdin() async throws {
+        let script = """
+        #!/bin/sh
+        printf '%s\\n' '{"kind":"result","result":{"status":"ok"}}'
+        """  // exits immediately; the host's request write may hit a closed stdin
+        let out = try await Self.runScript(id: "com.test.run.nostdin", script: script, timeout: 20)
+        #expect(out.result?.status == "ok")
+    }
+
+    @Test("audit HIGH#2: a forked descendant holding stdout doesn't hang run() (bounded drain)")
+    func spawnForkedFdHolderBounded() async throws {
+        let script = """
+        #!/bin/sh
+        cat >/dev/null
+        ( sleep 30 & )
+        printf '%s\\n' '{"kind":"result","result":{"status":"ok"}}'
+        """  // parent exits; the backgrounded descendant keeps stdout open
+        let start = Date()
+        let out = try await Self.runScript(id: "com.test.run.fork", script: script, timeout: 20)
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(out.result?.status == "ok")
+        #expect(elapsed < 12)   // bounded ~3s drain, not the 30s descendant lifetime
+    }
 }

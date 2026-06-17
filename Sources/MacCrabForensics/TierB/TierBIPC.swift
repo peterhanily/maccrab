@@ -15,8 +15,11 @@
 //   - The host stamps the AUTHORITATIVE identity (caseID, pluginID, pluginVersion,
 //     schemaVersion) from the VERIFIED manifest. The DTO deliberately does NOT
 //     carry them — a plugin cannot spoof which case/plugin an artifact belongs to.
-//   - The host recomputes sizeBytes and OWNS blobRelpath; the plugin only names a
-//     scratch-relative blob file, which the host validates (no traversal) + ingests.
+//   - The host recomputes sizeBytes and OWNS blobRelpath. NOTE: blob ingest is
+//     RESERVED, not yet implemented — `blobScratchName` is decoded but the host
+//     opens NO plugin-named file and always sets blobRelpath=nil (the riskiest IPC
+//     surface stays absent until a hardened, traversal-validating BlobVault ingest
+//     lands). Plugins should not rely on blobScratchName yet (the hero is all-metadata).
 //   - sourcePath is untrusted free-text the host records but NEVER opens.
 //   - privacyClass/confidence cross the wire as strings; the host validates them
 //     (e.g. a non-metadata artifact is rejected in a plaintext case) — the wire
@@ -77,14 +80,15 @@ public struct TierBArtifactDTO: Codable, Sendable {
     /// "metadata" | "content" | "personalComms" | "credentialAdjacent" | "secret"
     /// — host maps to PrivacyClass and validates against the case encryption state.
     public let privacyClass: String
-    /// "low" | "medium" | "high" — host maps to Confidence, defaults if absent/invalid.
+    /// "observed" | "derived" | "heuristic" — the Confidence raw values the host
+    /// maps to (anything else, or absent, defaults to "observed").
     public let confidence: String?
     /// Untrusted free-text; the host records it but NEVER opens it.
     public let sourcePath: String?
     public let observedAtUnix: Int64?
     public let capturedAtUnix: Int64?
-    /// Optional scratch-relative file name the plugin wrote into scratchDir; the
-    /// host validates (no traversal / leading slash / dotdot / null) then ingests.
+    /// RESERVED — blob ingest is not yet implemented; the host opens no file and
+    /// always sets blobRelpath=nil. Do not rely on this field yet.
     public let blobScratchName: String?
 
     public init(
