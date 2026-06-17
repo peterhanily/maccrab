@@ -1,23 +1,28 @@
 // FirstPartyTierBRunner — spawns a verified FIRST-PARTY Tier-B plugin as a
-// trusted subprocess and reads its TierBIPC stream (Shape 2, Phase 2b).
+// trusted subprocess and reads its TierBIPC stream (Shape 2, Phase 2b + reap).
 //
 // First-party plugins run WITHOUT a sandbox profile (they are our own
-// offline-key-signed code, exactly as trusted as a built-in) — so this runner is
-// the SandboxAnalyzer Process pattern MINUS the /usr/bin/sandbox-exec wrapper,
-// HARDENED against the Shape-2 attack pass:
+// offline-key-signed code, exactly as trusted as a built-in), HARDENED against
+// the Shape-2 attack pass:
 //   - hard-requires VerifiedPlugin.isFirstParty (only the Phase-1 gate sets it);
 //     a non-first-party plugin can never reach this runner.
-//   - environment is scrubbed to PATH + HOME ONLY — never inherits the host env
+//   - spawned in its OWN PROCESS GROUP (posix_spawn + POSIX_SPAWN_SETPGROUP) so
+//     the entire subtree is reachable via kill(-pgid) — a forked descendant is
+//     REAPED, not orphaned (Foundation.Process cannot set the group).
+//   - environment scrubbed to PATH + HOME ONLY — never inherits the host env
 //     (no MACCRAB_LLM_*_KEY / token leak); the SQLCipher DEK never crosses.
-//   - the request goes via stdin (one JSON line), never argv (no secrets in argv).
-//   - stdout is STREAMED on a background thread with a running total-byte cap
-//     (no readDataToEndOfFile-after-exit deadlock/OOM); per-line, artifact-count,
-//     and JSON-nesting caps are enforced when parsing.
-//   - wall-clock timeout → terminate (SIGTERM) → SIGKILL escalation.
+//   - request via stdin (one JSON line), never argv; the stdin write fd is
+//     F_SETNOSIGPIPE so a closed-read-end write returns EPIPE, not a fatal SIGPIPE.
+//   - stdout STREAMED on a background thread with a running total-byte cap (no
+//     readDataToEndOfFile-after-exit deadlock/OOM); stderr drained to a capped
+//     tail; per-line, artifact-count, and JSON-nesting caps enforced when parsing.
+//   - wall-clock timeout → SIGTERM the group → SIGKILL the group; the child is
+//     awaited WNOWAIT (no pid reuse) then the group is SIGKILL'd then reaped.
 // The caller owns the scratch dir + maps the returned DTOs to ArtifactRecords
-// (host stamps identity, recomputes size, ingests blobs) — see the Phase 2c bridge.
+// (host stamps identity, recomputes size) — see the Phase 2c bridge.
 
 import Foundation
+import Darwin
 
 public struct TierBRunOutcome: Sendable {
     public let artifacts: [TierBArtifactDTO]
@@ -62,58 +67,81 @@ public struct FirstPartyTierBRunner: Sendable {
             throw FirstPartyTierBRunnerError.notFirstParty(pluginID: verified.pluginID)
         }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: verified.binaryPath)
-        proc.arguments = []   // request crosses via stdin, never argv
-        // Scrub the environment: PATH + HOME only. Never nil (nil inherits the
-        // full host env). No MACCRAB_* / tokens / DEK ever cross the boundary.
-        proc.environment = [
-            "PATH": "/usr/bin:/bin",
-            "HOME": NSHomeDirectory(),
+        // Pipes (raw fds): child stdin <- in[0], stdout -> out[1], stderr -> err[1].
+        var inFds: [Int32] = [-1, -1]
+        var outFds: [Int32] = [-1, -1]
+        var errFds: [Int32] = [-1, -1]
+        guard pipe(&inFds) == 0, pipe(&outFds) == 0, pipe(&errFds) == 0 else {
+            throw FirstPartyTierBRunnerError.spawnFailed(pluginID: verified.pluginID, message: "pipe() failed")
+        }
+
+        var fileActions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, inFds[0], 0)
+        posix_spawn_file_actions_adddup2(&fileActions, outFds[1], 1)
+        posix_spawn_file_actions_adddup2(&fileActions, errFds[1], 2)
+        posix_spawn_file_actions_addclose(&fileActions, inFds[1])
+        posix_spawn_file_actions_addclose(&fileActions, outFds[0])
+        posix_spawn_file_actions_addclose(&fileActions, errFds[0])
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        // Own process group with the child as leader (pgid == child pid) → the
+        // whole subtree is reachable via kill(-pid, ...).
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+        posix_spawnattr_setpgroup(&attr, 0)
+        defer { posix_spawnattr_destroy(&attr) }
+
+        let argv: [UnsafeMutablePointer<CChar>?] = [strdup(verified.binaryPath), nil]
+        let envp: [UnsafeMutablePointer<CChar>?] = [
+            strdup("PATH=/usr/bin:/bin"),
+            strdup("HOME=\(NSHomeDirectory())"),
+            nil,
         ]
+        defer {
+            for p in argv where p != nil { free(p) }
+            for p in envp where p != nil { free(p) }
+        }
 
-        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-        proc.standardInput = inPipe
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
+        var pid: pid_t = 0
+        let spawnRC = posix_spawn(&pid, verified.binaryPath, &fileActions, &attr, argv, envp)
+        // Parent closes the child ends of every pipe.
+        close(inFds[0]); close(outFds[1]); close(errFds[1])
+        guard spawnRC == 0 else {
+            close(inFds[1]); close(outFds[0]); close(errFds[0])
+            throw FirstPartyTierBRunnerError.spawnFailed(
+                pluginID: verified.pluginID,
+                message: "posix_spawn: \(String(cString: strerror(spawnRC)))")
+        }
+        // Per-fd SIGPIPE suppression (audit HIGH#1).
+        _ = fcntl(inFds[1], F_SETNOSIGPIPE, 1)
 
-        // Thread-safe stdout accumulator with a hard total-byte cap.
+        let inWrite = FileHandle(fileDescriptor: inFds[1], closeOnDealloc: true)
+        let outHandle = FileHandle(fileDescriptor: outFds[0], closeOnDealloc: true)
+        let errHandle = FileHandle(fileDescriptor: errFds[0], closeOnDealloc: true)
+
         let lock = NSLock()
         var outBuf = Data()
         var truncated = false
-        let outHandle = outPipe.fileHandleForReading
-        let errHandle = errPipe.fileHandleForReading
+        var errBuf = Data()
         let readQ = DispatchQueue(label: "com.maccrab.tierb.stdout")
         let errQ = DispatchQueue(label: "com.maccrab.tierb.stderr")
         let outDone = DispatchSemaphore(value: 0)
         let errDone = DispatchSemaphore(value: 0)
-        var errBuf = Data()
 
-        do {
-            try proc.run()
-        } catch {
-            throw FirstPartyTierBRunnerError.spawnFailed(pluginID: verified.pluginID, message: "\(error)")
-        }
-
-        // Per-fd SIGPIPE suppression (audit HIGH #1): a write to a child that has
-        // closed its stdin read end returns EPIPE (a throwable `write` error)
-        // instead of raising SIGPIPE — which `try?` cannot catch and which would
-        // kill a host process that doesn't globally ignore SIGPIPE.
-        _ = fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
-
-        // Background drain of stdout with a running cap (avoids pipe-buffer
-        // deadlock and unbounded memory).
+        // Background drain of stdout with a running cap (no pipe-buffer deadlock / OOM).
         readQ.async {
             while true {
                 let chunk = outHandle.availableData
-                if chunk.isEmpty { break }      // EOF (child closed stdout / exited)
+                if chunk.isEmpty { break }     // EOF
                 lock.lock()
                 if outBuf.count + chunk.count > TierBIPC.maxStdoutBytes {
                     let room = max(0, TierBIPC.maxStdoutBytes - outBuf.count)
                     if room > 0 { outBuf.append(chunk.prefix(room)) }
                     truncated = true
                     lock.unlock()
-                    proc.terminate()
+                    kill(-pid, SIGKILL)        // stop the producer(s): the whole group
                     break
                 }
                 outBuf.append(chunk)
@@ -121,8 +149,6 @@ public struct FirstPartyTierBRunner: Sendable {
             }
             outDone.signal()
         }
-        // Background drain of stderr too (an un-drained stderr pipe can also
-        // deadlock the child); keep only a small capped tail for diagnostics.
         errQ.async {
             while true {
                 let chunk = errHandle.availableData
@@ -132,22 +158,18 @@ public struct FirstPartyTierBRunner: Sendable {
             errDone.signal()
         }
 
-        // Wall-clock timeout → SIGTERM, then SIGKILL escalation after a grace.
+        // Wall-clock timeout → SIGTERM the GROUP, then SIGKILL the GROUP after a grace.
         var timedOut = false
         let timer = DispatchSource.makeTimerSource()
         timer.schedule(deadline: .now() + timeout)
         timer.setEventHandler {
             timedOut = true
-            proc.terminate()
-            let pid = proc.processIdentifier
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
-                if proc.isRunning { kill(pid, SIGKILL) }
-            }
+            kill(-pid, SIGTERM)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) { kill(-pid, SIGKILL) }
         }
         timer.resume()
 
-        // Deliver the request (one JSON line) then close stdin. Tolerate EPIPE
-        // (a plugin that never reads stdin); bound nothing else on this path.
+        // Deliver the request (one JSON line) then close stdin. Tolerate EPIPE.
         if let reqData = try? JSONEncoder().encode(TierBCollectRequest(
             pluginID: verified.pluginID,
             pluginVersion: verified.manifest.version,
@@ -155,37 +177,42 @@ public struct FirstPartyTierBRunner: Sendable {
             windowStartUnix: windowStartUnix,
             windowEndUnix: windowEndUnix
         )) {
-            let w = inPipe.fileHandleForWriting
-            try? w.write(contentsOf: reqData)
-            try? w.write(contentsOf: Data([0x0A]))
+            try? inWrite.write(contentsOf: reqData)
+            try? inWrite.write(contentsOf: Data([0x0A]))
         }
-        try? inPipe.fileHandleForWriting.close()
+        try? inWrite.close()
 
-        proc.waitUntilExit()
+        // Await the leader's exit WITHOUT reaping (WNOWAIT keeps the zombie, so the
+        // pgid stays valid + the pid can't be reused), THEN SIGKILL the whole GROUP
+        // to reap any forked descendant, THEN reap the leader for its exit status.
+        // The timer bounds this wait (it SIGKILLs the group on timeout).
+        var si = siginfo_t()
+        _ = waitid(P_PID, id_t(pid), &si, WEXITED | WNOWAIT)
+        kill(-pid, SIGKILL)
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
         timer.cancel()
-        // Bound the post-exit drains (audit HIGH #2): a forked descendant still
-        // holding the stdout/stderr write end means availableData never EOFs, so
-        // an unbounded wait would hang run() forever. On expiry we proceed with
-        // what we captured (the direct child's output is already drained); the
-        // background read returns when the orphan eventually dies. CLEANLY reaping
-        // such a descendant requires a process-group spawn (posix_spawn setpgid +
-        // kill(-pgid)) — a hard prerequisite before WIRING this runner into a host
-        // (MacCrabApp / maccrab-mcp / maccrabd), tracked for the wiring milestone.
+
+        // The group is dead now, so EOF should arrive promptly; keep the bound as a
+        // safety net against any unexpected fd holder.
         _ = outDone.wait(timeout: .now() + 3.0)
         _ = errDone.wait(timeout: .now() + 3.0)
 
         lock.lock()
         let finalOut = outBuf
         let didTruncate = truncated
+        let finalErr = errBuf
         lock.unlock()
 
         let parsed = Self.parseOutputLines(finalOut)
-        let stderrTail = String(data: errBuf, encoding: .utf8) ?? ""
+        let stderrTail = String(data: finalErr, encoding: .utf8) ?? ""
+        // exit status: WIFEXITED → code; WIFSIGNALED → -signal.
+        let exitCode: Int32 = (status & 0x7f) == 0 ? ((status >> 8) & 0xff) : -(status & 0x7f)
 
         return TierBRunOutcome(
             artifacts: parsed.artifacts,
             result: parsed.result,
-            exitCode: proc.terminationStatus,
+            exitCode: exitCode,
             timedOut: timedOut,
             stdoutTruncated: didTruncate || parsed.truncated,
             decodeErrors: parsed.decodeErrors,

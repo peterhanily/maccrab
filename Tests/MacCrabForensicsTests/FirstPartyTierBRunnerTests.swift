@@ -168,18 +168,37 @@ struct FirstPartyTierBRunnerTests {
         #expect(out.result?.status == "ok")
     }
 
-    @Test("audit HIGH#2: a forked descendant holding stdout doesn't hang run() (bounded drain)")
-    func spawnForkedFdHolderBounded() async throws {
+    @Test("audit HIGH#2 reap: a forked descendant is KILLED with the process group, not orphaned, and run() returns promptly")
+    func spawnForkedDescendantReaped() async throws {
+        // The plugin backgrounds `sleep 30` (which inherits + holds stdout) and
+        // records its pid. With the process-group spawn, run()'s kill(-pgid) must
+        // reap that descendant; without it the descendant would orphan + survive.
+        let marker = NSTemporaryDirectory() + "desc-pid-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: marker) }
         let script = """
         #!/bin/sh
         cat >/dev/null
-        ( sleep 30 & )
+        sleep 30 &
+        echo $! > \(marker)
         printf '%s\\n' '{"kind":"result","result":{"status":"ok"}}'
-        """  // parent exits; the backgrounded descendant keeps stdout open
+        """
         let start = Date()
-        let out = try await Self.runScript(id: "com.test.run.fork", script: script, timeout: 20)
+        let out = try await Self.runScript(id: "com.test.run.reap", script: script, timeout: 20)
         let elapsed = Date().timeIntervalSince(start)
         #expect(out.result?.status == "ok")
-        #expect(elapsed < 12)   // bounded ~3s drain, not the 30s descendant lifetime
+        #expect(elapsed < 12)   // not the 30s descendant lifetime
+
+        let pidStr = (try? String(contentsOfFile: marker, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let descPid = Int32(pidStr) else {
+            Issue.record("no descendant pid recorded (got \(pidStr.debugDescription))"); return
+        }
+        // Poll briefly: kill(pid, 0) returns -1/ESRCH once the descendant is gone.
+        var alive = true
+        for _ in 0..<40 {
+            if kill(descPid, 0) != 0 { alive = false; break }
+            usleep(100_000)
+        }
+        #expect(!alive, "forked descendant pid \(descPid) should be reaped by the process-group kill")
     }
 }
