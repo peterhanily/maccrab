@@ -10,12 +10,26 @@
 
 import Foundation
 
+/// Plugin role for a Tier B bundle (B1). Deliberately a 2-case enum — NOT the
+/// 4-case Tier-A PluginType — because only these two are meaningful for the
+/// out-of-process runtime. Optional on the wire: a manifest without `kind`
+/// decodes to nil (treated as a collector by the runner for back-compat).
+/// `.analyzer` execution is DEFERRED (no analyzer runner yet); only `.collector`
+/// is dispatched to the TierBIPC subprocess today.
+public enum TierBPluginKind: String, Codable, Sendable {
+    case collector
+    case analyzer
+}
+
 public struct TierBManifest: Codable, Sendable {
     public let id: String
     public let displayName: String
     public let version: String
     public let schemaVersion: Int
     public let description: String
+
+    /// Plugin role (B1). Optional — absent decodes to nil (≈ collector).
+    public let kind: TierBPluginKind?
 
     /// Subpaths the plugin reads. Used to populate
     /// SandboxProfileSpec.fileReadSubpaths at spawn time.
@@ -34,6 +48,7 @@ public struct TierBManifest: Codable, Sendable {
         version: String,
         schemaVersion: Int,
         description: String,
+        kind: TierBPluginKind? = nil,
         fileReadSubpaths: [String] = [],
         fileWriteSubpaths: [String] = [],
         networkConnectAllowlist: [String] = []
@@ -43,9 +58,31 @@ public struct TierBManifest: Codable, Sendable {
         self.version = version
         self.schemaVersion = schemaVersion
         self.description = description
+        self.kind = kind
         self.fileReadSubpaths = fileReadSubpaths
         self.fileWriteSubpaths = fileWriteSubpaths
         self.networkConnectAllowlist = networkConnectAllowlist
+    }
+
+    // Lenient decode: only id/displayName/version/schemaVersion/description are
+    // required. kind + the three capability arrays are optional (arrays absent →
+    // [], kind absent → nil) so a minimal plugin manifest isn't brittle. Encode
+    // stays synthesized. An unknown `kind` value is rejected (fail-closed).
+    private enum CodingKeys: String, CodingKey {
+        case id, displayName, version, schemaVersion, description, kind
+        case fileReadSubpaths, fileWriteSubpaths, networkConnectAllowlist
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        version = try c.decode(String.self, forKey: .version)
+        schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        description = try c.decode(String.self, forKey: .description)
+        kind = try c.decodeIfPresent(TierBPluginKind.self, forKey: .kind)
+        fileReadSubpaths = try c.decodeIfPresent([String].self, forKey: .fileReadSubpaths) ?? []
+        fileWriteSubpaths = try c.decodeIfPresent([String].self, forKey: .fileWriteSubpaths) ?? []
+        networkConnectAllowlist = try c.decodeIfPresent([String].self, forKey: .networkConnectAllowlist) ?? []
     }
 
     /// Produce the SandboxProfileSpec this manifest declares.

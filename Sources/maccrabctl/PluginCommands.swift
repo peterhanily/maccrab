@@ -419,6 +419,12 @@ private func runFirstPartyTierBCollector(id: String, handle: CaseHandle) async t
     }
     defer { registry.cleanupVerifiedBinary(verified) }
 
+    // Only collectors are dispatched to the subprocess runtime today (B1).
+    if verified.manifest.kind == .analyzer {
+        throw CaseCommandError.underlying(
+            "Plugin '\(id)' is a Tier-B analyzer; analyzer execution is not yet supported (collector-only runtime).")
+    }
+
     let caseRow = try await handle.store.fetchCase(id: handle.caseID)
     let allowsSensitive = (caseRow?.encryptionState ?? .plaintext) != .plaintext
 
