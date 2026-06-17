@@ -394,4 +394,18 @@ public actor RaveCatalogClient {
         }
         return entries.sorted { $0.id < $1.id }
     }
+
+    /// Storefront DISPLAY filter: the entries the catalog actually OFFERS as
+    /// installable apps — exactly those with `status == "active"`, mirroring the
+    /// website's go-live filter (maccrab-rave site/build.sh). Pre-release /
+    /// placeholder / official-but-not-active / not-yet-signed entries are NOT
+    /// offered (the browser falls back to ComingSoon when none are active). This
+    /// is a display filter ONLY — it does not touch any signature / serial /
+    /// installability trust gate; the install path fail-closes on its own.
+    ///
+    /// Pure + nonisolated so the SwiftUI view's `offeredEntries` computed var and
+    /// the unit tests share one definition.
+    public nonisolated static func offeredEntries(_ entries: [RaveCatalogEntry]) -> [RaveCatalogEntry] {
+        entries.filter { $0.status == "active" }
+    }
 }

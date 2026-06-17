@@ -51,7 +51,7 @@ struct V2RaveCatalogBrowserView: View {
     /// DISPLAY filter only — it does not touch any signature / serial /
     /// installability trust gate (the install path still fail-closes on its own).
     private var offeredEntries: [RaveCatalogEntry] {
-        entries.filter { $0.status == "active" }
+        RaveCatalogClient.offeredEntries(entries)
     }
 
     private var visibleEntries: [RaveCatalogEntry] {
