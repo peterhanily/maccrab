@@ -331,13 +331,18 @@ public actor RaveCatalogClient {
     }
 
     private func loadCatalogPublicKey() throws -> Curve25519.Signing.PublicKey {
-        // Local-dev override.
+        #if DEBUG
+        // Local-dev override. DEBUG-ONLY (matches the S2-13 staging seam below):
+        // a RELEASE build must trust ONLY the bundled production key — honoring an
+        // env path on release would let a local foothold swap the catalog trust
+        // root and forge a catalog/signer pin.
         if let path = ProcessInfo.processInfo.environment["MACCRAB_RAVE_CATALOG_PUB_PATH"], !path.isEmpty,
            let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
            data.count == 32,
            let key = try? Curve25519.Signing.PublicKey(rawRepresentation: data) {
             return key
         }
+        #endif
         // S2-13 debug-only staging-key seam: a debug build with
         // MACCRAB_RAVE_STAGING_PUB set verifies against the staging signing
         // key. Compiled out / always nil on release builds.

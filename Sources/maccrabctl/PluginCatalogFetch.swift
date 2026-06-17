@@ -136,10 +136,15 @@ struct PluginCatalogFetcher {
     }
 
     private static func loadCatalogPublicKey() throws -> Curve25519.Signing.PublicKey {
-        // Local-dev override — explicit file path wins.
+        #if DEBUG
+        // Local-dev override — explicit file path wins. DEBUG-ONLY (matches the
+        // S2-13 staging seam below): a RELEASE build must trust ONLY the bundled
+        // production key. Honoring an env path on release would let a local
+        // foothold swap the catalog trust root and forge a catalog/signer pin.
         if let path = ProcessInfo.processInfo.environment["MACCRAB_RAVE_CATALOG_PUB_PATH"], !path.isEmpty {
             return try loadFromFile(path: path)
         }
+        #endif
         // S2-13 debug-only staging-key seam: a debug build with
         // MACCRAB_RAVE_STAGING_PUB set verifies against the staging signing
         // key instead of the bundled production key. Compiled out / always nil
