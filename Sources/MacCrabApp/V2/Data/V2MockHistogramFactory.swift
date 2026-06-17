@@ -6,6 +6,9 @@
 
 import Foundation
 
+#if DEBUG
+// DEBUG-only: synthetic chart data used solely by V2MockDataProvider. Gated out
+// of release — the live/offline paths render the real (or empty) histogram.
 public enum V2MockHistogramFactory {
     public static func synthBuckets(rangeKey: String) -> [V2OverviewBucket] {
         let now = Date()
@@ -55,3 +58,4 @@ public enum V2MockHistogramFactory {
         }
     }
 }
+#endif

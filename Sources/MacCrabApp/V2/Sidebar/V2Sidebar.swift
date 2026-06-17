@@ -216,7 +216,9 @@ struct V2Sidebar: View {
     /// when the daemon was offline.
     private var protectionFooter: some View {
         let degraded = appState.isProtectionDegraded
-        let inactive = state.provider.mode == .mock
+        // Inactive = not reading live data: offline (no daemon yet, release) or
+        // mock (DEBUG/dev). Either way the footer says "Protection inactive".
+        let inactive = state.provider.mode != .live
         let color: Color = inactive ? V2Theme.high : (degraded ? V2Theme.warning : V2Theme.healthy)
         let title: String = inactive ? "Protection inactive" : (degraded ? "Protection degraded" : "Protection active")
         let subtitle: String = inactive ? "No daemon detected" : (degraded ? "Click for details" : "Click for details")

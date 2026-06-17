@@ -15,13 +15,22 @@
 import Foundation
 
 public enum V2DataSourceMode: String, Sendable, Equatable {
+    /// Fabricated fixtures (V2MockRepository). DEBUG/preview/dev builds ONLY —
+    /// never reachable in a release build (gated in V2DashboardState).
     case mock
+    /// Reading from on-disk MacCrabCore stores.
     case live
+    /// No daemon data on this machine yet (fresh install, System Extension not
+    /// yet approved, pre-boot). Backed by V2OfflineDataProvider, which returns
+    /// EMPTY/zeroed data — an honest empty state with zero fabricated content.
+    /// This is the release default until `connectLiveData()` finds live stores.
+    case offline
 
     public var label: String {
         switch self {
         case .mock: return "Mock"
         case .live: return "Live"
+        case .offline: return "Offline"
         }
     }
 }

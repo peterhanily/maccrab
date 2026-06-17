@@ -635,7 +635,13 @@ extension MacCrabCtl {
         }
     }
 
+#if DEBUG
     // MARK: - trace demo (synthetic-trace seeder)
+    //
+    // DEBUG-only. This seeder writes fabricated "[DEMO]"-titled traces into the
+    // live tracegraph.db. A release build must contain no fake/test/demo data,
+    // so the whole seeder (plus its `process()` helper) and the CLI dispatch +
+    // help line for `trace demo` are gated out of release.
 
     /// Materializes a synthetic Fixture-1-style AI-credential-access
     /// trace directly into the user's tracegraph.db, with no daemon
@@ -872,6 +878,7 @@ extension MacCrabCtl {
             parentProcessKey: parentKey
         )
     }
+#endif
 
     // MARK: - trace replay-batch
 

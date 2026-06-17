@@ -51,180 +51,30 @@ public enum BundledThreatIntel {
 
     // MARK: - Known macOS Malware Hashes (SHA-256)
     //
-    // IMPORTANT: These are placeholder hashes formatted as valid SHA-256 (64 hex chars).
-    // Each placeholder encodes the malware family in the prefix for readability.
-    // Replace with real verified hashes from MalwareBazaar before production use.
-    //
-    // To get real hashes:
+    // Intentionally empty. The hash-match path is driven by the LIVE feeds
+    // (MalwareBazaar / abuse.ch) wired up at daemon startup — we do not ship a
+    // bundled offline hash set. The earlier entries here were synthetic
+    // placeholders (not real SHA-256s); they could never match a real file and
+    // a shipping detection engine must not carry fabricated IOCs, so they were
+    // removed. To bundle a real offline set in future, add VERIFIED entries:
     //   curl -s 'https://mb-api.abuse.ch/api/v1/' -d 'query=get_taginfo&tag=macos' | jq
     //   https://bazaar.abuse.ch/browse/tag/macos/
 
-    public static let malwareHashes: [MalwareHashEntry] = [
-        // --- Atomic Stealer (AMOS) ---
-        // Credential stealer sold on Telegram; targets Keychain, browser data, crypto wallets.
-        // Multiple variants since early 2023. Distributed via fake app DMGs.
-        MalwareHashEntry(
-            hash: "a100000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real AMOS hash
-            family: "AMOS",
-            description: "Atomic Stealer v1 — DMG installer targeting Keychain and browser passwords"
-        ),
-        MalwareHashEntry(
-            hash: "a100000000000000000000000000000000000000000000000000000000000002",  // PLACEHOLDER — replace with real AMOS hash
-            family: "AMOS",
-            description: "Atomic Stealer v2 — Python-based variant with crypto wallet extraction"
-        ),
-        MalwareHashEntry(
-            hash: "a100000000000000000000000000000000000000000000000000000000000003",  // PLACEHOLDER — replace with real AMOS hash
-            family: "AMOS",
-            description: "Atomic Stealer v3 — AppleScript credential prompt variant"
-        ),
-
-        // --- Poseidon Stealer ---
-        // Successor to AMOS, advertised on Telegram. Uses osascript for credential prompts.
-        MalwareHashEntry(
-            hash: "b200000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real Poseidon hash
-            family: "Poseidon",
-            description: "Poseidon Stealer — osascript-based credential harvester"
-        ),
-        MalwareHashEntry(
-            hash: "b200000000000000000000000000000000000000000000000000000000000002",  // PLACEHOLDER — replace with real Poseidon hash
-            family: "Poseidon",
-            description: "Poseidon Stealer variant — targets Bitwarden/1Password browser extensions"
-        ),
-
-        // --- MacSync (Notarized Stealer) ---
-        // Passed Apple's notarization checks. Stole credentials via fake system dialogs.
-        MalwareHashEntry(
-            hash: "c300000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real MacSync hash
-            family: "MacSync",
-            description: "MacSync — notarized stealer that bypassed Gatekeeper"
-        ),
-
-        // --- Cthulhu Stealer ---
-        // Go-based stealer sold as MaaS. Distributed as fake app bundles.
-        MalwareHashEntry(
-            hash: "d400000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real Cthulhu hash
-            family: "CthulhuStealer",
-            description: "Cthulhu Stealer — Go-based MaaS targeting macOS Keychain and crypto wallets"
-        ),
-
-        // --- RustBucket (DPRK / Lazarus / BlueNoroff) ---
-        // Stage 1 PDF viewer drops stage 2 Rust payload. Targets crypto sector.
-        MalwareHashEntry(
-            hash: "e500000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real RustBucket hash
-            family: "RustBucket",
-            description: "RustBucket Stage 1 — trojanized PDF viewer (DPRK/BlueNoroff)"
-        ),
-        MalwareHashEntry(
-            hash: "e500000000000000000000000000000000000000000000000000000000000002",  // PLACEHOLDER — replace with real RustBucket hash
-            family: "RustBucket",
-            description: "RustBucket Stage 2 — Rust payload with C2 beacon (DPRK/BlueNoroff)"
-        ),
-
-        // --- POOLRAT (DPRK) ---
-        // macOS backdoor attributed to Lazarus. Persists via LaunchDaemons.
-        MalwareHashEntry(
-            hash: "f600000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real POOLRAT hash
-            family: "POOLRAT",
-            description: "POOLRAT — macOS backdoor with LaunchDaemon persistence (DPRK/Lazarus)"
-        ),
-
-        // --- ObjCShellz (DPRK / BlueNoroff) ---
-        // Simple Objective-C reverse shell. Small binary, connects to C2 for commands.
-        MalwareHashEntry(
-            hash: "a700000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real ObjCShellz hash
-            family: "ObjCShellz",
-            description: "ObjCShellz — Objective-C reverse shell (DPRK/BlueNoroff)"
-        ),
-
-        // --- SmoothOperator (3CX Supply Chain) ---
-        // Trojanized 3CX desktop app. Loaded malicious dylib via legitimate updater.
-        MalwareHashEntry(
-            hash: "b800000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real SmoothOperator hash
-            family: "SmoothOperator",
-            description: "SmoothOperator — trojanized 3CXDesktopApp macOS build (supply chain)"
-        ),
-
-        // --- XLoader ---
-        // Java-based info stealer ported to macOS. Disguised as OfficeNote.
-        MalwareHashEntry(
-            hash: "c900000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real XLoader hash
-            family: "XLoader",
-            description: "XLoader for macOS — Java-based stealer disguised as OfficeNote"
-        ),
-
-        // --- Activator (Cracked Software Trojan) ---
-        // Distributed via cracked macOS apps on torrent sites. Drops crypto miner.
-        MalwareHashEntry(
-            hash: "da00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real Activator hash
-            family: "Activator",
-            description: "Activator — trojan in cracked macOS apps, drops XMRig miner"
-        ),
-
-        // --- Realst Stealer ---
-        // Rust-based stealer targeting crypto users via fake blockchain games.
-        MalwareHashEntry(
-            hash: "eb00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real Realst hash
-            family: "Realst",
-            description: "Realst Stealer — Rust-based stealer via fake blockchain game (Brawl Earth, etc.)"
-        ),
-        MalwareHashEntry(
-            hash: "eb00000000000000000000000000000000000000000000000000000000000002",  // PLACEHOLDER — replace with real Realst hash
-            family: "Realst",
-            description: "Realst Stealer variant — AppleScript credential phish + browser data exfil"
-        ),
-
-        // --- MetaStealer ---
-        // Go-based stealer targeting businesses. Social engineering via DMG delivery.
-        MalwareHashEntry(
-            hash: "fc00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real MetaStealer hash
-            family: "MetaStealer",
-            description: "MetaStealer — Go-based stealer distributed as fake business PDF DMG"
-        ),
-
-        // --- Pureland Stealer ---
-        // Targets Unity/game developer credentials. Distributed via Discord.
-        MalwareHashEntry(
-            hash: "ad00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER — replace with real Pureland hash
-            family: "Pureland",
-            description: "Pureland Stealer — targets game dev credentials via fake Discord tool"
-        ),
-
-        // --- Additional high-confidence macOS malware families ---
-
-        // CloudMensis / BadRAT — macOS spyware using cloud storage for C2
-        MalwareHashEntry(
-            hash: "be00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER
-            family: "CloudMensis",
-            description: "CloudMensis — macOS spyware using pCloud/Yandex/Dropbox as C2"
-        ),
-
-        // JokerSpy — Python backdoor with Mach-O dropper
-        MalwareHashEntry(
-            hash: "cf00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER
-            family: "JokerSpy",
-            description: "JokerSpy — Python backdoor with SwiftBelt reconnaissance"
-        ),
-
-        // Geacon — Cobalt Strike beacon ported to Go for macOS
-        MalwareHashEntry(
-            hash: "de00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER
-            family: "Geacon",
-            description: "Geacon — Go-based Cobalt Strike beacon for macOS"
-        ),
-
-        // VShell — post-exploitation framework targeting macOS
-        MalwareHashEntry(
-            hash: "ef00000000000000000000000000000000000000000000000000000000000001",  // PLACEHOLDER
-            family: "VShell",
-            description: "VShell — cross-platform post-exploitation framework (macOS variant)"
-        ),
-    ]
+    public static let malwareHashes: [MalwareHashEntry] = []
 
     // MARK: - Known C2 / Malicious Domains
     //
-    // Sources: abuse.ch URLhaus, public threat reports, community blocklists.
-    // Includes cryptomining pools, known phishing infra, and documented C2 domains.
+    // Cryptomining-pool domains only. Connecting to a mining pool from non-mining
+    // software is a strong, low-false-positive indicator of compromise.
+    //
+    // The former Apple-phishing / macOS-C2 / Cobalt-Strike / supply-chain /
+    // credential-theft sections were removed: their own comments described them as
+    // illustrative "patterns" / "impersonation themes" with no threat-feed
+    // corroboration (functionally fabricated IOCs), and the dynamic-DNS base
+    // domains (duckdns.org, no-ip.com, ddns.net, …) are legitimate services whose
+    // wholesale match is a false-positive generator. Real phishing / C2 /
+    // distribution domains arrive via the live URLhaus / abuse.ch feeds — we don't
+    // bundle invented examples.
 
     public static let maliciousDomains: Set<String> = [
         // --- Cryptomining Pools (21 entries) ---
@@ -250,67 +100,6 @@ public enum BundledThreatIntel {
         "auto.c3pool.org",
         "xmr.2miners.com",
         "pool.xmr.pt",
-
-        // --- Apple ID / iCloud Phishing (10 entries) ---
-        // Common patterns used in macOS-targeted phishing campaigns.
-        "login-appleid.com.verify.session",
-        "icloud-verify.com",
-        "apple-id-login.com",
-        "appleid-signin.com",
-        "icloud-findmy.com",
-        "appleid.apple.com-verify.support",
-        "signin.apple.com.account-verify.info",
-        "support-apple.com-id.info",
-        "appleid-recovery.support",
-        "icloud-unlock.com",
-
-        // --- Known macOS Malware C2 Domain Patterns (5 entries) ---
-        // From public threat research. These use common impersonation themes.
-        "api.macsoftupdate.com",
-        "cdn.applesoftwareupdate.com",
-        "update.appledownload.info",
-        "swupdate.macos-service.com",
-        "telemetry.macos-analytics.com",
-
-        // --- Commonly Abused Dynamic DNS / Free Hosting (8 entries) ---
-        // Legitimate services heavily abused for free C2 infrastructure.
-        "duckdns.org",
-        "no-ip.com",
-        "hopto.org",
-        "zapto.org",
-        "serveftp.com",
-        "ddns.net",
-        "sytes.net",
-        "myftp.biz",
-
-        // --- Documented Malware Distribution / Phishing (6 entries) ---
-        "dl.dropboxusercontent.com.malware-host.xyz",
-        "github-release.s3.amazonaws.com.download.top",
-        "maccrack.info",
-        "getmacapps.xyz",
-        "macapps.link",
-        "free-mac-software.top",
-
-        // --- Known Cobalt Strike Team Servers (from public lists) (5 entries) ---
-        "microsoftupdate.dynamic-dns.net",
-        "windows-update.dnset.com",
-        "update.windowsdefender.top",
-        "office365-update.com",
-        "azure-cdn.top",
-
-        // --- Supply Chain Attack C2 Patterns (4 entries) ---
-        "npm-stats.com",
-        "pypi-analytics.com",
-        "registry-npm.top",
-        "package-telemetry.com",
-
-        // --- Additional Phishing / Credential Theft Domains (6 entries) ---
-        "github-login.com",
-        "gitlab-auth.com",
-        "aws-console-login.com",
-        "google-oauth.top",
-        "microsoft-login.xyz",
-        "okta-verify.top",
     ]
 
     // MARK: - Known C2 IP Addresses
@@ -319,11 +108,13 @@ public enum BundledThreatIntel {
     // These IPs have documented malicious activity.
 
     public static let c2IPs: [C2IPEntry] = [
-        // --- Feodo Tracker / Botnet C2 (20 entries) ---
-        // Top IPs from abuse.ch Feodo Tracker blocklist (publicly available).
-        // These host botnet command-and-control infrastructure.
+        // --- Feodo Tracker / Botnet C2 (19 entries) ---
+        // Historical IPs from abuse.ch Feodo Tracker. The live Feodo list is
+        // currently empty (post-Operation-Endgame 2024), so these are best-effort
+        // offline snapshots in real hosting ranges; live botnet C2 arrives via the
+        // abuse.ch feeds. (Removed 45.33.32.156 — that is scanme.nmap.org, a test
+        // host that was mislabeled "Cobalt Strike C2".)
         C2IPEntry(ip: "23.111.114.52",   source: "Feodo Tracker", description: "Emotet C2"),
-        C2IPEntry(ip: "45.33.32.156",    source: "Feodo Tracker", description: "Cobalt Strike C2"),
         C2IPEntry(ip: "51.75.33.120",    source: "Feodo Tracker", description: "Emotet C2"),
         C2IPEntry(ip: "51.75.33.122",    source: "Feodo Tracker", description: "Emotet C2"),
         C2IPEntry(ip: "51.75.33.127",    source: "Feodo Tracker", description: "QakBot C2"),
@@ -343,24 +134,23 @@ public enum BundledThreatIntel {
         C2IPEntry(ip: "134.122.66.193",  source: "Feodo Tracker", description: "Emotet C2"),
         C2IPEntry(ip: "138.197.14.67",   source: "Feodo Tracker", description: "IcedID C2"),
 
-        // --- DPRK / Lazarus APT Infrastructure (5 entries) ---
+        // --- DPRK / Lazarus APT Infrastructure (4 entries) ---
         // IPs attributed to North Korean threat actors in public reports.
+        // (Removed 93.184.216.34 — that is example.com's IP, mislabeled "Lazarus
+        // staging server". Corrected the ObjCShellz C2 to the published Jamf IOC.)
         C2IPEntry(ip: "104.168.174.80",  source: "DPRK APT", description: "RustBucket C2 (BlueNoroff)"),
         C2IPEntry(ip: "185.29.8.53",     source: "DPRK APT", description: "POOLRAT C2 (Lazarus)"),
-        C2IPEntry(ip: "172.93.201.253",  source: "DPRK APT", description: "ObjCShellz C2 (BlueNoroff)"),
+        C2IPEntry(ip: "104.168.214.151", source: "DPRK APT", description: "ObjCShellz C2 (BlueNoroff, swissborg.blog lure)"),
         C2IPEntry(ip: "45.61.169.36",    source: "DPRK APT", description: "AppleJeus C2 (Lazarus)"),
-        C2IPEntry(ip: "93.184.216.34",   source: "DPRK APT", description: "Lazarus staging server"),
 
-        // --- Cryptomining Pool IPs (5 entries) ---
+        // --- Cryptomining Pool IPs (4 entries) ---
         // Direct IP connections to mining pools (bypass DNS detection).
+        // (Removed 51.255.71.0 — a .0 network address that monero.crypto-pool.fr
+        // never resolved to; a guaranteed mismatch.)
         C2IPEntry(ip: "5.9.28.116",      source: "Mining Pool", description: "MinerGate pool IP"),
         C2IPEntry(ip: "5.9.70.67",       source: "Mining Pool", description: "MinerGate pool IP"),
         C2IPEntry(ip: "46.173.219.161",  source: "Mining Pool", description: "MoneroOcean pool IP"),
-        C2IPEntry(ip: "51.255.71.0",     source: "Mining Pool", description: "monero.crypto-pool.fr"),
         C2IPEntry(ip: "144.76.183.96",   source: "Mining Pool", description: "Nanopool XMR"),
-
-        // --- 3CX Supply Chain (1 entry) ---
-        C2IPEntry(ip: "104.18.12.33",    source: "3CX Supply Chain", description: "SmoothOperator C2 endpoint"),
     ]
 
     // MARK: - Suspicious TLDs

@@ -310,10 +310,12 @@ public struct V2CommandPalette: View {
 
     private func entityLookup(prefix: String, needle: String?) -> [V2PaletteItem]? {
         // In LIVE mode read the synchronous caches V2DashboardState refreshes on
-        // palette open; in MOCK mode use the static fixtures. (Previously this
-        // hard-returned [] in live mode, so alert:/rule:/trace: were dead on
+        // palette open; in a DEBUG mock build use the static fixtures. (Previously
+        // this hard-returned [] in live mode, so alert:/rule:/trace: were dead on
         // every real install — the one feature that only worked in the demo.)
+        #if DEBUG
         let isMock = state.provider.mode == .mock
+        #endif
         // `ip:` needs no entity data — it's a pure IOC-search nav hint — so it
         // works in both modes (handled before any source lookup).
         if prefix == "ip" {
@@ -333,9 +335,15 @@ public struct V2CommandPalette: View {
                 )
             ]
         }
+        #if DEBUG
         let alertSource = isMock ? V2MockRepository.alerts : state.paletteAlerts
         let ruleSource = isMock ? V2MockRepository.rules : state.paletteRules
         let traceSource = isMock ? V2MockRepository.traces : state.paletteTraces
+        #else
+        let alertSource = state.paletteAlerts
+        let ruleSource = state.paletteRules
+        let traceSource = state.paletteTraces
+        #endif
         switch prefix {
         case "alert":
             return alertSource

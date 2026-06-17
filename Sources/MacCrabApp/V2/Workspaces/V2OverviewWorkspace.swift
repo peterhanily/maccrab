@@ -89,7 +89,8 @@ struct V2OverviewWorkspace: View {
     private enum ProtectionState { case active, degraded, inactive }
 
     private var protectionState: ProtectionState {
-        if state.provider.mode == .mock { return .inactive }
+        // Not live (offline/no-daemon in release, or mock in DEBUG) ⇒ inactive.
+        if state.provider.mode != .live { return .inactive }
         let heartbeatFresh: Bool = {
             guard let hb = appState.heartbeat else { return false }
             return !hb.isStale

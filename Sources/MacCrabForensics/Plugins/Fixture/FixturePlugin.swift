@@ -14,6 +14,12 @@
 import Foundation
 import CryptoKit
 
+// DEBUG-only test fixture. A no-op collector used solely to exercise the plugin
+// lifecycle and back PluginRunner tests. It must not ship in a release build —
+// not registered (Bootstrap is also #if DEBUG) and the type itself is gated so
+// its marker string never appears in a release binary. Tests register it
+// directly and compile in DEBUG, so they're unaffected.
+#if DEBUG
 public struct FixturePlugin: Collector {
 
     public static let manifest = PluginManifest(
@@ -107,3 +113,4 @@ public struct FixturePlugin: Collector {
         )
     }
 }
+#endif

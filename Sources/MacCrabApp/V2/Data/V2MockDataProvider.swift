@@ -4,6 +4,10 @@
 
 import Foundation
 
+#if DEBUG
+// DEBUG / preview / dev ONLY — serves the fabricated V2MockRepository fixtures.
+// A release build must show no fake/sample/demo data, so the dashboard defaults
+// to V2OfflineDataProvider (an honest empty state) instead. Gated out of release.
 @MainActor
 public final class V2MockDataProvider: V2DataProvider {
     public let mode: V2DataSourceMode = .mock
@@ -65,3 +69,4 @@ public final class V2MockDataProvider: V2DataProvider {
         )
     }
 }
+#endif

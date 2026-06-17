@@ -15,10 +15,18 @@ public enum MacCrabForensicsBootstrap {
     /// Idempotent on plugin id — re-registration replaces. The
     /// shared `PluginRegistry.shared` is the canonical target.
     public static func registerBuiltins(into registry: PluginRegistry = .shared) async throws {
+        #if DEBUG
+        // FixturePlugin (com.maccrab.forensics.fixture) is a no-op collector that
+        // exists only to exercise the plugin lifecycle / serve as the PluginRunner
+        // test fixture. It must NOT ship in a release build — it would otherwise
+        // surface in the CLI `plugin list`, the MCP `forensics.list_plugins`, and
+        // the live `fixture_emit_heartbeat` tool. Tests register it directly, so
+        // gating it here doesn't affect them.
         try await registry.register(PluginRegistration(
             manifest: FixturePlugin.manifest,
             factory: { try await FixturePlugin() }
         ))
+        #endif
         try await registry.register(PluginRegistration(
             manifest: CodesignResolveEnricher.manifest,
             factory: { try await CodesignResolveEnricher() }

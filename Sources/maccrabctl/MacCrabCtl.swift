@@ -423,9 +423,14 @@ struct MacCrabCtl {
             } else {
                 await traceReplay(bundlePath: path, expectedNormalizationVersion: normVersion)
             }
+        #if DEBUG
+        // DEBUG-only: `trace demo` seeds fabricated "[DEMO]" traces into the live
+        // tracegraph.db. A release build must ship no fake/test/demo data, so the
+        // dispatch (and the seeder in TraceCommands.swift) are gated out.
         case "demo":
             let scenario = rest.first
             await traceDemo(scenario: scenario)
+        #endif
         case "replay-batch":
             guard let dir = rest.first else {
                 print("Usage: maccrabctl trace replay-batch <dir> [--report <html-path>] [--normalization <version>]"); exit(1)
@@ -502,8 +507,6 @@ struct MacCrabCtl {
           trace from-agent <name> [--window 20m]   Find traces involving an agent
           trace from-process <pid> [--window 20m]  Find traces involving a pid
           trace from-process-key <key>             Find traces involving a processKey
-          trace demo [scenario]                    Materialize a synthetic demo trace into tracegraph.db
-                                                   (no daemon required; scenario: fixture1 | persistence | list)
 
         Bundle pipeline (.maccrabtrace files):
           trace export <trace-id> [--out <dir>] [--include-raw-paths] [--include-hostname]

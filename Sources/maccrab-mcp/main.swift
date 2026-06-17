@@ -2124,7 +2124,7 @@ func handleGetTraces(_ args: [String: Any]) async -> Any {
         let traces = try await store.listTraces(limit: limit, status: statusFilter)
         if traces.isEmpty {
             return ["content": [["type": "text", "text":
-                "No traces found. Either the daemon hasn't materialized any yet, or the tracegraph.db isn't on this machine. Run `maccrabctl trace demo` to seed a sample."]]]
+                "No traces found. Either the daemon hasn't materialized any yet (it anchors a trace once it correlates a multi-step chain of activity), or the tracegraph.db isn't on this machine."]]]
         }
         var lines = ["\(traces.count) trace(s):"]
         for t in traces {

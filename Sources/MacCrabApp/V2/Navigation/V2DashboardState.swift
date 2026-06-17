@@ -33,15 +33,24 @@ public final class V2DashboardState: ObservableObject {
     /// navigated; the user still had to click "+ New rule" inside.
     @Published public var presentNewRuleTick: Int = 0
 
-    /// Current data source. Starts as mock; flips to live once
-    /// `connectLiveData()` succeeds.
-    @Published public var provider: V2DataProvider = V2MockDataProvider()
+    /// Current data source. In a release build this starts as the honest
+    /// empty/offline provider (V2OfflineDataProvider) and flips to live once
+    /// `connectLiveData()` succeeds; a DEBUG/dev build starts on the mock
+    /// fixtures instead. A release NEVER renders fabricated [DEMO] data.
+    @Published public var provider: V2DataProvider = {
+        #if DEBUG
+        return V2MockDataProvider()
+        #else
+        return V2OfflineDataProvider()
+        #endif
+    }()
 
     /// Synchronous caches of recent entities for the command palette's
     /// alert:/rule:/trace: lookups. The palette filter is sync but the live
     /// provider is async, so these are refreshed when the palette opens (and
     /// on each auto-refresh tick) and read synchronously by entityLookup.
-    /// Empty in mock mode — the palette falls back to V2MockRepository there.
+    /// Empty until the live provider populates them. (In a DEBUG build the
+    /// palette falls back to V2MockRepository fixtures while in mock mode.)
     @Published public var paletteAlerts: [V2MockAlert] = []
     @Published public var paletteRules: [V2MockRule] = []
     @Published public var paletteTraces: [V2MockTrace] = []
@@ -163,7 +172,7 @@ public final class V2DashboardState: ObservableObject {
             showToast(V2Toast(
                 kind: .info,
                 title: "No daemon data found",
-                detail: "Continuing with sample data — start the daemon and try again",
+                detail: "Start or approve the daemon, then try again",
                 displayFor: 4
             ))
         }
@@ -236,8 +245,13 @@ public final class V2DashboardState: ObservableObject {
     }
 
     public func disconnectLiveData() {
+        #if DEBUG
         self.provider = V2MockDataProvider()
         showToast(V2Toast(kind: .info, title: "Switched to sample data"))
+        #else
+        self.provider = V2OfflineDataProvider()
+        showToast(V2Toast(kind: .info, title: "Disconnected from live data"))
+        #endif
     }
 
     /// Start the periodic refresh loop. Idempotent.

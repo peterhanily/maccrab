@@ -165,12 +165,18 @@ struct SecurityDigestTests {
 
 @Suite("Bundled Threat Intel")
 struct BundledThreatIntelTests {
-    @Test("Has non-zero IOC counts")
+    @Test("Has non-zero IP/domain IOC counts; no bundled hashes")
     func hasCounts() {
         let stats = BundledThreatIntel.stats
-        #expect(stats.hashes > 10)
+        // No bundled malware hashes ship — the earlier entries were synthetic
+        // placeholders (could never match) and were removed; hashes now arrive
+        // via the live MalwareBazaar feed. The bundled IPs are real hosting-range
+        // C2 snapshots; the bundled domains are the cryptomining-pool set (the
+        // former synthetic phishing/C2 "pattern" domains + dynamic-DNS FP hazards
+        // were removed). Real phishing/C2 domains arrive via the live feeds.
+        #expect(stats.hashes == 0)
         #expect(stats.ips > 10)
-        #expect(stats.domains > 30)
+        #expect(stats.domains > 10)
     }
 
     @Test("Suspicious TLD detection works")

@@ -431,7 +431,12 @@ public struct V2MockIntegration: Identifiable, Sendable, Hashable {
     }
 }
 
-// MARK: - Repository
+#if DEBUG
+// MARK: - Repository — fabricated fixtures, DEBUG / preview / dev ONLY.
+// Served by V2MockDataProvider (also DEBUG-only). A release build shows no fake
+// data, so this whole fixture corpus is gated out of release. The SHAPE structs
+// above (V2MockAlert, V2MockRule, …) and V2TimeFormat below are used by the LIVE
+// provider too and intentionally stay OUTSIDE this gate.
 
 public enum V2MockRepository {
 
@@ -810,6 +815,7 @@ public enum V2MockRepository {
         Date().addingTimeInterval(deltaSeconds)
     }
 }
+#endif
 
 // MARK: - Time formatting helpers
 

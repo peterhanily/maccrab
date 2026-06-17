@@ -239,7 +239,7 @@ private enum V2DocEntry: CaseIterable, Hashable {
         case .troubleshooting:
             return [
                 DocSection(title: "Empty TraceGraph",
-                           body: "If the dashboard reports zero traces but the daemon is running, the materializer hasn't yet observed an anchor candidate. Run maccrabctl trace demo to seed a synthetic trace.",
+                           body: "If the dashboard reports zero traces but the daemon is running, the materializer hasn't yet observed an anchor candidate. Traces appear once the daemon correlates a multi-step chain of activity — give it time on an active machine.",
                            codeBlock: ""),
                 DocSection(title: "ES entitlement missing",
                            body: "If System › Health shows EndpointSecurity as down, the system extension wasn't activated. Open MacCrab.app and click \"Activate protection\" in the onboarding banner.",

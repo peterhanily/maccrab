@@ -86,6 +86,12 @@ public struct V2SystemWorkspace: View {
     private var dataSourceCard: some View {
         let isLive = state.provider.mode == .live
         let dirNote = state.provider.dataDir.map { " · \($0)" } ?? ""
+        let subtitle: String
+        switch state.provider.mode {
+        case .live:    subtitle = "Reading from MacCrabCore stores\(dirNote)"
+        case .offline: subtitle = "No daemon data yet — start or approve the daemon, then click Reconnect"
+        case .mock:    subtitle = "Sample / mock data (dev build) — start the daemon and click Reconnect"
+        }
         return HStack(spacing: 12) {
             ZStack {
                 Circle()
@@ -103,9 +109,7 @@ public struct V2SystemWorkspace: View {
                     V2StatusChip(state.provider.mode.label,
                                  kind: isLive ? .healthy : .info)
                 }
-                Text(isLive
-                     ? "Reading from MacCrabCore stores\(dirNote)"
-                     : "Sample / mock data — start the daemon and click Reconnect")
+                Text(subtitle)
                     .font(V2Theme.meta())
                     .foregroundStyle(V2Theme.mutedText)
                 if let err = state.provider.lastErrorDescription {
