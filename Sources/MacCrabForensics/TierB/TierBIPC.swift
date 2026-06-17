@@ -108,6 +108,26 @@ public struct TierBArtifactDTO: Codable, Sendable {
         self.capturedAtUnix = capturedAtUnix
         self.blobScratchName = blobScratchName
     }
+
+    // Lenient decode: only contentType is required on the wire. A plugin may omit
+    // data ([:]) / privacyClass ("metadata") / any optional field. Encode stays
+    // synthesized, so round-trips are preserved.
+    private enum CodingKeys: String, CodingKey {
+        case contentType, summary, data, privacyClass, confidence
+        case sourcePath, observedAtUnix, capturedAtUnix, blobScratchName
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        contentType = try c.decode(String.self, forKey: .contentType)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        data = try c.decodeIfPresent([String: JSONValue].self, forKey: .data) ?? [:]
+        privacyClass = try c.decodeIfPresent(String.self, forKey: .privacyClass) ?? "metadata"
+        confidence = try c.decodeIfPresent(String.self, forKey: .confidence)
+        sourcePath = try c.decodeIfPresent(String.self, forKey: .sourcePath)
+        observedAtUnix = try c.decodeIfPresent(Int64.self, forKey: .observedAtUnix)
+        capturedAtUnix = try c.decodeIfPresent(Int64.self, forKey: .capturedAtUnix)
+        blobScratchName = try c.decodeIfPresent(String.self, forKey: .blobScratchName)
+    }
 }
 
 /// The single terminal line a plugin emits to close the stream.
@@ -119,6 +139,14 @@ public struct TierBCollectResult: Codable, Sendable {
     public init(status: String, notes: [String] = []) {
         self.status = status
         self.notes = notes
+    }
+
+    // Lenient decode: status required, notes defaults to [] when omitted.
+    private enum CodingKeys: String, CodingKey { case status, notes }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decode(String.self, forKey: .status)
+        notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
     }
 }
 
