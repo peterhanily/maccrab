@@ -40,12 +40,22 @@ struct V2RaveCatalogBrowserView: View {
     private let client = RaveCatalogClient()
 
     private var categories: [String] {
-        let set = Set(entries.compactMap { $0.category })
+        let set = Set(offeredEntries.compactMap { $0.category })
         return set.sorted()
     }
 
+    /// Only entries the store actually offers — status == "active", mirroring the
+    /// website's go-live filter (maccrab-rave site/build.sh). Pre-release /
+    /// placeholder / not-yet-signed entries are NOT shown as available apps; when
+    /// none are active the browser falls back to the ComingSoon panel. This is a
+    /// DISPLAY filter only — it does not touch any signature / serial /
+    /// installability trust gate (the install path still fail-closes on its own).
+    private var offeredEntries: [RaveCatalogEntry] {
+        entries.filter { $0.status == "active" }
+    }
+
     private var visibleEntries: [RaveCatalogEntry] {
-        entries.filter { e in
+        offeredEntries.filter { e in
             if showFeaturedOnly, e.trustTier != "first-party" { return false }
             if let cat = selectedCategory, e.category != cat { return false }
             return true
@@ -74,9 +84,11 @@ struct V2RaveCatalogBrowserView: View {
 
     private var liveCatalog: some View {
         VStack(spacing: 0) {
-            if loading || error != nil || entries.isEmpty {
-                // Offline / empty / first-load: the branded ComingSoon panel is
-                // the honest fallback when the catalog isn't reachable yet.
+            if loading || error != nil || offeredEntries.isEmpty {
+                // Offline / empty / first-load / no active plugins yet: the branded
+                // ComingSoon panel is the honest fallback when the catalog isn't
+                // reachable OR carries only pre-release/placeholder entries (which
+                // are filtered out of offeredEntries, matching the website).
                 ComingSoonCatalogView()
             } else {
                 header
@@ -162,14 +174,14 @@ struct V2RaveCatalogBrowserView: View {
             sidebarRow("All scanners",
                        icon: "square.grid.2x2",
                        isSelected: selectedCategory == nil && !showFeaturedOnly,
-                       count: entries.count) {
+                       count: offeredEntries.count) {
                 selectedCategory = nil
                 showFeaturedOnly = false
             }
             sidebarRow("Featured (first-party)",
                        icon: "sparkles",
                        isSelected: showFeaturedOnly,
-                       count: entries.filter { $0.trustTier == "first-party" }.count) {
+                       count: offeredEntries.filter { $0.trustTier == "first-party" }.count) {
                 showFeaturedOnly.toggle()
                 if showFeaturedOnly { selectedCategory = nil }
             }
@@ -179,7 +191,7 @@ struct V2RaveCatalogBrowserView: View {
                     sidebarRow(cat.capitalized,
                                icon: categoryIcon(cat),
                                isSelected: selectedCategory == cat,
-                               count: entries.filter { $0.category == cat }.count) {
+                               count: offeredEntries.filter { $0.category == cat }.count) {
                         selectedCategory = (selectedCategory == cat) ? nil : cat
                         showFeaturedOnly = false
                     }
@@ -610,7 +622,9 @@ struct V2RaveCatalogBrowserView: View {
 
             entries = fetched
             stateByID = states
-            if selectedID == nil { selectedID = entries.first?.id }
+            // Default the detail selection to the first OFFERED (active) entry,
+            // never a hidden pre-release one.
+            if selectedID == nil { selectedID = offeredEntries.first?.id }
         } catch {
             self.error = "\(error)"
             entries = []
