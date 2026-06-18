@@ -174,6 +174,70 @@ public enum SandboxProfileBuilder {
         return lines.joined(separator: "\n") + "\n"
     }
 
+    /// Compile a genuine DENY-DEFAULT ("Model B") profile for UNTRUSTED
+    /// third-party plugins.
+    ///
+    /// `compile` above is allow-default + targeted denies — which is NOT
+    /// containment for untrusted code (anything not explicitly denied is
+    /// allowed; a new sensitive path is a silent leak). This emits
+    /// `(deny default)` and allows ONLY a minimal runtime base plus the
+    /// manifest-declared capabilities. fork / exec / network and ALL files
+    /// outside the base+allowlist are DENIED unless the manifest declares them.
+    ///
+    /// APPLICATION MODEL (validated on-device, Stream-0 spike): a deny-default
+    /// profile applied at exec time aborts the binary (sandbox-exec custom
+    /// deny-default → SIGABRT / execvp denied). So this profile is applied by
+    /// the signed `maccrab-tierb-sandbox-host` trampoline via `sandbox_init`
+    /// AFTER process startup (dyld/exec already done). In that form the spike
+    /// proved containment holds: an allow-listed read succeeds, a non-listed
+    /// read returns EPERM.
+    ///
+    /// PENDING (corpus work, Stream 0-1): the runtime base below is the spike
+    /// base (broad `mach-lookup`, which must be tightened to the specific
+    /// services the Swift runtime needs), and the exact base for full Swift
+    /// plugins must be proven against the adversarial corpus AS A CLIENT TEST
+    /// before this is wired into any execution path. It is intentionally NOT
+    /// wired yet — third-party execution stays fail-closed.
+    public static func compileDenyDefault(_ spec: SandboxProfileSpec) -> String {
+        var lines: [String] = []
+        lines.append("(version 1)")
+        lines.append("(deny default)")
+        lines.append("")
+        lines.append(";; Minimal runtime base — applied POST-STARTUP by the signed trampoline.")
+        lines.append(";; TODO(corpus): tighten mach-lookup to the specific runtime services.")
+        lines.append("(allow process-info*)")
+        lines.append("(allow sysctl-read)")
+        lines.append("(allow mach-lookup)")
+        lines.append("(allow file-read-metadata)")
+        lines.append("(allow file-read* (subpath \"/usr/lib\"))")
+        lines.append("(allow file-read* (subpath \"/System/Library\"))")
+        lines.append("(allow file-read* (literal \"/dev/null\") (literal \"/dev/random\") (literal \"/dev/urandom\"))")
+        lines.append("")
+        // Manifest-declared allowlist. Anything not listed stays denied by the
+        // (deny default) baseline — fork/exec/network are denied unless declared.
+        if !spec.fileReadSubpaths.isEmpty {
+            lines.append(";; Manifest file-read allowlist.")
+            for p in spec.fileReadSubpaths { lines.append("(allow file-read* (subpath \(quoted(p))))") }
+        }
+        if !spec.fileWriteSubpaths.isEmpty {
+            lines.append(";; Manifest file-write allowlist.")
+            for p in spec.fileWriteSubpaths { lines.append("(allow file-write* (subpath \(quoted(p))))") }
+        }
+        if !spec.networkConnectAllowlist.isEmpty {
+            lines.append(";; Manifest network allowlist (else all egress stays denied).")
+            for e in spec.networkConnectAllowlist { lines.append("(allow network-outbound (remote ip \(quoted(e))))") }
+        }
+        if !spec.processExecPaths.isEmpty {
+            lines.append(";; Manifest exec allowlist (else exec stays denied).")
+            for p in spec.processExecPaths { lines.append("(allow process-exec (literal \(quoted(p))))") }
+        }
+        if spec.allowProcessFork {
+            lines.append(";; Manifest opted into fork/posix_spawn.")
+            lines.append("(allow process-fork)")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
     /// Quote a string for SBPL. SBPL uses double-quoted strings.
     /// Backslash + double-quote need escaping. Newlines and other
     /// control chars need to be either stripped or hex-escaped

@@ -42,6 +42,18 @@ public struct TierBManifest: Codable, Sendable {
     /// (deny all network).
     public let networkConnectAllowlist: [String]
 
+    /// Mach services the plugin may look up. Default empty (deny all).
+    public let machServiceConnects: [String]
+
+    /// Executables the plugin may spawn. Default empty (deny exec).
+    public let processExecPaths: [String]
+
+    /// Whether the plugin may fork / posix_spawn. Default FALSE — third-party
+    /// code gets no fork unless it declares an exec allowlist AND the operator
+    /// consents. (Previously this was hardcoded `true` in toSandboxProfileSpec,
+    /// ignoring the manifest entirely — the "decorative capability" gap.)
+    public let allowProcessFork: Bool
+
     public init(
         id: String,
         displayName: String,
@@ -51,7 +63,10 @@ public struct TierBManifest: Codable, Sendable {
         kind: TierBPluginKind? = nil,
         fileReadSubpaths: [String] = [],
         fileWriteSubpaths: [String] = [],
-        networkConnectAllowlist: [String] = []
+        networkConnectAllowlist: [String] = [],
+        machServiceConnects: [String] = [],
+        processExecPaths: [String] = [],
+        allowProcessFork: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -62,6 +77,9 @@ public struct TierBManifest: Codable, Sendable {
         self.fileReadSubpaths = fileReadSubpaths
         self.fileWriteSubpaths = fileWriteSubpaths
         self.networkConnectAllowlist = networkConnectAllowlist
+        self.machServiceConnects = machServiceConnects
+        self.processExecPaths = processExecPaths
+        self.allowProcessFork = allowProcessFork
     }
 
     // Lenient decode: only id/displayName/version/schemaVersion/description are
@@ -71,6 +89,7 @@ public struct TierBManifest: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, displayName, version, schemaVersion, description, kind
         case fileReadSubpaths, fileWriteSubpaths, networkConnectAllowlist
+        case machServiceConnects, processExecPaths, allowProcessFork
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -83,20 +102,27 @@ public struct TierBManifest: Codable, Sendable {
         fileReadSubpaths = try c.decodeIfPresent([String].self, forKey: .fileReadSubpaths) ?? []
         fileWriteSubpaths = try c.decodeIfPresent([String].self, forKey: .fileWriteSubpaths) ?? []
         networkConnectAllowlist = try c.decodeIfPresent([String].self, forKey: .networkConnectAllowlist) ?? []
+        machServiceConnects = try c.decodeIfPresent([String].self, forKey: .machServiceConnects) ?? []
+        processExecPaths = try c.decodeIfPresent([String].self, forKey: .processExecPaths) ?? []
+        // Fail-closed default: a manifest that omits the field gets NO fork.
+        allowProcessFork = try c.decodeIfPresent(Bool.self, forKey: .allowProcessFork) ?? false
     }
 
     /// Produce the SandboxProfileSpec this manifest declares.
-    /// allowAllByDefault is always false for Tier B — we never
-    /// ship a Tier B plugin with permissive defaults.
+    /// allowAllByDefault is always false for Tier B — we never ship a Tier B
+    /// plugin with permissive defaults. ALL six capability fields are now
+    /// mapped faithfully from the manifest (previously machServiceConnects /
+    /// processExecPaths / allowProcessFork were discarded and fork was forced
+    /// on — the capability manifest was decorative). Default fork is FALSE.
     public func toSandboxProfileSpec() -> SandboxProfileSpec {
         SandboxProfileSpec(
             allowAllByDefault: false,
             fileReadSubpaths: fileReadSubpaths,
             fileWriteSubpaths: fileWriteSubpaths,
             networkConnectAllowlist: networkConnectAllowlist,
-            machServiceConnects: [],
-            processExecPaths: [],
-            allowProcessFork: true
+            machServiceConnects: machServiceConnects,
+            processExecPaths: processExecPaths,
+            allowProcessFork: allowProcessFork
         )
     }
 
