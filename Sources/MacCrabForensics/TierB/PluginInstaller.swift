@@ -134,10 +134,12 @@ public actor PluginInstaller {
         }
     }
 
-    /// Validate a manifest-declared path entry (member of
-    /// fileReadSubpaths / fileWriteSubpaths). Rejects newlines /
-    /// quotes / parens / control chars that could break out of
-    /// SBPL string literals; rejects relative paths; caps length.
+    /// Validate a manifest-declared path entry (member of fileReadSubpaths /
+    /// fileWriteSubpaths / processExecPaths). Rejects control chars
+    /// (newlines/tabs) and double-quotes that could break out of an SBPL string
+    /// literal, '..' traversal segments, and relative paths; caps length.
+    /// (Parens are legal in real paths and are neutralized by the SBPL quoter at
+    /// profile-build time, not rejected here.)
     public static func validateSandboxPath(
         _ path: String,
         field: String,
@@ -165,13 +167,14 @@ public actor PluginInstaller {
                 message: "\(field) entry contains '..' segment: \(path)"
             )
         }
-        // No control chars (newlines, tabs, etc.) — these can
-        // close out the SBPL string literal in the profile.
+        // No control chars (newlines, tabs, etc.) or double-quotes — these can
+        // close out the SBPL string literal in the profile. (Parens are legal in
+        // paths; the SBPL quoter neutralizes them at build time.)
         for scalar in path.unicodeScalars {
             let v = scalar.value
-            if v < 0x20 || v == 0x7F || (v >= 0x80 && v <= 0x9F) {
+            if v < 0x20 || v == 0x7F || (v >= 0x80 && v <= 0x9F) || v == 0x22 {
                 throw InstallError.invalidPluginID(
-                    message: "\(field) entry contains control char U+\(String(v, radix: 16, uppercase: true)): \(path)"
+                    message: "\(field) entry contains control/quote char U+\(String(v, radix: 16, uppercase: true)): \(path)"
                 )
             }
         }
@@ -211,6 +214,17 @@ public actor PluginInstaller {
                 // can't enforce more without a parser.
                 try validateDisplayString(endpoint, field: "networkConnectAllowlist", maxChars: 256)
             }
+        }
+        // The three capability fields the deny-default profile also consumes are
+        // validated here too (previously unvalidated — quoting was the sole
+        // defense). processExecPaths are absolute exec paths; machServiceConnects
+        // are service names (not paths), so they get the looser control/length
+        // check. allowProcessFork is a Bool — nothing to validate.
+        if let arr = json["processExecPaths"] as? [String] {
+            for p in arr { try validateSandboxPath(p, field: "processExecPaths") }
+        }
+        if let arr = json["machServiceConnects"] as? [String] {
+            for s in arr { try validateDisplayString(s, field: "machServiceConnects", maxChars: 256) }
         }
     }
 

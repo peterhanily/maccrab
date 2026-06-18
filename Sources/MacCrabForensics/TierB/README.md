@@ -8,7 +8,7 @@ Tier B = subprocess-sandboxed plugin runtime. Plan §3.9 + §12. The §12 commit
 
 | # | Condition | Status |
 |---|---|---|
-| 1 | Sandbox profile generator emits profiles macOS accepts | ✅ `SandboxProfileBuilder.swift` |
+| 1 | Sandbox profile generator emits profiles macOS accepts | ⚠ partial — emits SBPL (`SandboxProfileBuilder.swift`, incl. `compileDenyDefault`). Stream-0 spike (2026-06-18) found exec-time custom deny-default **aborts** the binary; containment requires the `sandbox_init` post-startup trampoline (validated for file-read deny). Runtime acceptance for real Swift plugins is **pending the corpus client-test** — see `plans/2026-06-17-thirdparty-marketplace.md`. |
 | 2 | XPC service IPC contract stable + reuses MCP JSON-RPC | partial — `XPCPluginLoader.swift` exists; subprocess spawn on `research/post-v15` |
 | 3 | Signing CA + revocation infrastructure wired | ✅ `PluginSignatureVerifier.swift` + `PluginInstaller.swift` + maccrabctl integration verified end-to-end against rave catalog |
 | 4 | Plan-level commitment via new chapter | ✅ platform plan §12 updated 2026-05-24; rave plan v4.5 published |

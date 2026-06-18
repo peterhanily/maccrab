@@ -235,6 +235,12 @@ public enum SandboxProfileBuilder {
             lines.append(";; Manifest opted into fork/posix_spawn.")
             lines.append("(allow process-fork)")
         }
+        // NOTE: spec.machServiceConnects is decoded + install-validated but NOT
+        // yet ENFORCED here — the runtime base above allows broad mach-lookup
+        // (needed to launch; see the TODO). The corpus-tightening step replaces
+        // that broad allow with a minimal runtime set AND emits per-service
+        // (allow mach-lookup (global-name ...)) from spec.machServiceConnects.
+        // Recorded + deferred, NOT silently dropped.
         return lines.joined(separator: "\n") + "\n"
     }
 
