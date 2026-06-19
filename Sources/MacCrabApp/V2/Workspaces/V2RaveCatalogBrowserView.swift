@@ -69,9 +69,9 @@ struct V2RaveCatalogBrowserView: View {
         case name, category, firstPartyFirst
         var label: String {
             switch self {
-            case .name:            return "Name (A–Z)"
-            case .category:        return "Category"
-            case .firstPartyFirst: return "First-party first"
+            case .name:            return String(localized: "raveStore.sort.name", defaultValue: "Name (A–Z)")
+            case .category:        return String(localized: "raveStore.sort.category", defaultValue: "Category")
+            case .firstPartyFirst: return String(localized: "raveStore.sort.firstPartyFirst", defaultValue: "First-party first")
             }
         }
     }
@@ -236,9 +236,9 @@ struct V2RaveCatalogBrowserView: View {
         HStack(spacing: 8) {
             Image(systemName: "shippingbox").foregroundStyle(.secondary).scaledSystem(12)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Third-party catalog — coming soon")
+                Text(String(localized: "raveStore.thirdPartyComingSoon.title", defaultValue: "Third-party catalog — coming soon"))
                     .scaledSystem(11, weight: .semibold)
-                Text("The signed, vetted plugin catalog is on the way. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed.")
+                Text(String(localized: "raveStore.thirdPartyComingSoon.body", defaultValue: "The signed, vetted plugin catalog is on the way. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed."))
                     .scaledSystem(10).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
@@ -573,7 +573,7 @@ struct V2RaveCatalogBrowserView: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .scaledSystem(11).foregroundStyle(.secondary)
-                TextField("Search scanners", text: $searchText)
+                TextField(String(localized: "raveStore.searchPlaceholder", defaultValue: "Search scanners"), text: $searchText)
                     .textFieldStyle(.plain)
                     .scaledSystem(12)
                 if !searchText.isEmpty {
@@ -581,7 +581,7 @@ struct V2RaveCatalogBrowserView: View {
                         Image(systemName: "xmark.circle.fill").scaledSystem(11)
                     }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
-                    .help("Clear search")
+                    .help(String(localized: "raveStore.clearSearch", defaultValue: "Clear search"))
                 }
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
@@ -612,12 +612,12 @@ struct V2RaveCatalogBrowserView: View {
         VStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .scaledSystem(28).foregroundStyle(.tertiary)
-            Text("No scanners match")
+            Text(String(localized: "raveStore.noMatches.title", defaultValue: "No scanners match"))
                 .scaledSystem(13, weight: .medium).foregroundStyle(.secondary)
             if !searchText.isEmpty {
-                Text("Nothing matches “\(searchText)”.")
+                Text(String(localized: "raveStore.noMatches.detail", defaultValue: "Nothing matches “\(searchText)”."))
                     .scaledSystem(11).foregroundStyle(.tertiary)
-                Button("Clear search") { searchText = "" }
+                Button(String(localized: "raveStore.clearSearch", defaultValue: "Clear search")) { searchText = "" }
                     .scaledSystem(11).buttonStyle(.bordered).controlSize(.small)
             }
         }
@@ -756,7 +756,7 @@ struct V2RaveCatalogBrowserView: View {
                     detailSection(String(localized: "raveDetail.source", defaultValue: "Source"), view: HStack(spacing: 5) {
                         Image(systemName: PluginProvenance.builtIn.symbolName)
                             .scaledSystem(10).foregroundStyle(.green)
-                        Text("Built-in — ships inside MacCrab").scaledSystem(11)
+                        Text(String(localized: "raveDetail.source.builtIn", defaultValue: "Built-in — ships inside MacCrab")).scaledSystem(11)
                     })
                 } else {
                     detailSection(String(localized: "raveDetail.signedBy", defaultValue: "Signed by"), body: e.signerIdentity.isEmpty ? "—" : e.signerIdentity)
@@ -782,18 +782,18 @@ struct V2RaveCatalogBrowserView: View {
     /// install); shown only for registered, runnable (collector/analyzer) ids.
     private func runOnThisMacAction(_ e: RaveCatalogEntry) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Run")
+            Text(String(localized: "raveDetail.run.header", defaultValue: "Run"))
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
             Button {
                 state.pendingForensicsRunPluginID = e.id
                 state.selectedTabs[.forensics] = .forensicsScans
             } label: {
-                Label("Run on this Mac", systemImage: "play.fill")
+                Label(String(localized: "raveDetail.run.button", defaultValue: "Run on this Mac"), systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            Text("Runs this built-in scanner on your Mac now — no install needed. Results appear under Run a scan.")
+            Text(String(localized: "raveDetail.run.caption", defaultValue: "Runs this built-in scanner on your Mac now — no install needed. Results appear under Run a scan."))
                 .scaledSystem(10)
                 .foregroundStyle(.tertiary)
         }

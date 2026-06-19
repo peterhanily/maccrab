@@ -68,8 +68,8 @@ struct V2ForensicsMyPluginsView: View {
                 .scaledSystem(22).foregroundStyle(.tint)
                 .padding(8).background(Color.accentColor.opacity(0.12)).cornerRadius(8)
             VStack(alignment: .leading, spacing: 2) {
-                Text("My plugins").font(.title2).fontWeight(.semibold)
-                Text("Scanners installed on this Mac, where they came from, and their verification state.")
+                Text(String(localized: "myPlugins.title", defaultValue: "My plugins")).font(.title2).fontWeight(.semibold)
+                Text(String(localized: "myPlugins.subtitle", defaultValue: "Scanners installed on this Mac, where they came from, and their verification state."))
                     .scaledSystem(11).foregroundStyle(.secondary)
             }
             Spacer()
@@ -79,11 +79,11 @@ struct V2ForensicsMyPluginsView: View {
                 if reverifying {
                     ProgressView().controlSize(.small)
                 } else {
-                    Label("Re-verify all", systemImage: "checkmark.shield")
+                    Label(String(localized: "myPlugins.reverifyAll", defaultValue: "Re-verify all"), systemImage: "checkmark.shield")
                 }
             }
             .disabled(reverifying)
-            .help("Re-check every installed plugin's signature against the pinned keys.")
+            .help(String(localized: "myPlugins.reverifyAll.help", defaultValue: "Re-check every installed plugin's signature against the pinned keys."))
         }
         .padding(.horizontal, 20).padding(.vertical, 16)
     }
@@ -92,10 +92,10 @@ struct V2ForensicsMyPluginsView: View {
 
     private var builtInSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Built-in scanners (\(builtins.count))",
-                          "Ship with MacCrab — always available, signed into the app.")
+            sectionHeader(String(localized: "myPlugins.builtin.header", defaultValue: "Built-in scanners (\(builtins.count))"),
+                          String(localized: "myPlugins.builtin.subtitle", defaultValue: "Ship with MacCrab — always available, signed into the app."))
             if builtins.isEmpty {
-                emptyHint("No built-in scanners registered.")
+                emptyHint(String(localized: "myPlugins.builtin.empty", defaultValue: "No built-in scanners registered."))
             } else {
                 ForEach(builtins, id: \.id) { m in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -128,10 +128,10 @@ struct V2ForensicsMyPluginsView: View {
 
     private var installedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Installed plugins (\(visibleVerified.count + visibleFailed.count))",
-                          "Added via the catalog or a local bundle. Re-verify checks their signatures live.")
+            sectionHeader(String(localized: "myPlugins.installed.header", defaultValue: "Installed plugins (\(visibleVerified.count + visibleFailed.count))"),
+                          String(localized: "myPlugins.installed.subtitle", defaultValue: "Added via the catalog or a local bundle. Re-verify checks their signatures live."))
             if visibleVerified.isEmpty && visibleFailed.isEmpty {
-                emptyHint("Nothing installed yet. MacCrab ships with the built-in scanners above.")
+                emptyHint(String(localized: "myPlugins.installed.empty", defaultValue: "Nothing installed yet. MacCrab ships with the built-in scanners above."))
             } else {
                 ForEach(visibleVerified, id: \.pluginID) { v in
                     installedRow(pluginID: v.pluginID, subtitle: "v\(v.version)",
@@ -166,7 +166,7 @@ struct V2ForensicsMyPluginsView: View {
             Button(role: .destructive) {
                 Task { await remove(pluginID) }
             } label: {
-                Text("Remove")
+                Text(String(localized: "myPlugins.remove", defaultValue: "Remove"))
             }
             .buttonStyle(.borderless).controlSize(.small)
         }
@@ -177,8 +177,8 @@ struct V2ForensicsMyPluginsView: View {
 
     private func quarantineSection(_ q: [TierBBootstrap.QuarantinedSummary]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Quarantined (\(q.count))",
-                          "Revoked or failed verification — held, not run. Remove to clear.")
+            sectionHeader(String(localized: "myPlugins.quarantined.header", defaultValue: "Quarantined (\(q.count))"),
+                          String(localized: "myPlugins.quarantined.subtitle", defaultValue: "Revoked or failed verification — held, not run. Remove to clear."))
             ForEach(q, id: \.pluginID) { item in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.octagon.fill")
@@ -189,13 +189,13 @@ struct V2ForensicsMyPluginsView: View {
                             .scaledSystem(10).foregroundStyle(.orange)
                             .fixedSize(horizontal: false, vertical: true)
                         if let url = item.advisoryURL, let u = URL(string: url) {
-                            Link("Advisory", destination: u).scaledSystem(10)
+                            Link(String(localized: "myPlugins.advisory", defaultValue: "Advisory"), destination: u).scaledSystem(10)
                         }
                     }
                     Spacer()
                     Button(role: .destructive) {
                         Task { await remove(item.pluginID) }
-                    } label: { Text("Remove") }
+                    } label: { Text(String(localized: "myPlugins.remove", defaultValue: "Remove")) }
                     .buttonStyle(.borderless).controlSize(.small)
                 }
                 .padding(.vertical, 4)
@@ -251,16 +251,16 @@ struct V2ForensicsMyPluginsView: View {
         reverifying = true
         status = await bootstrap.refresh()
         reverifying = false
-        actionMessage = "Re-verified: \(visibleVerified.count) ok, \(visibleFailed.count) failed."
+        actionMessage = String(localized: "myPlugins.action.reverified", defaultValue: "Re-verified: \(visibleVerified.count) ok, \(visibleFailed.count) failed.")
     }
 
     private func remove(_ pluginID: String) async {
         do {
             try await installer.uninstall(pluginID: pluginID)
-            actionMessage = "Removed \(friendlyName(pluginID))."
+            actionMessage = String(localized: "myPlugins.action.removed", defaultValue: "Removed \(friendlyName(pluginID)).")
             await reload()
         } catch {
-            actionMessage = "Couldn't remove: \(error.localizedDescription)"
+            actionMessage = String(localized: "myPlugins.action.removeFailed", defaultValue: "Couldn't remove: \(error.localizedDescription)")
         }
     }
 }
