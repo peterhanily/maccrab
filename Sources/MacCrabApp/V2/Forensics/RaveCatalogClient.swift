@@ -429,4 +429,36 @@ public actor RaveCatalogClient {
     public nonisolated static func offeredEntries(_ entries: [RaveCatalogEntry]) -> [RaveCatalogEntry] {
         entries.filter { $0.status == "active" }
     }
+
+    /// Synthesize first-party catalog rows for the runnable BUILT-IN scanners
+    /// (collector / analyzer manifests) so the store can browse + "Run on this
+    /// Mac" them while the signed third-party catalog is still coming soon.
+    ///
+    /// PURE + DISPLAY-ONLY. These rows must NEVER be merged into the verified
+    /// `entries` array, never enter `RaveCatalogEntryState.compute`, and never
+    /// touch the trust strip / catalog_serial — they are local built-ins, not
+    /// signed catalog entries. `signerPublicKeySHA256` is intentionally empty
+    /// (no pin) so any accidental `compute()` fail-closes to awaitingSignedBinary.
+    public nonisolated static func builtinEntries(
+        from manifests: [PluginManifest],
+        displayName: (String) -> String
+    ) -> [RaveCatalogEntry] {
+        manifests
+            .filter { $0.type == .collector || $0.type == .analyzer }
+            .map { m in
+                RaveCatalogEntry(
+                    id: m.id,
+                    displayName: displayName(m.id),
+                    currentVersion: m.version,
+                    channel: "official",
+                    trustTier: "first-party",
+                    signerIdentity: "MacCrab (built-in)",
+                    signerPublicKeySHA256: "",
+                    status: "active",
+                    category: m.type.rawValue,
+                    tags: [],
+                    minMaccrabVersion: nil
+                )
+            }
+    }
 }

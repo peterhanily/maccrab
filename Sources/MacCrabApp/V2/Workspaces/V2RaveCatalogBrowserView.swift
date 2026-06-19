@@ -59,6 +59,11 @@ struct V2RaveCatalogBrowserView: View {
     /// analyzer) — the local gate for the "Run on this Mac" action. Built-ins
     /// are always runnable regardless of catalog/install state.
     @State private var runnableIDs: Set<String> = []
+    /// Synthesized first-party rows for the runnable BUILT-IN scanners, so the
+    /// store can browse + run them while the signed third-party catalog is still
+    /// coming soon. DISPLAY-ONLY: never merged into `entries`, so they never
+    /// touch stateByID / compute / the trust strip / offeredEntries.
+    @State private var builtinEntries: [RaveCatalogEntry] = []
 
     private enum SortMode: CaseIterable, Hashable {
         case name, category, firstPartyFirst
@@ -74,7 +79,7 @@ struct V2RaveCatalogBrowserView: View {
     private let client = RaveCatalogClient()
 
     private var categories: [String] {
-        let set = Set(offeredEntries.compactMap { $0.category })
+        let set = Set(displayEntries.compactMap { $0.category })
         return set.sorted()
     }
 
@@ -88,8 +93,19 @@ struct V2RaveCatalogBrowserView: View {
         RaveCatalogClient.offeredEntries(entries)
     }
 
+    /// Built-ins (local first-party scanners) + offered catalog entries, for
+    /// DISPLAY only (browse/search/sort/detail). Built-ins are NOT in `entries`,
+    /// so they never touch stateByID / compute / the trust strip / the offer set.
+    private var displayEntries: [RaveCatalogEntry] {
+        builtinEntries + offeredEntries
+    }
+
+    private func isBuiltin(_ e: RaveCatalogEntry) -> Bool {
+        builtinEntries.contains { $0.id == e.id }
+    }
+
     private var visibleEntries: [RaveCatalogEntry] {
-        let filtered = offeredEntries.filter { e in
+        let filtered = displayEntries.filter { e in
             if showFeaturedOnly, e.trustTier != "first-party" { return false }
             if let cat = selectedCategory, e.category != cat { return false }
             if !matchesSearch(e) { return false }
@@ -129,13 +145,21 @@ struct V2RaveCatalogBrowserView: View {
     }
 
     private var selectedEntry: RaveCatalogEntry? {
-        entries.first { $0.id == selectedID }
+        displayEntries.first { $0.id == selectedID }
     }
 
     /// Resolved state for an entry, defaulting to a fail-closed
     /// "awaiting signed binary" when (for any reason) we haven't computed one.
     private func state(for entry: RaveCatalogEntry) -> RaveCatalogEntryState {
-        stateByID[entry.id] ?? RaveCatalogEntryState(
+        if isBuiltin(entry) {
+            return RaveCatalogEntryState(
+                entry: entry,
+                installability: .builtInLocal,
+                isRevoked: false,
+                revocationReason: nil
+            )
+        }
+        return stateByID[entry.id] ?? RaveCatalogEntryState(
             entry: entry,
             installability: .awaitingSignedBinary,
             isRevoked: false,
@@ -173,7 +197,10 @@ struct V2RaveCatalogBrowserView: View {
     private var paneState: PaneState {
         if loading { return .loading }
         if error != nil { return errorIsTrust ? .trustError : .offline }
-        return offeredEntries.isEmpty ? .verifiedEmpty : .live
+        // Built-ins (local, always-available) widen verifiedEmpty → live. They
+        // can never reach trustError/offline (those return above), so a
+        // verification failure is never masked by showing built-ins.
+        return (offeredEntries.isEmpty && builtinEntries.isEmpty) ? .verifiedEmpty : .live
     }
 
     /// The live store chrome (header + sidebar + grid + detail) — shown only
@@ -183,6 +210,12 @@ struct V2RaveCatalogBrowserView: View {
             header
             if !usingOfficial {
                 nonOfficialBanner
+            }
+            // Only built-ins are showing — keep the third-party catalog's empty
+            // state honest ("coming soon") so built-ins don't read as "the
+            // catalog is live."
+            if offeredEntries.isEmpty {
+                thirdPartyComingSoonBanner
             }
             Divider()
             HStack(spacing: 0) {
@@ -196,6 +229,21 @@ struct V2RaveCatalogBrowserView: View {
     }
 
     // MARK: - Header
+
+    private var thirdPartyComingSoonBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "shippingbox").foregroundStyle(.secondary).scaledSystem(12)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Third-party catalog — coming soon")
+                    .scaledSystem(11, weight: .semibold)
+                Text("The signed, vetted plugin catalog is on the way. The built-in scanners below ship inside MacCrab and run on this Mac now — no install needed.")
+                    .scaledSystem(10).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 20).padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.08))
+    }
 
     private var nonOfficialBanner: some View {
         HStack(spacing: 8) {
@@ -438,14 +486,14 @@ struct V2RaveCatalogBrowserView: View {
             sidebarRow("All scanners",
                        icon: "square.grid.2x2",
                        isSelected: selectedCategory == nil && !showFeaturedOnly,
-                       count: offeredEntries.count) {
+                       count: displayEntries.count) {
                 selectedCategory = nil
                 showFeaturedOnly = false
             }
             sidebarRow("Featured (first-party)",
                        icon: "sparkles",
                        isSelected: showFeaturedOnly,
-                       count: offeredEntries.filter { $0.trustTier == "first-party" }.count) {
+                       count: displayEntries.filter { $0.trustTier == "first-party" }.count) {
                 showFeaturedOnly.toggle()
                 if showFeaturedOnly { selectedCategory = nil }
             }
@@ -455,7 +503,7 @@ struct V2RaveCatalogBrowserView: View {
                     sidebarRow(cat.capitalized,
                                icon: categoryIcon(cat),
                                isSelected: selectedCategory == cat,
-                               count: offeredEntries.filter { $0.category == cat }.count) {
+                               count: displayEntries.filter { $0.category == cat }.count) {
                         selectedCategory = (selectedCategory == cat) ? nil : cat
                         showFeaturedOnly = false
                     }
@@ -539,7 +587,7 @@ struct V2RaveCatalogBrowserView: View {
             .cornerRadius(6)
             .frame(maxWidth: 260)
 
-            Text("\(visibleEntries.count) of \(offeredEntries.count)")
+            Text("\(visibleEntries.count) of \(displayEntries.count)")
                 .scaledSystem(10).foregroundStyle(.secondary)
                 .monospacedDigit()
 
@@ -699,15 +747,26 @@ struct V2RaveCatalogBrowserView: View {
                 if let min = e.minMaccrabVersion {
                     detailSection(String(localized: "raveDetail.requires", defaultValue: "Requires"), body: "MacCrab v\(min) or newer")
                 }
-                detailSection(String(localized: "raveDetail.signedBy", defaultValue: "Signed by"), body: e.signerIdentity.isEmpty ? "—" : e.signerIdentity)
-                trustStateRow(state(for: e))
+                if isBuiltin(e) {
+                    detailSection(String(localized: "raveDetail.source", defaultValue: "Source"), view: HStack(spacing: 5) {
+                        Image(systemName: PluginProvenance.builtIn.symbolName)
+                            .scaledSystem(10).foregroundStyle(.green)
+                        Text("Built-in — ships inside MacCrab").scaledSystem(11)
+                    })
+                } else {
+                    detailSection(String(localized: "raveDetail.signedBy", defaultValue: "Signed by"), body: e.signerIdentity.isEmpty ? "—" : e.signerIdentity)
+                    trustStateRow(state(for: e))
+                }
 
                 if runnableIDs.contains(e.id) {
                     Divider()
                     runOnThisMacAction(e)
                 }
-                Divider()
-                installAction(e)
+                // Built-ins have nothing to install — Run is their only action.
+                if !isBuiltin(e) {
+                    Divider()
+                    installAction(e)
+                }
             }
             .padding(18)
         }
@@ -846,6 +905,7 @@ struct V2RaveCatalogBrowserView: View {
         case .versionFloorBlocked:    return "Unavailable on this MacCrab"
         case .revoked:                return "Revoked"
         case .impersonation:          return "Impersonation — refused"
+        case .builtInLocal:           return "Built-in"
         }
     }
 
@@ -857,6 +917,7 @@ struct V2RaveCatalogBrowserView: View {
         case .versionFloorBlocked:    return "exclamationmark.triangle"
         case .revoked:                return "xmark.octagon"
         case .impersonation:          return "exclamationmark.shield"
+        case .builtInLocal:           return "shield.lefthalf.filled"
         }
     }
 
@@ -878,6 +939,8 @@ struct V2RaveCatalogBrowserView: View {
             badge("Revoked", icon: "xmark.octagon.fill", color: .red)
         case .impersonation:
             badge("Impersonation", icon: "exclamationmark.shield.fill", color: .red)
+        case .builtInLocal:
+            badge("Built-in", icon: "shield.lefthalf.filled", color: .green)
         }
     }
 
@@ -968,6 +1031,9 @@ struct V2RaveCatalogBrowserView: View {
         if let f = PluginFactsLookup.facts(forPluginID: e.id) {
             return f.purpose
         }
+        if isBuiltin(e) {
+            return "\(friendlyName(e.id)) — a \(e.category ?? "scanner") that ships inside MacCrab. Run it on this Mac from here."
+        }
         return "\(friendlyName(e.id)) — \(e.category ?? "scanner") published via the rave catalog. Install it to add it to this Mac's scanner registry; from there it'll appear in any kit that references its id."
     }
 
@@ -1017,10 +1083,14 @@ struct V2RaveCatalogBrowserView: View {
         // "Run on this Mac". Built-ins are always runnable, so register them
         // first; this is independent of catalog reachability.
         try? await MacCrabForensicsBootstrap.registerBuiltins()
-        runnableIDs = Set(
-            await PluginRegistry.shared.manifests()
-                .filter { $0.type == .collector || $0.type == .analyzer }
-                .map { $0.id }
+        let runnableManifests = await PluginRegistry.shared.manifests()
+            .filter { $0.type == .collector || $0.type == .analyzer }
+        runnableIDs = Set(runnableManifests.map { $0.id })
+        // Synthesize display-only first-party rows for the runnable built-ins so
+        // the store can browse + run them while the third-party catalog is empty.
+        builtinEntries = RaveCatalogClient.builtinEntries(
+            from: runnableManifests,
+            displayName: { ScannerDisplay.name(forPluginID: $0) }
         )
         do {
             let fetched = try await client.fetchEntries()
@@ -1063,8 +1133,8 @@ struct V2RaveCatalogBrowserView: View {
             // it's unset OR points at one no longer offered (e.g. went inactive
             // on this reload), so the detail panel never shows a card the grid
             // filtered out. Never a hidden pre-release entry.
-            if selectedID == nil || !offeredEntries.contains(where: { $0.id == selectedID }) {
-                selectedID = offeredEntries.first?.id
+            if selectedID == nil || !displayEntries.contains(where: { $0.id == selectedID }) {
+                selectedID = displayEntries.first?.id
             }
         } catch {
             self.error = "\(error)"

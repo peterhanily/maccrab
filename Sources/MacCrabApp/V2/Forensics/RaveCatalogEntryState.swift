@@ -52,6 +52,10 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
         /// No pill — a non-first-party entry claims the reserved com.maccrab.*
         /// namespace (first-party impersonation). Never offered. (C-F)
         case impersonation(reason: String)
+        /// No pill — a first-party built-in scanner that ships inside
+        /// MacCrab.app. Already present; the live action is "Run on this Mac",
+        /// never Install. (Synthesized for display; never enters compute().)
+        case builtInLocal
     }
 
     public let entry: RaveCatalogEntry
@@ -100,6 +104,8 @@ public struct RaveCatalogEntryState: Equatable, Sendable {
             return "Revoked: \(reason)"
         case .impersonation(let reason):
             return reason
+        case .builtInLocal:
+            return "Built-in scanner — already on this Mac. Use Run on this Mac."
         }
     }
 
