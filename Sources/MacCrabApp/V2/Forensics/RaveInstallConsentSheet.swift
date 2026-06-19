@@ -279,7 +279,7 @@ struct RaveInstallConsentSheet: View {
             Text(label).font(.caption2.weight(.medium))
                 .foregroundStyle(.tertiary).frame(width: 42, alignment: .trailing)
             VStack(alignment: .leading, spacing: 1) {
-                ForEach(values, id: \.self) { Text($0).font(.caption2) }
+                ForEach(values.indices, id: \.self) { i in Text(values[i]).font(.caption2) }
             }
         }
     }

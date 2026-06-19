@@ -420,8 +420,8 @@ public actor RaveCatalogClient {
     /// installable apps — exactly those with `status == "active"`, mirroring the
     /// website's go-live filter (maccrab-rave site/build.sh). Pre-release /
     /// placeholder / official-but-not-active / not-yet-signed entries are NOT
-    /// offered (the browser falls back to ComingSoon when none are active). This
-    /// is a display filter ONLY — it does not touch any signature / serial /
+    /// offered (the browser shows its verified-empty pane when none are active).
+    /// This is a display filter ONLY — it does not touch any signature / serial /
     /// installability trust gate; the install path fail-closes on its own.
     ///
     /// Pure + nonisolated so the SwiftUI view's `offeredEntries` computed var and

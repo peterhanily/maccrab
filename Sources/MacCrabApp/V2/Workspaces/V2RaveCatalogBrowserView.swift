@@ -74,7 +74,7 @@ struct V2RaveCatalogBrowserView: View {
     /// Only entries the store actually offers — status == "active", mirroring the
     /// website's go-live filter (maccrab-rave site/build.sh). Pre-release /
     /// placeholder / not-yet-signed entries are NOT shown as available apps; when
-    /// none are active the browser falls back to the ComingSoon panel. This is a
+    /// none are active the browser shows its verified-empty pane. This is a
     /// DISPLAY filter only — it does not touch any signature / serial /
     /// installability trust gate (the install path still fail-closes on its own).
     private var offeredEntries: [RaveCatalogEntry] {
@@ -258,6 +258,10 @@ struct V2RaveCatalogBrowserView: View {
             VStack(spacing: 16) { content() }
                 .padding(40)
                 .frame(maxWidth: 460)
+                // The pane is always a near-black gradient; force dark so
+                // semantic colors (e.g. the trust-strip .secondary chips)
+                // resolve light and stay legible even in app light mode.
+                .environment(\.colorScheme, .dark)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -542,7 +546,7 @@ struct V2RaveCatalogBrowserView: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .scaledSystem(11)
-            .frame(width: 160)
+            .frame(minWidth: 140)
         }
         .padding(.horizontal, 18).padding(.vertical, 8)
     }
@@ -738,8 +742,8 @@ struct V2RaveCatalogBrowserView: View {
             Text(label).scaledSystem(10, weight: .medium)
                 .foregroundStyle(.tertiary).frame(width: 50, alignment: .trailing)
             VStack(alignment: .leading, spacing: 1) {
-                ForEach(values, id: \.self) { v in
-                    Text(v).scaledSystem(11).foregroundStyle(.primary)
+                ForEach(values.indices, id: \.self) { i in
+                    Text(values[i]).scaledSystem(11).foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1013,9 +1017,13 @@ struct V2RaveCatalogBrowserView: View {
             lastGoodFetch = Date()
             catalogSerial = await client.currentCatalogSerial()
             revFreshness = await client.revocationFreshness()
-            // Default the detail selection to the first OFFERED (active) entry,
-            // never a hidden pre-release one.
-            if selectedID == nil { selectedID = offeredEntries.first?.id }
+            // Seat the detail selection on the first OFFERED (active) entry when
+            // it's unset OR points at one no longer offered (e.g. went inactive
+            // on this reload), so the detail panel never shows a card the grid
+            // filtered out. Never a hidden pre-release entry.
+            if selectedID == nil || !offeredEntries.contains(where: { $0.id == selectedID }) {
+                selectedID = offeredEntries.first?.id
+            }
         } catch {
             self.error = "\(error)"
             self.errorIsTrust = Self.isTrustError(error)
