@@ -73,17 +73,31 @@ struct MCPProtocolHarnessTests {
         return dir
     }()
 
-    /// Feed newline-delimited request lines, close stdin (EOF ends the server
-    /// loop), and return the parsed response objects. A 60s read watchdog
-    /// guarantees a misbehaving server can't hang the suite — generous because
-    /// a CI runner building 442 suites in parallel can starve the first spawn's
-    /// DB-create/migrate well past a tight bound (the cause of the empty-
-    /// response flakes), while a healthy server still answers in milliseconds.
+    /// Feed newline-delimited request lines and return the parsed responses,
+    /// retrying on an EMPTY result. A CI runner building 442 suites in parallel
+    /// can starve the first cold 28MB-binary spawn (dyld load + Swift runtime
+    /// init + first DB open) past the read watchdog → no output. Later spawns
+    /// in the serialized suite are fast (binary + store warm in the page cache),
+    /// so a retry of the cold first call almost always succeeds. A genuinely
+    /// broken server returns empty on every attempt → the test still fails.
     func drive(_ requestLines: [String]) -> [[String: Any]] {
-        guard let bin = Self.binaryURL() else {
-            Issue.record("maccrab-mcp binary not found and could not be built")
-            return []
+        var objs: [[String: Any]] = []
+        for _ in 0..<3 {
+            objs = driveOnce(requestLines)
+            if !objs.isEmpty { break }
         }
+        if objs.isEmpty {
+            Issue.record("maccrab-mcp produced no parseable response after 3 attempts (missing binary, spawn failure, or starved past the watchdog)")
+        }
+        return objs
+    }
+
+    /// One spawn → write → read attempt. A 60s read watchdog guarantees a
+    /// misbehaving (or fatally starved) server can't hang the suite. Returns
+    /// [] on any failure — the caller (`drive`) decides whether to retry or
+    /// record an issue, so a transient first-attempt failure isn't a test fail.
+    private func driveOnce(_ requestLines: [String]) -> [[String: Any]] {
+        guard let bin = Self.binaryURL() else { return [] }
         let proc = Process()
         proc.executableURL = bin
         var env = ProcessInfo.processInfo.environment
@@ -93,10 +107,7 @@ struct MCPProtocolHarnessTests {
         proc.standardInput = inPipe
         proc.standardOutput = outPipe
         proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch {
-            Issue.record("failed to spawn maccrab-mcp: \(error)")
-            return []
-        }
+        do { try proc.run() } catch { return [] }
         let payload = (requestLines.joined(separator: "\n") + "\n").data(using: .utf8)!
         inPipe.fileHandleForWriting.write(payload)
         try? inPipe.fileHandleForWriting.close()
