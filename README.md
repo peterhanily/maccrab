@@ -37,7 +37,6 @@ MacCrab is an on-device security engine that monitors your Mac in real time usin
 
 ```bash
 # 1. Install
-brew tap peterhanily/maccrab https://github.com/peterhanily/maccrab
 brew install --cask peterhanily/maccrab/maccrab
 
 # 2. Open the dashboard
@@ -48,12 +47,13 @@ open /Applications/MacCrab.app
 #    Endpoint Security Extensions.
 ```
 
-> **Homebrew 6.0+:** the fully-qualified cask name (`peterhanily/maccrab/maccrab`) is required — it tells Homebrew to trust this one cask. The bare `--cask maccrab` now fails with `Refusing to load cask … from untrusted tap`.
+> **Homebrew 6.0+:** the fully-qualified cask name (`peterhanily/maccrab/maccrab`) auto-taps the official [`homebrew-maccrab`](https://github.com/peterhanily/homebrew-maccrab) tap and trusts this cask in one step. The bare `--cask maccrab` fails with `Refusing to load cask … from untrusted tap`.
 
-> **Updating from an older install?** If `brew install`/`brew update` errors with `could not apply …` (a rebase/cherry-pick conflict), your cached tap clone is stale — reset it, then re-run the install:
+> **Tapped the app repo before?** If you previously ran `brew tap … https://github.com/peterhanily/maccrab` and now hit a `could not apply …` rebase error on update — or `brew install` reports `Cask 'maccrab' is unreadable` / `syntax errors found` — your cached tap clone is stale. Switch to the clean tap, then re-run the install:
 >
 > ```bash
-> brew untap peterhanily/maccrab && brew tap peterhanily/maccrab https://github.com/peterhanily/maccrab
+> brew untap peterhanily/maccrab
+> brew install --cask peterhanily/maccrab/maccrab
 > ```
 
 > **Note:** Full Endpoint Security coverage requires granting Full Disk Access to MacCrab.app in **System Settings > Privacy & Security > Full Disk Access**.
