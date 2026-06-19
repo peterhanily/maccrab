@@ -134,11 +134,13 @@ struct V2ForensicsMyPluginsView: View {
                 emptyHint("Nothing installed yet. MacCrab ships with the built-in scanners above.")
             } else {
                 ForEach(visibleVerified, id: \.pluginID) { v in
-                    installedRow(pluginID: v.pluginID, subtitle: "v\(v.version)", state: .verified)
+                    installedRow(pluginID: v.pluginID, subtitle: "v\(v.version)",
+                                 state: .verified, provenance: v.provenance)
                     Divider()
                 }
                 ForEach(visibleFailed, id: \.pluginID) { f in
-                    installedRow(pluginID: f.pluginID, subtitle: f.reason, state: .failed)
+                    installedRow(pluginID: f.pluginID, subtitle: f.reason,
+                                 state: .failed, provenance: provenance(for: f.pluginID))
                     Divider()
                 }
             }
@@ -147,7 +149,7 @@ struct V2ForensicsMyPluginsView: View {
 
     private enum RowState { case verified, failed }
 
-    private func installedRow(pluginID: String, subtitle: String, state: RowState) -> some View {
+    private func installedRow(pluginID: String, subtitle: String, state: RowState, provenance: PluginProvenance) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: state == .verified ? "checkmark.seal.fill" : "xmark.octagon.fill")
                 .scaledSystem(12)
@@ -158,7 +160,7 @@ struct V2ForensicsMyPluginsView: View {
                     .scaledSystem(10)
                     .foregroundStyle(state == .verified ? Color.secondary : Color.red)
                     .fixedSize(horizontal: false, vertical: true)
-                provenanceLabel(provenance(for: pluginID))
+                provenanceLabel(provenance)
             }
             Spacer()
             Button(role: .destructive) {
@@ -258,7 +260,7 @@ struct V2ForensicsMyPluginsView: View {
             actionMessage = "Removed \(friendlyName(pluginID))."
             await reload()
         } catch {
-            actionMessage = "Couldn't remove: \(error)"
+            actionMessage = "Couldn't remove: \(error.localizedDescription)"
         }
     }
 }

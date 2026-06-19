@@ -88,19 +88,13 @@ struct V2ForensicsScansView: View {
             }
         }
         // Catalog "Run on this Mac" → run the single scanner here, through the
-        // SAME consent gate (runOrConfirm), reusing this tab's shared runner +
-        // result payoff. Consume + reset the one-shot intent.
-        .onChange(of: state.pendingForensicsRunPluginID) { id in
-            guard let id else { return }
-            state.pendingForensicsRunPluginID = nil
-            Task {
-                guard let reg = await PluginRegistry.shared.registration(forID: id) else { return }
-                runOrConfirm(Kit.adHoc(
-                    pluginID: id,
-                    name: ScannerDisplay.name(forPluginID: id),
-                    encrypted: deriveEncrypted(reg)
-                ))
-            }
+        // SAME consent gate (runOrConfirm). .task(id:) — NOT onChange — because
+        // the catalog sets the intent AND switches tabs, so this view is mounted
+        // FRESH with the value already set; onChange never sees a nil→id
+        // transition and would silently no-op. .task(id:) fires on mount and on
+        // change, covering both.
+        .task(id: state.pendingForensicsRunPluginID) {
+            await consumePendingRun()
         }
         .sheet(isPresented: Binding(
             get: { openScanID != nil },
@@ -345,6 +339,25 @@ struct V2ForensicsScansView: View {
     /// Encrypted-kit confirmation gate: once-per-profile alert
     /// the first time the operator runs a kit that asks for
     /// Keychain access, then direct run thereafter.
+    /// Consume the cross-tab "Run on this Mac" intent (set by the Catalog),
+    /// run the single scanner through the existing consent gate, then reset the
+    /// intent exactly once (after the work, so resetting it — which restarts the
+    /// .task(id:) — can't cancel the run mid-flight). No-op when nothing pends.
+    @MainActor
+    private func consumePendingRun() async {
+        guard let id = state.pendingForensicsRunPluginID else { return }
+        guard let reg = await PluginRegistry.shared.registration(forID: id) else {
+            state.pendingForensicsRunPluginID = nil
+            return
+        }
+        runOrConfirm(Kit.adHoc(
+            pluginID: id,
+            name: ScannerDisplay.name(forPluginID: id),
+            encrypted: deriveEncrypted(reg)
+        ))
+        state.pendingForensicsRunPluginID = nil
+    }
+
     /// A single scanner has no `kit.encrypted` flag — derive it from the
     /// manifest output privacy classes. Any non-metadata output means the case
     /// MUST be encrypted (a plaintext case rejects those rows at INSERT,
