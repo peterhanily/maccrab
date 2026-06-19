@@ -17,6 +17,10 @@ import SwiftUI
 import MacCrabForensics
 
 struct V2ForensicsScansView: View {
+    /// Injected so the Catalog's "Run on this Mac" can route a single-scanner
+    /// run through this tab's shared runner + the existing consent gate.
+    @ObservedObject var state: V2DashboardState
+
     /// Optional jump-to-tab callback supplied by V2ForensicsWorkspace.
     /// Wired to the "See all past scans →" button in the Recently
     /// run section. When nil the link hides.
@@ -81,6 +85,21 @@ struct V2ForensicsScansView: View {
         .onChange(of: runnerStateID) { _ in
             if case .done = runner.state {
                 Task { await reload() }
+            }
+        }
+        // Catalog "Run on this Mac" → run the single scanner here, through the
+        // SAME consent gate (runOrConfirm), reusing this tab's shared runner +
+        // result payoff. Consume + reset the one-shot intent.
+        .onChange(of: state.pendingForensicsRunPluginID) { id in
+            guard let id else { return }
+            state.pendingForensicsRunPluginID = nil
+            Task {
+                guard let reg = await PluginRegistry.shared.registration(forID: id) else { return }
+                runOrConfirm(Kit.adHoc(
+                    pluginID: id,
+                    name: ScannerDisplay.name(forPluginID: id),
+                    encrypted: deriveEncrypted(reg)
+                ))
             }
         }
         .sheet(isPresented: Binding(
@@ -326,6 +345,14 @@ struct V2ForensicsScansView: View {
     /// Encrypted-kit confirmation gate: once-per-profile alert
     /// the first time the operator runs a kit that asks for
     /// Keychain access, then direct run thereafter.
+    /// A single scanner has no `kit.encrypted` flag — derive it from the
+    /// manifest output privacy classes. Any non-metadata output means the case
+    /// MUST be encrypted (a plaintext case rejects those rows at INSERT,
+    /// Pass 2026-D), so the encrypted-scan consent must trigger.
+    private func deriveEncrypted(_ reg: PluginRegistration) -> Bool {
+        reg.manifest.outputs.contains { $0.privacyClass != .metadata }
+    }
+
     private func runOrConfirm(_ kit: Kit) {
         if kit.encrypted && !encryptedWarningSeen {
             pendingEncryptedKit = kit

@@ -22,6 +22,9 @@ import MacCrabCore
 import MacCrabForensics
 
 struct V2RaveCatalogBrowserView: View {
+    /// Injected so "Run on this Mac" can hand a single-scanner run to the Scans
+    /// tab (set the intent + switch tabs); the Scans tab owns the runner.
+    @ObservedObject var state: V2DashboardState
     @State private var entries: [RaveCatalogEntry] = []
     /// Per-entry resolved install state (trust badges + install-pill gating),
     /// keyed by plugin id. Computed once per reload from the verified index +
@@ -52,6 +55,10 @@ struct V2RaveCatalogBrowserView: View {
     @State private var searchText = ""
     @State private var sortMode: SortMode = .name
     @State private var installedByID: [String: String] = [:]
+    /// Plugin ids that are registered in THIS build AND runnable (collector /
+    /// analyzer) — the local gate for the "Run on this Mac" action. Built-ins
+    /// are always runnable regardless of catalog/install state.
+    @State private var runnableIDs: Set<String> = []
 
     private enum SortMode: CaseIterable, Hashable {
         case name, category, firstPartyFirst
@@ -695,10 +702,36 @@ struct V2RaveCatalogBrowserView: View {
                 detailSection(String(localized: "raveDetail.signedBy", defaultValue: "Signed by"), body: e.signerIdentity.isEmpty ? "—" : e.signerIdentity)
                 trustStateRow(state(for: e))
 
+                if runnableIDs.contains(e.id) {
+                    Divider()
+                    runOnThisMacAction(e)
+                }
                 Divider()
                 installAction(e)
             }
             .padding(18)
+        }
+    }
+
+    /// "Run on this Mac" — runs this built-in scanner now via the Scans tab's
+    /// runner + the existing consent gate. Local and always-available (no
+    /// install); shown only for registered, runnable (collector/analyzer) ids.
+    private func runOnThisMacAction(_ e: RaveCatalogEntry) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Run")
+                .scaledSystem(10, weight: .semibold)
+                .foregroundStyle(.tertiary).textCase(.uppercase)
+            Button {
+                state.pendingForensicsRunPluginID = e.id
+                state.selectedTabs[.forensics] = .forensicsScans
+            } label: {
+                Label("Run on this Mac", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            Text("Runs this built-in scanner on your Mac now — no install needed. Results appear under Run a scan.")
+                .scaledSystem(10)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -980,6 +1013,15 @@ struct V2RaveCatalogBrowserView: View {
         // Local plugin inventory (independent of the catalog fetch) so cards can
         // show Installed / Update-available state.
         installedByID = await client.installedPlugins()
+        // Registered + runnable (collector/analyzer) ids — the local gate for
+        // "Run on this Mac". Built-ins are always runnable, so register them
+        // first; this is independent of catalog reachability.
+        try? await MacCrabForensicsBootstrap.registerBuiltins()
+        runnableIDs = Set(
+            await PluginRegistry.shared.manifests()
+                .filter { $0.type == .collector || $0.type == .analyzer }
+                .map { $0.id }
+        )
         do {
             let fetched = try await client.fetchEntries()
 

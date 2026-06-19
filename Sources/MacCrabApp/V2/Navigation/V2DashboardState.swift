@@ -33,6 +33,11 @@ public final class V2DashboardState: ObservableObject {
     /// navigated; the user still had to click "+ New rule" inside.
     @Published public var presentNewRuleTick: Int = 0
 
+    /// Cross-tab intent: a scanner plugin id the user asked to "Run on this Mac"
+    /// from the Catalog. The Scans tab consumes it (runs via its shared
+    /// KitRunner through the existing consent gate) and resets it to nil.
+    @Published public var pendingForensicsRunPluginID: String? = nil
+
     /// Current data source. In a release build this starts as the honest
     /// empty/offline provider (V2OfflineDataProvider) and flips to live once
     /// `connectLiveData()` succeeds; a DEBUG/dev build starts on the mock
