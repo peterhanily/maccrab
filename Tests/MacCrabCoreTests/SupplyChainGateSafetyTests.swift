@@ -186,7 +186,17 @@ struct SupplyChainGateSafetyTests {
             if proc.isRunning { proc.terminate() }
         }
         let pid = proc.processIdentifier
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Synchronize on the child being resolvable before invoking the gate.
+        // Under CI CPU saturation a fixed sleep can fire before proc_pidpath
+        // resolves the child — poll with a bounded budget (~2s) instead.
+        // `/bin/sleep 30` outlives this window comfortably.
+        for _ in 0..<40 {
+            if proc.isRunning, SupplyChainGate.processPath(for: pid) != nil { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // The gate-refusal assertion below is only meaningful if the process
+        // is genuinely running when the gate evaluates it.
+        try #require(proc.isRunning, "spawned /bin/sleep exited before the gate evaluated it")
 
         let gate = SupplyChainGate(maxAgeHours: 24)
         await gate.enable()

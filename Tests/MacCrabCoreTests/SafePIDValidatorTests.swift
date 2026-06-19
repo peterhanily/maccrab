@@ -102,8 +102,19 @@ struct SafePIDValidatorTests {
             if proc.isRunning { proc.terminate() }
         }
         let pid = proc.processIdentifier
-        // Brief wait so proc_pidpath can resolve.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Synchronize on the child actually being resolvable before asserting.
+        // Under CI CPU saturation a fixed sleep can fire before the kernel has
+        // the child's path (proc_pidpath returns 0) — poll with a bounded
+        // budget (~2s) instead. `/bin/sleep 30` outlives this window comfortably.
+        for _ in 0..<40 {
+            if proc.isRunning,
+               SafePIDValidator.reasonToReject(pid: pid)?.contains("cannot be resolved") != true {
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // The child must still be alive for this assertion to be meaningful.
+        try #require(proc.isRunning, "spawned /bin/sleep exited before validation")
 
         #expect(SafePIDValidator.isSafeToKill(pid: pid) == true)
         #expect(SafePIDValidator.reasonToReject(pid: pid) == nil)

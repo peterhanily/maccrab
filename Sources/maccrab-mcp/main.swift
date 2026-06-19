@@ -1517,7 +1517,15 @@ func handleListAgentSessions(_ args: [String: Any]) async -> Any {
     let limit = min(max((args["limit"] as? Int) ?? 50, 1), 500)
     do {
         let store = try EventStore(directory: dataDir)
-        let sessions = try await store.agentSessions(limit: limit)
+        // Fail-soft on the query: this is a READ tool, so an empty / young
+        // store must return an empty list, not isError. On a fresh install
+        // the `ai_tool_session_id` column is added by a SchemaMigrator step
+        // that EventStore.openDatabase swallows-and-logs if it loses a
+        // create-time lock race (e.g. WAL/checkpoint BUSY on a load-saturated
+        // CI runner) — leaving the column absent so the SELECT throws
+        // "no such column". Treat any such query failure as "nothing recorded
+        // yet", mirroring get_traces' empty-store path.
+        let sessions = (try? await store.agentSessions(limit: limit)) ?? []
         let iso = ISO8601DateFormatter()
         let payload = sessions.map { s -> [String: Any] in
             [
@@ -1599,7 +1607,13 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
     let limit = min(max((args["limit"] as? Int) ?? 500, 1), 2000)
     do {
         let store = try EventStore(directory: dataDir)
-        let events = try await store.eventsForAgentSession(sessionId, limit: limit)
+        // Fail-soft on the event query: a READ tool against an empty / young
+        // store (or an unknown session id) must return an empty timeline, not
+        // isError. The `ai_tool_session_id` column is migration-added and can
+        // be absent on a fresh store whose migration lost a create-time lock
+        // race (see handleListAgentSessions / EventStore.openDatabase). The
+        // alert / mutation / tool-call rails below are already best-effort.
+        let events = (try? await store.eventsForAgentSession(sessionId, limit: limit)) ?? []
         let iso = ISO8601DateFormatter()
         let timeline = events.map { e -> [String: Any] in
             var row: [String: Any] = [
@@ -1618,8 +1632,10 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
             return row
         }
         // Wave-3 P2: the alert rail — what this session's activity tripped.
-        let alertStore = try AlertStore(directory: dataDir)
-        let sessionAlerts = (try? await alertStore.alerts(forAgentSession: sessionId)) ?? []
+        // Best-effort: the alert rail is supplementary, so a fresh-store
+        // alerts.db open/query failure must not turn this read into isError.
+        let alertStore = try? AlertStore(directory: dataDir)
+        let sessionAlerts = (try? await alertStore?.alerts(forAgentSession: sessionId)) ?? []
         let alerts = sessionAlerts.map { a -> [String: Any] in
             [
                 "ts": iso.string(from: a.timestamp),

@@ -325,23 +325,53 @@ struct StylometricFingerprinterTests {
         }
     }
 
-    @Test("Single-pass rewrite — 100KB input completes well under 100ms")
+    @Test("Single-pass rewrite — fingerprint cost scales sub-quadratically with input size")
     func singlePassLargeInputPerformance() {
-        // v1.12.0 perf budget: 100KB of source text should fingerprint
-        // in < 100ms on a modern Mac. The pre-rewrite implementation
-        // visited the string 22+ times AND allocated a full lowercased
-        // copy 17 times; this test would have flirted with the
-        // budget on cold runs before the rewrite.
+        // v1.12.0 perf guard: the rewrite collapsed 22+ string walks +
+        // 17 lowercased-copy allocations into a single pass, so cost must
+        // scale ~linearly with input length. The regression this catches
+        // is a return to multi-pass / O(n^2) behaviour — NOT an absolute
+        // wall-clock floor, which is unwinnable under full-suite parallel
+        // CPU saturation on a hosted CI runner (a raw < 0.1s flaked at
+        // 0.139s there). We assert the SHAPE (2x input ≈ 2x cost, well
+        // under quadratic) plus a generous absolute ceiling that only a
+        // true blowup would exceed.
         let line = "func processRow(_ row: [String: Any]) -> Result<Int, Error> { return .success(row.count) } // a representative comment about the row\n"
-        var text = ""
-        text.reserveCapacity(120_000)
-        while text.count < 100_000 { text += line }
-        let start = Date()
-        let fp = StylometricFingerprinter.computeFingerprint(text)
-        let elapsed = Date().timeIntervalSince(start)
-        #expect(fp.vector.count == 32)
-        // 100ms budget — generous; on M-series we see ~10-15ms.
-        #expect(elapsed < 0.1, "100KB fingerprint took \(elapsed)s — single-pass perf budget exceeded")
+        func makeText(minBytes: Int) -> String {
+            var text = ""
+            text.reserveCapacity(minBytes + line.utf8.count)
+            while text.utf8.count < minBytes { text += line }
+            return text
+        }
+        // Warm up so the first call's lazy-init costs don't skew the ratio.
+        _ = StylometricFingerprinter.computeFingerprint(makeText(minBytes: 10_000))
+
+        let small = makeText(minBytes: 100_000)
+        let large = makeText(minBytes: 200_000)   // 2x input
+
+        func timeFingerprint(_ text: String) -> (StylometricFingerprinter.Fingerprint, Double) {
+            let start = Date()
+            let fp = StylometricFingerprinter.computeFingerprint(text)
+            return (fp, Date().timeIntervalSince(start))
+        }
+        let (fpSmall, tSmall) = timeFingerprint(small)
+        let (fpLarge, tLarge) = timeFingerprint(large)
+
+        #expect(fpSmall.vector.count == 32)
+        #expect(fpLarge.vector.count == 32)
+
+        // Generous absolute ceiling — on M-series we see ~10-15ms for 200KB;
+        // 2s only trips on a catastrophic blowup, not on a loaded runner.
+        #expect(tLarge < 2.0, "200KB fingerprint took \(tLarge)s — single-pass perf budget grossly exceeded")
+
+        // Sub-quadratic scaling: linear cost would give a ~2x ratio; a
+        // floor (`+ epsilon`) keeps the ratio meaningful when both timings
+        // are sub-millisecond and dominated by noise. A multi-pass / O(n^2)
+        // regression pushes the 2x-input cost toward ~4x (or worse), which
+        // this catches independent of absolute machine speed.
+        let epsilon = 0.0005   // 0.5ms noise floor
+        let ratio = (tLarge + epsilon) / (tSmall + epsilon)
+        #expect(ratio < 3.0, "2x input cost \(ratio)x — expected ~2x (linear); looks quadratic/multi-pass")
     }
 }
 
