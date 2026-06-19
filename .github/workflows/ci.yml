@@ -93,6 +93,17 @@ jobs:
       - name: Build tests
         run: swift build --build-tests
 
+      # Rule-driven tests call RuleTestHelpers.ensureRulesCompiled(), which shells
+      # out to the Python compiler (PyYAML) into /tmp/maccrab_v3 — with stderr
+      # silenced and errors swallowed. On a fresh runner without PyYAML that
+      # compile fails silently, /tmp/maccrab_v3 is never created, and dozens of
+      # tests fail with directoryNotFound("/tmp/maccrab_v3"). Install PyYAML and
+      # pre-compile the rules here so the dir exists before `swift test`.
+      - name: Install PyYAML + compile rules for tests
+        run: |
+          python3 -m pip install --user pyyaml
+          python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir /tmp/maccrab_v3
+
       - name: Run tests
         run: swift test
 
