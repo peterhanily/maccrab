@@ -1542,7 +1542,12 @@ func handleListAgentSessions(_ args: [String: Any]) async -> Any {
             : ""
         return ["content": [["type": "text", "text": jsonStringify(["sessions": payload, "note": note])]]]
     } catch {
-        return toolError("list_agent_sessions failed: \(error)")
+        // READ tool: a store that can't be opened — no engine has created it
+        // (fresh box), or a create-time lock race lost it under load — means
+        // "no sessions yet" for the caller, not isError. Mutation tools still
+        // surface store-open failures.
+        let note = "No agent sessions recorded yet (no engine store available)."
+        return ["content": [["type": "text", "text": jsonStringify(["sessions": [Any](), "note": note])]]]
     }
 }
 
@@ -1664,7 +1669,20 @@ func handleGetAgentSession(_ args: [String: Any]) async -> Any {
             "tool_calls": toolCalls,
         ] as [String: Any])]]]
     } catch {
-        return toolError("get_agent_session failed: \(error)")
+        // READ tool: a store that can't be opened (fresh box / create-time
+        // lock race under load) means an empty timeline for the caller, not
+        // isError. Mutation tools still surface store-open failures.
+        return ["content": [["type": "text", "text": jsonStringify([
+            "session_id": sessionId,
+            "event_count": 0,
+            "alert_count": 0,
+            "mutation_count": 0,
+            "tool_call_count": 0,
+            "timeline": [Any](),
+            "alerts": [Any](),
+            "mutations": [Any](),
+            "tool_calls": [Any](),
+        ] as [String: Any])]]]
     }
 }
 

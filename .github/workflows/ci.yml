@@ -114,11 +114,6 @@ jobs:
         run: |
           python3 -m pip install --user pyyaml
           python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir /tmp/maccrab_v3
-          # A few FP-regression suites read compiled_rules/<rule>.json relative to
-          # the repo root. That dir is gitignored (populated by `make dev` on a
-          # dev box) so it's absent on a fresh CI checkout — populate it here with
-          # the same complete, valid set the developer machine has.
-          python3 Compiler/compile_rules.py --input-dir Rules/ --output-dir compiled_rules
 
       - name: Run tests
         run: swift test
