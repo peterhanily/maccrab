@@ -20,7 +20,7 @@ page to start from.
 | Sparkle appcast feed | `https://maccrab.com/appcast.xml` |
 | Sparkle EdDSA public key | First 8 chars: `de+dzPjB`. Full key in `Xcode/Resources/MacCrabApp-Info.plist` under `SUPublicEDKey`. |
 | GitHub release page | `https://github.com/peterhanily/maccrab/releases` |
-| Homebrew tap | `peterhanily/maccrab` — install with `brew tap peterhanily/maccrab https://github.com/peterhanily/maccrab && brew install --cask peterhanily/maccrab/maccrab` |
+| Homebrew tap | `peterhanily/homebrew-maccrab` — install with `brew install --cask peterhanily/maccrab/maccrab` |
 | Security contact | `maccrab@peterhanily.com` (see `SECURITY.md`) |
 
 ## Verifying a downloaded DMG

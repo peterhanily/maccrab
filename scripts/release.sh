@@ -297,6 +297,23 @@ elif [ -n "${SITE_REPO_TOKEN:-}" ] && [ -f "$DMG_PATH" ]; then
     if [ "$cross_check_ok" = "1" ]; then
         echo "  ✓ release.json, Casks/maccrab.rb, and GitHub release all agree on SHA ${local_release_sha:0:16}..."
     fi
+
+    # Step 6d: Publish the validated cask to the dedicated, append-only tap
+    # repo (peterhanily/homebrew-maccrab) via the GitHub Contents API. New
+    # users install with the one-liner
+    #   brew install --cask peterhanily/maccrab/maccrab
+    # which auto-taps that repo. Contents-API publishing is forward-only (one
+    # clean commit, never a force-push), so `brew update` always fast-forwards
+    # — unlike the old app-repo-as-tap, whose rewritten history poisoned every
+    # existing clone with rebase conflicts. Token needs write on the tap repo.
+    echo ""
+    echo "Step 6d: Publishing cask to homebrew-maccrab tap..."
+    if TAP_REPO_TOKEN="${TAP_REPO_TOKEN:-${GH_TOKEN:-$SITE_REPO_TOKEN}}" \
+            "$SCRIPT_DIR/publish-cask.sh"; then
+        echo "  ✓ Cask published; 'brew install --cask peterhanily/maccrab/maccrab' serves v$VERSION"
+    else
+        echo "  ! Cask publish failed — set TAP_REPO_TOKEN (PAT with contents:write on peterhanily/homebrew-maccrab) then run 'scripts/publish-cask.sh' manually" >&2
+    fi
 else
     echo ""
     echo "  Step 6/6: Skipping appcast publish."
@@ -317,5 +334,5 @@ echo ""
 echo "  DMG: .build/MacCrab-v$VERSION.dmg"
 echo ""
 echo "  Users can install with:"
-echo "    brew install --cask https://raw.githubusercontent.com/peterhanily/maccrab/main/Casks/maccrab.rb"
+echo "    brew install --cask peterhanily/maccrab/maccrab"
 echo ""
