@@ -7,7 +7,7 @@ cask "maccrab" do
   desc "Local-first macOS threat detection engine with Sigma-compatible rules"
   homepage "https://github.com/peterhanily/maccrab"
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "MacCrab.app"
   binary "bin/maccrabctl"
