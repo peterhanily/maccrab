@@ -206,6 +206,15 @@ STAGE_ENV_EOF
             cp "$ARM_BIN" "$STAGING_DIR/bin/$binary"
             echo "    ✓ $binary (arm64 only)"
         fi
+        # Strip the Mach-O debug map (N_OSO/SO stabs) BEFORE any signing.
+        # Unstripped release binaries embed absolute build paths
+        # (/Users/<operator>/…/.build/…) — leaking the build-machine username +
+        # dev-tree layout into the shipped, public DMG. strip -S removes the
+        # debugging symbol entries while leaving the binary runnable. Must run
+        # here (pre-codesign) — stripping after signing invalidates the signature.
+        if [ -f "$STAGING_DIR/bin/$binary" ]; then
+            strip -S "$STAGING_DIR/bin/$binary" 2>/dev/null || true
+        fi
     done
 
     # ─── Rules ───────────────────────────────────────────────────────
@@ -876,6 +885,34 @@ stage_publish() {
         exit 1
     fi
     echo "    ✓ No private-key material in the staging tree"
+
+    # Opsec: the internal build-staging dotfile must not ship in the DMG. It
+    # carries only public values (version, build number, the PUBLIC Sparkle key,
+    # feed URL) but is an internal artifact + leaks the build-number scheme to
+    # users. Remove it from the payload before packaging. (It has already been
+    # sourced by this stage, so removing it here is safe.)
+    rm -f "$STAGE_ENV"
+
+    # Opsec gate: no shipped Mach-O may leak the build machine's home path
+    # (/Users/<operator>/… N_OSO debug-map stabs) in its symbol table. The
+    # `strip -S` in the unsigned-build stage removes the debug map; this asserts
+    # it actually worked for every shipped executable before we package + sign
+    # the DMG. A match is a stop-the-release event.
+    echo "  Verifying shipped binaries carry no build-path leakage..."
+    LEAKED=""
+    while IFS= read -r f; do
+        if file -b "$f" 2>/dev/null | grep -q "Mach-O" && \
+           nm -ap "$f" 2>/dev/null | grep -q "$HOME/"; then
+            LEAKED="$LEAKED
+      $f"
+        fi
+    done < <(find "$STAGING_DIR" -type f -perm -u+x)
+    if [ -n "$LEAKED" ]; then
+        echo "  ✗ ABORT: shipped binary leaks the build-machine home path ($HOME/…) in its symbol table:$LEAKED"
+        echo "    (strip -S should have removed the debug map — investigate before release)"
+        exit 1
+    fi
+    echo "    ✓ No build-path leakage in shipped binaries"
 
     # ─── DMG ─────────────────────────────────────────────────────────
     echo "  Creating DMG..."
