@@ -41,6 +41,9 @@ enum SampleOutputLoader {
 
         for manifest in cases.prefix(maxCasesToScan)
             where manifest.encryptionState == .plaintext {
+            // Bail if the selection moved on (abandoned task) so we don't keep
+            // opening the remaining cases for a scanner no longer in view.
+            if Task.isCancelled { return [] }
             guard let handle = try? await caseManager.openCase(id: manifest.id) else { continue }
             let store = handle.store
             // Cheap COUNT(*) pre-check: did this plugin emit anything
@@ -53,6 +56,10 @@ enum SampleOutputLoader {
                 let q = ArtifactQuery(caseID: manifest.id, contentType: ct, limit: limit)
                 if let r = try? await store.query(q) { rows.append(contentsOf: r) }
             }
+            // Attribution: ArtifactQuery filters by content type only, so a
+            // different visible plugin emitting the same content type into this
+            // case could otherwise surface here — keep only THIS scanner's rows.
+            rows = rows.filter { $0.record.pluginID == pluginID }
             rows.sort { $0.record.observedAt > $1.record.observedAt }
             let visible = OperatorVisibilityFilter.filter(rows)
             if !visible.isEmpty { return Array(visible.prefix(limit)) }

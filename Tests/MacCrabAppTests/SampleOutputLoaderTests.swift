@@ -125,4 +125,59 @@ struct SampleOutputLoaderTests {
         #expect(rows.count == 1)
         #expect(rows.first?.record.summary == "real")
     }
+
+    private func record(
+        caseID: String, pluginID: String, contentType: String,
+        summary: String, observedAt: Date, sha: String
+    ) -> ArtifactRecord {
+        ArtifactRecord(
+            caseID: caseID, pluginID: pluginID, pluginVersion: "1.0.0",
+            schemaVersion: 1, contentType: contentType, sha256: sha,
+            observedAt: observedAt, summary: summary, privacyClass: .metadata,
+            data: ["k": .string("v")]
+        )
+    }
+
+    @Test("a different VISIBLE plugin sharing a content type is excluded (attribution)")
+    func attributionExcludesOtherPlugins() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let mgr = CaseManager(casesRoot: root, dekVault: InMemoryDEKVault())
+        let handle = try await mgr.createCase(name: "review", encrypted: false)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        // tcc-lite's own tcc.grant + a REAL (non-residue) plugin emitting the same
+        // content type into the same case. ArtifactQuery filters by content type
+        // only, so without the pluginID post-filter the other plugin's row would
+        // surface under tcc-lite.
+        try await handle.store.commit(record(caseID: handle.caseID, pluginID: tccLite,
+            contentType: "tcc.grant", summary: "mine", observedAt: base, sha: "a"))
+        try await handle.store.commit(record(caseID: handle.caseID, pluginID: "com.maccrab.forensics.launchd-lite",
+            contentType: "tcc.grant", summary: "theirs", observedAt: base.addingTimeInterval(300), sha: "b"))
+        let rows = try #require(await SampleOutputLoader.recentRows(forPluginID: tccLite, caseManager: mgr))
+        #expect(rows.allSatisfy { $0.record.pluginID == tccLite })
+        #expect(rows.map { $0.record.summary } == ["mine"])
+    }
+
+    @Test("rows merged across the scanner's content types are globally newest-first, capped")
+    func mergesContentTypesNewestFirst() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let mgr = CaseManager(casesRoot: root, dekVault: InMemoryDEKVault())
+        let handle = try await mgr.createCase(name: "review", encrypted: false)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        // tcc-lite emits BOTH tcc.grant and tcc.summary_by_service — interleave the
+        // observed_at across the two types so a per-type cap (instead of a global
+        // sort-then-cap) would order them wrong.
+        try await handle.store.commit(record(caseID: handle.caseID, pluginID: tccLite,
+            contentType: "tcc.grant", summary: "g-old", observedAt: base, sha: "g0"))
+        try await handle.store.commit(record(caseID: handle.caseID, pluginID: tccLite,
+            contentType: "tcc.summary_by_service", summary: "s-new", observedAt: base.addingTimeInterval(600), sha: "s0"))
+        try await handle.store.commit(record(caseID: handle.caseID, pluginID: tccLite,
+            contentType: "tcc.grant", summary: "g-mid", observedAt: base.addingTimeInterval(300), sha: "g1"))
+        try await handle.store.commit(record(caseID: handle.caseID, pluginID: tccLite,
+            contentType: "tcc.summary_by_service", summary: "s-older", observedAt: base.addingTimeInterval(120), sha: "s1"))
+        let rows = try #require(await SampleOutputLoader.recentRows(forPluginID: tccLite, caseManager: mgr))
+        #expect(rows.count == 3)  // capped at limit
+        #expect(rows.map { $0.record.summary } == ["s-new", "g-mid", "s-older"])  // global DESC
+    }
 }

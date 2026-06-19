@@ -787,8 +787,8 @@ struct V2RaveCatalogBrowserView: View {
             // (encrypted-only / undocumented) — the section is hidden for them
             // anyway, and this avoids any wasted case opens.
             guard ScannerCatalog.fact(forPluginID: id)?.privacyClass == .metadata else {
-                sampleForID = id
-                sampleRows = []
+                // Non-metadata / undocumented: recentOutputSection is hidden for
+                // these, so leave sample state untouched (it's never read here).
                 return
             }
             sampleForID = id
@@ -821,7 +821,7 @@ struct V2RaveCatalogBrowserView: View {
         if let rows = sampleRows, sampleForID == e.id {
             if rows.isEmpty {
                 Text(String(localized: "raveDetail.recentOutput.notRun",
-                            defaultValue: "Not run yet on this Mac — run it to see real output."))
+                            defaultValue: "No recent output on this Mac — run it to see real output."))
                     .scaledSystem(11).foregroundStyle(.tertiary)
             } else {
                 ArtifactCompactPreview(artifacts: rows, hint: nil)
