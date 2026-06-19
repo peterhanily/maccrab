@@ -38,7 +38,7 @@ MacCrab is an on-device security engine that monitors your Mac in real time usin
 ```bash
 # 1. Install
 brew tap peterhanily/maccrab https://github.com/peterhanily/maccrab
-brew install --cask maccrab
+brew install --cask peterhanily/maccrab/maccrab
 
 # 2. Open the dashboard
 open /Applications/MacCrab.app
@@ -47,6 +47,14 @@ open /Applications/MacCrab.app
 #    extension in System Settings → General → Login Items & Extensions →
 #    Endpoint Security Extensions.
 ```
+
+> **Homebrew 6.0+:** the fully-qualified cask name (`peterhanily/maccrab/maccrab`) is required — it tells Homebrew to trust this one cask. The bare `--cask maccrab` now fails with `Refusing to load cask … from untrusted tap`.
+
+> **Updating from an older install?** If `brew install`/`brew update` errors with `could not apply …` (a rebase/cherry-pick conflict), your cached tap clone is stale — reset it, then re-run the install:
+>
+> ```bash
+> brew untap peterhanily/maccrab && brew tap peterhanily/maccrab https://github.com/peterhanily/maccrab
+> ```
 
 > **Note:** Full Endpoint Security coverage requires granting Full Disk Access to MacCrab.app in **System Settings > Privacy & Security > Full Disk Access**.
 
