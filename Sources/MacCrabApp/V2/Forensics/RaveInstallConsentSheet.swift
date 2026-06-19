@@ -10,6 +10,10 @@ import MacCrabForensics
 struct RaveInstallConsentSheet: View {
     let link: RaveInstallLink
     let onClose: () -> Void
+    /// True when this is an UPDATE of an already-installed plugin (the store sets
+    /// it for an installed entry with a newer catalog version). The deep-link
+    /// path leaves it false. Drives the --force re-install + the button copy.
+    var isUpdate: Bool = false
 
     @State private var facts: RaveInstallConsentFacts?
     @State private var loadError: String?
@@ -27,7 +31,9 @@ struct RaveInstallConsentSheet: View {
             HStack(spacing: 8) {
                 Image(systemName: "shield.lefthalf.filled")
                     .foregroundStyle(.orange)
-                Text("Install from MacCrab link")
+                Text(isUpdate
+                     ? String(localized: "rave.consent.titleUpdate", defaultValue: "Update plugin")
+                     : String(localized: "rave.consent.titleInstall", defaultValue: "Install from MacCrab link"))
                     .font(.headline)
                 Spacer()
             }
@@ -76,8 +82,9 @@ struct RaveInstallConsentSheet: View {
                                 installing = false
                             }
                         } label: {
-                            Label(installOK == true ? "Installed" : "Install plugin",
-                                  systemImage: installOK == true ? "checkmark.circle.fill" : "arrow.down.circle")
+                            Label(installButtonTitle,
+                                  systemImage: installOK == true ? "checkmark.circle.fill"
+                                    : (isUpdate ? "arrow.up.circle" : "arrow.down.circle"))
                         }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
@@ -102,11 +109,12 @@ struct RaveInstallConsentSheet: View {
         guard let cli = Self.bundledMaccrabctlPath() else {
             return (false, "Bundled maccrabctl not found. Install from a terminal:\n  maccrabctl plugin install \(id)")
         }
+        let argv = Self.installArguments(id: id, isUpdate: isUpdate)
         return await withCheckedContinuation { cont in
             DispatchQueue.global().async {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: cli)
-                p.arguments = ["plugin", "install", id]
+                p.arguments = argv
                 let pipe = Pipe()
                 p.standardOutput = pipe
                 p.standardError = pipe
@@ -123,6 +131,27 @@ struct RaveInstallConsentSheet: View {
                                         out.isEmpty ? "maccrabctl exited \(p.terminationStatus)" : out))
             }
         }
+    }
+
+    /// The verified install argv. An update re-installs over the existing copy
+    /// (`--force`); a fresh install does not. Every fail-closed gate (serial,
+    /// signer pin, version floor, revocation, artifact hash) is re-enforced by
+    /// maccrabctl regardless of `--force` — the flag only permits overwriting an
+    /// already-present destination, never bypasses trust. Pure + static so the
+    /// arg construction is unit-testable without launching a Process.
+    static func installArguments(id: String, isUpdate: Bool) -> [String] {
+        ["plugin", "install", id] + (isUpdate ? ["--force"] : [])
+    }
+
+    /// Confirm-button copy. "Update plugin" / "Updated" for an in-place update,
+    /// "Install plugin" / "Installed" for a fresh install.
+    private var installButtonTitle: String {
+        if installOK == true {
+            return isUpdate ? String(localized: "rave.consent.updated", defaultValue: "Updated")
+                            : String(localized: "rave.consent.installed", defaultValue: "Installed")
+        }
+        return isUpdate ? String(localized: "rave.consent.updatePlugin", defaultValue: "Update plugin")
+                        : String(localized: "rave.consent.installPlugin", defaultValue: "Install plugin")
     }
 
     /// Locate the maccrabctl bundled into the app at Resources/bin/maccrabctl.
@@ -246,7 +275,8 @@ struct RaveInstallConsentSheet: View {
                 .padding(.top, 2)
             }
 
-            Text("This link can only name a catalog id — every install detail above was resolved from the signed catalog, not the link.")
+            Text(String(localized: "rave.consent.resolvedFromCatalog",
+                        defaultValue: "Every install detail above was resolved by id from the signed catalog — not from a link or any local input."))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }

@@ -41,6 +41,10 @@ struct V2RaveCatalogBrowserView: View {
     /// consent sheet the maccrab://install handler drives (resolve-from-pinned-
     /// catalog → version-floor → consent → verified hand-off). nil = no sheet.
     @State private var installLink: RaveInstallLink? = nil
+    /// Captured once when the pill is tapped so the consent sheet uses the SAME
+    /// update-vs-fresh decision the pill showed — never re-resolved at present
+    /// time (which could diverge across an async reload between tap and present).
+    @State private var pendingIsUpdate = false
     /// Phase-0 honest catalog states. Set on each reload so the pane can tell
     /// loading / offline / trust-failure / verified-but-empty / live apart, and
     /// surface the trust the verified fetch already earns (serial + revocation
@@ -197,7 +201,7 @@ struct V2RaveCatalogBrowserView: View {
         }
         .task { await reload() }
         .sheet(item: $installLink) { link in
-            RaveInstallConsentSheet(link: link) { installLink = nil }
+            RaveInstallConsentSheet(link: link, isUpdate: pendingIsUpdate) { installLink = nil }
         }
     }
 
@@ -925,14 +929,21 @@ struct V2RaveCatalogBrowserView: View {
                 .scaledSystem(10, weight: .semibold)
                 .foregroundStyle(.tertiary).textCase(.uppercase)
             if st.showsInstallPill {
+                let isUpdate = updateAvailable(for: e)
                 Button {
                     // Construct the id-only install link and let the SAME
                     // consent flow the URL handler uses resolve it from the
                     // pinned catalog (signer pin + version floor + consent +
                     // receipt). No bypass: this only OPENS the verified path.
+                    // The update case re-installs over the existing copy (--force);
+                    // every trust gate is still re-enforced by maccrabctl. Capture
+                    // the decision now so the sheet matches what this pill showed.
+                    pendingIsUpdate = isUpdate
                     installLink = RaveInstallLink(kind: .plugin, id: e.id)
                 } label: {
-                    Label("Install", systemImage: "checkmark.shield")
+                    Label(isUpdate ? String(localized: "rave.install.updateTo", defaultValue: "Update to v\(e.currentVersion)")
+                                   : String(localized: "rave.install.install", defaultValue: "Install"),
+                          systemImage: isUpdate ? "arrow.up.circle" : "checkmark.shield")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -1031,6 +1042,13 @@ struct V2RaveCatalogBrowserView: View {
     /// Uses the shared semver policy; an unparseable pair → no update (safe).
     private func isUpdateAvailable(installed: String, current: String) -> Bool {
         MacCrabSemverCompare.satisfiesFloor(running: installed, floor: current) == false
+    }
+
+    /// Whether `e` is an installed plugin with a newer catalog version — i.e. the
+    /// install pill should read "Update" and re-install with --force.
+    private func updateAvailable(for e: RaveCatalogEntry) -> Bool {
+        guard let installedVer = installedByID[e.id] else { return false }
+        return isUpdateAvailable(installed: installedVer, current: e.currentVersion)
     }
 
     /// Trust-state detail row: signer-pin status + (when blocked/revoked) the
