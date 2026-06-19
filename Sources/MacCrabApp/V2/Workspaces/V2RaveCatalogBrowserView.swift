@@ -64,6 +64,13 @@ struct V2RaveCatalogBrowserView: View {
     /// coming soon. DISPLAY-ONLY: never merged into `entries`, so they never
     /// touch stateByID / compute / the trust strip / offeredEntries.
     @State private var builtinEntries: [RaveCatalogEntry] = []
+    /// "Recent output" preview for the selected scanner — the most-recent ≤3 REAL
+    /// artifact rows from a plaintext case (no fake data). nil = loading / not yet
+    /// fetched; [] = ran (or never ran) but no real rows. Loaded once per selection
+    /// via `.task(id: selectedID)`, keyed by `sampleForID` so case-A's rows never
+    /// show under case-B during an in-flight swap.
+    @State private var sampleRows: [CommittedArtifact]? = nil
+    @State private var sampleForID: String? = nil
 
     private enum SortMode: CaseIterable, Hashable {
         case name, category, firstPartyFirst
@@ -637,9 +644,7 @@ struct V2RaveCatalogBrowserView: View {
                             startPoint: .topLeading, endPoint: .bottomTrailing
                         ))
                         .frame(height: 80)
-                    Text(monogram(e.id))
-                        .scaledSystem(32, weight: .bold, design: .rounded)
-                        .foregroundStyle(.white)
+                    thumbnailGlyph(e, size: 32)
                 }
                 .cornerRadius(6)
                 VStack(alignment: .leading, spacing: 4) {
@@ -718,9 +723,7 @@ struct V2RaveCatalogBrowserView: View {
                             startPoint: .topLeading, endPoint: .bottomTrailing
                         ))
                         .frame(height: 120)
-                    Text(monogram(e.id))
-                        .scaledSystem(48, weight: .bold, design: .rounded)
-                        .foregroundStyle(.white)
+                    thumbnailGlyph(e, size: 48)
                 }
                 .cornerRadius(8)
 
@@ -740,7 +743,7 @@ struct V2RaveCatalogBrowserView: View {
 
                 Divider()
                 detailSection(String(localized: "raveDetail.whatItDoes", defaultValue: "What it does"), body: longDescription(e))
-                // TODO: sample-output preview once per-entry catalog fetch lands (signed sample_output)
+                recentOutputSection(e)
                 if let f = PluginFactsLookup.facts(forPluginID: e.id) {
                     Divider()
                     capabilityChips(f)
@@ -774,6 +777,57 @@ struct V2RaveCatalogBrowserView: View {
                 }
             }
             .padding(18)
+        }
+        // Lazy, once-per-selection load of the real "Recent output" rows.
+        // Re-keyed on selectedID so rapid card switching cancels/replaces the
+        // in-flight load (no pile-up) and never shows the wrong scanner's rows.
+        .task(id: selectedID) {
+            guard let id = selectedID else { return }
+            // Skip the store walk entirely for scanners with no metadata fact
+            // (encrypted-only / undocumented) — the section is hidden for them
+            // anyway, and this avoids any wasted case opens.
+            guard ScannerCatalog.fact(forPluginID: id)?.privacyClass == .metadata else {
+                sampleForID = id
+                sampleRows = []
+                return
+            }
+            sampleForID = id
+            sampleRows = nil
+            let rows = await SampleOutputLoader.recentRows(forPluginID: id)
+            // Guard against a stale completion landing after the selection moved on.
+            if sampleForID == id { sampleRows = rows }
+        }
+    }
+
+    /// "Recent output" — the most-recent real artifact rows this scanner has
+    /// produced on THIS Mac (plaintext cases only; no fake data). Shown only for
+    /// metadata scanners (the only class that can live in a plaintext case, so no
+    /// Keychain prompt is ever triggered). Encrypted-only / undocumented scanners
+    /// get no section — the capability chips' "Emits" row still answers "what
+    /// you'll see" honestly.
+    @ViewBuilder
+    private func recentOutputSection(_ e: RaveCatalogEntry) -> some View {
+        if ScannerCatalog.fact(forPluginID: e.id)?.privacyClass == .metadata {
+            Divider()
+            detailSection(
+                String(localized: "raveDetail.recentOutput", defaultValue: "Recent output"),
+                view: recentOutputBody(e)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func recentOutputBody(_ e: RaveCatalogEntry) -> some View {
+        if let rows = sampleRows, sampleForID == e.id {
+            if rows.isEmpty {
+                Text(String(localized: "raveDetail.recentOutput.notRun",
+                            defaultValue: "Not run yet on this Mac — run it to see real output."))
+                    .scaledSystem(11).foregroundStyle(.tertiary)
+            } else {
+                ArtifactCompactPreview(artifacts: rows, hint: nil)
+            }
+        } else {
+            ProgressView().controlSize(.small)
         }
     }
 
@@ -1072,6 +1126,71 @@ struct V2RaveCatalogBrowserView: View {
         default:              return "square.grid.2x2"
         }
     }
+
+    /// A meaningful SF Symbol for a card / detail thumbnail. Prefers a
+    /// per-scanner symbol (recognizable at a glance), then the category icon;
+    /// returns nil only when neither is sensible so the caller falls back to the
+    /// 2-letter monogram. Keeps the gradient background either way.
+    private func thumbnailSymbol(for e: RaveCatalogEntry) -> String? {
+        if let s = Self.scannerSymbols[e.id] { return s }
+        switch e.category {
+        case "collector", "analyzer", "enricher", "fingerprinter":
+            return categoryIcon(e.category ?? "")
+        default:
+            return nil
+        }
+    }
+
+    /// Card / detail thumbnail glyph: a per-category / per-scanner SF Symbol when
+    /// one is sensible, else the 2-letter monogram fallback. Gradient background
+    /// is applied by the caller's ZStack.
+    @ViewBuilder
+    private func thumbnailGlyph(_ e: RaveCatalogEntry, size: CGFloat) -> some View {
+        // Guard against a symbol name unavailable on the running OS (it would
+        // render blank): fall back to the monogram if the system symbol is
+        // absent. NSImage(systemSymbolName:) is nil for an unknown symbol.
+        if let symbol = thumbnailSymbol(for: e),
+           NSImage(systemSymbolName: symbol, accessibilityDescription: nil) != nil {
+            Image(systemName: symbol)
+                .scaledSystem(size, weight: .bold)
+                .foregroundStyle(.white)
+        } else {
+            Text(monogram(e.id))
+                .scaledSystem(size, weight: .bold, design: .rounded)
+                .foregroundStyle(.white)
+        }
+    }
+
+    /// Per-scanner thumbnail symbols, keyed by plugin id. Chosen to read at a
+    /// glance for the first-party built-ins; ids without an entry fall through to
+    /// the category icon, then the monogram.
+    private static let scannerSymbols: [String: String] = [
+        "com.maccrab.forensics.tcc-lite":               "hand.raised.fill",
+        "com.maccrab.forensics.launchd-lite":           "gearshape.2.fill",
+        "com.maccrab.forensics.quarantine":             "arrow.down.circle.fill",
+        "com.maccrab.forensics.safari-lite":            "safari.fill",
+        "com.maccrab.forensics.safari-deep":            "safari.fill",
+        "com.maccrab.forensics.mail":                   "envelope.fill",
+        "com.maccrab.forensics.mail-bodies":            "envelope.open.fill",
+        "com.maccrab.forensics.imessage-metadata":      "message.fill",
+        "com.maccrab.forensics.imessage-bodies":        "message.fill",
+        "com.maccrab.forensics.facetime":               "video.fill",
+        "com.maccrab.forensics.knowledgec":             "brain.head.profile",
+        "com.maccrab.forensics.biome":                  "waveform.path.ecg",
+        "com.maccrab.forensics.applescript-runtime":    "terminal.fill",
+        "com.maccrab.forensics.posture-analyzer":       "checkmark.shield.fill",
+        "com.maccrab.forensics.codesigning-graph":      "signature",
+        "com.maccrab.forensics.macho-analyzer":         "cpu",
+        "com.maccrab.forensics.dmg-pkg-analyzer":       "shippingbox.fill",
+        "com.maccrab.forensics.plist-analyzer":         "doc.text.fill",
+        "com.maccrab.forensics.mobileconfig-inspector": "doc.badge.gearshape",
+        "com.maccrab.forensics.shortcuts-analyzer":     "wand.and.rays",
+        "com.maccrab.forensics.image-metadata":         "photo.fill",
+        "com.maccrab.forensics.archive-walker":         "archivebox.fill",
+        "com.maccrab.forensics.document-analyzer":      "doc.richtext.fill",
+        "com.maccrab.forensics.office-document-analyzer": "doc.richtext.fill",
+        "com.maccrab.forensics.fsevents":               "folder.fill",
+    ]
 
     // MARK: - Load
 
