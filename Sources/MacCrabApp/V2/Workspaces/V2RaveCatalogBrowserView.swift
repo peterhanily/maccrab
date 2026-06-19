@@ -18,6 +18,8 @@
 
 import SwiftUI
 import Foundation
+import MacCrabCore
+import MacCrabForensics
 
 struct V2RaveCatalogBrowserView: View {
     @State private var entries: [RaveCatalogEntry] = []
@@ -36,6 +38,31 @@ struct V2RaveCatalogBrowserView: View {
     /// consent sheet the maccrab://install handler drives (resolve-from-pinned-
     /// catalog → version-floor → consent → verified hand-off). nil = no sheet.
     @State private var installLink: RaveInstallLink? = nil
+    /// Phase-0 honest catalog states. Set on each reload so the pane can tell
+    /// loading / offline / trust-failure / verified-but-empty / live apart, and
+    /// surface the trust the verified fetch already earns (serial + revocation
+    /// freshness) instead of collapsing everything to one "Coming Soon" panel.
+    @State private var errorIsTrust = false
+    @State private var lastGoodFetch: Date? = nil
+    @State private var catalogSerial: Int? = nil
+    @State private var revFreshness: RaveRevocationFreshness? = nil
+    /// Phase-1 discovery + lifecycle. Search/sort over the offered entries, and
+    /// the locally-installed plugin id -> version map so cards show Installed /
+    /// Update-available state.
+    @State private var searchText = ""
+    @State private var sortMode: SortMode = .name
+    @State private var installedByID: [String: String] = [:]
+
+    private enum SortMode: CaseIterable, Hashable {
+        case name, category, firstPartyFirst
+        var label: String {
+            switch self {
+            case .name:            return "Name (A–Z)"
+            case .category:        return "Category"
+            case .firstPartyFirst: return "First-party first"
+            }
+        }
+    }
 
     private let client = RaveCatalogClient()
 
@@ -55,10 +82,42 @@ struct V2RaveCatalogBrowserView: View {
     }
 
     private var visibleEntries: [RaveCatalogEntry] {
-        offeredEntries.filter { e in
+        let filtered = offeredEntries.filter { e in
             if showFeaturedOnly, e.trustTier != "first-party" { return false }
             if let cat = selectedCategory, e.category != cat { return false }
+            if !matchesSearch(e) { return false }
             return true
+        }
+        return sortEntries(filtered)
+    }
+
+    private func matchesSearch(_ e: RaveCatalogEntry) -> Bool {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return true }
+        let hay = ([friendlyName(e.id), e.id, e.category ?? ""] + e.tags)
+            .joined(separator: " ").lowercased()
+        return hay.contains(q)
+    }
+
+    private func sortEntries(_ list: [RaveCatalogEntry]) -> [RaveCatalogEntry] {
+        switch sortMode {
+        case .name:
+            return list.sorted {
+                friendlyName($0.id).localizedCaseInsensitiveCompare(friendlyName($1.id)) == .orderedAscending
+            }
+        case .category:
+            return list.sorted {
+                let ca = $0.category ?? "~", cb = $1.category ?? "~"
+                if ca != cb { return ca < cb }
+                return friendlyName($0.id).localizedCaseInsensitiveCompare(friendlyName($1.id)) == .orderedAscending
+            }
+        case .firstPartyFirst:
+            return list.sorted {
+                let fa = $0.trustTier == "first-party" ? 0 : 1
+                let fb = $1.trustTier == "first-party" ? 0 : 1
+                if fa != fb { return fa < fb }
+                return friendlyName($0.id).localizedCaseInsensitiveCompare(friendlyName($1.id)) == .orderedAscending
+            }
         }
     }
 
@@ -84,30 +143,48 @@ struct V2RaveCatalogBrowserView: View {
 
     private var liveCatalog: some View {
         VStack(spacing: 0) {
-            if loading || error != nil || offeredEntries.isEmpty {
-                // Offline / empty / first-load / no active plugins yet: the branded
-                // ComingSoon panel is the honest fallback when the catalog isn't
-                // reachable OR carries only pre-release/placeholder entries (which
-                // are filtered out of offeredEntries, matching the website).
-                ComingSoonCatalogView()
-            } else {
-                header
-                if !usingOfficial {
-                    nonOfficialBanner
-                }
-                Divider()
-                HStack(spacing: 0) {
-                    sidebar
-                    Divider()
-                    grid
-                    Divider()
-                    detailPanel
-                }
+            // Distinct honest states instead of one catch-all "Coming Soon":
+            // loading, unreachable (offline), trust-failure (signature/freshness
+            // refused — the SAFE outcome), verified-but-empty (catalog signed &
+            // verified on this Mac, just no active plugins yet), and the live store.
+            switch paneState {
+            case .loading:       loadingPane
+            case .offline:       offlinePane
+            case .trustError:    trustErrorPane
+            case .verifiedEmpty: verifiedEmptyPane
+            case .live:          liveStore
             }
         }
         .task { await reload() }
         .sheet(item: $installLink) { link in
             RaveInstallConsentSheet(link: link) { installLink = nil }
+        }
+    }
+
+    private enum PaneState { case loading, offline, trustError, verifiedEmpty, live }
+
+    private var paneState: PaneState {
+        if loading { return .loading }
+        if error != nil { return errorIsTrust ? .trustError : .offline }
+        return offeredEntries.isEmpty ? .verifiedEmpty : .live
+    }
+
+    /// The live store chrome (header + sidebar + grid + detail) — shown only
+    /// once the catalog verified AND offers at least one active plugin.
+    private var liveStore: some View {
+        VStack(spacing: 0) {
+            header
+            if !usingOfficial {
+                nonOfficialBanner
+            }
+            Divider()
+            HStack(spacing: 0) {
+                sidebar
+                Divider()
+                grid
+                Divider()
+                detailPanel
+            }
         }
     }
 
@@ -148,12 +225,13 @@ struct V2RaveCatalogBrowserView: View {
                 .padding(8)
                 .background(Color.accentColor.opacity(0.12))
                 .cornerRadius(8)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Plugin catalog")
                     .font(.title2).fontWeight(.semibold)
                 Text(baseURL.isEmpty ? "rave.maccrab.com" : baseURL)
                     .scaledSystem(11)
                     .foregroundStyle(.secondary)
+                trustStrip
             }
             Spacer()
             Button {
@@ -164,6 +242,181 @@ struct V2RaveCatalogBrowserView: View {
             .help("Refresh")
         }
         .padding(.horizontal, 20).padding(.vertical, 16)
+    }
+
+    // MARK: - Honest catalog panes (Phase 0)
+
+    /// Shared dark/orange branded backdrop for the non-live catalog panes, so
+    /// loading / offline / trust-failure / coming-soon stay visually coherent
+    /// in the maccrab.com rave palette.
+    private func ravePane<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.04, green: 0.04, blue: 0.043),
+                         Color(red: 0.10, green: 0.055, blue: 0.031)],
+                startPoint: .topLeading, endPoint: .bottomTrailing)
+            VStack(spacing: 16) { content() }
+                .padding(40)
+                .frame(maxWidth: 460)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var paneTitleColor: Color { Color(red: 0.957, green: 0.957, blue: 0.961) }   // #f4f4f5
+    private var paneSubtitleColor: Color { Color(red: 0.63, green: 0.63, blue: 0.67) }    // #a1a1aa
+
+    private var loadingPane: some View {
+        ravePane {
+            RaveCrabView().frame(width: 150, height: 125)
+            ProgressView().controlSize(.small).tint(raveCrabOrange)
+            Text("Checking the signed catalog…")
+                .scaledSystem(13)
+                .foregroundStyle(paneSubtitleColor)
+        }
+    }
+
+    private var offlinePane: some View {
+        ravePane {
+            RaveCrabView().frame(width: 150, height: 125)
+            Text("Rave catalog")
+                .scaledSystem(12, weight: .semibold).tracking(2)
+                .foregroundStyle(raveCrabOrange)
+            Text("Can't reach the catalog")
+                .scaledSystem(26, weight: .bold)
+                .foregroundStyle(paneTitleColor)
+            Text(offlineDetailText)
+                .scaledSystem(13)
+                .foregroundStyle(paneSubtitleColor)
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+            Button { Task { await reload() } } label: {
+                Label("Retry", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent).tint(raveCrabOrange).controlSize(.large)
+        }
+    }
+
+    private var trustErrorPane: some View {
+        ravePane {
+            Image(systemName: "lock.shield.fill")
+                .scaledSystem(46)
+                .foregroundStyle(raveCrabOrange)
+            Text("Rave catalog")
+                .scaledSystem(12, weight: .semibold).tracking(2)
+                .foregroundStyle(raveCrabOrange)
+            Text("Catalog failed verification")
+                .scaledSystem(24, weight: .bold)
+                .foregroundStyle(paneTitleColor)
+            Text("MacCrab refused to show it — the catalog's signature or freshness check didn't pass, so nothing from it is trusted or installable. This is the safe outcome, not a bug. Your installed scanners and kits keep working.")
+                .scaledSystem(13)
+                .foregroundStyle(paneSubtitleColor)
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+            if let error {
+                Text(error)
+                    .scaledSystem(10, design: .monospaced)
+                    .foregroundStyle(paneSubtitleColor.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(4)
+                    .textSelection(.enabled)
+            }
+            Button { Task { await reload() } } label: {
+                Label("Try again", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent).tint(raveCrabOrange).controlSize(.large)
+        }
+    }
+
+    private var verifiedEmptyPane: some View {
+        ravePane {
+            RaveCrabView().frame(width: 180, height: 150)
+            Text("Rave catalog")
+                .scaledSystem(12, weight: .semibold).tracking(2)
+                .foregroundStyle(raveCrabOrange)
+            Text("Coming soon")
+                .scaledSystem(30, weight: .bold)
+                .foregroundStyle(paneTitleColor)
+            Text("A signed, vetted catalog of forensic plugins you'll browse and install right from MacCrab. The catalog is verified on this Mac — we're putting the finishing touches on the first plugins. Your existing scanners and kits keep working in the meantime.")
+                .scaledSystem(13)
+                .foregroundStyle(paneSubtitleColor)
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+            trustStrip
+            Button {
+                if let url = URL(string: "https://rave.maccrab.com/") {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                Label("Preview on rave.maccrab.com", systemImage: "safari")
+            }
+            .buttonStyle(.bordered).tint(raveCrabOrange).controlSize(.small)
+        }
+    }
+
+    // MARK: - Trust strip (surfaces the verification the fetch already earns)
+
+    /// Compact "Signed & verified · serial N · revocations fresh" strip, shown in
+    /// the live header AND the coming-soon pane so the trust the client enforces
+    /// (Ed25519 verify + anti-rollback serial + revocation freshness) is visible,
+    /// not silent. Semantic colors so it reads on the light header + dark panes.
+    @ViewBuilder
+    private var trustStrip: some View {
+        HStack(spacing: 6) {
+            trustChip("Signed & verified", icon: "checkmark.seal.fill", color: .green)
+            if let s = catalogSerial {
+                trustChip("serial \(s)", icon: "number", color: .secondary)
+            }
+            freshnessChip
+        }
+    }
+
+    @ViewBuilder
+    private var freshnessChip: some View {
+        switch revFreshness {
+        case .fresh:
+            trustChip("revocations fresh", icon: "clock.badge.checkmark", color: .green)
+        case .stale:
+            trustChip("revocations stale", icon: "clock.badge.exclamationmark", color: .orange)
+        case .never, .none:
+            trustChip("revocations: pending", icon: "clock", color: .secondary)
+        }
+    }
+
+    private func trustChip(_ text: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).scaledSystem(8)
+            Text(text).scaledSystem(9, weight: .medium)
+        }
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(color.opacity(0.16))
+        .foregroundStyle(color)
+        .cornerRadius(4)
+    }
+
+    private var offlineDetailText: String {
+        let host = URL(string: baseURL)?.host ?? "the catalog"
+        if let when = lastGoodFetch {
+            let f = RelativeDateTimeFormatter()
+            return "We couldn't reach \(host). Last verified \(f.localizedString(for: when, relativeTo: Date()))."
+        }
+        return "We couldn't reach \(host). Check your connection and try again."
+    }
+
+    /// Classify a fetch failure: a signature / parse / freshness-rollback failure
+    /// is a TRUST refusal (the safe outcome → security-toned pane); a reachability
+    /// / network failure is "offline". (Per-entry version-floor + config errors
+    /// aren't surfaced here.)
+    private static func isTrustError(_ error: Error) -> Bool {
+        guard let e = error as? RaveCatalogError else { return false }
+        switch e {
+        case .signatureMismatch, .parseFailed, .noCatalogKey,
+             .catalogRollback, .catalogSerialMissing,
+             .revocationsSignatureMismatch, .revocationsParseFailed,
+             .revocationsRollback, .revocationsSerialMissing:
+            return true
+        case .noBaseURL, .fetchFailed, .versionFloor:
+            return false
+        }
     }
 
     // MARK: - Sidebar
@@ -235,15 +488,80 @@ struct V2RaveCatalogBrowserView: View {
     // MARK: - Grid
 
     private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 14)], spacing: 14) {
-                ForEach(visibleEntries, id: \.id) { e in
-                    catalogCard(e)
+        VStack(spacing: 0) {
+            gridToolbar
+            Divider()
+            ScrollView {
+                if visibleEntries.isEmpty {
+                    noMatchesView
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 14)], spacing: 14) {
+                        ForEach(visibleEntries, id: \.id) { e in
+                            catalogCard(e)
+                        }
+                    }
+                    .padding(18)
                 }
             }
-            .padding(18)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var gridToolbar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .scaledSystem(11).foregroundStyle(.secondary)
+                TextField("Search scanners", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .scaledSystem(12)
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill").scaledSystem(11)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("Clear search")
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(6)
+            .frame(maxWidth: 260)
+
+            Text("\(visibleEntries.count) of \(offeredEntries.count)")
+                .scaledSystem(10).foregroundStyle(.secondary)
+                .monospacedDigit()
+
+            Spacer()
+
+            Picker("Sort", selection: $sortMode) {
+                ForEach(SortMode.allCases, id: \.self) { m in
+                    Text(m.label).tag(m)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .scaledSystem(11)
+            .frame(width: 160)
+        }
+        .padding(.horizontal, 18).padding(.vertical, 8)
+    }
+
+    private var noMatchesView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .scaledSystem(28).foregroundStyle(.tertiary)
+            Text("No scanners match")
+                .scaledSystem(13, weight: .medium).foregroundStyle(.secondary)
+            if !searchText.isEmpty {
+                Text("Nothing matches “\(searchText)”.")
+                    .scaledSystem(11).foregroundStyle(.tertiary)
+                Button("Clear search") { searchText = "" }
+                    .scaledSystem(11).buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 60)
     }
 
     private func catalogCard(_ e: RaveCatalogEntry) -> some View {
@@ -280,6 +598,7 @@ struct V2RaveCatalogBrowserView: View {
                             .scaledSystem(10)
                             .foregroundStyle(.tertiary)
                         statusBadge(state(for: e))
+                        installedBadge(for: e)
                     }
                 }
             }
@@ -495,6 +814,25 @@ struct V2RaveCatalogBrowserView: View {
         .cornerRadius(3)
     }
 
+    /// Installed / Update-available badge from the local plugin inventory.
+    /// Absent when the plugin isn't installed.
+    @ViewBuilder
+    private func installedBadge(for e: RaveCatalogEntry) -> some View {
+        if let installedVer = installedByID[e.id] {
+            if isUpdateAvailable(installed: installedVer, current: e.currentVersion) {
+                badge("Update", icon: "arrow.up.circle.fill", color: .blue)
+            } else {
+                badge("Installed", icon: "checkmark.circle.fill", color: .green)
+            }
+        }
+    }
+
+    /// True when the catalog's current version is newer than what's installed.
+    /// Uses the shared semver policy; an unparseable pair → no update (safe).
+    private func isUpdateAvailable(installed: String, current: String) -> Bool {
+        MacCrabSemverCompare.satisfiesFloor(running: installed, floor: current) == false
+    }
+
     /// Trust-state detail row: signer-pin status + (when blocked/revoked) the
     /// reason. Shown in the detail panel under "Signed by".
     @ViewBuilder
@@ -589,8 +927,12 @@ struct V2RaveCatalogBrowserView: View {
     private func reload() async {
         loading = true
         error = nil
+        errorIsTrust = false
         baseURL = await client.baseURL.absoluteString
         usingOfficial = await client.isUsingOfficialSource
+        // Local plugin inventory (independent of the catalog fetch) so cards can
+        // show Installed / Update-available state.
+        installedByID = await client.installedPlugins()
         do {
             let fetched = try await client.fetchEntries()
 
@@ -622,11 +964,18 @@ struct V2RaveCatalogBrowserView: View {
 
             entries = fetched
             stateByID = states
+            // Surface the trust this verified fetch earned (anti-rollback serial
+            // + revocation freshness) for the trust strip, and stamp the last-good
+            // time so the offline pane can say "last verified …".
+            lastGoodFetch = Date()
+            catalogSerial = await client.currentCatalogSerial()
+            revFreshness = await client.revocationFreshness()
             // Default the detail selection to the first OFFERED (active) entry,
             // never a hidden pre-release one.
             if selectedID == nil { selectedID = offeredEntries.first?.id }
         } catch {
             self.error = "\(error)"
+            self.errorIsTrust = Self.isTrustError(error)
             entries = []
             stateByID = [:]
         }
@@ -773,41 +1122,5 @@ private struct RaveCrabView: View {
             }
         }
         .accessibilityHidden(true)
-    }
-}
-
-/// First-release stand-in for the catalog tab: an intentional, branded
-/// "coming soon" in the maccrab.com dark/orange palette, instead of an
-/// error-toned "catalog not reachable" panel.
-private struct ComingSoonCatalogView: View {
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.04, green: 0.04, blue: 0.043),
-                         Color(red: 0.10, green: 0.055, blue: 0.031)],
-                startPoint: .topLeading, endPoint: .bottomTrailing)
-
-            VStack(spacing: 18) {
-                RaveCrabView()
-                    .frame(width: 180, height: 150)
-                VStack(spacing: 8) {
-                    Text("Rave catalog")
-                        .scaledSystem(12, weight: .semibold)
-                        .tracking(2)
-                        .foregroundStyle(raveCrabOrange)
-                    Text("Coming soon")
-                        .scaledSystem(30, weight: .bold)
-                        .foregroundStyle(Color(red: 0.957, green: 0.957, blue: 0.961)) // #f4f4f5
-                    Text("A signed, vetted catalog of forensic plugins you'll browse and install right from MacCrab. We're polishing it for launch — your existing scanners and kits keep working in the meantime.")
-                        .scaledSystem(13)
-                        .foregroundStyle(Color(red: 0.63, green: 0.63, blue: 0.67)) // #a1a1aa
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(2)
-                        .frame(maxWidth: 430)
-                }
-            }
-            .padding(40)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

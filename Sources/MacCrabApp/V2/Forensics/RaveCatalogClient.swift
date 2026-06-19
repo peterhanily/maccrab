@@ -310,6 +310,27 @@ public actor RaveCatalogClient {
         trustState.revocationFreshness(ceiling: ceiling)
     }
 
+    /// Current accepted top-level catalog_serial (S2-AR high-water mark), for
+    /// the dashboard trust strip. nil pre-ceremony (no serial stamped yet).
+    public func currentCatalogSerial() -> Int? {
+        trustState.currentCatalogSerial()
+    }
+
+    /// Installed plugin id -> installed version, for the store's "Installed" /
+    /// "Update available" card badges. Best-effort: returns empty on any read
+    /// error (the store still renders, just without installed-state badges).
+    public func installedPlugins() async -> [String: String] {
+        let installer = PluginInstaller()
+        guard let installed = try? await installer.list() else { return [:] }
+        var map: [String: String] = [:]
+        map.reserveCapacity(installed.count)
+        for p in installed {
+            let version = (try? TierBManifest.load(fromBundlePath: p.installRoot))?.version ?? ""
+            map[p.pluginID] = version
+        }
+        return map
+    }
+
     /// Extract the top-level monotonic catalog_serial (S2-AR). nil when absent
     /// or non-integer (pre-ceremony catalog) — treated as first-seen upstream.
     private func parseCatalogSerial(data: Data) -> Int? {
