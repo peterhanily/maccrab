@@ -263,28 +263,31 @@ echo -e "${BOLD}Required fields check:${NC}"
 MISSING_FIELDS=0
 for rule_file in $(find "$RULES_DIR" -name "*.yml" | sort); do
     relpath="${rule_file#$RULES_DIR/}"
-    content=$(cat "$rule_file")
+    # grep the file directly (not `echo "$content" | grep -q`): under
+    # `set -o pipefail`, grep -q matches and closes the pipe early, the
+    # upstream echo takes SIGPIPE, and the pipeline reports failure even
+    # though the field WAS present — an intermittent false "missing field".
 
     # Sequence rules use steps: instead of detection:
     is_sequence=false
-    if echo "$content" | grep -q "^type: sequence"; then
+    if grep -q "^type: sequence" "$rule_file"; then
         is_sequence=true
     fi
 
     for field in "title:" "id:" "level:"; do
-        if ! echo "$content" | grep -q "^${field}"; then
+        if ! grep -q "^${field}" "$rule_file"; then
             error "$relpath — missing required field: $field"
             MISSING_FIELDS=$((MISSING_FIELDS + 1))
         fi
     done
 
     if [ "$is_sequence" = true ]; then
-        if ! echo "$content" | grep -q "^steps:"; then
+        if ! grep -q "^steps:" "$rule_file"; then
             error "$relpath — sequence rule missing required field: steps:"
             MISSING_FIELDS=$((MISSING_FIELDS + 1))
         fi
     else
-        if ! echo "$content" | grep -q "^detection:"; then
+        if ! grep -q "^detection:" "$rule_file"; then
             error "$relpath — missing required field: detection:"
             MISSING_FIELDS=$((MISSING_FIELDS + 1))
         fi

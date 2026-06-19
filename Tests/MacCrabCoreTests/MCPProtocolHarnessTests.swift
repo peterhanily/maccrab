@@ -15,12 +15,19 @@
 import Testing
 import Foundation
 
-// .serialized: each test spawns (and, on first run, BUILDS) the maccrab-mcp
-// binary. Run in parallel under full-suite load, the 7 tests raced a
-// concurrent `swift build --product maccrab-mcp` (thundering herd) plus a
-// 7-way spawn, which intermittently timed out the read watchdog → empty
-// responses → the flaky failures seen in the default gate. Serializing the
-// suite means one build, one spawn at a time; other suites still run parallel.
+// CI-robustness (three mutually-reinforcing mitigations; the suite is a
+// black-box harness that spawns a real binary under full-suite load):
+//   1. .serialized — one spawn at a time within the suite (other suites still
+//      run parallel). Originally added to stop a 7-way concurrent
+//      `swift build --product maccrab-mcp` thundering herd; CI now pre-builds
+//      the binary (swift build links maccrab-mcp), so binaryURL() finds it and
+//      never builds in-test, but serialization still bounds spawn concurrency.
+//   2. hermetic HOME (see `hermeticHome`) — the spawned server's store is an
+//      isolated temp dir, so a slow first-spawn migration can't half-write a
+//      shared DB that a later test then reads (the intermittent isError flake).
+//   3. a 60s read watchdog (see `drive`) — generous enough that a load-starved
+//      first spawn's DB-create/migrate completes instead of being killed →
+//      empty response. A healthy server still answers in milliseconds.
 @Suite("MCP protocol contract", .serialized)
 struct MCPProtocolHarnessTests {
 
@@ -50,24 +57,57 @@ struct MCPProtocolHarnessTests {
         return fm.isExecutableFile(atPath: debug.path) ? debug : nil
     }
 
-    /// Feed newline-delimited request lines, close stdin (EOF ends the server
-    /// loop), and return the parsed response objects. A 15s read watchdog
-    /// guarantees a misbehaving server can't hang the suite.
+    /// A hermetic, per-process app-support root for the spawned server. The
+    /// server resolves its store under HOME (`~/Library/Application Support/
+    /// MacCrab`, `main.swift` resolveDataDir/mcpUserDir). Pointing HOME here
+    /// means the harness (a) never reads or writes the developer/CI MacCrab
+    /// store — so the suite tests the real empty-store contract rather than
+    /// whatever happens to be on the machine — and (b) a slow first-spawn
+    /// SQLite migration on a load-saturated CI runner cannot half-write the
+    /// shared store and poison a later test (the intermittent isError flakes).
+    static let hermeticHome: URL = {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-harness-\(ProcessInfo.processInfo.globallyUniqueString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    /// Feed newline-delimited request lines and return the parsed responses,
+    /// retrying on an EMPTY result. A CI runner building 442 suites in parallel
+    /// can starve the first cold 28MB-binary spawn (dyld load + Swift runtime
+    /// init + first DB open) past the read watchdog → no output. Later spawns
+    /// in the serialized suite are fast (binary + store warm in the page cache),
+    /// so a retry of the cold first call almost always succeeds. A genuinely
+    /// broken server returns empty on every attempt → the test still fails.
     func drive(_ requestLines: [String]) -> [[String: Any]] {
-        guard let bin = Self.binaryURL() else {
-            Issue.record("maccrab-mcp binary not found and could not be built")
-            return []
+        var objs: [[String: Any]] = []
+        for _ in 0..<3 {
+            objs = driveOnce(requestLines)
+            if !objs.isEmpty { break }
         }
+        if objs.isEmpty {
+            Issue.record("maccrab-mcp produced no parseable response after 3 attempts (missing binary, spawn failure, or starved past the watchdog)")
+        }
+        return objs
+    }
+
+    /// One spawn → write → read attempt. A 60s read watchdog guarantees a
+    /// misbehaving (or fatally starved) server can't hang the suite. Returns
+    /// [] on any failure — the caller (`drive`) decides whether to retry or
+    /// record an issue, so a transient first-attempt failure isn't a test fail.
+    private func driveOnce(_ requestLines: [String]) -> [[String: Any]] {
+        guard let bin = Self.binaryURL() else { return [] }
         let proc = Process()
         proc.executableURL = bin
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = Self.hermeticHome.path
+        proc.environment = env
         let inPipe = Pipe(), outPipe = Pipe()
         proc.standardInput = inPipe
         proc.standardOutput = outPipe
         proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch {
-            Issue.record("failed to spawn maccrab-mcp: \(error)")
-            return []
-        }
+        do { try proc.run() } catch { return [] }
         let payload = (requestLines.joined(separator: "\n") + "\n").data(using: .utf8)!
         inPipe.fileHandleForWriting.write(payload)
         try? inPipe.fileHandleForWriting.close()
@@ -79,7 +119,7 @@ struct MCPProtocolHarnessTests {
             outData = outPipe.fileHandleForReading.readDataToEndOfFile()
             group.leave()
         }
-        if group.wait(timeout: .now() + 15) == .timedOut {
+        if group.wait(timeout: .now() + 60) == .timedOut {
             proc.terminate()
             _ = group.wait(timeout: .now() + 2)
         }

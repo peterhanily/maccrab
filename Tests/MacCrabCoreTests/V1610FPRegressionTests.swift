@@ -38,7 +38,12 @@ struct HiddenFileSignerRegressionTests {
         // signer anchor correctly. Guards against a future edit
         // that reverts the rule to the v1.6.5 allowlist model and
         // re-opens the Logitech FP.
-        let url = URL(fileURLWithPath: "compiled_rules/hidden_file_created.json")
+        // Read the FRESHLY-compiled output (ensureRulesCompiled keeps
+        // /tmp/maccrab_v3 current with the in-tree compiler + Rules/), not
+        // the gitignored compiled_rules/ dir — that dir can be stale on a dev
+        // box (masking a compiler change) and is absent on a fresh CI checkout.
+        ensureRulesCompiled()
+        let url = URL(fileURLWithPath: "/tmp/maccrab_v3/hidden_file_created.json")
         let data = try Data(contentsOf: url)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let predicates = json["predicates"] as! [[String: Any]]
@@ -59,28 +64,64 @@ struct C2BeaconDevIDApplicationsRegressionTests {
 
     @Test("Compiled rule contains filter_devid_applications with /Applications/ + devId")
     func compiledRuleHasDevIDFilter() throws {
-        let url = URL(fileURLWithPath: "compiled_rules/c2_beacon_pattern.json")
+        // The v1.6.10 FP filter excludes developer-ID-signed apps installed in
+        // /Applications/ from the C2-beacon rule. It's a MULTI-KEY filter
+        // (Image startswith /Applications/ AND SignerType=devId) applied as
+        // `not filter_devid_applications`. Since a27fc00 (the De Morgan fix) a
+        // negated multi-key filter compiles to a condition_tree node
+        //   { not: [ { type: group, mode: all_of, rangeStart..<rangeEnd } ] }
+        // over non-negated flat predicates — i.e. not(devId AND /Applications/)
+        // — NOT two separately-negated predicates (the old, over-suppressing
+        // shape). Read the freshly-compiled output so this tests the current
+        // compiler, not a stale (pre-fix) compiled_rules/ file.
+        ensureRulesCompiled()
+        let url = URL(fileURLWithPath: "/tmp/maccrab_v3/c2_beacon_pattern.json")
         let data = try Data(contentsOf: url)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let predicates = json["predicates"] as! [[String: Any]]
-        // Look for two negated predicates that together express
-        // "devId AND /Applications/ prefix". Compiler emits them as
-        // two separate predicates inside one selection block; both
-        // should appear negated.
-        let hasDevIdNeg = predicates.contains { p in
+
+        // Locate the two filter_devid_applications predicates (both emitted
+        // non-negated; the negation lives in the condition tree).
+        let iDev = predicates.firstIndex { p in
             (p["field"] as? String) == "SignerType"
                 && (p["modifier"] as? String) == "equals"
-                && (p["negate"] as? Bool) == true
                 && ((p["values"] as? [String]) ?? []).contains("devId")
         }
-        let hasApplicationsNeg = predicates.contains { p in
+        let iApp = predicates.firstIndex { p in
             (p["field"] as? String) == "process.executable"
                 && (p["modifier"] as? String) == "startswith"
-                && (p["negate"] as? Bool) == true
                 && ((p["values"] as? [String]) ?? []).contains("/Applications/")
         }
-        #expect(hasDevIdNeg, "c2_beacon_pattern must negate SignerType=devId after v1.6.10")
-        #expect(hasApplicationsNeg, "c2_beacon_pattern must negate Image startswith /Applications/ after v1.6.10")
+        #expect(iDev != nil, "c2_beacon_pattern must carry a SignerType=devId filter predicate")
+        #expect(iApp != nil, "c2_beacon_pattern must carry an Image startswith /Applications/ filter predicate")
+
+        // The condition tree must NEGATE those two as one all_of group —
+        // not(devId AND /Applications/) — so devId-signed /Applications/ apps
+        // are excluded. A `not` wrapping an all_of group whose range spans
+        // both predicate indices proves the De-Morgan-correct filter.
+        guard let a = iDev, let b = iApp,
+              let tree = json["condition_tree"] as? [String: Any] else {
+            #expect(Bool(false), "c2_beacon_pattern must have a condition_tree negating the devId/Applications filter")
+            return
+        }
+        func negatesGroupCovering(_ node: [String: Any]) -> Bool {
+            if (node["type"] as? String) == "not",
+               let ops = node["operands"] as? [[String: Any]] {
+                for op in ops where (op["type"] as? String) == "group"
+                    && (op["mode"] as? String) == "all_of" {
+                    if let s = op["rangeStart"] as? Int, let e = op["rangeEnd"] as? Int,
+                       s <= min(a, b), max(a, b) < e {
+                        return true
+                    }
+                }
+            }
+            if let ops = node["operands"] as? [[String: Any]] {
+                for op in ops where negatesGroupCovering(op) { return true }
+            }
+            return false
+        }
+        #expect(negatesGroupCovering(tree),
+                "c2_beacon_pattern must negate (devId AND /Applications/) as an all_of group after the De Morgan fix (a27fc00)")
     }
 }
 
