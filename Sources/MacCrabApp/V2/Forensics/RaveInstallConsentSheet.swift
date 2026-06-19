@@ -179,7 +179,7 @@ struct RaveInstallConsentSheet: View {
             // "reviewed & signed" for a pre-release/awaiting-binary entry).
             if f.isFirstParty {
                 if f.isInstallable {
-                    Label("First-party — reviewed & signed by the MacCrab maintainer.",
+                    Label("Verified by MacCrab — reviewed & signed by the maintainer.",
                           systemImage: "checkmark.seal.fill")
                         .font(.caption2).foregroundStyle(.green)
                 } else {
@@ -187,6 +187,29 @@ struct RaveInstallConsentSheet: View {
                           systemImage: "seal")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
+            }
+
+            // C-D-pre: concrete per-plugin capability chips from the local facts
+            // (first-party only; nil → this block is omitted and the generic C-D
+            // disclosure below still carries the honest baseline). Chips read
+            // first, then the "what this grants" caveat.
+            if let pf = PluginFactsLookup.facts(forPluginID: f.id) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("What this scanner accesses", systemImage: "doc.text.magnifyingglass")
+                        .font(.caption.weight(.semibold))
+                    consentChipRow("Reads", pf.reads)
+                    if !pf.needs.isEmpty { consentChipRow("TCC", pf.needs) }
+                    consentChipRow("Emits", pf.emits)
+                    HStack(spacing: 6) {
+                        Image(systemName: "network.slash").font(.caption2).foregroundStyle(.secondary)
+                        Text("\(pf.networkChip) · \(pf.sandboxChip)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.secondary.opacity(0.06))
+                .cornerRadius(6)
             }
 
             // C-D: honest capability/enforcement disclosure. Plugin execution is
@@ -247,6 +270,17 @@ struct RaveInstallConsentSheet: View {
                 .font(mono ? .system(.caption, design: .monospaced) : .caption)
                 .textSelection(.enabled)
             Spacer()
+        }
+    }
+
+    /// Compact "Reads / TCC / Emits" capability row for the consent chips block.
+    private func consentChipRow(_ label: String, _ values: [String]) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(label).font(.caption2.weight(.medium))
+                .foregroundStyle(.tertiary).frame(width: 42, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(values, id: \.self) { Text($0).font(.caption2) }
+            }
         }
     }
 

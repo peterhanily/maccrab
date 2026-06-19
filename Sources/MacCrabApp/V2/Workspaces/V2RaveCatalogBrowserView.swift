@@ -676,6 +676,11 @@ struct V2RaveCatalogBrowserView: View {
 
                 Divider()
                 detailSection(String(localized: "raveDetail.whatItDoes", defaultValue: "What it does"), body: longDescription(e))
+                // TODO: sample-output preview once per-entry catalog fetch lands (signed sample_output)
+                if let f = PluginFactsLookup.facts(forPluginID: e.id) {
+                    Divider()
+                    capabilityChips(f)
+                }
                 if !e.tags.isEmpty {
                     detailSection(String(localized: "raveDetail.tags", defaultValue: "Tags"), view: tagWrap(e.tags))
                 }
@@ -703,6 +708,42 @@ struct V2RaveCatalogBrowserView: View {
 
     private func detailSection(_ title: String, body: String) -> some View {
         detailSection(title, view: Text(body).scaledSystem(12))
+    }
+
+    /// Phase-2 capability chips: what the scanner reads, the TCC it needs, what
+    /// it emits, its privacy class, and the honest network/sandbox posture —
+    /// sourced from the local ScannerCatalog (first-party), surfaced here instead
+    /// of being buried in the kit-detail sheet on another tab.
+    @ViewBuilder
+    private func capabilityChips(_ f: PluginFacts) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            chipRow("Reads", f.reads)
+            if !f.needs.isEmpty { chipRow("Needs", f.needs) }
+            chipRow("Emits", f.emits)
+            HStack(spacing: 4) {
+                Image(systemName: f.isMetadataOnly ? "checkmark.shield" : "lock.fill")
+                    .scaledSystem(9)
+                    .foregroundStyle(f.isMetadataOnly ? .green : .purple)
+                Text(f.privacyLabel).scaledSystem(10).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 4) {
+                Image(systemName: "network.slash").scaledSystem(9).foregroundStyle(.secondary)
+                Text(f.networkChip).scaledSystem(10).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func chipRow(_ label: String, _ values: [String]) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label).scaledSystem(10, weight: .medium)
+                .foregroundStyle(.tertiary).frame(width: 50, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(values, id: \.self) { v in
+                    Text(v).scaledSystem(11).foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 
     private func tagWrap(_ tags: [String]) -> some View {
@@ -884,11 +925,13 @@ struct V2RaveCatalogBrowserView: View {
     }
 
     private func longDescription(_ e: RaveCatalogEntry) -> String {
-        // Detail panel text — manifest descriptions live in the
-        // plugin manifests once those land in the catalog; for
-        // now the friendly name is enough until the rave catalog
-        // emits descriptions in its JSON.
-        return "\(friendlyName(e.id)) — \(e.category ?? "scanner") published via the rave catalog. Install via the command shown below to add it to this Mac's scanner registry; from there it'll appear in any kit that references its id."
+        // Prefer the real per-scanner purpose from the local ScannerCatalog
+        // (first-party, keyed by plugin id); fall back to a templated line for
+        // ids with no local facts (third-party / not-yet-documented).
+        if let f = PluginFactsLookup.facts(forPluginID: e.id) {
+            return f.purpose
+        }
+        return "\(friendlyName(e.id)) — \(e.category ?? "scanner") published via the rave catalog. Install it to add it to this Mac's scanner registry; from there it'll appear in any kit that references its id."
     }
 
     private func monogram(_ id: String) -> String {
