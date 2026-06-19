@@ -97,7 +97,9 @@ struct V2RaveCatalogBrowserView: View {
     /// DISPLAY only (browse/search/sort/detail). Built-ins are NOT in `entries`,
     /// so they never touch stateByID / compute / the trust strip / the offer set.
     private var displayEntries: [RaveCatalogEntry] {
-        builtinEntries + offeredEntries
+        // De-dup on id, built-in wins (see mergedDisplayEntries). offeredEntries
+        // is untouched, so the verified-catalog accounting is unaffected.
+        RaveCatalogClient.mergedDisplayEntries(builtins: builtinEntries, offered: offeredEntries)
     }
 
     private func isBuiltin(_ e: RaveCatalogEntry) -> Bool {
@@ -645,7 +647,10 @@ struct V2RaveCatalogBrowserView: View {
                         Text(friendlyName(e.id))
                             .scaledSystem(13, weight: .semibold)
                             .lineLimit(1)
-                        trustBadge(e.trustTier)
+                        // Built-ins wear the dedicated "Built-in" status badge, not
+                        // the green "First-party" trust chip (which means
+                        // catalog-signature-verified first-party).
+                        if !isBuiltin(e) { trustBadge(e.trustTier) }
                     }
                     if let cat = e.category {
                         Text(cat.capitalized)
@@ -723,7 +728,7 @@ struct V2RaveCatalogBrowserView: View {
                     Text(friendlyName(e.id))
                         .font(.headline)
                     HStack(spacing: 6) {
-                        trustBadge(e.trustTier)
+                        if !isBuiltin(e) { trustBadge(e.trustTier) }
                         channelBadge(e.channel)
                         statusBadge(state(for: e))
                     }

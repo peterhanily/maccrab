@@ -461,4 +461,17 @@ public actor RaveCatalogClient {
                 )
             }
     }
+
+    /// Merge built-in rows + offered catalog rows for DISPLAY, de-duped on id
+    /// with the BUILT-IN winning. A first-party catalog entry may legitimately
+    /// share a built-in's com.maccrab.* id (the namespace guard only refuses
+    /// non-first-party impersonators); showing both would dup the SwiftUI
+    /// ForEach id and mis-gate the installable catalog row as a Run-only
+    /// built-in. `offered` is never mutated — this is display-only.
+    public nonisolated static func mergedDisplayEntries(
+        builtins: [RaveCatalogEntry], offered: [RaveCatalogEntry]
+    ) -> [RaveCatalogEntry] {
+        let builtinIDs = Set(builtins.map { $0.id })
+        return builtins + offered.filter { !builtinIDs.contains($0.id) }
+    }
 }
