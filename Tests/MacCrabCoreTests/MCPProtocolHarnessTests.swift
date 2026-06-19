@@ -15,12 +15,19 @@
 import Testing
 import Foundation
 
-// .serialized: each test spawns (and, on first run, BUILDS) the maccrab-mcp
-// binary. Run in parallel under full-suite load, the 7 tests raced a
-// concurrent `swift build --product maccrab-mcp` (thundering herd) plus a
-// 7-way spawn, which intermittently timed out the read watchdog → empty
-// responses → the flaky failures seen in the default gate. Serializing the
-// suite means one build, one spawn at a time; other suites still run parallel.
+// CI-robustness (three mutually-reinforcing mitigations; the suite is a
+// black-box harness that spawns a real binary under full-suite load):
+//   1. .serialized — one spawn at a time within the suite (other suites still
+//      run parallel). Originally added to stop a 7-way concurrent
+//      `swift build --product maccrab-mcp` thundering herd; CI now pre-builds
+//      the binary (swift build links maccrab-mcp), so binaryURL() finds it and
+//      never builds in-test, but serialization still bounds spawn concurrency.
+//   2. hermetic HOME (see `hermeticHome`) — the spawned server's store is an
+//      isolated temp dir, so a slow first-spawn migration can't half-write a
+//      shared DB that a later test then reads (the intermittent isError flake).
+//   3. a 60s read watchdog (see `drive`) — generous enough that a load-starved
+//      first spawn's DB-create/migrate completes instead of being killed →
+//      empty response. A healthy server still answers in milliseconds.
 @Suite("MCP protocol contract", .serialized)
 struct MCPProtocolHarnessTests {
 
@@ -50,9 +57,28 @@ struct MCPProtocolHarnessTests {
         return fm.isExecutableFile(atPath: debug.path) ? debug : nil
     }
 
+    /// A hermetic, per-process app-support root for the spawned server. The
+    /// server resolves its store under HOME (`~/Library/Application Support/
+    /// MacCrab`, `main.swift` resolveDataDir/mcpUserDir). Pointing HOME here
+    /// means the harness (a) never reads or writes the developer/CI MacCrab
+    /// store — so the suite tests the real empty-store contract rather than
+    /// whatever happens to be on the machine — and (b) a slow first-spawn
+    /// SQLite migration on a load-saturated CI runner cannot half-write the
+    /// shared store and poison a later test (the intermittent isError flakes).
+    static let hermeticHome: URL = {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("maccrab-mcp-harness-\(ProcessInfo.processInfo.globallyUniqueString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
     /// Feed newline-delimited request lines, close stdin (EOF ends the server
-    /// loop), and return the parsed response objects. A 15s read watchdog
-    /// guarantees a misbehaving server can't hang the suite.
+    /// loop), and return the parsed response objects. A 60s read watchdog
+    /// guarantees a misbehaving server can't hang the suite — generous because
+    /// a CI runner building 442 suites in parallel can starve the first spawn's
+    /// DB-create/migrate well past a tight bound (the cause of the empty-
+    /// response flakes), while a healthy server still answers in milliseconds.
     func drive(_ requestLines: [String]) -> [[String: Any]] {
         guard let bin = Self.binaryURL() else {
             Issue.record("maccrab-mcp binary not found and could not be built")
@@ -60,6 +86,9 @@ struct MCPProtocolHarnessTests {
         }
         let proc = Process()
         proc.executableURL = bin
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = Self.hermeticHome.path
+        proc.environment = env
         let inPipe = Pipe(), outPipe = Pipe()
         proc.standardInput = inPipe
         proc.standardOutput = outPipe
@@ -79,7 +108,7 @@ struct MCPProtocolHarnessTests {
             outData = outPipe.fileHandleForReading.readDataToEndOfFile()
             group.leave()
         }
-        if group.wait(timeout: .now() + 15) == .timedOut {
+        if group.wait(timeout: .now() + 60) == .timedOut {
             proc.terminate()
             _ = group.wait(timeout: .now() + 2)
         }
