@@ -24,7 +24,6 @@ import MacCrabForensics
 struct V2ForensicsSettingsSheet: View {
     @Binding var isPresented: Bool
 
-    @State private var installed: [InstalledPlugin] = []
     @State private var trustedKeys: [String] = []
     @State private var revokedKeys: [String] = []
     @State private var devResidue: [String] = []
@@ -38,7 +37,7 @@ struct V2ForensicsSettingsSheet: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    installedSection
+                    installedPointerSection
                     Divider()
                     trustSection
                     if !devResidue.isEmpty {
@@ -80,57 +79,19 @@ struct V2ForensicsSettingsSheet: View {
 
     // MARK: - Sections
 
-    private var installedSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionHeader(String(localized: "forensicsSettings.installedScanners", defaultValue: "Installed scanners"),
-                          "Third-party scanners you've added via the catalog or local bundle.")
-            if loading {
-                ProgressView().controlSize(.small)
-            } else if installed.isEmpty {
-                emptyHint("Nothing installed yet. MacCrab ships with standard scanners built in.")
-            } else {
-                ForEach(installed, id: \.pluginID) { p in
-                    installedRow(p)
-                    Divider()
-                }
+    /// Installed-scanner management moved to the dedicated "My Plugins" tab
+    /// (richer: provenance, live re-verify, quarantine, uninstall). This keeps
+    /// Settings focused on trust keys + maintenance and avoids two divergent
+    /// inventory views. (Modal sheet → informational pointer, not a navigation.)
+    private var installedPointerSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            sectionHeader(String(localized: "forensicsSettings.installedScanners", defaultValue: "Installed scanners"), "")
+            HStack(spacing: 6) {
+                Image(systemName: "puzzlepiece.extension").foregroundStyle(.secondary).scaledSystem(12)
+                Text("Manage installed scanners — provenance, live re-verify, and uninstall — in the My Plugins tab.")
+                    .scaledSystem(11).foregroundStyle(.secondary)
             }
         }
-    }
-
-    private func installedRow(_ p: InstalledPlugin) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(friendlyName(p.pluginID))
-                    .scaledSystem(13, weight: .semibold)
-                provenanceBadge(p)
-                Text("Publisher key: \(p.publicKeyHex.prefix(16))…")
-                    .scaledSystem(10, design: .monospaced)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            Spacer()
-            Button(role: .destructive) {
-                Task { await remove(p) }
-            } label: {
-                Text("Remove")
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-        }
-        .padding(.vertical, 4)
-    }
-
-    /// v1.19.0: provenance badge for an installed (Tier B) plugin — "Store"
-    /// (carries a signed rave-catalog install receipt) vs "Third-party"
-    /// (operator-trusted local sideload). First-party scanners ship built-in and
-    /// aren't listed in this Tier-B section.
-    private func provenanceBadge(_ p: InstalledPlugin) -> some View {
-        let receiptsDir = URL(fileURLWithPath: (installer.pluginsRootPath as NSString).deletingLastPathComponent)
-            .appendingPathComponent("plugin_receipts")
-        let prov = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
-        return Label(prov.displayName, systemImage: prov.symbolName)
-            .scaledSystem(10)
-            .foregroundStyle(prov == .store ? Color.green : Color.orange)
     }
 
     private var trustSection: some View {
@@ -223,17 +184,12 @@ struct V2ForensicsSettingsSheet: View {
             .padding(.vertical, 4)
     }
 
-    private func friendlyName(_ id: String) -> String {
-        ScannerDisplay.name(forPluginID: id)
-    }
-
     // MARK: - Actions
 
     private func reload() async {
         loading = true
         let allInstalled = (try? await installer.list()) ?? []
         let filtered = OperatorVisibilityFilter.filter(allInstalled)
-        installed = filtered
         // Anything that the filter dropped is dev / test residue.
         let visibleIDs = Set(filtered.map { $0.pluginID })
         devResidue = allInstalled
@@ -244,16 +200,6 @@ struct V2ForensicsSettingsSheet: View {
         trustedKeys = Array(trusted).sorted()
         revokedKeys = Array(revoked).sorted()
         loading = false
-    }
-
-    private func remove(_ p: InstalledPlugin) async {
-        do {
-            try await installer.uninstall(pluginID: p.pluginID)
-            actionMessage = "Removed \(friendlyName(p.pluginID))."
-            await reload()
-        } catch {
-            actionMessage = "Couldn't remove: \(error)"
-        }
     }
 
     private func cleanupResidue() async {
