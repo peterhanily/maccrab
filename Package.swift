@@ -165,9 +165,16 @@ let package = Package(
         // README for module layout. Depends on MacCrabCore for shared
         // event / alert / process-identity types, and on CSQLCipher for
         // the encrypted per-case ArtifactStore + blob vault.
+        // SCM_RIGHTS fd-passing syscall layer for the Tier-B file broker —
+        // C so the CMSG_* alignment macros are the platform's, not hand-rolled.
+        .target(
+            name: "CTierBBroker",
+            path: "Sources/CTierBBroker",
+            publicHeadersPath: "include"
+        ),
         .target(
             name: "MacCrabForensics",
-            dependencies: ["MacCrabCore", "CSQLCipher"],
+            dependencies: ["MacCrabCore", "CSQLCipher", "CTierBBroker"],
             exclude: [
                 "README.md",
                 "TierB/README.md",
@@ -228,6 +235,7 @@ let package = Package(
             name: "MacCrabForensicsTests",
             dependencies: [
                 "MacCrabForensics",
+                "CTierBBroker",   // the broker round-trip test uses the recv-fd side
                 .product(name: "Testing", package: "swift-testing"),
             ]
         ),
