@@ -2608,21 +2608,48 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
         let inputsArg = args["inputs"] as? [String: Any] ?? [:]
         let specs = await PluginRegistry.shared.registration(forID: pluginID)?.manifest.inputs ?? []
         let inputs = buildPluginInputs(from: inputsArg, specs: specs)
+        func payload(_ result: CollectionResult, _ invID: Int, _ lane: String) -> Any {
+            ["content": [["type": "text", "text": jsonStringify([
+                "plugin_id": pluginID,
+                "case_id": caseID,
+                "invocation_id": invID,
+                "status": result.status.rawValue,
+                "artifacts_committed": result.artifactsCommitted,
+                "artifacts_rejected": result.artifactsRejected,
+                "lane": lane,
+                "notes": result.notes,
+            ] as [String: Any])]]]
+        }
         let runner = PluginRunner()
-        let (result, invocationID) = try await runner.runCollector(
-            id: pluginID,
-            handle: handle,
-            inputs: inputs
-        )
-        return ["content": [["type": "text", "text": jsonStringify([
-            "plugin_id": pluginID,
-            "case_id": caseID,
-            "invocation_id": Int(invocationID),
-            "status": result.status.rawValue,
-            "artifacts_committed": result.artifactsCommitted,
-            "artifacts_rejected": result.artifactsRejected,
-            "notes": result.notes,
-        ] as [String: Any])]]]
+        do {
+            let (result, invocationID) = try await runner.runCollector(
+                id: pluginID, handle: handle, inputs: inputs)
+            return payload(result, Int(invocationID), "first-party-builtin")
+        } catch is PluginRunnerError {
+            // Not a Tier-A built-in — try an INSTALLED Tier-B plugin via the
+            // shared two-lane executor (first-party → sandboxed, fail-closed).
+            // Untrusted code runs ONLY under the sandbox.
+            let ctx = TierBCollectorExecutor.catalogContextFromEnv()
+            let scratch = NSTemporaryDirectory() + "maccrab-tierb-scratch-\(UUID().uuidString)"
+            try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(atPath: scratch) }
+            let exec = try await TierBCollectorExecutor.runInstalled(
+                pluginID: pluginID, scratchDir: scratch,
+                officialSource: ctx.officialSource, catalogOverrideActive: ctx.catalogOverrideActive)
+            let enc = ((try? await handle.store.fetchCase(id: caseID)) ?? nil)?.encryptionState ?? .plaintext
+            let invID = try await handle.store.recordInvocationStart(
+                caseID: caseID, pluginID: pluginID, pluginVersion: exec.manifest.version, inputsJSON: "{}")
+            let result = await TierBArtifactBridge.commit(
+                outcome: exec.outcome, caseID: caseID, manifest: exec.manifest,
+                caseAllowsSensitive: enc != .plaintext, output: StoreCollectorOutput(store: handle.store))
+            try? await handle.store.recordInvocationEnd(
+                id: invID, exitStatus: result.status.rawValue,
+                artifactsCommitted: Int64(result.artifactsCommitted),
+                artifactsRejected: Int64(result.artifactsRejected),
+                errorMessage: result.notes.isEmpty ? nil : result.notes.joined(separator: "; "),
+                snapshotHash: nil)
+            return payload(result, Int(invID), exec.lane.rawValue)
+        }
     } catch {
         return toolError("run_collector failed: \(error)")
     }

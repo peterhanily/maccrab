@@ -35,6 +35,7 @@
 
 import Foundation
 import Darwin
+import Security
 
 public struct SandboxedTierBRunner: Sendable {
 
@@ -136,10 +137,55 @@ public struct SandboxedTierBRunner: Sendable {
     }
 
     public static func isRuntimeAvailable(trampolinePath: String) -> Bool {
+        // Dev/test opt-in: the dev trampoline (`swift build`) is ad-hoc-signed and
+        // fails the release signature check; the corpus + local runs allow it
+        // explicitly. NEVER set in a shipped build.
+        let env = ProcessInfo.processInfo.environment
+        let allowUnsigned = env["MACCRAB_TIERB_DEV_TRAMPOLINE"] != nil || env["MACCRAB_CORPUS"] != nil
+        return isRuntimeAvailable(trampolinePath: trampolinePath, allowUnsigned: allowUnsigned)
+    }
+
+    /// Testable core. `allowUnsigned` skips the release signature requirement.
+    static func isRuntimeAvailable(trampolinePath: String, allowUnsigned: Bool) -> Bool {
         var isDir: ObjCBool = false
         let fm = FileManager.default
-        guard fm.fileExists(atPath: trampolinePath, isDirectory: &isDir), !isDir.boolValue else { return false }
-        return fm.isExecutableFile(atPath: trampolinePath)
+        guard fm.fileExists(atPath: trampolinePath, isDirectory: &isDir), !isDir.boolValue,
+              fm.isExecutableFile(atPath: trampolinePath) else { return false }
+        if allowUnsigned { return true }
+        // Release: the trampoline is the signed binary that enforces containment.
+        // Require a valid signature anchored to Apple AND — when the host itself
+        // is Developer-ID-signed — the SAME team, so a swapped/user-planted
+        // trampoline is refused before any untrusted code runs.
+        return isTrampolineSignatureTrusted(trampolinePath)
+    }
+
+    static func isTrampolineSignatureTrusted(_ path: String) -> Bool {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &staticCode) == errSecSuccess,
+              let code = staticCode else { return false }
+        let reqStr: String
+        if let team = hostTeamIdentifier() {
+            reqStr = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+        } else {
+            reqStr = "anchor apple generic"   // host is ad-hoc/unsigned (dev) — require at least Apple-anchored
+        }
+        var req: SecRequirement?
+        guard SecRequirementCreateWithString(reqStr as CFString, [], &req) == errSecSuccess,
+              let requirement = req else { return false }
+        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    /// The Developer-ID team identifier of the running host, or nil if the host
+    /// is ad-hoc / unsigned (dev).
+    static func hostTeamIdentifier() -> String? {
+        var selfCode: SecCode?
+        guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let sc = selfCode else { return nil }
+        var staticSelf: SecStaticCode?
+        guard SecCodeCopyStaticCode(sc, [], &staticSelf) == errSecSuccess, let ssc = staticSelf else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(ssc, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any] else { return nil }
+        return dict[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     /// realpath(3) — resolves all symlinks (esp. /var → /private/var) so the SBPL

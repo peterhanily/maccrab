@@ -83,10 +83,17 @@ public final class KitRunner: ObservableObject {
                                  total: total,
                                  rowsSoFar: 0)
                 guard let reg = await PluginRegistry.shared.registration(forID: pref.pluginID) else {
-                    skipped.append(SkippedPlugin(
-                        pluginID: pref.pluginID,
-                        reason: "not registered in this build"
-                    ))
+                    // Not a Tier-A built-in — try an INSTALLED Tier-B plugin via
+                    // the shared two-lane executor (first-party → sandboxed,
+                    // fail-closed; untrusted code runs ONLY under the sandbox).
+                    let ranTierB = await Self.runInstalledTierB(
+                        pluginID: pref.pluginID, store: handle.store, caseID: handle.caseID)
+                    if !ranTierB {
+                        skipped.append(SkippedPlugin(
+                            pluginID: pref.pluginID,
+                            reason: "not a built-in and not an installed Tier-B plugin"
+                        ))
+                    }
                     continue
                 }
 
@@ -183,5 +190,36 @@ public final class KitRunner: ObservableObject {
             return String(firstLine)
         }
         return s
+    }
+
+    /// Run an INSTALLED Tier-B collector through the shared two-lane executor
+    /// (first-party → sandboxed, fail-closed) and commit its artifacts. Returns
+    /// false (skip) if the plugin isn't installed or is refused — the kit run is
+    /// best-effort per plugin. Untrusted code runs ONLY under the sandbox.
+    static func runInstalledTierB(pluginID: String, store: ArtifactStore, caseID: String) async -> Bool {
+        let ctx = TierBCollectorExecutor.catalogContextFromEnv()
+        let scratch = NSTemporaryDirectory() + "maccrab-tierb-scratch-\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        do {
+            let exec = try await TierBCollectorExecutor.runInstalled(
+                pluginID: pluginID, scratchDir: scratch,
+                officialSource: ctx.officialSource, catalogOverrideActive: ctx.catalogOverrideActive)
+            let enc = ((try? await store.fetchCase(id: caseID)) ?? nil)?.encryptionState ?? .plaintext
+            let invID = try await store.recordInvocationStart(
+                caseID: caseID, pluginID: pluginID, pluginVersion: exec.manifest.version, inputsJSON: "{}")
+            let result = await TierBArtifactBridge.commit(
+                outcome: exec.outcome, caseID: caseID, manifest: exec.manifest,
+                caseAllowsSensitive: enc != .plaintext, output: StoreCollectorOutput(store: store))
+            try? await store.recordInvocationEnd(
+                id: invID, exitStatus: result.status.rawValue,
+                artifactsCommitted: Int64(result.artifactsCommitted),
+                artifactsRejected: Int64(result.artifactsRejected),
+                errorMessage: result.notes.isEmpty ? nil : result.notes.joined(separator: "; "),
+                snapshotHash: nil)
+            return true
+        } catch {
+            return false
+        }
     }
 }

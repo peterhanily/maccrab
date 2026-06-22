@@ -342,7 +342,7 @@ private func pluginRun(args: [String]) async throws {
         // FirstPartyTrustRoot this refuses cleanly (anchor unset); third-party
         // bundles always refuse. The spawn runs inside maccrabctl, which ignores
         // SIGPIPE (the host requirement for FirstPartyTierBRunner).
-        try await runFirstPartyTierBCollector(id: id, handle: handle, window: window)
+        try await runTierBCollector(id: id, handle: handle, window: window)
         return
     }
     switch registration.manifest.type {
@@ -395,35 +395,9 @@ private func pluginRun(args: [String]) async throws {
 /// production caller. Fail-closed: a non-installed id, a third-party bundle, or
 /// the unset publisher anchor all refuse here. The spawn (FirstPartyTierBRunner)
 /// runs in maccrabctl, which ignores SIGPIPE.
-private func runFirstPartyTierBCollector(id: String, handle: CaseHandle, window: TimeWindow?) async throws {
-    let env = ProcessInfo.processInfo.environment
-    // Defense-in-depth catalog-context flags for the execution gate: a catalog
-    // trust-root override being set, or a non-official base URL, force a refusal.
-    let overrideActive = !(env["MACCRAB_RAVE_CATALOG_PUB_PATH"] ?? "").isEmpty
-    let base = env["MACCRAB_RAVE_BASE_URL"] ?? ""
-    let officialSource = base.isEmpty
-        || base == "https://rave.maccrab.com" || base == "https://rave.maccrab.com/"
-
-    let registry = TierBRegistry()
-    let verified: TierBRegistry.VerifiedPlugin
-    do {
-        verified = try await registry.resolveForFirstPartyExecution(
-            pluginID: id, officialSource: officialSource, catalogOverrideActive: overrideActive)
-    } catch let e as TierBRegistry.RegistryError {
-        if case .notInstalled = e {
-            throw CaseCommandError.underlying(
-                "Plugin '\(id)' is not a built-in (Tier A) plugin and is not installed (Tier B).")
-        }
-        // firstPartyExecutionRefused / quarantined / verificationFailed → fail-closed.
-        throw CaseCommandError.underlying("\(e)")
-    }
-    defer { registry.cleanupVerifiedBinary(verified) }
-
-    // Only collectors are dispatched to the subprocess runtime today (B1).
-    if verified.manifest.kind == .analyzer {
-        throw CaseCommandError.underlying(
-            "Plugin '\(id)' is a Tier-B analyzer; analyzer execution is not yet supported (collector-only runtime).")
-    }
+private func runTierBCollector(id: String, handle: CaseHandle, window: TimeWindow?) async throws {
+    // Defense-in-depth catalog-context flags for the execution gate.
+    let ctx = TierBCollectorExecutor.catalogContextFromEnv()
 
     let caseRow = try await handle.store.fetchCase(id: handle.caseID)
     let allowsSensitive = (caseRow?.encryptionState ?? .plaintext) != .plaintext
@@ -432,28 +406,33 @@ private func runFirstPartyTierBCollector(id: String, handle: CaseHandle, window:
     try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: scratch) }
 
-    // Window plumbed across the IPC (the hero is unbounded, but windowed
-    // collectors get the bounds); the run is recorded in plugin_invocations for
-    // the same audit trail Tier-A runs get.
     let startU = window?.start.map { Int64($0.timeIntervalSince1970) }
     let endU = window?.end.map { Int64($0.timeIntervalSince1970) }
+
+    // Shared two-lane dispatch (first-party → sandboxed; fail-closed).
+    let exec: TierBExecutionResult
+    do {
+        exec = try await TierBCollectorExecutor.runInstalled(
+            pluginID: id, scratchDir: scratch, windowStartUnix: startU, windowEndUnix: endU,
+            officialSource: ctx.officialSource, catalogOverrideActive: ctx.catalogOverrideActive)
+    } catch let e as TierBRegistry.RegistryError {
+        if case .notInstalled = e {
+            throw CaseCommandError.underlying(
+                "Plugin '\(id)' is not a built-in (Tier A) plugin and is not installed (Tier B).")
+        }
+        throw CaseCommandError.underlying("\(e)")
+    } catch let e as TierBCollectorExecutorError {
+        throw CaseCommandError.underlying("\(e)")
+    }
+
+    // The run is recorded in plugin_invocations for the same audit trail Tier-A
+    // runs get; artifacts commit through the host-stamped bridge.
     let invID = try await handle.store.recordInvocationStart(
         caseID: handle.caseID, pluginID: id,
-        pluginVersion: verified.manifest.version, inputsJSON: "{}")
-    let result: CollectionResult
-    do {
-        let outcome = try FirstPartyTierBRunner().run(
-            verified: verified, scratchDir: scratch,
-            windowStartUnix: startU, windowEndUnix: endU)
-        result = await TierBArtifactBridge.commit(
-            outcome: outcome, caseID: handle.caseID, manifest: verified.manifest,
-            caseAllowsSensitive: allowsSensitive, output: StoreCollectorOutput(store: handle.store))
-    } catch {
-        try? await handle.store.recordInvocationEnd(
-            id: invID, exitStatus: "error", artifactsCommitted: 0, artifactsRejected: 0,
-            errorMessage: "\(error)", snapshotHash: nil)
-        throw error
-    }
+        pluginVersion: exec.manifest.version, inputsJSON: "{}")
+    let result = await TierBArtifactBridge.commit(
+        outcome: exec.outcome, caseID: handle.caseID, manifest: exec.manifest,
+        caseAllowsSensitive: allowsSensitive, output: StoreCollectorOutput(store: handle.store))
     try? await handle.store.recordInvocationEnd(
         id: invID, exitStatus: result.status.rawValue,
         artifactsCommitted: Int64(result.artifactsCommitted),
@@ -461,7 +440,7 @@ private func runFirstPartyTierBCollector(id: String, handle: CaseHandle, window:
         errorMessage: result.notes.isEmpty ? nil : result.notes.joined(separator: "; "),
         snapshotHash: nil)
 
-    print("Ran first-party Tier-B collector \(id) on case \(handle.caseID)")
+    print("Ran \(exec.lane.rawValue) Tier-B collector \(id) on case \(handle.caseID)")
     print("  Invocation id:        \(invID)")
     print("  Status:               \(result.status.rawValue)")
     print("  Artifacts committed:  \(result.artifactsCommitted)")

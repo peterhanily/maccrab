@@ -58,16 +58,25 @@ struct SandboxedTierBRunnerTests {
 
     // MARK: - Runtime availability (pure filesystem check)
 
-    @Test("isRuntimeAvailable: true for an executable, false for missing / dir / non-exec")
+    @Test("isRuntimeAvailable: exists+executable (override on); false for missing / dir / non-exec")
     func runtimeAvailability() throws {
-        #expect(SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: "/bin/sh"))
-        #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: "/nonexistent/x"))
-        #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: "/tmp"))  // directory
+        // Use the allowUnsigned core for a deterministic positive (the strict
+        // signature path depends on how the test runner itself is signed).
+        #expect(SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: "/bin/sh", allowUnsigned: true))
+        #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: "/nonexistent/x", allowUnsigned: true))
+        #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: "/tmp", allowUnsigned: true))  // directory
         let f = NSTemporaryDirectory() + "nonexec-\(UUID().uuidString)"
         try Data("x".utf8).write(to: URL(fileURLWithPath: f))
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f)
         defer { try? FileManager.default.removeItem(atPath: f) }
-        #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: f))
+        #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: f, allowUnsigned: true))
+        // Strict path: an ad-hoc (non-Apple-anchored) binary is refused when
+        // unsigned is NOT allowed. (A 0o755 script under /tmp is ad-hoc/unsigned.)
+        let script = NSTemporaryDirectory() + "adhoc-\(UUID().uuidString).sh"
+        try "#!/bin/sh\n".write(toFile: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
+        defer { try? FileManager.default.removeItem(atPath: script) }
+        #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: script, allowUnsigned: false))
     }
 
     // MARK: - Trampoline argv construction (pure)
