@@ -65,24 +65,35 @@ public enum LiveDBSnapshot {
         sourcePath: String,
         layout: CaseDirectoryLayout
     ) throws -> LiveDBSnapshotResult {
+        try snapshot(sourcePath: sourcePath, destDir: layout.snapshotsRoot)
+    }
+
+    /// Snapshot a live SQLite database into an ARBITRARY destination directory
+    /// (not just a case layout). Used by the brokered-TCC path: the host
+    /// snapshots a manifest-declared TCC-protected store (chat.db, TCC.db, Safari
+    /// History.db…) into a host-owned, plugin-UNWRITABLE dir, then the file broker
+    /// serves the snapshot fd to the sandboxed plugin — so the untrusted child
+    /// never opens the live protected store and never inherits host FDA/TCC.
+    /// (Plan §3.1 / Invariant 2.) Same backup-API copy + sha256 filename.
+    public static func snapshot(
+        sourcePath: String,
+        destDir: URL
+    ) throws -> LiveDBSnapshotResult {
 
         guard FileManager.default.fileExists(atPath: sourcePath) else {
             throw LiveDBSnapshotError.sourceMissing(path: sourcePath)
         }
 
-        // Ensure the snapshots/ dir exists. It's normally created by
-        // CaseDirectoryLayout.createDirectoryStructure() at case
-        // creation, but accept that a case may have been created
-        // before this code path landed (forward-compat shim).
+        // Ensure the destination dir exists, owner-only.
         try FileManager.default.createDirectory(
-            at: layout.snapshotsRoot,
+            at: destDir,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
 
         // Temp destination — written first, then renamed.
         let tempName = "snapshot-inprogress-\(UUID().uuidString).db"
-        let tempURL = layout.snapshotsRoot.appendingPathComponent(tempName)
+        let tempURL = destDir.appendingPathComponent(tempName)
         defer {
             // If we exit via error, clean up the half-finished temp
             // file. If we exit via success, the file's been renamed
@@ -139,7 +150,7 @@ public enum LiveDBSnapshot {
         let data = try Data(contentsOf: tempURL)
         let digest = SHA256.hash(data: data)
         let sha = digest.map { String(format: "%02x", $0) }.joined()
-        let finalURL = layout.snapshotsRoot.appendingPathComponent("\(sha).db")
+        let finalURL = destDir.appendingPathComponent("\(sha).db")
 
         // If a snapshot with this content already exists, dedup:
         // remove temp + return existing.
@@ -161,6 +172,52 @@ public enum LiveDBSnapshot {
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
 
         return LiveDBSnapshotResult(path: finalURL, sha256: sha, sizeBytes: size)
+    }
+
+    /// Snapshot a single NON-SQLite regular file (e.g. a plist or .emlx a plugin
+    /// declared) into `destDir` as `<sha>.bin`, 0o600. The source is opened
+    /// O_NOFOLLOW (a symlinked source is refused) and must be a regular file; the
+    /// copy is size-capped. For the brokered-TCC path alongside the DB snapshot.
+    public static func snapshotFile(
+        sourcePath: String,
+        destDir: URL,
+        maxBytes: Int = 256 * 1024 * 1024
+    ) throws -> LiveDBSnapshotResult {
+        let fd = open(sourcePath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw LiveDBSnapshotError.sourceMissing(path: sourcePath) }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, (UInt32(st.st_mode) & UInt32(S_IFMT)) == UInt32(S_IFREG) else {
+            throw LiveDBSnapshotError.sourceMissing(path: sourcePath)
+        }
+        guard st.st_size >= 0, Int(st.st_size) <= maxBytes else {
+            throw LiveDBSnapshotError.backupStepFailed(message: "source exceeds \(maxBytes) bytes", code: 0)
+        }
+        var data = Data()
+        let chunkSize = 1 << 16
+        var buf = [UInt8](repeating: 0, count: chunkSize)
+        while true {
+            let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, chunkSize) }
+            if n < 0 { if errno == EINTR { continue }; throw LiveDBSnapshotError.openSourceFailed(message: "read error", code: errno) }
+            if n == 0 { break }
+            data.append(contentsOf: buf[0..<n])
+            if data.count > maxBytes { throw LiveDBSnapshotError.backupStepFailed(message: "source grew past cap", code: 0) }
+        }
+        try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let finalURL = destDir.appendingPathComponent("\(sha).bin")
+        if !FileManager.default.fileExists(atPath: finalURL.path) {
+            let tempURL = destDir.appendingPathComponent("filesnap-inprogress-\(UUID().uuidString).bin")
+            try data.write(to: tempURL, options: .atomic)
+            do {
+                try FileManager.default.moveItem(at: tempURL, to: finalURL)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: finalURL.path)
+            } catch {
+                try? FileManager.default.removeItem(at: tempURL)
+                throw LiveDBSnapshotError.renameFailed(message: error.localizedDescription)
+            }
+        }
+        return LiveDBSnapshotResult(path: finalURL, sha256: sha, sizeBytes: Int64(data.count))
     }
 }
 

@@ -131,12 +131,19 @@ public final class TierBFileBroker: @unchecked Sendable {
     /// allowlist. PURE.
     public static func resolve(_ requested: String, policy: Policy) -> (path: String, root: String)? {
         guard isValidRequestPath(requested, maxBytes: policy.maxPathBytes) else { return nil }
-        // Brokered-TCC redirect: serve from the scratch snapshot, beneath `to`.
+        // Brokered-TCC redirect: serve the snapshot instead of the live store.
         for rd in policy.redirects {
             let pfx = Policy.normalizeRoot(rd.prefix)
-            if requested == pfx || requested.hasPrefix(pfx + "/") {
+            let to = Policy.normalizeRoot(rd.to)
+            if requested == pfx {
+                // EXACT-file redirect (e.g. chat.db → its <sha>.db snapshot): serve
+                // the mapped file, rooted at its parent dir for the safe-open walk.
+                return (to, parentDirectory(of: to))
+            }
+            if requested.hasPrefix(pfx + "/") {
+                // DIRECTORY redirect: append the suffix beneath the snapshot root.
                 let suffix = String(requested.dropFirst(pfx.count))   // includes leading "/"
-                return (Policy.normalizeRoot(rd.to) + suffix, Policy.normalizeRoot(rd.to))
+                return (to + suffix, to)
             }
         }
         for root in policy.allowedReadRoots {
