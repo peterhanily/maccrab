@@ -52,8 +52,34 @@ Optional features that make outbound calls (only when you enable them):
 | Webhook output (`MACCRAB_WEBHOOK_URL`) | Alert JSON payloads to your configured URL | URL policy rejects RFC1918 unless opt-in, blocks cloud metadata IPs unconditionally |
 | Syslog output (`MACCRAB_SYSLOG_HOST`) | Alert RFC 5424 syslog messages to your configured host | None (your infrastructure) |
 | Fleet telemetry (`MACCRAB_FLEET_URL`) | Alert summaries and IOC sightings to your fleet server | Username + private IP redaction; opt-in per-host |
+| Third-party forensic plugins (rave marketplace) | Only if a plugin you install declares network egress **and** you consent | Runs sandboxed; reads only its declared files (personal-comms served as snapshots, never live); the consent sheet flags any reads-personal-data + has-network combo |
 
 See [PRIVACY.md](PRIVACY.md) for the full inventory.
+
+---
+
+### Is it safe to install third-party forensic plugins from the store?
+
+Third-party plugins are **untrusted code**, so MacCrab runs them in a way that
+assumes they might be hostile:
+
+- They execute **only** inside a deny-default sandbox (a signed trampoline
+  applies the OS sandbox before the plugin's code runs).
+- They can read **only** the files their signed manifest declares — requested
+  through a broker, so a symlink trick or an undeclared path can't be opened.
+- Protected stores (Messages, Mail, Safari history, …) are handed to the plugin
+  as a **snapshot copy**, never the live store, and the plugin never inherits
+  your Full Disk Access.
+- The install consent sheet shows the real read-set + network access, derived
+  from the plugin's enforced capabilities (a plugin can't lie about what it
+  touches). A plugin that both reads personal data and has network egress is
+  flagged as a high-friction exfil surface.
+- You can revoke a publisher, freeze the catalog, or locally disable all
+  third-party execution at any time.
+
+The runnable third-party marketplace ships **fail-closed** and is gated on an
+independent security review before it opens. The technical detail is in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8.
 
 ---
 

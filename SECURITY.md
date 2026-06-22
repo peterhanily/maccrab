@@ -34,6 +34,9 @@ If you discover a security vulnerability in MacCrab, please report it responsibl
 - Denial of service against the detection pipeline
 - MCP server vulnerabilities
 - Rule injection or tampering
+- **Sandbox escape from the third-party forensic-plugin lane** — any way an
+  untrusted plugin reads outside its brokered allowlist, reaches the live TCC
+  stores, escapes the deny-default sandbox, or abuses the host's Full Disk Access
 
 ### What Does NOT Qualify
 
@@ -60,6 +63,10 @@ MacCrab assumes the following trust boundaries:
 - External threat intelligence feeds (validated before use)
 - LLM API responses (never auto-executed, always advisory)
 - Clipboard content, browser extensions, USB devices
+- **Third-party forensic plugins** (rave marketplace) — executed **only** under a
+  deny-default sandbox with file reads brokered over a fd; TCC-protected stores
+  (Messages, Mail, Safari, …) are served as host-made snapshots, never the live
+  store; see the full lane in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §8
 
 ### Out of Scope
 
@@ -83,10 +90,14 @@ MacCrab does **not** protect against:
 
 ### Data Protection
 
-- SQLite database uses WAL mode with `0600` file permissions
+- SQLite databases use WAL mode with `0o660` permissions (admin-group
+  read-write: the root sysext writes them and the admin-group dashboard reads /
+  suppresses — **not** world-readable). The key is encrypted at rest in Keychain
 - Optional AES-256 field-level encryption (key stored in macOS Keychain)
-- Compiled rules directory uses `0700` permissions
-- Symlink validation on all privileged file writes
+- Compiled rules are **world-readable by design** (`0o755` dir / `0o644` files):
+  the non-root app reads them for rule display + integrity hashing. They carry no
+  secrets; this is intentional, not `0o700`
+- Symlink validation (`O_NOFOLLOW`) on all privileged file writes
 
 ### LLM Safety
 
@@ -104,6 +115,24 @@ MacCrab does **not** protect against:
 - State-modifying operations (suppress_alert) are audit-logged
 - Input validation on all parameters (length limits, format checks)
 - Parse errors return generic messages (no request body leakage)
+
+### Third-Party Plugin Execution (rave marketplace)
+
+The forensic-plugin marketplace runs code MacCrab does not author on an
+FDA/TCC host. It is the most security-sensitive surface in the product and is
+documented in full as in-scope attacker #8 in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). In brief:
+
+- First-party (MacCrab-signed) and untrusted third-party plugins run in **two
+  disjoint lanes**; untrusted code runs **only** under a deny-default sandbox.
+- A signed trampoline applies the `(deny default)` SBPL post-startup; a
+  per-invocation **broker** is the file boundary (reads brokered over a fd, every
+  component `O_NOFOLLOW`); TCC stores are served as **snapshots**, never live; no
+  global mach-lookup, no metadata side channel on crown-jewels.
+- Containment is **proved** by an adversarial corpus (`make test-corpus`) against
+  the exact shipped runner, for both C and Swift fixtures.
+- The runnable third-party lane ships **fail-closed** and is GA-gated on the
+  publisher-key ceremony + an independent external pentest.
 
 ### Release & Distribution Chain
 

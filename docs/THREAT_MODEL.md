@@ -36,7 +36,7 @@ residual risk remains.
 - Endpoint Security captures process exec/fork/exit, file create/write/
   rename/unlink, network connect, and TCC permission changes in real
   time.
-- 484 Sigma-style rules match adversary-known patterns (LaunchAgent
+- 483 Sigma-style rules match adversary-known patterns (LaunchAgent
   drops, suspicious process trees, AMOS/Atomic Stealer wallet paths,
   XCSSET clipboard injection, etc.).
 - Sequence rules correlate multi-step kill chains within bounded
@@ -196,6 +196,70 @@ events to suppress evidence post-compromise.
   single largest non-Apple supply-chain risk.
 - Compromise of the EdDSA private key would do the same for Sparkle
   signature verification. The key is generated and held outside CI.
+
+### 8. Malicious third-party forensic plugin (the rave marketplace lane)
+
+**Goal:** a third-party plugin the operator installs from the rave store (or
+sideloads) is hostile — it tries to escape its sandbox, exfiltrate the operator's
+data (Messages, Mail, Keychains, SSH keys), or abuse the host's Full Disk Access
+/ TCC grants. This is the one place MacCrab runs code it does **not** author, on
+an FDA/TCC host.
+
+**MacCrab defenses:**
+- **Two disjoint lanes.** A first-party (MacCrab-signed) plugin runs unsandboxed
+  only after a byte-match to a compiled-in publisher anchor; an untrusted
+  third-party plugin runs **only** sandboxed. The lanes never cross and both
+  fail-closed — a plugin that isn't provably first-party can never reach the
+  unsandboxed lane.
+- **Deny-default sandbox.** The third-party plugin runs under `(deny default)`
+  SBPL applied post-startup by the signed `maccrab-tierb-sandbox-host` trampoline
+  (`sandbox_init` then `execv`). There is **no** global `mach-lookup` — the
+  plugin can reach only a documented named runtime-service base plus its
+  manifest-declared services; fork/exec/network and every file outside the base
+  are denied unless the signed manifest declares them.
+- **The broker is the file boundary (Model B).** File reads are not granted in
+  the SBPL. To read a declared file the plugin asks a per-invocation broker over
+  fd 3, which opens it safely (every path component `O_NOFOLLOW`, single-link
+  regular file only) and passes back a read-only fd — a symlink/hardlink/TOCTOU
+  race or an undeclared path can never be opened.
+- **Brokered personal-comms, never live.** A TCC-protected store (chat.db, Mail,
+  Safari, TCC.db, knowledgeC, …) is snapshotted into a plugin-unwritable dir and
+  the broker serves the SNAPSHOT; the untrusted child never opens the live store
+  and never inherits the host's FDA. The broker re-checks TCC on the **served**
+  path, so a broad ancestor read root (`~/Library`) cannot coax out a live store.
+- **No metadata / process / mach side channels.** `stat()` of user crown-jewels
+  (Keychains, `.ssh`, personal-comms) is denied even though their content is
+  brokered; `process-info*` is scoped to self; mach-lookup is the named base +
+  manifest allowlist only.
+- **Authoritative consent.** The install sheet shows a consent summary DERIVED
+  from the manifest's enforced capabilities (not author labels), so a plugin
+  cannot under-declare what it reads or where it sends.
+- **Trust + revocation + kill-switches.** Plugins are Ed25519-signed; the catalog
+  is signed with an offline key and carries a `frozen` install kill-switch; a
+  runtime re-verify quarantines plugins a fresh signed revocation list revokes;
+  the operator has a local execution kill-switch.
+- **Containment is proved, not asserted.** An adversarial corpus
+  (`make test-corpus`) runs the EXACT shipped runner + broker + trampoline on a
+  real macOS host and asserts the OS denies undeclared read / network / fork /
+  metadata-stat / mach-lookup for both a C and a Swift fixture.
+
+**Residual risk:**
+- The runnable third-party lane is **GA-gated and ships fail-closed** until: the
+  publisher anchor is set (offline ceremony), the corpus passes against the exact
+  signed release build, and an **independent external pentest** of the lane
+  clears it. Until then no third-party plugin executes.
+- A check→spawn TOCTOU on the trampoline binary remains (same-uid only — no
+  privilege crossing); an fd-pinned (`fexecve`-style) spawn is a tracked
+  hardening.
+- Runtime revocation is staleness-driven; a runtime fetch of a fresh signed
+  revocation list (so a post-install revocation is enforced within minutes, not
+  by the staleness ceiling) is a tracked hardening.
+- A sandboxed plugin can still consume CPU/memory within its rlimits and emit
+  misleading artifacts; the operator reviews plugin output.
+- The brokered-snapshot scheme rests on the snapshot dir being plugin-unwritable;
+  a same-uid foothold that already holds the operator's privileges is out of
+  scope (the sandbox keeps a fooled trust contained, but local root / same-uid is
+  the documented trust boundary, as elsewhere).
 
 ## Out-of-scope attackers
 

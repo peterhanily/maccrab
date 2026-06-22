@@ -53,14 +53,44 @@ When enrolled in fleet management:
 - **Sent:** Machine ID, event counts, alert summaries, security score
 - **Not sent:** Process names, command lines, user data, file paths
 
+### Third-Party Forensic Plugins (opt-in)
+
+If you install a forensic plugin from the rave marketplace (or sideload one), it
+is **third-party code** and runs **only under a deny-default sandbox**. It can
+read **only** the files its signed manifest declares, and the install consent
+sheet shows you the exact read-set, derived from those declared capabilities (a
+plugin cannot under-declare). Specifics:
+
+- **Personal-comms stores** (Messages `chat.db`, Mail, Safari history, …) are
+  never read live — MacCrab snapshots them into a plugin-unwritable copy and the
+  plugin reads the snapshot. The plugin never inherits your Full Disk Access.
+- A plugin sends data off your machine **only** if its manifest declares network
+  egress AND you consent — a plugin that both reads personal data and has network
+  is surfaced as a high-friction "disclosed exfil surface" in the consent sheet.
+- You can revoke a publisher's trust, freeze the catalog, or locally disable all
+  third-party plugin execution at any time.
+
+By default no third-party plugins are installed and the marketplace ships
+fail-closed.
+
 ## Data Retention
+
+Retention is bounded by **both** a time horizon and a size cap under the
+`storage{}` block of `daemon_config.json` (all keys optional; missing keys use
+the defaults below):
 
 | Data | Default Retention | Configurable |
 |------|-------------------|-------------|
-| Events | 30 days | `retention_days` in `daemon_config.json` |
-| Alerts | 90 days | Yes |
+| Raw events | ~30 min hot tier, then rolled into aggregates | `storage.events_hot_tier_minutes` |
+| Event aggregates | 90 days | `storage.aggregate_days` |
+| Alerts | 365 days | `storage.alerts_retention_days` |
+| Campaigns | 365 days | `storage.campaigns_retention_days` |
+| Causal traces / TraceGraph | 90 days | `storage.traces_retention_days` / `storage.tracegraph_retention_days` |
 | Behavioral baselines | In-memory (lost on restart) | No |
 | Threat intel cache | 24 hours | No |
+
+(The legacy top-level `retention_days` / `max_database_size_mb` keys from v1.7
+still decode and are folded onto the `storage{}` block at load.)
 
 ## Data Encryption
 
