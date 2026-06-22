@@ -396,6 +396,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("[MacCrab] Forensic scan retention: deleted \(result.deleted.count) scan(s) older than \(days)d")
             }
         }
+        // Tier-B revocation self-heal (Stream 5): reconcile installed third-party
+        // plugins against the revocation + staleness state at launch and on a
+        // 30-min timer, so an install-once box can't keep running a since-revoked
+        // or stale-unverifiable plugin. Offline → staleness escalation only.
+        Task.detached(priority: .utility) {
+            if let recs = try? await RevocationReverifyService.reconcileDefaults(), !recs.isEmpty {
+                NSLog("[MacCrab] Tier-B revocation reconcile: quarantined \(recs.count) plugin(s)")
+            }
+        }
+        Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { _ in
+            Task.detached(priority: .utility) { _ = try? await RevocationReverifyService.reconcileDefaults() }
+        }
         // v1.18: one-time migration off the noisy "informational" notification
         // floor. The OS-banner floor defaults to "critical" (SettingsView
         // @AppStorage), but installs that ran an early build could have
