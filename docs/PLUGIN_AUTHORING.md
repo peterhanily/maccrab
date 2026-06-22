@@ -416,9 +416,11 @@ Ran under the sandboxed lane:
 **derived** consent summary (flagging any under-declaration with
 `⚠ author under-declared!`), then runs the binary under the **real** sandbox via
 the sandboxed lane and shows containment. The `✓ ran CONTAINED` line confirms it
-executed deny-default with reads brokered over fd 3. (`test` opts the dev
-trampoline in via `MACCRAB_TIERB_DEV_TRAMPOLINE=1` because `swift build`
-binaries are ad-hoc-signed.)
+executed deny-default with reads brokered over fd 3. No environment variable is
+needed: `test` accepts your ad-hoc-signed `swift build` trampoline over an
+in-process flag (so it can't leak to other code paths). That dev path is
+**DEBUG-only** — a release build always requires the Developer-ID-signed
+trampoline.
 
 A metadata-only example would simply show `Declared reads: (none)`,
 `Network: deny`, `Privacy class: metadata`, and one artifact.

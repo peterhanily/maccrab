@@ -275,8 +275,13 @@ public struct SandboxedTierBRunner: Sendable {
         guard !verified.isFirstParty else {
             throw RunnerError.isFirstParty(pluginID: verified.pluginID)
         }
-        // Contained-or-nothing: never spawn without the trampoline.
-        guard Self.isRuntimeAvailable(trampolinePath: trampolinePath) else {
+        // Contained-or-nothing: never spawn without the trampoline. Use the
+        // INSTANCE gate so it honors `allowUnsignedTrampoline` (DEBUG-only, the
+        // in-process channel for `maccrabctl plugin test`); the static overload
+        // hardcodes explicit:false and silently dropped the flag, fail-closing the
+        // documented one-command contributor test on a `swift build` binary (audit
+        // #7). RELEASE is unchanged: devOverrideAllowed is false regardless there.
+        guard isRuntimeAvailable else {
             throw RunnerError.sandboxRuntimeUnavailable(
                 pluginID: verified.pluginID,
                 message: "trampoline not found or not executable at \(trampolinePath)")

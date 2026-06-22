@@ -79,6 +79,30 @@ struct SandboxedTierBRunnerTests {
         #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: script, allowUnsigned: false))
     }
 
+    @Test("instance gate honors allowUnsignedTrampoline so `plugin test` works on a swift-build binary (audit #7)")
+    func instanceGateHonorsUnsignedFlag() throws {
+        // An ad-hoc-signed 0o755 script stands in for a `swift build` binary. The
+        // contributor command threads allowUnsignedTrampoline:true; run()'s gate
+        // must honor it (DEBUG-only) — the bug used the static explicit:false
+        // overload and silently dropped the flag, fail-closing the test command.
+        let script = NSTemporaryDirectory() + "tramp-\(UUID().uuidString).sh"
+        try "#!/bin/sh\n".write(toFile: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
+        defer { try? FileManager.default.removeItem(atPath: script) }
+        #if DEBUG
+        // The fix: the INSTANCE gate accepts the unsigned trampoline with the flag.
+        #expect(SandboxedTierBRunner(trampolinePath: script, allowUnsignedTrampoline: true).isRuntimeAvailable)
+        // Without the flag (and without a dev env override) it is refused — as is
+        // the static explicit:false overload the old run() mistakenly called.
+        let env = ProcessInfo.processInfo.environment
+        let devEnv = env["MACCRAB_TIERB_DEV_TRAMPOLINE"] == "1" || env["MACCRAB_CORPUS"] != nil
+        if !devEnv {
+            #expect(!SandboxedTierBRunner(trampolinePath: script, allowUnsignedTrampoline: false).isRuntimeAvailable)
+            #expect(!SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: script))
+        }
+        #endif
+    }
+
     // MARK: - Trampoline argv construction (pure)
 
     @Test("trampolineArguments carries --profile, --exec and every set rlimit")
