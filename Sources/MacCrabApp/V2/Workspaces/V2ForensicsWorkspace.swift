@@ -81,7 +81,7 @@ struct V2ForensicsWorkspace: View {
     private var content: some View {
         switch currentTab {
         case .forensicsScans:
-            V2ForensicsScansView(onShowAllScans: {
+            V2ForensicsScansView(state: state, onShowAllScans: {
                 state.selectedTabs[.forensics] = .forensicsPastScans
             })
         case .forensicsPastScans:
@@ -89,9 +89,11 @@ struct V2ForensicsWorkspace: View {
         case .forensicsFindings:
             V2ForensicsFindingsView()
         case .forensicsCatalog:
-            V2RaveCatalogBrowserView()
+            V2RaveCatalogBrowserView(state: state)
+        case .forensicsMyPlugins:
+            V2ForensicsMyPluginsView()
         default:
-            V2ForensicsScansView(onShowAllScans: {
+            V2ForensicsScansView(state: state, onShowAllScans: {
                 state.selectedTabs[.forensics] = .forensicsPastScans
             })
         }

@@ -102,7 +102,8 @@ public enum V2Workspace: String, CaseIterable, Identifiable, Hashable, Codable, 
         case .forensics:     return [.forensicsScans,
                                      .forensicsPastScans,
                                      .forensicsFindings,
-                                     .forensicsCatalog]
+                                     .forensicsCatalog,
+                                     .forensicsMyPlugins]
         case .detection:     return [.detectionRules, .detectionAIGuard, .detectionBrowser,
                                      .detectionMCP]
         case .prevention:    return []
@@ -143,6 +144,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
     case forensicsPastScans
     case forensicsFindings
     case forensicsCatalog
+    case forensicsMyPlugins
 
     // Detection
     case detectionRules
@@ -178,6 +180,7 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .forensicsPastScans:             return String(localized: "workspaceTab.forensics.pastScans", defaultValue: "Past scans")
         case .forensicsFindings:              return String(localized: "workspaceTab.forensics.findings", defaultValue: "Findings")
         case .forensicsCatalog:               return String(localized: "workspaceTab.forensics.catalog",  defaultValue: "Catalog")
+        case .forensicsMyPlugins:             return String(localized: "workspaceTab.forensics.myPlugins", defaultValue: "My Plugins")
         case .detectionRules:                 return String(localized: "workspaceTab.detection.rules",              defaultValue: "Rules")
         case .detectionAIGuard:               return String(localized: "workspaceTab.detection.aiGuard",            defaultValue: "AI Guard")
         case .detectionBrowser:               return String(localized: "workspaceTab.detection.browser",            defaultValue: "Browser")
@@ -199,7 +202,8 @@ public enum V2WorkspaceTab: String, CaseIterable, Identifiable, Hashable, Codabl
         case .investigationTraceGraph, .investigationAgentTraces,
              .investigationAIAnalysis:
             return .investigation
-        case .forensicsScans, .forensicsPastScans, .forensicsFindings, .forensicsCatalog:
+        case .forensicsScans, .forensicsPastScans, .forensicsFindings, .forensicsCatalog,
+             .forensicsMyPlugins:
             return .forensics
         case .detectionRules, .detectionAIGuard, .detectionBrowser,
              .detectionMCP:

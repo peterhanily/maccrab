@@ -98,6 +98,29 @@ public struct Kit: Identifiable, Hashable, Codable, Sendable {
         case updatedAt = "updated_at"
     }
 
+    /// Memberwise init — restored because the custom `init(from:)` below
+    /// suppresses the synthesized one. Needed to build an ad-hoc 1-plugin kit
+    /// (see `Kit.adHoc`) for a single-scanner "Run on this Mac".
+    public init(
+        id: String, name: String, description: String, version: String,
+        maintainer: String, category: Category, minMaccrabVersion: String,
+        plugins: [PluginRef], trustTier: TrustTier, createdAt: String,
+        updatedAt: String, encrypted: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.version = version
+        self.maintainer = maintainer
+        self.category = category
+        self.minMaccrabVersion = minMaccrabVersion
+        self.plugins = plugins
+        self.trustTier = trustTier
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.encrypted = encrypted
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try c.decode(String.self, forKey: .id)
@@ -112,6 +135,30 @@ public struct Kit: Identifiable, Hashable, Codable, Sendable {
         self.createdAt = try c.decode(String.self, forKey: .createdAt)
         self.updatedAt = try c.decode(String.self, forKey: .updatedAt)
         self.encrypted = try c.decodeIfPresent(Bool.self, forKey: .encrypted) ?? false
+    }
+}
+
+extension Kit {
+    /// Wrap a single registered scanner id in an ephemeral 1-plugin kit so the
+    /// existing `KitRunner.run` can drive a "Run on this Mac" from the catalog —
+    /// no new run path. `encrypted` MUST be derived from the scanner's manifest
+    /// output privacy classes by the caller (a content/personal-comms scanner
+    /// run into a plaintext case silently drops every non-metadata row).
+    static func adHoc(pluginID: String, name: String, encrypted: Bool) -> Kit {
+        Kit(
+            id: "com.maccrab.kit.adhoc.\(pluginID)",
+            name: name,
+            description: "Single scanner run.",
+            version: "0",
+            maintainer: "MacCrab",
+            category: .triage,            // UI-only; never read by the runner
+            minMaccrabVersion: "0",
+            plugins: [PluginRef(pluginID: pluginID, minVersion: "", role: "collector", required: true)],
+            trustTier: .firstParty,
+            createdAt: "",
+            updatedAt: "",
+            encrypted: encrypted
+        )
     }
 }
 

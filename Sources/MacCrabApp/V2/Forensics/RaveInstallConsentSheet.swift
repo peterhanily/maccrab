@@ -10,6 +10,10 @@ import MacCrabForensics
 struct RaveInstallConsentSheet: View {
     let link: RaveInstallLink
     let onClose: () -> Void
+    /// True when this is an UPDATE of an already-installed plugin (the store sets
+    /// it for an installed entry with a newer catalog version). The deep-link
+    /// path leaves it false. Drives the --force re-install + the button copy.
+    var isUpdate: Bool = false
 
     @State private var facts: RaveInstallConsentFacts?
     @State private var loadError: String?
@@ -27,7 +31,9 @@ struct RaveInstallConsentSheet: View {
             HStack(spacing: 8) {
                 Image(systemName: "shield.lefthalf.filled")
                     .foregroundStyle(.orange)
-                Text("Install from MacCrab link")
+                Text(isUpdate
+                     ? String(localized: "rave.consent.titleUpdate", defaultValue: "Update plugin")
+                     : String(localized: "rave.consent.titleInstall", defaultValue: "Install from MacCrab link"))
                     .font(.headline)
                 Spacer()
             }
@@ -76,8 +82,9 @@ struct RaveInstallConsentSheet: View {
                                 installing = false
                             }
                         } label: {
-                            Label(installOK == true ? "Installed" : "Install plugin",
-                                  systemImage: installOK == true ? "checkmark.circle.fill" : "arrow.down.circle")
+                            Label(installButtonTitle,
+                                  systemImage: installOK == true ? "checkmark.circle.fill"
+                                    : (isUpdate ? "arrow.up.circle" : "arrow.down.circle"))
                         }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
@@ -102,11 +109,12 @@ struct RaveInstallConsentSheet: View {
         guard let cli = Self.bundledMaccrabctlPath() else {
             return (false, "Bundled maccrabctl not found. Install from a terminal:\n  maccrabctl plugin install \(id)")
         }
+        let argv = Self.installArguments(id: id, isUpdate: isUpdate)
         return await withCheckedContinuation { cont in
             DispatchQueue.global().async {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: cli)
-                p.arguments = ["plugin", "install", id]
+                p.arguments = argv
                 let pipe = Pipe()
                 p.standardOutput = pipe
                 p.standardError = pipe
@@ -123,6 +131,27 @@ struct RaveInstallConsentSheet: View {
                                         out.isEmpty ? "maccrabctl exited \(p.terminationStatus)" : out))
             }
         }
+    }
+
+    /// The verified install argv. An update re-installs over the existing copy
+    /// (`--force`); a fresh install does not. Every fail-closed gate (serial,
+    /// signer pin, version floor, revocation, artifact hash) is re-enforced by
+    /// maccrabctl regardless of `--force` — the flag only permits overwriting an
+    /// already-present destination, never bypasses trust. Pure + static so the
+    /// arg construction is unit-testable without launching a Process.
+    static func installArguments(id: String, isUpdate: Bool) -> [String] {
+        ["plugin", "install", id] + (isUpdate ? ["--force"] : [])
+    }
+
+    /// Confirm-button copy. "Update plugin" / "Updated" for an in-place update,
+    /// "Install plugin" / "Installed" for a fresh install.
+    private var installButtonTitle: String {
+        if installOK == true {
+            return isUpdate ? String(localized: "rave.consent.updated", defaultValue: "Updated")
+                            : String(localized: "rave.consent.installed", defaultValue: "Installed")
+        }
+        return isUpdate ? String(localized: "rave.consent.updatePlugin", defaultValue: "Update plugin")
+                        : String(localized: "rave.consent.installPlugin", defaultValue: "Install plugin")
     }
 
     /// Locate the maccrabctl bundled into the app at Resources/bin/maccrabctl.
@@ -179,7 +208,7 @@ struct RaveInstallConsentSheet: View {
             // "reviewed & signed" for a pre-release/awaiting-binary entry).
             if f.isFirstParty {
                 if f.isInstallable {
-                    Label("First-party — reviewed & signed by the MacCrab maintainer.",
+                    Label("Verified by MacCrab — reviewed & signed by the maintainer.",
                           systemImage: "checkmark.seal.fill")
                         .font(.caption2).foregroundStyle(.green)
                 } else {
@@ -187,6 +216,29 @@ struct RaveInstallConsentSheet: View {
                           systemImage: "seal")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
+            }
+
+            // C-D-pre: concrete per-plugin capability chips from the local facts
+            // (first-party only; nil → this block is omitted and the generic C-D
+            // disclosure below still carries the honest baseline). Chips read
+            // first, then the "what this grants" caveat.
+            if let pf = PluginFactsLookup.facts(forPluginID: f.id) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("What this scanner accesses", systemImage: "doc.text.magnifyingglass")
+                        .font(.caption.weight(.semibold))
+                    consentChipRow("Reads", pf.reads)
+                    if !pf.needs.isEmpty { consentChipRow("TCC", pf.needs) }
+                    consentChipRow("Emits", pf.emits)
+                    HStack(spacing: 6) {
+                        Image(systemName: "network.slash").font(.caption2).foregroundStyle(.secondary)
+                        Text("\(pf.networkChip) · \(pf.sandboxChip)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.secondary.opacity(0.06))
+                .cornerRadius(6)
             }
 
             // C-D: honest capability/enforcement disclosure. Plugin execution is
@@ -223,7 +275,8 @@ struct RaveInstallConsentSheet: View {
                 .padding(.top, 2)
             }
 
-            Text("This link can only name a catalog id — every install detail above was resolved from the signed catalog, not the link.")
+            Text(String(localized: "rave.consent.resolvedFromCatalog",
+                        defaultValue: "Every install detail above was resolved by id from the signed catalog — not from a link or any local input."))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -247,6 +300,17 @@ struct RaveInstallConsentSheet: View {
                 .font(mono ? .system(.caption, design: .monospaced) : .caption)
                 .textSelection(.enabled)
             Spacer()
+        }
+    }
+
+    /// Compact "Reads / TCC / Emits" capability row for the consent chips block.
+    private func consentChipRow(_ label: String, _ values: [String]) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(label).font(.caption2.weight(.medium))
+                .foregroundStyle(.tertiary).frame(width: 42, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(values.indices, id: \.self) { i in Text(values[i]).font(.caption2) }
+            }
         }
     }
 

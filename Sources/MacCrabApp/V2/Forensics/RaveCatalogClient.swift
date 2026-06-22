@@ -310,6 +310,27 @@ public actor RaveCatalogClient {
         trustState.revocationFreshness(ceiling: ceiling)
     }
 
+    /// Current accepted top-level catalog_serial (S2-AR high-water mark), for
+    /// the dashboard trust strip. nil pre-ceremony (no serial stamped yet).
+    public func currentCatalogSerial() -> Int? {
+        trustState.currentCatalogSerial()
+    }
+
+    /// Installed plugin id -> installed version, for the store's "Installed" /
+    /// "Update available" card badges. Best-effort: returns empty on any read
+    /// error (the store still renders, just without installed-state badges).
+    public func installedPlugins() async -> [String: String] {
+        let installer = PluginInstaller()
+        guard let installed = try? await installer.list() else { return [:] }
+        var map: [String: String] = [:]
+        map.reserveCapacity(installed.count)
+        for p in installed {
+            let version = (try? TierBManifest.load(fromBundlePath: p.installRoot))?.version ?? ""
+            map[p.pluginID] = version
+        }
+        return map
+    }
+
     /// Extract the top-level monotonic catalog_serial (S2-AR). nil when absent
     /// or non-integer (pre-ceremony catalog) — treated as first-seen upstream.
     private func parseCatalogSerial(data: Data) -> Int? {
@@ -399,13 +420,58 @@ public actor RaveCatalogClient {
     /// installable apps — exactly those with `status == "active"`, mirroring the
     /// website's go-live filter (maccrab-rave site/build.sh). Pre-release /
     /// placeholder / official-but-not-active / not-yet-signed entries are NOT
-    /// offered (the browser falls back to ComingSoon when none are active). This
-    /// is a display filter ONLY — it does not touch any signature / serial /
+    /// offered (the browser shows its verified-empty pane when none are active).
+    /// This is a display filter ONLY — it does not touch any signature / serial /
     /// installability trust gate; the install path fail-closes on its own.
     ///
     /// Pure + nonisolated so the SwiftUI view's `offeredEntries` computed var and
     /// the unit tests share one definition.
     public nonisolated static func offeredEntries(_ entries: [RaveCatalogEntry]) -> [RaveCatalogEntry] {
         entries.filter { $0.status == "active" }
+    }
+
+    /// Synthesize first-party catalog rows for the runnable BUILT-IN scanners
+    /// (collector / analyzer manifests) so the store can browse + "Run on this
+    /// Mac" them while the signed third-party catalog is still coming soon.
+    ///
+    /// PURE + DISPLAY-ONLY. These rows must NEVER be merged into the verified
+    /// `entries` array, never enter `RaveCatalogEntryState.compute`, and never
+    /// touch the trust strip / catalog_serial — they are local built-ins, not
+    /// signed catalog entries. `signerPublicKeySHA256` is intentionally empty
+    /// (no pin) so any accidental `compute()` fail-closes to awaitingSignedBinary.
+    public nonisolated static func builtinEntries(
+        from manifests: [PluginManifest],
+        displayName: (String) -> String
+    ) -> [RaveCatalogEntry] {
+        manifests
+            .filter { $0.type == .collector || $0.type == .analyzer }
+            .map { m in
+                RaveCatalogEntry(
+                    id: m.id,
+                    displayName: displayName(m.id),
+                    currentVersion: m.version,
+                    channel: "official",
+                    trustTier: "first-party",
+                    signerIdentity: "MacCrab (built-in)",
+                    signerPublicKeySHA256: "",
+                    status: "active",
+                    category: m.type.rawValue,
+                    tags: [],
+                    minMaccrabVersion: nil
+                )
+            }
+    }
+
+    /// Merge built-in rows + offered catalog rows for DISPLAY, de-duped on id
+    /// with the BUILT-IN winning. A first-party catalog entry may legitimately
+    /// share a built-in's com.maccrab.* id (the namespace guard only refuses
+    /// non-first-party impersonators); showing both would dup the SwiftUI
+    /// ForEach id and mis-gate the installable catalog row as a Run-only
+    /// built-in. `offered` is never mutated — this is display-only.
+    public nonisolated static func mergedDisplayEntries(
+        builtins: [RaveCatalogEntry], offered: [RaveCatalogEntry]
+    ) -> [RaveCatalogEntry] {
+        let builtinIDs = Set(builtins.map { $0.id })
+        return builtins + offered.filter { !builtinIDs.contains($0.id) }
     }
 }
