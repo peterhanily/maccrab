@@ -21,6 +21,12 @@ func dispatchPlugin(args: [String]) async {
             try await pluginInfo(args: rest)
         case "run":
             try await pluginRun(args: rest)
+        case "keygen":
+            try await pluginKeygen(args: rest)
+        case "sign":
+            try await pluginSign(args: rest)
+        case "test":
+            try await pluginTest(args: rest)
         case "install":
             try await pluginInstall(args: rest)
         case "uninstall":
@@ -110,15 +116,21 @@ func printPluginUsage() {
       trust <key-hex>                 Add a publisher public key (64-hex / 32 bytes).
       revoke <key-hex>                Revoke a publisher key (preempts trust).
       trust-list                      Show trusted + revoked publisher keys.
-      run <plugin-id> --case <id>     Invoke a built-in plugin against a case.
+      run <plugin-id> --case <id>     Invoke a built-in or installed plugin
+                                      against a case (Tier-B plugins run sandboxed).
+
+    Authoring (contributor SDK):
+      keygen [--out <dir>]            Generate an Ed25519 plugin-signing keypair
+                                      (signing.key + signing.key.pub). Keep the
+                                      private key OFFLINE.
+      sign <bundle-dir> [--key <k>]   Sign a bundle (manifest + binary) in place.
+      test <bundle-dir>               Run the bundle LOCALLY under the real
+                                      sandbox and show its containment + outcome.
 
     Renamed in v1.17 (aliases work through v1.18, removed v1.19):
       installed-list  → list --filter installed
       verify-all      → verify
       daemon-status   → status
-
-    Running third-party plugins is not yet supported. Built-in plugins
-    can be run today via `maccrabctl plugin run`.
     """)
 }
 
@@ -451,6 +463,87 @@ private func runTierBCollector(id: String, handle: CaseHandle, window: TimeWindo
     }
 }
 
+
+// MARK: - keygen / sign / test  (contributor SDK)
+
+private func pluginKeygen(args: [String]) async throws {
+    var outDir = FileManager.default.currentDirectoryPath
+    var i = 0
+    while i < args.count { if args[i] == "--out", i + 1 < args.count { outDir = args[i + 1]; i += 2 } else { i += 1 } }
+    let (priv, pub, hex) = CryptoSigning.newSigningKey()
+    let keyPath = (outDir as NSString).appendingPathComponent("signing.key")
+    let pubPath = (outDir as NSString).appendingPathComponent("signing.key.pub")
+    try priv.write(to: URL(fileURLWithPath: keyPath), options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyPath)
+    try pub.write(to: URL(fileURLWithPath: pubPath), options: .atomic)
+    print("Generated Tier-B signing keypair:")
+    print("  Private key:  \(keyPath)  (0600 — KEEP OFFLINE; never commit or place in a bundle)")
+    print("  Public key:   \(pubPath)")
+    print("  Public hex:   \(hex)")
+    print("  Operators trust your plugins with:  maccrabctl plugin trust \(hex)")
+}
+
+private func pluginSign(args: [String]) async throws {
+    var keyPath = "signing.key"
+    var bundle: String?
+    var i = 0
+    while i < args.count {
+        if args[i] == "--key", i + 1 < args.count { keyPath = args[i + 1]; i += 2 }
+        else if !args[i].hasPrefix("--") { bundle = args[i]; i += 1 }
+        else { i += 1 }
+    }
+    guard let bundle else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin sign <bundle-dir> [--key signing.key]")
+    }
+    guard let privData = try? Data(contentsOf: URL(fileURLWithPath: keyPath)) else {
+        throw CaseCommandError.underlying("Cannot read signing key at '\(keyPath)'. Generate one with: maccrabctl plugin keygen")
+    }
+    let hex = try CryptoSigning.signBundle(atPath: bundle, privateKeyRaw: privData)
+    print("Signed bundle \(bundle)")
+    print("  Wrote signature + signing.key.pub.")
+    print("  Publisher key: \(hex)")
+}
+
+private func pluginTest(args: [String]) async throws {
+    guard let bundle = args.first(where: { !$0.hasPrefix("--") }) else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin test <bundle-dir>")
+    }
+    // Run the plugin LOCALLY under the real sandbox so the author SEES containment.
+    // The dev trampoline (`swift build`) is ad-hoc-signed; opt it in for the test.
+    setenv("MACCRAB_TIERB_DEV_TRAMPOLINE", "1", 1)
+    let manifest = try TierBManifest.load(fromBundlePath: bundle)
+    let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory() + "maccrab-plugintest-\(UUID().uuidString)")
+    let installer = PluginInstaller(pluginsRoot: tmpRoot)
+    defer { try? FileManager.default.removeItem(at: tmpRoot) }
+    _ = try await installer.install(sourceDir: URL(fileURLWithPath: bundle), trustOnInstall: true)
+
+    let scratch = NSTemporaryDirectory() + "maccrab-plugintest-scratch-\(UUID().uuidString)"
+    try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: scratch) }
+
+    let consent = manifest.consentSummary()
+    print("Testing \(manifest.id) v\(manifest.version)")
+    print("  Declared reads:   \(consent.fileReads.isEmpty ? "(none)" : consent.fileReads.joined(separator: ", "))")
+    print("  TCC (brokered):   \(consent.tccReads.isEmpty ? "(none)" : consent.tccReads.joined(separator: ", "))")
+    print("  Network:          \(consent.networkEndpoints.isEmpty ? "deny" : consent.networkEndpoints.joined(separator: ", "))")
+    print("  Privacy class:    \(consent.derivedHighestPrivacy)\(consent.privacyUnderdeclared ? "  (⚠ author under-declared!)" : "")")
+
+    let registry = TierBRegistry(installer: installer)
+    do {
+        let exec = try await TierBCollectorExecutor.runInstalled(
+            pluginID: manifest.id, scratchDir: scratch,
+            officialSource: true, catalogOverrideActive: false, registry: registry)
+        print("Ran under the \(exec.lane.rawValue) lane:")
+        print("  Exit code:    \(exec.outcome.exitCode)")
+        print("  Result:       \(exec.outcome.result?.status ?? "(no terminal result)")")
+        print("  Artifacts:    \(exec.outcome.artifacts.count)")
+        for a in exec.outcome.artifacts.prefix(10) { print("    - \(a.contentType): \(a.summary ?? "")") }
+        if !exec.outcome.stderrTail.isEmpty { print("  stderr tail:  \(exec.outcome.stderrTail.prefix(400))") }
+        if exec.lane == .sandboxed { print("  ✓ ran CONTAINED (deny-default sandbox; file reads brokered over fd 3).") }
+    } catch {
+        throw CaseCommandError.underlying("Run failed (fail-closed): \(error)")
+    }
+}
 
 // MARK: - daemon-status
 
