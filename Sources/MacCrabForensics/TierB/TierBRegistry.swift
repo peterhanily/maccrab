@@ -25,6 +25,10 @@ public actor TierBRegistry {
         /// (not the publisher key / unconfigured anchor / non-official / override).
         /// Third-party plugins always hit this — execution stays fail-closed.
         case firstPartyExecutionRefused(pluginID: String, reason: String)
+        /// The bundle verified, but the SANDBOXED third-party EXECUTION gate
+        /// refused it (sandbox runtime unavailable, first-party-anchor bundle in
+        /// the wrong lane, revoked, or no operator/curated authority).
+        case sandboxedExecutionRefused(pluginID: String, reason: String)
 
         public var description: String {
             switch self {
@@ -34,6 +38,7 @@ public actor TierBRegistry {
             case .binaryNotExecutable(let id, let p): return "TierBRegistry: binary not executable for \(id) at \(p)"
             case .quarantined(let id, let r): return "TierBRegistry: \(id) is quarantined by a signed revocation (\(r)) — refusing to load"
             case .firstPartyExecutionRefused(let id, let r): return "TierBRegistry: refusing first-party execution of \(id): \(r)"
+            case .sandboxedExecutionRefused(let id, let r): return "TierBRegistry: refusing sandboxed third-party execution of \(id): \(r)"
             }
         }
     }
@@ -55,7 +60,15 @@ public actor TierBRegistry {
         /// True ONLY when resolved via resolveForFirstPartyExecution AND the
         /// FirstPartyExecutionGate allowed (publisher-key match + defense-in-depth
         /// checks). Base resolve() never evaluates first-party authority → false.
-        public var isFirstParty: Bool = false
+        /// internal(set): only the gates (this module) may assert a lane — an
+        /// external caller can read it but cannot mint a struct claiming a lane.
+        public internal(set) var isFirstParty: Bool = false
+        /// True ONLY when resolved via resolveForSandboxedExecution AND the
+        /// ThirdPartyExecutionGate allowed. DISJOINT from isFirstParty — a plugin
+        /// is never both (the two execution lanes never cross). Base resolve()
+        /// sets neither; SandboxedTierBRunner requires this true + isFirstParty
+        /// false, FirstPartyTierBRunner requires isFirstParty true.
+        public internal(set) var isSandboxed: Bool = false
     }
 
     public struct VerifyAllReport: Sendable {
@@ -109,6 +122,11 @@ public actor TierBRegistry {
         let bundleBinaryURL = bundleURL.appendingPathComponent("binary")
         let verifiedBinaryBytes: Data
         var resolvedPublisherFingerprint = ""
+        // Decoded from the SAME signature-verified bytes (manifestData below) —
+        // never an independent disk re-read. The manifest's capability fields
+        // become the sandboxed lane's SBPL allowlist, so binding them to the
+        // verified bytes is load-bearing containment, not just hygiene.
+        var verifiedManifest: TierBManifest? = nil
         do {
             _ = try PluginSignatureVerifier.verify(
                 bundle: PluginSignatureVerifier.BundleLayout(bundleRoot: bundleURL),
@@ -135,6 +153,17 @@ public actor TierBRegistry {
                     reason: "binary changed between verify and snapshot (TOCTOU)"
                 )
             }
+            // Decode the manifest from manifestData — the bytes the signature
+            // just covered — NOT a fresh `TierBManifest.load` disk read. A 4th,
+            // independent read could be swapped (same-uid) between verify and
+            // use, letting an attacker author the SBPL allowlist for the
+            // sandboxed lane (fileReadSubpaths/network/exec/fork) while the
+            // signature still validates the original bytes. (Manifest TOCTOU.)
+            do {
+                verifiedManifest = try JSONDecoder().decode(TierBManifest.self, from: manifestData)
+            } catch {
+                throw RegistryError.manifestUnreadable(pluginID: pluginID, message: "\(error)")
+            }
         } catch let e as RegistryError {
             throw e
         } catch {
@@ -143,14 +172,8 @@ public actor TierBRegistry {
                 reason: "\(error)"
             )
         }
-        let manifest: TierBManifest
-        do {
-            manifest = try TierBManifest.load(fromBundlePath: entry.installRoot)
-        } catch {
-            throw RegistryError.manifestUnreadable(
-                pluginID: pluginID,
-                message: error.localizedDescription
-            )
+        guard let manifest = verifiedManifest else {
+            throw RegistryError.manifestUnreadable(pluginID: pluginID, message: "manifest decode produced no value")
         }
         // Write the verified bytes to a fresh temp file. This is
         // the path we hand to Process.run — guarantees the
@@ -241,6 +264,90 @@ public actor TierBRegistry {
             throw RegistryError.firstPartyExecutionRefused(pluginID: pluginID, reason: reason)
         }
         verified.isFirstParty = true
+        return verified
+    }
+
+    /// Resolve a plugin AND gate it for SANDBOXED third-party / sideload
+    /// execution — the disjoint twin of resolveForFirstPartyExecution. Runs the
+    /// full resolve() chain (quarantine → verify → TOCTOU re-verify → 0o500 temp)
+    /// and THEN the ThirdPartyExecutionGate. On any deny it DELETES the verified
+    /// temp (cleanupVerifiedBinary) so no runnable binary is left behind, and
+    /// throws `sandboxedExecutionRefused`. Sets isSandboxed=true, NEVER
+    /// isFirstParty. A bundle matching the first-party publisher anchor is refused
+    /// here (it belongs to the unsandboxed first-party lane).
+    ///
+    /// `sandboxRuntimeAvailable` is supplied by the caller (the runner knows
+    /// whether the signed trampoline is present + executable); FALSE →
+    /// fail-closed (never run uncontained). SBPL validity / deny-default content
+    /// is NOT pre-checked — it is enforced at runtime by the trampoline (a bad
+    /// profile → sandbox_init fail / content-refuse → _exit before execv).
+    /// `hasValidCuratedReceipt` / `catalogOverrideActive` are the catalog-context
+    /// authority inputs the app/CLI knows.
+    public func resolveForSandboxedExecution(
+        pluginID: String,
+        sandboxRuntimeAvailable: Bool,
+        hasValidCuratedReceipt: Bool,
+        catalogOverrideActive: Bool
+    ) async throws -> VerifiedPlugin {
+        try await resolveForSandboxedExecution(
+            pluginID: pluginID,
+            sandboxRuntimeAvailable: sandboxRuntimeAvailable,
+            hasValidCuratedReceipt: hasValidCuratedReceipt,
+            catalogOverrideActive: catalogOverrideActive,
+            firstPartyAnchorFingerprint: FirstPartyTrustRoot.publisherKeyFingerprint,
+            firstPartyAnchorConfigured: FirstPartyTrustRoot.isConfigured
+        )
+    }
+
+    /// Testable core — the public overload pins the anchor to FirstPartyTrustRoot;
+    /// this `internal` form lets tests inject an anchor fingerprint matching a
+    /// fixture key (to prove the disjoint-lane refusal) without touching the
+    /// compiled-in keystone. Production callers never see the override params.
+    func resolveForSandboxedExecution(
+        pluginID: String,
+        sandboxRuntimeAvailable: Bool,
+        hasValidCuratedReceipt: Bool,
+        catalogOverrideActive: Bool,
+        firstPartyAnchorFingerprint: String,
+        firstPartyAnchorConfigured: Bool
+    ) async throws -> VerifiedPlugin {
+        var verified = try await resolve(pluginID: pluginID)
+        // Structural cleanup: the resolve() temp (0o500 runnable bytes) is deleted
+        // on EVERY exit that is not a clean allow — so no refactor that adds a new
+        // throw between here and success can leave a runnable binary behind.
+        var keepVerifiedBinary = false
+        defer { if !keepVerifiedBinary { cleanupVerifiedBinary(verified) } }
+        // Recompute operator-trust + revocation from the installer state. resolve()
+        // already required trusted-not-revoked, so these are belt-and-suspenders
+        // that also make the gate's authority inputs explicit + auditable.
+        let trusted = await installer.currentTrustedKeys()
+        let revoked = await installer.currentRevokedKeys()
+        let key = verified.publicKeyHex.lowercased()
+        let operatorTrusts = trusted.contains { $0.lowercased() == key }
+        let isRevoked = revoked.contains { $0.lowercased() == key }
+        // Disjoint-lane check: does this bundle match the first-party publisher
+        // anchor? If so it must NOT run sandboxed — the gate refuses it.
+        let want = firstPartyAnchorFingerprint.lowercased()
+        let got = verified.publicKeySHA256.lowercased()
+        let anchorMatch = firstPartyAnchorConfigured
+            && got.count == 64 && want.count == 64
+            && got.allSatisfy({ $0.isHexDigit }) && got == want
+        let decision = ThirdPartyExecutionGate.evaluate(
+            sandboxRuntimeAvailable: sandboxRuntimeAvailable,
+            isFirstPartyAnchorMatch: anchorMatch,
+            operatorTrustsPublisherKey: operatorTrusts,
+            hasValidCuratedReceipt: hasValidCuratedReceipt,
+            isRevoked: isRevoked,
+            catalogOverrideActive: catalogOverrideActive
+        )
+        guard case .allow = decision else {
+            // The defer above deletes the verified temp on this throw.
+            let reason: String
+            if case .deny(let r) = decision { reason = r } else { reason = "denied" }
+            throw RegistryError.sandboxedExecutionRefused(pluginID: pluginID, reason: reason)
+        }
+        verified.isSandboxed = true
+        keepVerifiedBinary = true   // success → caller owns cleanup
         return verified
     }
 

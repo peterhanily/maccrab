@@ -244,6 +244,33 @@ public enum SandboxProfileBuilder {
         return lines.joined(separator: "\n") + "\n"
     }
 
+    /// Compile the deny-default ("Model B") profile the signed
+    /// `maccrab-tierb-sandbox-host` trampoline applies to ITSELF via
+    /// `sandbox_init`, with the one extra grant the trampoline needs that a plain
+    /// `compileDenyDefault` cannot have: permission to `execv` the verified plugin
+    /// temp.
+    ///
+    /// WHY: the trampoline applies this profile to itself, then `execv`s the
+    /// plugin. Under `(deny default)`, that exec is itself denied unless the
+    /// profile allows `process-exec*` + `file-read*` on the exact target. The
+    /// target is the host-controlled 0o500 verified-binary temp (NOT an
+    /// attacker-named path), so granting exec on that single literal does not
+    /// widen the plugin's authority — once the plugin image is running it is still
+    /// `(deny default)` for everything outside its manifest allowlist + base.
+    ///
+    /// `selfExecPath` MUST be the registry's per-resolve verified temp. The SBPL
+    /// quoter neutralises any metacharacters; callers still pass a host path.
+    public static func compileTrampolineDenyDefault(
+        _ spec: SandboxProfileSpec,
+        selfExecPath: String
+    ) -> String {
+        var profile = compileDenyDefault(spec)
+        profile += ";; Trampoline self-exec target — the host-controlled verified plugin temp.\n"
+        profile += "(allow process-exec* (literal \(quoted(selfExecPath))))\n"
+        profile += "(allow file-read* (literal \(quoted(selfExecPath))))\n"
+        return profile
+    }
+
     /// Quote a string for SBPL. SBPL uses double-quoted strings.
     /// Backslash + double-quote need escaping. Newlines and other
     /// control chars need to be either stripped or hex-escaped

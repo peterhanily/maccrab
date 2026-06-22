@@ -1,6 +1,39 @@
 # MacCrabForensics/TierB
 
-**Status (2026-05-25 update — partial promotion to first-class):** the install + verify + trust + discovery surface is live and exercised by the rave catalog (see launch rehearsal at `peterhanily/maccrab-site:rave-prototypes/launch-rehearsal/hosts-collector/`). The subprocess-spawn path remains on the `research/post-v15` branch pending NSXPCConnection + XPC service bundling work; until that lands, Tier B plugins install and verify but cannot be run via `maccrabctl plugin run`.
+**Status (2026-06-22 update — third-party sandboxed lane, writable core landed INERT):**
+the third-party execution mechanism is decided and its writable core is built (still
+fail-closed; nothing routes to it). The XPC approach below is SUPERSEDED — see
+"Third-party sandboxed lane" near the bottom.
+
+> ## Third-party sandboxed lane (Streams 0–2 core — built, INERT, fail-closed)
+>
+> Untrusted third-party / sideload Tier-B plugins run ONLY under a deny-default
+> sandbox applied by the signed **`maccrab-tierb-sandbox-host`** trampoline
+> (`Sources/maccrab-tierb-sandbox-host/main.c`, a separate C executable target):
+> it sets rlimits, applies the manifest-derived `(deny default)` SBPL to itself via
+> `sandbox_init` AFTER startup, then `execv`s the verified plugin (the Stream-0
+> spike-validated mechanism — exec-time `sandbox-exec` deny-default aborts the
+> target; post-startup `sandbox_init` does not). Cardinal invariant: it NEVER
+> execs without a successful, deny-default `sandbox_init` (contained-or-nothing).
+>
+> Two DISJOINT lanes, never crossed:
+> - first-party (unsandboxed) → `FirstPartyExecutionGate` + `FirstPartyTierBRunner`
+> - third-party (sandboxed)   → `ThirdPartyExecutionGate` + `SandboxedTierBRunner`
+>   behind `TierBRegistry.resolveForSandboxedExecution` (sets `isSandboxed`, never
+>   `isFirstParty`; fail-closed if the sandbox runtime is unavailable).
+>
+> New/changed files this lane: `ThirdPartyExecutionGate.swift`,
+> `SandboxedTierBRunner.swift`, `SandboxProfileBuilder.compileTrampolineDenyDefault`,
+> `TierBRegistry.{VerifiedPlugin.isSandboxed, resolveForSandboxedExecution}`,
+> `Sources/maccrab-tierb-sandbox-host/main.c`.
+>
+> DEFERRED (operator/on-device, NOT in this build): the SCM_RIGHTS file broker
+> (fd 3 is reserved) + TOCTOU/inode hardening; brokered-TCC scratch snapshots;
+> live routing (`PluginRunner` still throws `tierBExecutionUnsupported`); the
+> minimal SBPL base for a full Swift plugin + exact rlimits; and the adversarial
+> containment corpus AS A CLIENT TEST. See `plans/2026-06-17-thirdparty-marketplace.md`.
+
+**Status (2026-05-25 — SUPERSEDED by the above):** the install + verify + trust + discovery surface is live and exercised by the rave catalog (see launch rehearsal at `peterhanily/maccrab-site:rave-prototypes/launch-rehearsal/hosts-collector/`). The subprocess-spawn path was historically scoped to NSXPCConnection + XPC service bundling on `research/post-v15`; that approach is no longer the plan (App-Sandbox/XPC is ruled out by the no-in-app-re-signing + FDA-host constraints) — the trampoline above replaces it.
 
 Tier B = subprocess-sandboxed plugin runtime. Plan §3.9 + §12. The §12 commitment was made on 2026-05-24 — see `plans/2026-05-19-plugin-platform-plan.md` §12 + the rave plan v4.5 at `~/Documents/claude_code/maccrab-future-planning/2026-05-20-plugin-site-plan.md`.
 
@@ -8,7 +41,7 @@ Tier B = subprocess-sandboxed plugin runtime. Plan §3.9 + §12. The §12 commit
 
 | # | Condition | Status |
 |---|---|---|
-| 1 | Sandbox profile generator emits profiles macOS accepts | ⚠ partial — emits SBPL (`SandboxProfileBuilder.swift`, incl. `compileDenyDefault`). Stream-0 spike (2026-06-18) found exec-time custom deny-default **aborts** the binary; containment requires the `sandbox_init` post-startup trampoline (validated for file-read deny). Runtime acceptance for real Swift plugins is **pending the corpus client-test** — see `plans/2026-06-17-thirdparty-marketplace.md`. |
+| 1 | Sandbox profile generator emits profiles macOS accepts | ⚠ partial — emits SBPL (`SandboxProfileBuilder.swift`, incl. `compileDenyDefault` + `compileTrampolineDenyDefault`). The `sandbox_init` trampoline (`maccrab-tierb-sandbox-host`) + `SandboxedTierBRunner` + `ThirdPartyExecutionGate` are now **built (inert)**. C smoke test (2026-06-22) confirms the mechanism + self-exec allow (execv SUCCEEDS under deny-default, vs pure deny-default which blocks it) and every fail-closed guard. Remaining: minimal SBPL base for a real Swift plugin (a stock `/usr/bin/true` SIGABRTs under the spike base — the macOS-version base-tuning) is **pending the corpus client-test** — see `plans/2026-06-17-thirdparty-marketplace.md`. |
 | 2 | XPC service IPC contract stable + reuses MCP JSON-RPC | partial — `XPCPluginLoader.swift` exists; subprocess spawn on `research/post-v15` |
 | 3 | Signing CA + revocation infrastructure wired | ✅ `PluginSignatureVerifier.swift` + `PluginInstaller.swift` + maccrabctl integration verified end-to-end against rave catalog |
 | 4 | Plan-level commitment via new chapter | ✅ platform plan §12 updated 2026-05-24; rave plan v4.5 published |
