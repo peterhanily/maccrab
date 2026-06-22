@@ -212,6 +212,14 @@ struct PluginCatalogFetcher {
         // Step 2: locate plugin in index.
         let catalog = try parseCatalogIndex(data: catalogData)
 
+        // Step 1.6: global signed kill-switch. A frozen catalog halts ALL installs
+        // (incident response) — checked on the signature-verified bytes so a
+        // tampered/unsigned catalog can neither set nor clear the freeze.
+        if catalog.frozen {
+            throw PluginCatalogFetchError.catalogParseFailed(
+                reason: "The plugin catalog is FROZEN by the maintainer — installs are halted. \(catalog.freezeReason ?? "")".trimmingCharacters(in: .whitespaces))
+        }
+
         // Step 1.5 (S2-AR): anti-rollback gate on the now signature-verified
         // catalog. A validly-signed-but-older catalog_serial is a stale/replay
         // and is rejected; the prior trusted catalog (and its high-water mark)
@@ -536,6 +544,10 @@ struct PluginCatalogFetcher {
         /// Top-level monotonic freshness counter (S2-AR). nil when the catalog
         /// predates the field (pre-ceremony signed bytes keep it optional).
         let catalogSerial: Int?
+        /// Global signed kill-switch: when true, the client refuses ALL installs
+        /// (the operator/keyholder can halt the store from the signed catalog).
+        let frozen: Bool
+        let freezeReason: String?
     }
     private struct CatalogIndexEntry {
         let currentVersion: String
@@ -586,7 +598,11 @@ struct PluginCatalogFetcher {
         // silently treating it as absent (a string "0" would otherwise slip
         // past the rollback gate).
         let catalogSerial = (json["catalog_serial"] as? NSNumber)?.intValue
-        return CatalogIndex(plugins: out, catalogSerial: catalogSerial)
+        // Global kill-switch (signed). Default false; any non-bool is treated as
+        // false (a freeze must be an explicit boolean true in the signed bytes).
+        let frozen = (json["frozen"] as? Bool) ?? false
+        let freezeReason = json["freeze_reason"] as? String
+        return CatalogIndex(plugins: out, catalogSerial: catalogSerial, frozen: frozen, freezeReason: freezeReason)
     }
 
     private func parseCatalogEntry(data: Data) throws -> ParsedEntry {

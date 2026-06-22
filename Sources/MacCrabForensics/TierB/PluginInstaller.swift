@@ -442,6 +442,7 @@ public actor PluginInstaller {
         try await Self.mutateKeySet(
             path: pluginsRoot.appendingPathComponent("trusted-keys.json").path
         ) { $0.insert(keyHex) }
+        appendTrustAudit(action: "trust", keyHex: keyHex)
     }
 
     public func removeTrustedKey(_ keyHex: String) async throws {
@@ -449,6 +450,7 @@ public actor PluginInstaller {
         try await Self.mutateKeySet(
             path: pluginsRoot.appendingPathComponent("trusted-keys.json").path
         ) { $0.remove(keyHex) }
+        appendTrustAudit(action: "untrust", keyHex: keyHex)
     }
 
     public func revokeKey(_ keyHex: String) async throws {
@@ -459,6 +461,7 @@ public actor PluginInstaller {
         // Removing from trust set is best-effort; revocation alone
         // is sufficient because verify() checks revocation first.
         try? await removeTrustedKey(keyHex)
+        appendTrustAudit(action: "revoke", keyHex: keyHex)
     }
 
     public func unrevokeKey(_ keyHex: String) async throws {
@@ -466,6 +469,28 @@ public actor PluginInstaller {
         try await Self.mutateKeySet(
             path: pluginsRoot.appendingPathComponent("revoked-keys.json").path
         ) { $0.remove(keyHex) }
+        appendTrustAudit(action: "unrevoke", keyHex: keyHex)
+    }
+
+    /// Append-only, tamper-EVIDENT audit of every trust-list mutation (who
+    /// changed what, when), since a trusted key now gates SANDBOXED execution.
+    /// `<pluginsRoot>/trust_audit.log`, 0o600. (Full tamper-PROOFING of
+    /// trusted-keys.json against a same-uid foothold needs an offline/SE signer
+    /// — out of band of the client; documented in the operator runbook. This log
+    /// gives the operator a trail + the sandbox keeps a fooled trust contained.)
+    private func appendTrustAudit(action: String, keyHex: String) {
+        let line = "\(ISO8601DateFormatter().string(from: Date()))\t\(action)\t\(keyHex)\t\(NSUserName())\n"
+        let path = pluginsRoot.appendingPathComponent("trust_audit.log").path
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: path) {
+            try? Data().write(to: URL(fileURLWithPath: path))
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        }
+        if let fh = FileHandle(forWritingAtPath: path) {
+            defer { try? fh.close() }
+            _ = try? fh.seekToEnd()
+            try? fh.write(contentsOf: Data(line.utf8))
+        }
     }
 
     // MARK: - Remote-revocation quarantine (O2, S2-03/04)
