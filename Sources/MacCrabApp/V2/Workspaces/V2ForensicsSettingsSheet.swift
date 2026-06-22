@@ -111,6 +111,27 @@ struct V2ForensicsSettingsSheet: View {
                     keyList(revokedKeys, tint: .secondary)
                 }
             }
+            // Revocation-data freshness (C-E staleness ceiling). When stale/never,
+            // the runtime reconcile quarantines third-party plugins (self-heal).
+            let fresh = Self.revocationFreshnessLine()
+            HStack(spacing: 6) {
+                Image(systemName: fresh.stale ? "exclamationmark.triangle.fill" : "checkmark.shield")
+                    .foregroundStyle(fresh.stale ? .orange : .secondary).scaledSystem(11)
+                Text(fresh.text).scaledSystem(11).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Revocation-data staleness, read from the persisted trust-state clock.
+    static func revocationFreshnessLine() -> (text: String, stale: Bool) {
+        let store = RaveTrustStateStore.default(supportDir: RevocationReverifyService.defaultSupportDir().path)
+        switch store.revocationFreshness() {
+        case .never:
+            return ("Revocation data never fetched — third-party plugins quarantine until verified.", true)
+        case .fresh(let age):
+            return ("Revocation data fresh (verified \(Int(age / 3600))h ago).", false)
+        case .stale(let age):
+            return ("Revocation data stale (\(Int(age / 86_400))d) — third-party plugins quarantined pending re-verify.", true)
         }
     }
 
