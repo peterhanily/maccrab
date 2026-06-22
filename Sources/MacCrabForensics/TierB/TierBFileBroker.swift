@@ -78,6 +78,13 @@ public final class TierBFileBroker: @unchecked Sendable {
         /// a slow-drip (one byte per <readTimeout) attack that never trips the
         /// per-read timeout. Seconds.
         public let maxServeSeconds: Double
+        /// Home dir for the SERVED-PATH TCC guard. When set, `resolve` fail-closes
+        /// any DIRECT (non-redirect) grant whose served path is TCC-protected — so
+        /// a recursive read root that is an ANCESTOR of a TCC store (e.g. a plugin
+        /// declaring `~/Library`) can never make the FDA-holding broker open the
+        /// live `~/Library/Messages/chat.db`. TCC stores are reachable ONLY via the
+        /// explicit snapshot redirects. nil = no guard (non-TCC contexts/tests).
+        public let tccGuardHome: String?
 
         public init(
             allowedReadRoots: [String] = [],
@@ -86,7 +93,8 @@ public final class TierBFileBroker: @unchecked Sendable {
             maxRequests: Int = 4096,
             maxPathBytes: Int = 4096,
             readTimeoutSeconds: Int = 30,
-            maxServeSeconds: Double = 120
+            maxServeSeconds: Double = 120,
+            tccGuardHome: String? = nil
         ) {
             self.allowedReadRoots = allowedReadRoots.map(Self.normalizeRoot)
             self.allowedReadLiterals = allowedReadLiterals
@@ -95,6 +103,7 @@ public final class TierBFileBroker: @unchecked Sendable {
             self.maxPathBytes = max(1, maxPathBytes)
             self.readTimeoutSeconds = max(1, readTimeoutSeconds)
             self.maxServeSeconds = max(1, maxServeSeconds)
+            self.tccGuardHome = tccGuardHome
         }
 
         /// Build a read policy from a verified manifest + the per-invocation
@@ -148,13 +157,26 @@ public final class TierBFileBroker: @unchecked Sendable {
         }
         for root in policy.allowedReadRoots {
             if requested == root || requested.hasPrefix(root + "/") {
-                return (requested, root)
+                return guardTCC(requested, root: root, policy: policy)
             }
         }
         for lit in policy.allowedReadLiterals where requested == lit {
-            return (lit, parentDirectory(of: lit))
+            return guardTCC(lit, root: parentDirectory(of: lit), policy: policy)
         }
         return nil
+    }
+
+    /// Final served-path TCC guard for DIRECT (non-redirect) grants. The broker
+    /// holds the host's FDA, so it must NEVER open a live TCC-protected store: a
+    /// recursive read root can be an ANCESTOR of one (a plugin declaring
+    /// `~/Library` would otherwise reach `~/Library/Messages/chat.db`). Fail-closed
+    /// here — to read a TCC file a plugin must declare its EXACT path, which
+    /// `BrokeredTCC.prepare` then snapshots into a redirect (resolved above, before
+    /// this guard). No-op when the policy carries no `tccGuardHome` (non-TCC
+    /// contexts / pure unit tests).
+    private static func guardTCC(_ served: String, root: String, policy: Policy) -> (path: String, root: String)? {
+        if let home = policy.tccGuardHome, TCCProtectedPaths.isProtected(served, home: home) { return nil }
+        return (served, root)
     }
 
     static func parentDirectory(of path: String) -> String {

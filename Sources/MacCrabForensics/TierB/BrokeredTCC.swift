@@ -95,6 +95,12 @@ public struct BrokeredReadPlan: Sendable {
     /// TCC reads that could NOT be brokered in this build (directory sources, or
     /// missing/unreadable files) — fail-closed (neither granted nor redirected).
     public let denied: [String]
+    /// The home dir TCC classification was resolved against. Handed to the broker
+    /// Policy as the SERVED-PATH TCC guard: a direct read root may be an ANCESTOR
+    /// of a TCC store (a plugin declaring `~/Library` would otherwise let the
+    /// FDA-holding broker open `~/Library/Messages/chat.db` LIVE). The guard
+    /// fail-closes any served TCC path that isn't an explicit snapshot redirect.
+    public let tccGuardHome: String
 
     /// Build the broker Policy for this plan + the plugin's own scratch dir.
     ///
@@ -104,12 +110,18 @@ public struct BrokeredReadPlan: Sendable {
     /// otherwise replace a 0o600 snapshot). As defense in depth this DROPS any
     /// redirect whose snapshot resolved under `scratchDir` (fail-closed: that
     /// source becomes unreadable rather than reading a plugin-tamperable copy).
+    ///
+    /// The Policy also carries `tccGuardHome` so the broker re-checks every DIRECT
+    /// (non-redirect) grant on the SERVED path: a broad ancestor read root can
+    /// never coax the broker into opening a live TCC-protected store — those are
+    /// reachable only via the explicit snapshot redirects built here.
     public func brokerPolicy(scratchDir: String) -> TierBFileBroker.Policy {
         let scratch = scratchDir.hasSuffix("/") ? String(scratchDir.dropLast()) : scratchDir
         let safeRedirects = redirects.filter { !($0.to == scratch || $0.to.hasPrefix(scratch + "/")) }
         return TierBFileBroker.Policy(
             allowedReadRoots: directReadRoots + [scratchDir],
-            redirects: safeRedirects
+            redirects: safeRedirects,
+            tccGuardHome: tccGuardHome
         )
     }
 }
@@ -156,7 +168,8 @@ public enum BrokeredTCC {
         }
         return BrokeredReadPlan(
             directReadRoots: direct, redirects: redirects,
-            snapshotted: snapshotted, denied: denied
+            snapshotted: snapshotted, denied: denied,
+            tccGuardHome: home
         )
     }
 

@@ -183,6 +183,12 @@ public struct TierBManifest: Codable, Sendable {
     /// `home` resolves which declared reads are TCC-protected (brokered, never
     /// read live).
     public func consentSummary(home: String = NSHomeDirectory()) -> TierBConsentSummary {
+        // Uses the SAME classifier as the broker's served-path TCC guard
+        // (TierBFileBroker.guardTCC), so disclosure can't drift from enforcement:
+        // a declared path AT/UNDER a TCC store (e.g. the exact chat.db) is a
+        // brokered personal-comms read (snapshotted) and shows here; a broad
+        // ANCESTOR root (e.g. ~/Library) is NOT a TCC read because the broker
+        // fail-closes its TCC subtrees, so it honestly classifies as "content".
         let tcc = fileReadSubpaths.filter { TCCProtectedPaths.isProtected($0, home: home) }
         let derived: String
         if !tcc.isEmpty { derived = "personalComms" }            // conservative: TCC read → high friction

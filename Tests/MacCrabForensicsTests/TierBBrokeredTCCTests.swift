@@ -130,6 +130,61 @@ struct TierBBrokeredTCCTests {
         #expect(r?.root == "/snap")
     }
 
+    // MARK: - Served-path TCC guard (a broad ANCESTOR root must NOT leak a live store)
+
+    @Test("broker resolve: a broad ancestor read root does NOT serve a live TCC store")
+    func ancestorRootCannotLeakLiveTCC() {
+        let home = "/Users/x"
+        let chat = "/Users/x/Library/Messages/chat.db"
+        // A plugin declares ~/Library as a recursive read root (an ANCESTOR of the
+        // TCC store). The served-path guard must deny the live chat.db beneath it.
+        let guarded = TierBFileBroker.Policy(allowedReadRoots: ["/Users/x/Library"], tccGuardHome: home)
+        #expect(TierBFileBroker.resolve(chat, policy: guarded) == nil)
+        // Non-TCC content under the same broad root is still served.
+        let prefs = "/Users/x/Library/Preferences/com.example.plist"
+        #expect(TierBFileBroker.resolve(prefs, policy: guarded)?.path == prefs)
+        // Case-folded bypass attempt (lowercase library/messages) is also denied.
+        #expect(TierBFileBroker.resolve("/Users/x/library/messages/chat.db", policy: guarded) == nil)
+        // WITHOUT the guard the live store WOULD be served — documents the guard is
+        // the control (and that a non-TCC context is unaffected).
+        let unguarded = TierBFileBroker.Policy(allowedReadRoots: ["/Users/x/Library"])
+        #expect(TierBFileBroker.resolve(chat, policy: unguarded)?.path == chat)
+    }
+
+    @Test("broker resolve: the guard does not break the legit exact-file snapshot redirect")
+    func guardAllowsSnapshotRedirect() {
+        let home = "/Users/x"
+        // Even with the guard armed, an explicit redirect (the snapshot of chat.db)
+        // is resolved first and served — the redirect target is non-TCC scratch.
+        let p = TierBFileBroker.Policy(
+            redirects: [.init(prefix: "/Users/x/Library/Messages/chat.db", to: "/snap/abc.db")],
+            tccGuardHome: home)
+        let r = TierBFileBroker.resolve("/Users/x/Library/Messages/chat.db", policy: p)
+        #expect(r?.path == "/snap/abc.db")
+        #expect(r?.root == "/snap")
+    }
+
+    @Test("prepare → brokerPolicy: an ANCESTOR ~/Library root denies the live chat.db end-to-end")
+    func ancestorRootDeniedThroughPreparedPolicy() throws {
+        let snapDir = URL(fileURLWithPath: NSTemporaryDirectory() + "snap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: snapDir) }
+        let home = NSTemporaryDirectory() + "tcc-home-\(UUID().uuidString)"
+        let chat = home + "/Library/Messages/chat.db"
+        try FileManager.default.createDirectory(atPath: (chat as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try Self.makeSourceDB(at: chat)
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let scratch = NSTemporaryDirectory() + "scratch-\(UUID().uuidString)"
+
+        // The plugin declares the broad ANCESTOR root, not the exact chat.db.
+        let plan = BrokeredTCC.prepare(manifestReadPaths: [home + "/Library"], snapshotDir: snapDir, home: home)
+        #expect(plan.directReadRoots == [home + "/Library"])   // ancestor → direct root (not snapshotted)
+        #expect(plan.redirects.isEmpty)
+        let policy = plan.brokerPolicy(scratchDir: scratch)
+        #expect(policy.tccGuardHome == home)
+        // The guard fail-closes the live store reached via the ancestor root.
+        #expect(TierBFileBroker.resolve(chat, policy: policy) == nil)
+    }
+
     // MARK: - End to end: request the live TCC path → receive the SNAPSHOT
 
     @Test("e2e: a sandboxed request for the live chat.db is served the snapshot, not the live store", .timeLimit(.minutes(1)))
