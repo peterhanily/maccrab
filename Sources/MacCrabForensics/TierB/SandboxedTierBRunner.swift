@@ -181,9 +181,23 @@ public struct SandboxedTierBRunner: Sendable {
                 message: "trampoline not found or not executable at \(trampolinePath)")
         }
 
-        // Build + write the deny-default SBPL the trampoline applies to itself.
-        // 0o400 owner-read-only temp, sibling of the 0o500 verified-binary temp.
-        let spec = verified.manifest.toSandboxProfileSpec()
+        // Brokered file access (Model B): the SBPL grants NO manifest reads. The
+        // host snapshots manifest-declared TCC sources into a host-owned,
+        // plugin-UNWRITABLE dir and the broker serves read-fds over fd 3, so the
+        // plugin can only reach a declared, broker-opened path (a symlink/TOCTOU
+        // race or an undeclared path can never be opened directly). A TCC source
+        // that can't be snapshotted is fail-closed (denied).
+        let snapshotDir = URL(fileURLWithPath: NSTemporaryDirectory() + "maccrab-tier-b-tccsnap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: snapshotDir) }
+        let readPlan = BrokeredTCC.prepare(
+            manifestReadPaths: verified.manifest.fileReadSubpaths,
+            snapshotDir: snapshotDir,
+            home: NSHomeDirectory())
+        let brokerPolicy = readPlan.brokerPolicy(scratchDir: scratchDir)
+
+        // Build + write the Model-B deny-default SBPL the trampoline applies to
+        // itself (reads brokered, not in the profile). 0o400 owner-read-only temp.
+        let spec = verified.manifest.toBrokeredSandboxProfileSpec(scratchDir: scratchDir)
         let profile = SandboxProfileBuilder.compileTrampolineDenyDefault(spec, selfExecPath: verified.binaryPath)
         let profilePath = NSTemporaryDirectory() + "maccrab-tier-b-profile-\(UUID().uuidString).sb"
         do {
@@ -193,6 +207,18 @@ public struct SandboxedTierBRunner: Sendable {
             throw RunnerError.profileWriteFailed(pluginID: verified.pluginID, message: "\(error)")
         }
         defer { try? FileManager.default.removeItem(atPath: profilePath) }
+
+        // Per-invocation broker socketpair: the child inherits the broker end on
+        // fd 3 (the fd-3 dup below clears CLOEXEC so it survives the trampoline's
+        // execv to the plugin); the host end is CLOEXEC and closes at exec, so the
+        // plugin never sees it.
+        var brokerFds: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &brokerFds) == 0 else {
+            throw RunnerError.spawnFailed(pluginID: verified.pluginID, message: "socketpair() failed")
+        }
+        let brokerHostFd = brokerFds[0], brokerChildFd = brokerFds[1]
+        _ = fcntl(brokerHostFd, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(brokerChildFd, F_SETFD, FD_CLOEXEC)
 
         let argvStrings = Self.trampolineArguments(
             trampolinePath: trampolinePath,
@@ -218,8 +244,10 @@ public struct SandboxedTierBRunner: Sendable {
         posix_spawn_file_actions_addclose(&fileActions, inFds[1])
         posix_spawn_file_actions_addclose(&fileActions, outFds[0])
         posix_spawn_file_actions_addclose(&fileActions, errFds[0])
-        // fd 3 (the future SCM_RIGHTS broker) is intentionally NOT passed yet —
-        // no broker in this build, so the child inherits no fd 3.
+        // Pass the broker child end as fd 3. dup2 clears CLOEXEC on fd 3, so it
+        // survives the trampoline's execv to the plugin; the original brokerChildFd
+        // (CLOEXEC) and brokerHostFd (CLOEXEC) are closed at exec.
+        posix_spawn_file_actions_adddup2(&fileActions, brokerChildFd, 3)
         defer { posix_spawn_file_actions_destroy(&fileActions) }
 
         var attr: posix_spawnattr_t?
@@ -245,15 +273,22 @@ public struct SandboxedTierBRunner: Sendable {
         // Spawn the TRAMPOLINE (not the plugin). The trampoline applies the
         // sandbox then execv's the verified plugin in the same process.
         let spawnRC = posix_spawn(&pid, trampolinePath, &fileActions, &attr, argv, envp)
-        // Parent closes the child ends of every pipe.
-        close(inFds[0]); close(outFds[1]); close(errFds[1])
+        // Parent closes the child ends of every pipe + the broker child end.
+        close(inFds[0]); close(outFds[1]); close(errFds[1]); close(brokerChildFd)
         guard spawnRC == 0 else {
-            close(inFds[1]); close(outFds[0]); close(errFds[0])
+            close(inFds[1]); close(outFds[0]); close(errFds[0]); close(brokerHostFd)
             throw RunnerError.spawnFailed(
                 pluginID: verified.pluginID,
                 message: "posix_spawn: \(String(cString: strerror(spawnRC)))")
         }
         _ = fcntl(inFds[1], F_SETNOSIGPIPE, 1)
+
+        // Serve the per-invocation broker on the host end. It exits when the child
+        // closes fd 3 (EOF) or the serve deadline fires; teardown closes the host
+        // end + joins it after reap so no blocked thread leaks into the long-lived host.
+        let broker = TierBFileBroker()
+        let brokerDone = DispatchSemaphore(value: 0)
+        Thread { broker.serve(hostSocket: brokerHostFd, policy: brokerPolicy); brokerDone.signal() }.start()
 
         let inWrite = FileHandle(fileDescriptor: inFds[1], closeOnDealloc: true)
         let outHandle = FileHandle(fileDescriptor: outFds[0], closeOnDealloc: true)
@@ -324,6 +359,11 @@ public struct SandboxedTierBRunner: Sendable {
         var status: Int32 = 0
         waitpid(pid, &status, 0)
         timer.cancel()
+
+        // Tear down the broker: closing the host end EOFs the serve loop; bounded
+        // wait so a wedged thread can't outlive the invocation in the host.
+        close(brokerHostFd)
+        _ = brokerDone.wait(timeout: .now() + 3.0)
 
         _ = outDone.wait(timeout: .now() + 3.0)
         _ = errDone.wait(timeout: .now() + 3.0)

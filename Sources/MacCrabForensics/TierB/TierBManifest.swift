@@ -153,6 +153,24 @@ public struct TierBManifest: Codable, Sendable {
         )
     }
 
+    /// Model-B sandbox spec for the SANDBOXED third-party lane: file READS are
+    /// NOT granted in the SBPL — the broker is the file boundary (the plugin
+    /// requests read-fds over fd 3, so a symlink/TOCTOU race or an undeclared
+    /// path can never be opened directly). Only the plugin's own writes (its
+    /// host-owned scratch + any declared write subpaths) plus network/exec/fork
+    /// (when declared) are in the profile. (Plan §3.1 file-access decision.)
+    public func toBrokeredSandboxProfileSpec(scratchDir: String) -> SandboxProfileSpec {
+        SandboxProfileSpec(
+            allowAllByDefault: false,
+            fileReadSubpaths: [],                                  // brokered — never in the SBPL
+            fileWriteSubpaths: fileWriteSubpaths + [scratchDir],
+            networkConnectAllowlist: networkConnectAllowlist,
+            machServiceConnects: machServiceConnects,
+            processExecPaths: processExecPaths,
+            allowProcessFork: allowProcessFork
+        )
+    }
+
     public static func load(fromBundlePath bundlePath: String) throws -> TierBManifest {
         let url = URL(fileURLWithPath: bundlePath).appendingPathComponent("manifest.json")
         let data = try Data(contentsOf: url)
