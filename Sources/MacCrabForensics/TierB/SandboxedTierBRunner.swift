@@ -101,14 +101,20 @@ public struct SandboxedTierBRunner: Sendable {
     /// Path to the signed `maccrab-tierb-sandbox-host` trampoline binary.
     public let trampolinePath: String
     public let limits: ResourceLimits
+    /// Explicitly allow an unsigned (dev) trampoline — for `maccrabctl plugin
+    /// test` only. Threaded as a value, NOT via a process-wide env var, so it
+    /// can't leak to other code paths or children. Ignored unless DEBUG-honored.
+    public let allowUnsignedTrampoline: Bool
 
     /// `trampolinePath` defaults to a binary named `maccrab-tierb-sandbox-host`
     /// next to the running executable (dev/test: `.build/<config>/`; release: the
     /// app bundle's helper dir, wired by build-release.sh). Pass an explicit path
     /// in tests.
-    public init(trampolinePath: String? = nil, limits: ResourceLimits = .default) {
+    public init(trampolinePath: String? = nil, limits: ResourceLimits = .default,
+                allowUnsignedTrampoline: Bool = false) {
         self.trampolinePath = trampolinePath ?? Self.defaultTrampolinePath()
         self.limits = limits
+        self.allowUnsignedTrampoline = allowUnsignedTrampoline
     }
 
     /// Best-effort default location of the trampoline: a sibling of the current
@@ -140,16 +146,29 @@ public struct SandboxedTierBRunner: Sendable {
     /// check→spawn TOCTOU. build-release.sh must install the trampoline
     /// accordingly. Until then this lane stays inert (nothing routes here).
     public var isRuntimeAvailable: Bool {
-        Self.isRuntimeAvailable(trampolinePath: trampolinePath)
+        Self.isRuntimeAvailable(
+            trampolinePath: trampolinePath,
+            allowUnsigned: Self.devOverrideAllowed(explicit: allowUnsignedTrampoline))
     }
 
     public static func isRuntimeAvailable(trampolinePath: String) -> Bool {
-        // Dev/test opt-in: the dev trampoline (`swift build`) is ad-hoc-signed and
-        // fails the release signature check; the corpus + local runs allow it
-        // explicitly. NEVER set in a shipped build.
+        isRuntimeAvailable(trampolinePath: trampolinePath, allowUnsigned: devOverrideAllowed(explicit: false))
+    }
+
+    /// Whether an UNSIGNED (dev) trampoline is permitted. The env overrides are
+    /// honored ONLY in DEBUG builds (M1) — a RELEASE binary literally cannot be
+    /// tricked into running an unsigned/swapped trampoline via an inherited env
+    /// var (the MCP server inherits its parent's full env). The explicit flag is
+    /// the in-process channel for `maccrabctl plugin test`, also DEBUG-only.
+    static func devOverrideAllowed(explicit: Bool) -> Bool {
+        #if DEBUG
+        if explicit { return true }
         let env = ProcessInfo.processInfo.environment
-        let allowUnsigned = env["MACCRAB_TIERB_DEV_TRAMPOLINE"] != nil || env["MACCRAB_CORPUS"] != nil
-        return isRuntimeAvailable(trampolinePath: trampolinePath, allowUnsigned: allowUnsigned)
+        return env["MACCRAB_TIERB_DEV_TRAMPOLINE"] == "1" || env["MACCRAB_CORPUS"] != nil
+        #else
+        _ = explicit
+        return false
+        #endif
     }
 
     /// Testable core. `allowUnsigned` skips the release signature requirement.
@@ -160,9 +179,9 @@ public struct SandboxedTierBRunner: Sendable {
               fm.isExecutableFile(atPath: trampolinePath) else { return false }
         if allowUnsigned { return true }
         // Release: the trampoline is the signed binary that enforces containment.
-        // Require a valid signature anchored to Apple AND — when the host itself
-        // is Developer-ID-signed — the SAME team, so a swapped/user-planted
-        // trampoline is refused before any untrusted code runs.
+        // Require a valid signature anchored to Apple AND the SAME team as the
+        // host, so a swapped/user-planted trampoline is refused before any
+        // untrusted code runs.
         return isTrampolineSignatureTrusted(trampolinePath)
     }
 
@@ -174,7 +193,15 @@ public struct SandboxedTierBRunner: Sendable {
         if let team = hostTeamIdentifier() {
             reqStr = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
         } else {
-            reqStr = "anchor apple generic"   // host is ad-hoc/unsigned (dev) — require at least Apple-anchored
+            // Host team unknown (a Sec failure, or the host is ad-hoc/unsigned).
+            // In RELEASE this means a signed-app Sec failure → FAIL CLOSED (M2):
+            // never accept ANY Apple-Developer-ID binary as the trampoline. The
+            // bare anchor-apple-generic fallback is DEBUG-only (dev host).
+            #if DEBUG
+            reqStr = "anchor apple generic"
+            #else
+            return false
+            #endif
         }
         var req: SecRequirement?
         guard SecRequirementCreateWithString(reqStr as CFString, [], &req) == errSecSuccess,

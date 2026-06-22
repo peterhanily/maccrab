@@ -31,10 +31,13 @@ public struct TierBExecutionResult: Sendable {
 
 public enum TierBCollectorExecutorError: Error, CustomStringConvertible {
     case analyzerNotSupported(pluginID: String)
+    case thirdPartyExecutionDisabled
     public var description: String {
         switch self {
         case .analyzerNotSupported(let id):
             return "Plugin '\(id)' is a Tier-B analyzer; analyzer execution is not yet supported (collector-only runtime)."
+        case .thirdPartyExecutionDisabled:
+            return "Third-party plugin execution is disabled by the operator (kill-switch). First-party plugins still run."
         }
     }
 }
@@ -55,9 +58,10 @@ public enum TierBCollectorExecutor {
         windowEndUnix: Int64? = nil,
         officialSource: Bool,
         catalogOverrideActive: Bool,
-        registry: TierBRegistry = TierBRegistry()
+        registry: TierBRegistry = TierBRegistry(),
+        allowUnsignedTrampoline: Bool = false   // `plugin test` only (DEBUG-honored); never set in production
     ) async throws -> TierBExecutionResult {
-        let sandboxRunner = SandboxedTierBRunner()
+        let sandboxRunner = SandboxedTierBRunner(allowUnsignedTrampoline: allowUnsignedTrampoline)
         let verified: TierBRegistry.VerifiedPlugin
         let sandboxed: Bool
         do {
@@ -74,6 +78,13 @@ public enum TierBCollectorExecutor {
             sandboxed = true
         }
         defer { registry.cleanupVerifiedBinary(verified) }
+
+        // Operator kill-switch (S4): a fast field lever to disable the freshly-live
+        // third-party lane fleet-wide without an app update. First-party (MacCrab-
+        // signed) plugins are unaffected.
+        if sandboxed && thirdPartyExecutionDisabled() {
+            throw TierBCollectorExecutorError.thirdPartyExecutionDisabled
+        }
 
         if verified.manifest.kind == .analyzer {
             throw TierBCollectorExecutorError.analyzerNotSupported(pluginID: pluginID)
@@ -94,9 +105,22 @@ public enum TierBCollectorExecutor {
     /// computes them identically.
     public static func catalogContextFromEnv() -> (officialSource: Bool, catalogOverrideActive: Bool) {
         let env = ProcessInfo.processInfo.environment
+        // S5: BOTH catalog-trust-root overrides void the curated authority — the
+        // pub-path override AND the staging-pub override (which swaps the signer).
         let overrideActive = !(env["MACCRAB_RAVE_CATALOG_PUB_PATH"] ?? "").isEmpty
+            || RaveStagingPubOverride.isActive
         let base = env["MACCRAB_RAVE_BASE_URL"] ?? ""
         let official = base.isEmpty || base == "https://rave.maccrab.com" || base == "https://rave.maccrab.com/"
         return (official, overrideActive)
+    }
+
+    /// Operator kill-switch for the third-party lane: a flag file
+    /// `<supportDir>/tierb_third_party_disabled`. Operator-settable, survives
+    /// restarts, no app update needed. (A signed remote-config flip is the
+    /// fleet-wide version — documented for the cross-repo server work.)
+    public static func thirdPartyExecutionDisabled() -> Bool {
+        FileManager.default.fileExists(
+            atPath: RevocationReverifyService.defaultSupportDir()
+                .appendingPathComponent("tierb_third_party_disabled").path)
     }
 }

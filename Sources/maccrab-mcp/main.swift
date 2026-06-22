@@ -2620,13 +2620,17 @@ func handleForensicsRunCollector(_ args: [String: Any]) async -> Any {
                 "notes": result.notes,
             ] as [String: Any])]]]
         }
-        let runner = PluginRunner()
-        do {
+        // Gate Tier-B on "not a registered Tier-A built-in" (mirrors the CLI +
+        // KitRunner). NOT on the thrown error type — a registered Tier-A plugin's
+        // transient failure (constructionFailed / consent-denied / etc.) must
+        // propagate, never silently re-route to a colliding installed Tier-B id.
+        if await PluginRegistry.shared.registration(forID: pluginID) != nil {
+            let runner = PluginRunner()
             let (result, invocationID) = try await runner.runCollector(
                 id: pluginID, handle: handle, inputs: inputs)
             return payload(result, Int(invocationID), "first-party-builtin")
-        } catch is PluginRunnerError {
-            // Not a Tier-A built-in — try an INSTALLED Tier-B plugin via the
+        } else {
+            // Not a Tier-A built-in — run the INSTALLED Tier-B plugin via the
             // shared two-lane executor (first-party → sandboxed, fail-closed).
             // Untrusted code runs ONLY under the sandbox.
             let ctx = TierBCollectorExecutor.catalogContextFromEnv()

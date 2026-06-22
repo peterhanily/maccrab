@@ -411,6 +411,11 @@ private func runTierBCollector(id: String, handle: CaseHandle, window: TimeWindo
     // Defense-in-depth catalog-context flags for the execution gate.
     let ctx = TierBCollectorExecutor.catalogContextFromEnv()
 
+    // S2: headless/CLI boxes don't get the dashboard's revocation sweep — run the
+    // staleness reconcile before the run so a since-revoked-or-stale third-party
+    // plugin is quarantined (resolve refuses a quarantined plugin before verify).
+    _ = try? await RevocationReverifyService.reconcileDefaults()
+
     let caseRow = try await handle.store.fetchCase(id: handle.caseID)
     let allowsSensitive = (caseRow?.encryptionState ?? .plaintext) != .plaintext
 
@@ -509,8 +514,8 @@ private func pluginTest(args: [String]) async throws {
         throw CaseCommandError.usage("Usage: maccrabctl plugin test <bundle-dir>")
     }
     // Run the plugin LOCALLY under the real sandbox so the author SEES containment.
-    // The dev trampoline (`swift build`) is ad-hoc-signed; opt it in for the test.
-    setenv("MACCRAB_TIERB_DEV_TRAMPOLINE", "1", 1)
+    // The dev trampoline (`swift build`) is ad-hoc-signed; allow it for THIS run
+    // via an explicit value (not a process-global env var that could leak).
     let manifest = try TierBManifest.load(fromBundlePath: bundle)
     let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory() + "maccrab-plugintest-\(UUID().uuidString)")
     let installer = PluginInstaller(pluginsRoot: tmpRoot)
@@ -532,7 +537,8 @@ private func pluginTest(args: [String]) async throws {
     do {
         let exec = try await TierBCollectorExecutor.runInstalled(
             pluginID: manifest.id, scratchDir: scratch,
-            officialSource: true, catalogOverrideActive: false, registry: registry)
+            officialSource: true, catalogOverrideActive: false, registry: registry,
+            allowUnsignedTrampoline: true)   // local author test; DEBUG-honored only
         print("Ran under the \(exec.lane.rawValue) lane:")
         print("  Exit code:    \(exec.outcome.exitCode)")
         print("  Result:       \(exec.outcome.result?.status ?? "(no terminal result)")")
@@ -652,6 +658,13 @@ private func pluginInstall(args: [String]) async throws {
         // Local bundle = a SIDELOAD: operator-vouched, UNVETTED code. Hard-refuse
         // namespace impersonation, then TOFU-disclose its capabilities before
         // trusting it. It will run sandboxed regardless.
+        // S1: honor the operator kill-switch on the sideload (install) path too —
+        // the catalog `frozen` flag covers the catalog path; this local flag is
+        // the immediate incident lever for non-catalog installs. (A frozen remote
+        // catalog is the cross-repo signed equivalent.)
+        if TierBCollectorExecutor.thirdPartyExecutionDisabled() {
+            throw CaseCommandError.underlying("Third-party plugins are disabled by the operator kill-switch — refusing to sideload.")
+        }
         let manifest = try TierBManifest.load(fromBundlePath: first)
         let builtinNames = await PluginRegistry.shared.manifests().map { $0.displayName }
         switch RaveNamespaceGuard.evaluate(
