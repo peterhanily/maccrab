@@ -39,11 +39,27 @@ struct RevocationReverifyTests {
         #expect(RevocationReverify.staleAction(freshness: stale, provenance: .builtIn) == .ok)
     }
 
-    @Test("never-fetched is treated as stale (third-party quarantines, store warns)")
+    @Test("never-fetched does NOT fail-close a sideload (no revocation authority yet — audit #6); it only warns")
     func neverFetched() {
-        #expect(RevocationReverify.staleAction(freshness: .never, provenance: .thirdParty) == .quarantine(age: nil))
+        // `.never` = the signed revocation feed has never verified here (the
+        // reality until the rave server ships). It must NOT quarantine an
+        // operator-TOFU'd sideload — that would make every offline box unable to
+        // run its own sideloaded plugin. Only genuine `.stale` escalates (above).
+        #expect(RevocationReverify.staleAction(freshness: .never, provenance: .thirdParty) == .warn(age: nil))
         #expect(RevocationReverify.staleAction(freshness: .never, provenance: .store) == .warn(age: nil))
         #expect(RevocationReverify.staleAction(freshness: .never, provenance: .builtIn) == .ok)
+    }
+
+    @Test("sweep: a never-fetched-feed box does NOT quarantine an un-revoked third-party sideload (audit #6)")
+    func sweepNeverFetchedRunsSideload() {
+        // No explicit revocation + never-fetched feed → the operator's sideload
+        // runs (contained), instead of being instantly quarantined offline.
+        let installed: [(ref: RevocationEnforcer.InstalledRef, provenance: PluginProvenance)] = [
+            (Self.ref("com.x.sideload"), .thirdParty),
+        ]
+        let recs = RevocationReverify.runtimeQuarantine(
+            installed: installed, against: Self.listRevoking("com.other"), freshness: .never)
+        #expect(recs.isEmpty)
     }
 
     // MARK: - runtimeQuarantine sweep
@@ -85,8 +101,10 @@ struct RevocationReverifyTests {
         let installed: [(ref: RevocationEnforcer.InstalledRef, provenance: PluginProvenance)] = [
             (Self.ref("com.x.revoked"), .thirdParty),
         ]
+        // `.stale` (not `.never`) so the stale escalation genuinely fires and the
+        // dedup against the explicit revocation is exercised.
         let recs = RevocationReverify.runtimeQuarantine(
-            installed: installed, against: list, freshness: .never)
+            installed: installed, against: list, freshness: .stale(age: 8 * 24 * 3600))
         #expect(recs.count == 1)
         #expect(recs.first?.code == "MALWARE")
     }

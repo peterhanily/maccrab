@@ -29,18 +29,39 @@ struct RevocationReverifyServiceTests {
         URL(fileURLWithPath: NSTemporaryDirectory() + "revsvc-receipts-\(UUID().uuidString)")
     }
 
-    @Test("offline + never-fetched: a third-party plugin is quarantined as stale (self-heal)")
+    @Test("offline + STALE feed: a third-party plugin is quarantined as stale (self-heal)")
     func staleQuarantines() async throws {
         let installer = try await Self.installThirdParty(id: "com.x.rev1")
         defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
         let store = Self.freshStore()
         defer { try? FileManager.default.removeItem(atPath: store.filePath) }
 
+        // Seed a genuinely STALE clock: a signed list WAS verified once, 8 days ago
+        // (past the 7-day ceiling). `.never` no longer escalates (audit #6) — only
+        // real staleness does — so the self-heal is driven from a lapsed feed.
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        try store.recordRevocations(serial: 1, verifiedAt: now.addingTimeInterval(-8 * 24 * 3600))
+
         let records = try await RevocationReverifyService.reconcile(
-            verifiedList: nil, installer: installer, trustStateStore: store, receiptsDir: Self.emptyReceipts())
+            verifiedList: nil, installer: installer, trustStateStore: store,
+            receiptsDir: Self.emptyReceipts(), now: now)
         #expect(records.contains { $0.pluginID == "com.x.rev1" && $0.code == "REVOCATION_STALE" })
         let q = await installer.currentQuarantine()
         #expect(q["com.x.rev1"] != nil)   // actually applied
+    }
+
+    @Test("offline + never-fetched: an operator sideload RUNS, not quarantined (audit #6)")
+    func neverFetchedRunsSideload() async throws {
+        let installer = try await Self.installThirdParty(id: "com.x.rev3")
+        defer { try? FileManager.default.removeItem(atPath: installer.pluginsRootPath) }
+        let store = Self.freshStore()   // never recorded → freshness .never
+        defer { try? FileManager.default.removeItem(atPath: store.filePath) }
+
+        let records = try await RevocationReverifyService.reconcile(
+            verifiedList: nil, installer: installer, trustStateStore: store, receiptsDir: Self.emptyReceipts())
+        #expect(records.isEmpty)
+        let q = await installer.currentQuarantine()
+        #expect(q["com.x.rev3"] == nil)   // the operator's TOFU sideload is runnable offline
     }
 
     @Test("fresh verified list: a non-revoked third-party plugin is NOT quarantined")

@@ -8,11 +8,16 @@
 // was revoked since. This adds:
 //
 //   (1) staleAction — when the client's revocation data is older than the ceiling
-//       (RaveTrustState.revocationFreshness) or was never fetched, a maybe-revoked
-//       plugin may be running unknown to us. Fail-closed by trust class: a
-//       third-party SIDELOAD is quarantined (we cannot confirm it is still
-//       trusted); a curated STORE plugin warns (it carries the catalog vetting
-//       chain); a BUILT-IN is unaffected (first-party, no remote revocation).
+//       (RaveTrustState.revocationFreshness), a maybe-revoked plugin may be running
+//       unknown to us. Fail-closed by trust class: a third-party SIDELOAD is
+//       quarantined (we cannot confirm it is still trusted); a curated STORE plugin
+//       warns (it carries the catalog vetting chain); a BUILT-IN is unaffected
+//       (first-party, no remote revocation). A NEVER-fetched feed — no revocation
+//       authority established yet, the reality until the rave server ships — does
+//       NOT fail-close: an operator's explicit TOFU sideload must stay runnable
+//       offline, so `.never` warns rather than quarantines (audit #6). Explicit
+//       revocations (runtimeQuarantine part (a)) are enforced regardless of
+//       freshness; only genuine STALENESS escalates a sideload to quarantine.
 //
 //   (2) runtimeQuarantine — the full sweep a timer applies: the union of
 //       (a) plugins the verified list now revokes and (b) stale-escalated
@@ -42,20 +47,33 @@ public enum RaveRevocationStaleAction: Sendable, Equatable {
 public enum RevocationReverify {
 
     /// Staleness escalation keyed on trust class. Fresh data → `.ok` for all.
+    ///
+    /// `.never` (no signed revocation feed has EVER verified on this box) is
+    /// treated differently from `.stale` (a feed we had and let lapse). A
+    /// never-fetched feed is NOT evidence a plugin was revoked — it's the expected
+    /// state until the rave revocation server is live, or on any box that has
+    /// never reached it. Quarantining a third-party SIDELOAD on `.never` would make
+    /// an operator's explicit TOFU install (`plugin install --local
+    /// --trust-on-install`) unrunnable offline, breaking the contributor/operator
+    /// loop on every box (audit #6). So `.never` does NOT fail-close: built-in is
+    /// unaffected, store/sideload get at most a warning. Explicit revocations are
+    /// still enforced regardless of freshness (runtimeQuarantine part (a)); only
+    /// genuine STALENESS escalates a sideload to quarantine.
     public static func staleAction(
         freshness: RaveRevocationFreshness,
         provenance: PluginProvenance
     ) -> RaveRevocationStaleAction {
-        guard freshness.isStale else { return .ok }
-        let age: TimeInterval?
         switch freshness {
-        case .stale(let a): age = a
-        case .never, .fresh: age = nil
-        }
-        switch provenance {
-        case .builtIn:    return .ok                  // first-party — no remote revocation
-        case .store:      return .warn(age: age)      // curated vetting chain — warn, keep running
-        case .thirdParty: return .quarantine(age: age) // sideload — fail-closed when unconfirmable
+        case .fresh:
+            return .ok
+        case .never:
+            return provenance == .builtIn ? .ok : .warn(age: nil)
+        case .stale(let age):
+            switch provenance {
+            case .builtIn:    return .ok                   // first-party — no remote revocation
+            case .store:      return .warn(age: age)       // curated vetting chain — warn, keep running
+            case .thirdParty: return .quarantine(age: age) // sideload + lost-freshness — fail-closed
+            }
         }
     }
 
