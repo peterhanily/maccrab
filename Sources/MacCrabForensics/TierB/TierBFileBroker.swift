@@ -31,13 +31,13 @@
 //   - Symlink/hardlink defenses: every path component (incl. the root) is
 //     O_NOFOLLOW; the final fd is fstat'd for a single-link regular file.
 //
-// STATUS: built + unit-tested; NOT yet wired into SandboxedTierBRunner's spawn.
-// DEFERRED WIRING (on-device, with the rest of the lane): the fd-3 attachment;
-// the brokered-TCC snapshot creation; the SBPL-vs-broker file-access decision;
-// and — REQUIRED, not optional — invocation teardown that close()s the host
-// socket and joins/cancels the serve thread, so a killed/desynced plugin cannot
-// leave a blocked broker thread behind in the long-lived host. Nothing routes
-// here yet.
+// STATUS: built, unit-tested, and WIRED LIVE. SandboxedTierBRunner.run creates the
+// socketpair, dups the broker end onto the child's fd 3, serves on a dedicated
+// thread, and tears it down after reap (close()s the host socket → EOF → bounded
+// join), so a killed/desynced plugin cannot leave a blocked broker thread behind
+// in the long-lived host. Brokered-TCC snapshots are prepared per invocation
+// (BrokeredTCC.prepare) and the served-path TCC guard keeps live stores out.
+// Containment is proven by ContainmentCorpus (`make test-corpus`).
 
 import Foundation
 import CTierBBroker

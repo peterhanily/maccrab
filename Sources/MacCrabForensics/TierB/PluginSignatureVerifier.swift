@@ -5,10 +5,10 @@
 // §12 third-party plugin store + feasibility memo (Audit Pass
 // 2026-E future).
 //
-// Status: research-grade implementation. Not yet wired into the
-// load path — the goal is to prove the contract + ship a vetted
-// reference impl so the release-chapter work can lift this into
-// PluginRegistry.load() with confidence.
+// Status: LIVE — the verifier on the install + trust + execution path. Used by
+// PluginInstaller (install/trust), TierBRegistry (resolve + verifyAll), and both
+// execution gates; verifies the Ed25519 signature over the canonical signed
+// payload before a plugin can be trusted or run.
 //
 // Design:
 //   1. A "signed plugin bundle" is a directory containing:

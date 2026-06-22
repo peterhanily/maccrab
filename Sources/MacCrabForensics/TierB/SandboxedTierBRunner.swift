@@ -19,19 +19,22 @@
 // (the trampoline inherits fds 0/1/2 across execv). Output maps through
 // TierBArtifactBridge exactly as the first-party lane.
 //
-// DEVICE-ITERATION / DEFERRED (Streams 0-2, operator-gated, not in this build):
-//   - The per-invocation SCM_RIGHTS file broker on fd 3 (O_NOFOLLOW + post-open
-//     inode re-validation, brokered-TCC scratch snapshots). fd 3 is RESERVED for
-//     it; this runner does not yet attach one, so a third-party plugin reaches
-//     files only through its SBPL-declared allowlist. The broker is the TOCTOU-
-//     hardening + brokered-personal-comms layer proven on-device.
-//   - The minimal SBPL runtime base that starts a full Swift plugin while still
-//     denying the adversarial corpus, and the exact rlimit values, are tuned and
-//     proven AS A CLIENT TEST on a physical macOS host. The defaults below are
-//     conservative starting points, not corpus-proven values.
-//   - Nothing routes to this runner yet (PluginRunner still fail-closes Tier-B
-//     execution). It is built + unit-tested + inert, like the deny-default
-//     foundation it sits on.
+// LIVE: this runner is reached via TierBCollectorExecutor (CLI `plugin run`, the
+// dashboard "Run on this Mac", and MCP forensics.run_collector). It attaches the
+// per-invocation SCM_RIGHTS file broker on fd 3 (O_NOFOLLOW safe-open beneath the
+// allowed roots + brokered-TCC snapshots; the served-path TCC guard keeps live
+// stores out) and tears it down after reap. Containment is PROVEN on-device by
+// ContainmentCorpus (`make test-corpus`) for both C and Swift fixtures. The
+// runnable lane is still TRUST-gated (FirstPartyTrustRoot / signed catalog /
+// sideload TOFU) and GA-gated on the keyholder ceremony + external pentest.
+//
+// REMAINING DEVICE / HARDENING ITEMS (operator/tracked, NOT fail-open):
+//   - Re-validate the SBPL runtime base + rlimits against the corpus on the EXACT
+//     signed release build (the defaults here are corpus-proven on the dev host;
+//     widen SandboxProfileBuilder.runtimeBaseMachServices if a heavier plugin
+//     SIGABRTs — never restore a global mach-lookup).
+//   - The check->spawn TOCTOU on the trampoline (an fd-pinned/fexecve-style spawn)
+//     and a runtime fetch of a fresh signed revocation list are tracked hardenings.
 
 import Foundation
 import Darwin
@@ -144,14 +147,13 @@ public struct SandboxedTierBRunner: Sendable {
     /// is executable. The ThirdPartyExecutionGate consumes this (FALSE →
     /// fail-closed). Pure filesystem check, safe to call before resolve.
     ///
-    /// WIRING REQUIREMENT (before this runs untrusted code in a shipped build):
-    /// the trampoline is the signed binary that enforces containment, so this
-    /// check MUST be strengthened from "exists + executable" to "is the
-    /// MacCrab-signed trampoline on a non-user-writable path" — e.g.
-    /// SecStaticCodeCheckValidity against the app's signing anchor, or
-    /// root-owned + parent not user-writable, validated once by fd to close the
-    /// check→spawn TOCTOU. build-release.sh must install the trampoline
-    /// accordingly. Until then this lane stays inert (nothing routes here).
+    /// The trampoline is the signed binary that enforces containment, so in
+    /// RELEASE this requires a valid Developer-ID signature anchored to Apple AND
+    /// the host's team (`isTrampolineSignatureTrusted`) — a swapped/user-planted
+    /// trampoline is refused before any untrusted code runs; build-release.sh
+    /// installs it Developer-ID-signed under the app bundle. REMAINING hardening:
+    /// validate once by fd and spawn from that fd (fexecve-style) to close the
+    /// residual check→spawn TOCTOU (same-uid only today — no privilege crossing).
     public var isRuntimeAvailable: Bool {
         Self.isRuntimeAvailable(
             trampolinePath: trampolinePath,
