@@ -115,9 +115,16 @@ public struct SandboxedTierBRunner: Sendable {
     /// executable. Returns the path even if it does not exist — `isRuntimeAvailable`
     /// is the gate; this just computes the candidate.
     public static func defaultTrampolinePath() -> String {
-        let exeDir = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments.first ?? "/"))
-            .deletingLastPathComponent()
-        return exeDir.appendingPathComponent("maccrab-tierb-sandbox-host").path
+        let exe = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments.first ?? "/")
+        let dir = exe.deletingLastPathComponent()
+        let name = "maccrab-tierb-sandbox-host"
+        let candidates = [
+            dir.appendingPathComponent(name),                                                // sibling: CLI/MCP in Resources/bin, dev .build
+            dir.deletingLastPathComponent().appendingPathComponent("Resources/bin/\(name)"), // app: Contents/MacOS → ../Resources/bin
+        ]
+        let fm = FileManager.default
+        for c in candidates where fm.isExecutableFile(atPath: c.path) { return c.path }
+        return candidates[0].path   // fall back to the sibling path; isRuntimeAvailable rejects if absent
     }
 
     /// Whether the sandbox runtime can be established: the trampoline exists and

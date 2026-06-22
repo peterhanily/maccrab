@@ -196,7 +196,10 @@ STAGE_ENV_EOF
     # Create universal binaries for every product. maccrabd still builds
     # (it's the legacy SPM target used during `swift run` development) but
     # isn't shipped — the system extension replaces it in the installed .app.
-    for binary in maccrabctl maccrab-mcp MacCrabApp MacCrabAgent; do
+    # maccrab-tierb-sandbox-host = the signed sandbox trampoline (enforces
+    # third-party plugin containment); maccrab-tierb-example = the reference
+    # collector shipped for contributors. Both are C executables.
+    for binary in maccrabctl maccrab-mcp MacCrabApp MacCrabAgent maccrab-tierb-sandbox-host maccrab-tierb-example; do
         ARM_BIN="$PROJECT_DIR/.build/arm64-apple-macosx/release/$binary"
         X86_BIN="$PROJECT_DIR/.build/x86_64-apple-macosx/release/$binary"
         if [ -f "$ARM_BIN" ] && [ -f "$X86_BIN" ]; then
@@ -498,6 +501,24 @@ PLIST
         chmod 755 "$APP/Contents/Resources/bin/maccrab-mcp"
         echo "    ✓ Bundled maccrab-mcp into MacCrab.app/Contents/Resources/bin/"
     fi
+    # The signed sandbox trampoline + the reference plugin. The trampoline is the
+    # binary that enforces third-party plugin containment; SandboxedTierBRunner's
+    # isRuntimeAvailable rejects it unless it is Developer-ID-signed (codesigned
+    # below in the sign stage), so the third-party lane FAIL-CLOSES on any build
+    # that doesn't ship it here. defaultTrampolinePath() finds it next to the CLI
+    # (Resources/bin) and via ../Resources/bin from the app's Contents/MacOS.
+    if [ -x "$STAGING_DIR/bin/maccrab-tierb-sandbox-host" ]; then
+        cp "$STAGING_DIR/bin/maccrab-tierb-sandbox-host" "$APP/Contents/Resources/bin/maccrab-tierb-sandbox-host"
+        chmod 755 "$APP/Contents/Resources/bin/maccrab-tierb-sandbox-host"
+        echo "    ✓ Bundled the sandbox trampoline into MacCrab.app/Contents/Resources/bin/"
+    else
+        echo "    ⚠ maccrab-tierb-sandbox-host missing — the third-party plugin lane will fail-closed in this build."
+    fi
+    if [ -x "$STAGING_DIR/bin/maccrab-tierb-example" ]; then
+        cp "$STAGING_DIR/bin/maccrab-tierb-example" "$APP/Contents/Resources/bin/maccrab-tierb-example"
+        chmod 755 "$APP/Contents/Resources/bin/maccrab-tierb-example"
+        echo "    ✓ Bundled the reference plugin into MacCrab.app/Contents/Resources/bin/"
+    fi
 
     cat > "$APP/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -652,6 +673,21 @@ stage_sign() {
                 echo "    ✓ $(basename "$binary") (hardened runtime)"
             fi
         done
+
+        # 1b. The CLI tools + sandbox trampoline COPIED into the .app
+        # (Contents/Resources/bin) need their OWN hardened-runtime signature —
+        # the final app sign is intentionally NOT --deep (it only SEALS these via
+        # CodeResources). SandboxedTierBRunner.isRuntimeAvailable refuses to run
+        # any third-party plugin unless the trampoline is independently
+        # Developer-ID-signed with our team, so without this the lane fail-closes.
+        if [ -d "$APP/Contents/Resources/bin" ]; then
+            for binary in "$APP"/Contents/Resources/bin/*; do
+                if [ -f "$binary" ] && file "$binary" | grep -q "Mach-O"; then
+                    codesign --sign "$DEVELOPER_ID" --options runtime --timestamp --force "$binary"
+                    echo "    ✓ .app/Resources/bin/$(basename "$binary") (hardened runtime)"
+                fi
+            done
+        fi
 
         # 2. System extension Mach-O — signed with ES entitlement +
         # provisioning-profile-bound identifier. AMFI matches the identifier
