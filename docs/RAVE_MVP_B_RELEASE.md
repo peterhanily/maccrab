@@ -53,8 +53,14 @@ The corpus passed for C plugins on the dev host. Re-run it against the **release
 build and a **Swift** plugin (a real plugin is Swift; the runtime base may need
 extra tuning):
 ```
-MACCRAB_CORPUS=1 MACCRAB_BIN_DIR=$(swift build --show-bin-path) swift test --filter ContainmentCorpus
+make test-corpus      # MACCRAB_CORPUS=1 MACCRAB_BIN_DIR=$(swift build --show-bin-path) swift test --filter ContainmentCorpus
 ```
+This is the **REQUIRED** containment gate and must be recorded in the release
+checklist. CI runs the same corpus as an **advisory** job (`corpus`) so a
+host-independent regression (broker/SBPL/trampoline) turns a check red, but a
+hosted runner's VM is not the launch-proof environment — only the on-device run
+is the gate. The corpus now also asserts an undeclared **mach-service** lookup
+and a **stat()** of a metadata-denied crown-jewel are both OS-denied (audit #4).
 If a Swift plugin SIGABRTs at startup, the deny-default base in
 `SandboxProfileBuilder.compileDenyDefault` needs more allow rules (iterate: add a
 base rule → rebuild → re-run). The C fixtures already pass; the Swift base is the

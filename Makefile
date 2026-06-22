@@ -1,4 +1,4 @@
-.PHONY: build test compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown check-counts
+.PHONY: build test test-corpus compile-rules install uninstall clean run dev restart app stop status test-detection test-campaign pkg dmg breakdown check-counts
 
 PREFIX ?= /usr/local
 SUPPORT_DIR = /Library/Application\ Support/MacCrab
@@ -80,6 +80,19 @@ test-fp:
 
 test-integration:
 	./scripts/integration-test.sh
+
+# Containment corpus — the on-device proof that the sandboxed third-party Tier-B
+# lane actually CONTAINS (undeclared read / network / fork / metadata-stat /
+# undeclared mach-lookup are OS-denied; a declared read is brokered over fd 3).
+# Gated behind MACCRAB_CORPUS so plain `make test` / hosted CI stays
+# host-agnostic; this runs the real spawn under sandbox_init on a physical macOS
+# host. MANDATORY pre-release gate for ANY change under Sources/MacCrabForensics/
+# TierB or the trampoline/broker C targets — record the run in the release
+# checklist. (audit #2: the only containment proof must not run nowhere.)
+test-corpus:
+	swift build
+	MACCRAB_CORPUS=1 MACCRAB_BIN_DIR="$$(swift build --show-bin-path)" \
+		swift test --filter ContainmentCorpus 2>&1 | grep -E "✔|✘|Test run"
 
 lint-rules:
 	./scripts/rule-lint.sh

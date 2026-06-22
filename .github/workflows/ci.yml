@@ -29,6 +29,14 @@
 #                               the full architectural audit + PASS-L
 #                               Xcode-27 guards, some of which are
 #                               release-time gates, not per-PR gates).
+#   corpus          ADVISORY  — runs the Tier-B containment corpus so a
+#                               regression in the broker/SBPL/trampoline that
+#                               re-opens the boundary turns a check red instead
+#                               of passing unseen. Advisory because a hosted
+#                               runner's VM is NOT the launch-proof environment —
+#                               the REQUIRED containment gate is the operator's
+#                               on-device `make test-corpus` on macOS 26, recorded
+#                               in the release checklist.
 name: CI
 
 on:
@@ -186,3 +194,53 @@ jobs:
 
       - name: Pre-release architectural audit
         run: ./scripts/pre-release-audit.sh
+
+  # ── ADVISORY ────────────────────────────────────────────────────────
+  corpus:
+    name: Tier-B containment corpus (advisory)
+    runs-on: macos-15
+    timeout-minutes: 30
+    # Advisory: a hosted runner's VM is not the launch-proof environment for
+    # sandbox_init containment (the SBPL base for a full Swift plugin is still
+    # tuned on device — see docs/RAVE_MVP_B_RELEASE.md §2a). But running the
+    # corpus here still turns a host-INDEPENDENT regression — broker resolve
+    # logic, SBPL shape, fd-3 wiring, trampoline argv — from "passes CI green"
+    # (audit #2) into a visible red check. The REQUIRED containment gate stays
+    # the operator's on-device `make test-corpus`, recorded in the release
+    # checklist.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Select Xcode ${{ env.PINNED_XCODE_MAJOR }}.x (PASS-K pin)
+        run: |
+          set -euo pipefail
+          want="${PINNED_XCODE_MAJOR}"
+          best=""
+          for app in /Applications/Xcode_${want}*.app /Applications/Xcode.app; do
+            [ -d "$app" ] || continue
+            ver=$("$app/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | sed -n 's/^Xcode \([0-9][0-9]*\).*/\1/p')
+            if [ "$ver" = "$want" ]; then best="$app"; break; fi
+          done
+          if [ -z "$best" ]; then
+            echo "::error::No Xcode ${want}.x found on this runner — CI is pinned to the release toolchain (PASS-K)." >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$best/Contents/Developer"
+          xcodebuild -version
+
+      - name: Resolve dependencies (pinned)
+        run: swift package resolve
+
+      # MACCRAB_CORPUS makes the gated ContainmentCorpusTests run AND (in DEBUG)
+      # lets SandboxedTierBRunner accept the locally-built dev trampoline; MACCRAB_
+      # BIN_DIR points the test at the freshly built trampoline + C fixtures. The
+      # corpus asserts ZERO leak.* artifacts (undeclared read/network/fork/metadata/
+      # mach all OS-denied) and one brokered read.
+      - name: Run containment corpus
+        run: |
+          set -euo pipefail
+          swift build
+          MACCRAB_CORPUS=1 MACCRAB_BIN_DIR="$(swift build --show-bin-path)" \
+            swift test --filter ContainmentCorpus
