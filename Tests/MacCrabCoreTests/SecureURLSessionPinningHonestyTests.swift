@@ -44,6 +44,27 @@ struct SecureURLSessionPinningHonestyTests {
         }
     }
 
+    @Test("strict pinning is ON by default for a pinned provider; off for an unpinned one")
+    func strictDefaultsOnForPinnedProviders() {
+        let noEnv: [String: String] = [:]
+        // Pinned credential-bearing providers pin by default — no env var needed.
+        #expect(SecureURLSession.strictPinningEnabled(provider: .anthropic, env: noEnv))
+        #expect(SecureURLSession.strictPinningEnabled(provider: .openai, env: noEnv))
+        #expect(SecureURLSession.strictPinningEnabled(provider: .virustotal, env: noEnv))
+        // Unpinned providers can't pin regardless of env.
+        #expect(!SecureURLSession.strictPinningEnabled(provider: .osv, env: noEnv))
+        #expect(!SecureURLSession.strictPinningEnabled(provider: .ollama, env: noEnv))
+    }
+
+    @Test("MACCRAB_TLS_PINNING=off|warn downgrades a pinned provider to warn-only (stale-pin safety valve)")
+    func downgradeValve() {
+        #expect(!SecureURLSession.strictPinningEnabled(provider: .anthropic, env: ["MACCRAB_TLS_PINNING": "off"]))
+        #expect(!SecureURLSession.strictPinningEnabled(provider: .anthropic, env: ["MACCRAB_TLS_PINNING": "warn"]))
+        #expect(!SecureURLSession.strictPinningEnabled(provider: .anthropic, env: ["MACCRAB_TLS_PINNING": "OFF"]))   // case-insensitive
+        // An explicit =strict (or any other value) keeps strict on for a pinned provider.
+        #expect(SecureURLSession.strictPinningEnabled(provider: .anthropic, env: ["MACCRAB_TLS_PINNING": "strict"]))
+    }
+
     @Test("sessions construct cleanly under strict-pinning env for both pinned and unpinned providers")
     func makeWorksUnderStrictEnv() {
         // Exercises the init path that emits the no-op warning for unpinned

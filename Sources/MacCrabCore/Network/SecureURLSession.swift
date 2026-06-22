@@ -128,34 +128,48 @@ public enum APIProvider: String, Sendable {
 ///
 /// Security properties enforced:
 /// - TLS 1.2 minimum (blocks negotiation of deprecated TLS 1.0 / 1.1)
-/// - SPKI certificate pinning when pins are configured AND
-///   `MACCRAB_TLS_PINNING=strict` env var is set (opt-in, since pins require
-///   maintenance to stay valid as providers rotate certificates)
+/// - SPKI certificate pinning is ON BY DEFAULT for any provider that ships pins
+///   (the pins exist to resist a rogue-CA / enterprise-MITM proxy on the path
+///   carrying API keys + alert content). An operator can downgrade to warn-only
+///   with `MACCRAB_TLS_PINNING=off` (or `warn`) — a safety valve for the case
+///   where a provider rotates keys and the shipped pins go stale before a release
+///   refreshes them. The chain-match accepts the stable Google-Trust-Services
+///   intermediate-CA pins, so normal leaf rotation does not break strict mode.
 /// - Reasonable request/resource timeouts to prevent hung connections
 public final class SecureURLSession: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
 
     private let logger = Logger(subsystem: "com.maccrab", category: "tls")
 
     /// Whether strict pinning (reject connections with no matching pin) is active.
-    /// Requires both `MACCRAB_TLS_PINNING=strict` env var AND the provider having
-    /// at least one configured pin in `knownSPKIPins`.
+    /// True by default whenever the provider ships pins; false if the provider has
+    /// none, or the operator set `MACCRAB_TLS_PINNING=off|warn`.
     private let strictPinning: Bool
 
     /// Expected SPKI SHA-256 hashes (base64) for this session.
     private let expectedPins: Set<String>
 
+    /// Pure pinning-mode decision (testable without a live handshake). Strict is ON
+    /// by default for any provider that ships pins; downgraded to warn-only only by
+    /// an explicit `MACCRAB_TLS_PINNING=off|warn` (stale-pin safety valve).
+    static func strictPinningEnabled(provider: APIProvider, env: [String: String]) -> Bool {
+        guard !provider.knownSPKIPins.isEmpty else { return false }
+        let mode = env["MACCRAB_TLS_PINNING"]?.lowercased()
+        return !(mode == "off" || mode == "warn")
+    }
+
     private init(provider: APIProvider) {
-        let envPinning = Foundation.ProcessInfo.processInfo.environment["MACCRAB_TLS_PINNING"] == "strict"
+        let env = Foundation.ProcessInfo.processInfo.environment
         self.expectedPins = Set(provider.knownSPKIPins)
-        self.strictPinning = envPinning && !provider.knownSPKIPins.isEmpty
+        self.strictPinning = Self.strictPinningEnabled(provider: provider, env: env)
         super.init()
-        // Honesty: an operator who sets MACCRAB_TLS_PINNING=strict expects every
-        // outbound API connection to be pinned. For a provider that ships no pins
-        // (e.g. .osv) strict mode resolves to false above and pinning becomes a
-        // silent no-op. Say so explicitly rather than pretend pinning is active.
-        // .ollama is excluded — it targets localhost, where there is no MITM
-        // surface and pinning genuinely does not apply.
-        if envPinning && expectedPins.isEmpty && provider != .ollama {
+        let mode = env["MACCRAB_TLS_PINNING"]?.lowercased()
+        if (mode == "off" || mode == "warn"), !expectedPins.isEmpty {
+            // The operator opted OUT of the secure default. Be loud: connections to
+            // a credential-bearing provider now rely on the OS trust store only.
+            logger.warning("TLS: SPKI pinning DOWNGRADED to warn-only for \(provider.rawValue) (MACCRAB_TLS_PINNING=\(mode ?? "")) — connections rely on the OS trust store only; refresh the pins and remove this override")
+        } else if mode == "strict", expectedPins.isEmpty, provider != .ollama {
+            // Honesty: strict explicitly requested for a provider that ships no
+            // pins (e.g. .osv) is a silent no-op — say so. .ollama is localhost.
             logger.warning("TLS: MACCRAB_TLS_PINNING=strict requested but no SPKI pins are configured for \(provider.rawValue) — pinning is a NO-OP for this host (OS trust store only)")
         }
     }
