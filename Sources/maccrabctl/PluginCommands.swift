@@ -594,15 +594,14 @@ private func pluginDaemonStatus() async throws {
 // MARK: - install / uninstall / trust list
 
 private func pluginInstall(args: [String]) async throws {
-    guard let first = args.first else {
-        throw CaseCommandError.usage("Usage: maccrabctl plugin install <bundle-dir>|<plugin-id> [--trust-on-install] [--force] [--catalog-base <url>] [--version <ver>] [--allow-unpinned-prerelease]")
-    }
     var trustOnInstall = false
     var force = false
     var catalogBase: String?
     var version: String?
     var allowUnpinnedPrerelease = false
-    var i = 1
+    var assumeYes = false
+    var target: String?
+    var i = 0
     while i < args.count {
         let arg = args[i]
         switch arg {
@@ -610,6 +609,10 @@ private func pluginInstall(args: [String]) async throws {
             trustOnInstall = true
         case "--force":
             force = true
+        case "--local":
+            break   // explicit sideload intent; a local path is auto-detected anyway
+        case "--yes", "-y":
+            assumeYes = true
         case "--allow-unpinned-prerelease":
             allowUnpinnedPrerelease = true
         case "--catalog-base":
@@ -621,13 +624,16 @@ private func pluginInstall(args: [String]) async throws {
             guard i < args.count else { throw CaseCommandError.usage("--version requires a version") }
             version = args[i]
         default:
-            break
+            if target == nil && !arg.hasPrefix("-") { target = arg }
         }
         i += 1
     }
+    guard let first = target else {
+        throw CaseCommandError.usage("Usage: maccrabctl plugin install <bundle-dir>|<plugin-id> [--local] [--yes] [--trust-on-install] [--force] [--catalog-base <url>] [--version <ver>]")
+    }
 
     // Plugin-id (reverse-DNS, no slashes) → HTTP catalog-fetch path.
-    // Path / URL / anything-else → existing local bundle-dir path.
+    // Path / URL / anything-else → local bundle-dir SIDELOAD path.
     let installed: InstalledPlugin
     if isLikelyPluginID(first) {
         let base = catalogBase
@@ -643,13 +649,44 @@ private func pluginInstall(args: [String]) async throws {
         )
         print("Installed plugin '\(installed.pluginID)' from \(base)")
     } else {
+        // Local bundle = a SIDELOAD: operator-vouched, UNVETTED code. Hard-refuse
+        // namespace impersonation, then TOFU-disclose its capabilities before
+        // trusting it. It will run sandboxed regardless.
+        let manifest = try TierBManifest.load(fromBundlePath: first)
+        let builtinNames = await PluginRegistry.shared.manifests().map { $0.displayName }
+        switch RaveNamespaceGuard.evaluate(
+            id: manifest.id, displayName: manifest.displayName,
+            isFirstParty: false, firstPartyDisplayNames: builtinNames
+        ) {
+        case .reservedNamespaceImpersonation(let id):
+            throw CaseCommandError.underlying("Refusing to install '\(id)': the com.maccrab.* namespace is reserved for first-party plugins.")
+        case .confusableDisplayName(let name, let matches):
+            throw CaseCommandError.underlying("Refusing to install: display name '\(name)' is confusable with first-party '\(matches)'.")
+        case .ok:
+            break
+        }
+        let consent = manifest.consentSummary()
+        print("⚠ Sideloading UNVETTED third-party plugin '\(manifest.id)' v\(manifest.version)")
+        print("  Operator-vouched code with NO rave-catalog vetting. It runs sandboxed; review its access:")
+        print("    File reads:     \(consent.fileReads.isEmpty ? "(none)" : consent.fileReads.joined(separator: ", "))")
+        if !consent.tccReads.isEmpty { print("    ⚠ Personal/TCC: \(consent.tccReads.joined(separator: ", "))  (served as brokered snapshots)") }
+        print("    Network:        \(consent.networkEndpoints.isEmpty ? "deny" : consent.networkEndpoints.joined(separator: ", "))")
+        print("    Exec/fork:      \((consent.execPaths.isEmpty && !consent.allowsFork) ? "deny" : "ALLOWED")")
+        print("    Privacy class:  \(consent.derivedHighestPrivacy)\(consent.privacyUnderdeclared ? "  (⚠ author under-declared)" : "")")
+        if consent.isDisclosedExfilSurface {
+            print("  ⚠⚠ HIGH RISK: reads personal data AND has network egress (disclosed exfil surface).")
+        }
+        if !assumeYes {
+            FileHandle.standardOutput.write(Data("  Type 'sideload' to proceed (or anything else to cancel): ".utf8))
+            guard (readLine() ?? "") == "sideload" else { throw CaseCommandError.underlying("Sideload cancelled.") }
+        }
         let installer = PluginInstaller()
         installed = try await installer.install(
             sourceDir: URL(fileURLWithPath: first),
             trustOnInstall: trustOnInstall,
             force: force
         )
-        print("Installed plugin '\(installed.pluginID)'")
+        print("Installed (sideloaded) plugin '\(installed.pluginID)' — provenance: third-party · sideloaded · unverified")
     }
     print("  Root:            \(installed.installRoot)")
     print("  Publisher key:   \(installed.publicKeyHex.prefix(16))…")

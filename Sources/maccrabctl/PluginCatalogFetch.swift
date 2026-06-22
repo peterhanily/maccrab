@@ -195,6 +195,13 @@ struct PluginCatalogFetcher {
         force: Bool,
         allowUnpinnedPrerelease: Bool = false
     ) async throws -> InstalledPlugin {
+        // Step 0: reserved-namespace hard refusal (even from a signed catalog) —
+        // com.maccrab.* is first-party-only; a confusable/impersonating id never
+        // installs through the enforced path.
+        if RaveNamespaceGuard.isReservedNamespace(pluginID) {
+            throw PluginCatalogFetchError.catalogParseFailed(
+                reason: "Refusing to install '\(pluginID)': the com.maccrab.* namespace is reserved for first-party plugins.")
+        }
         // Step 1: catalog index + signature.
         let catalogURL = catalogBase.appendingPathComponent("catalog.json")
         let catalogSigURL = catalogBase.appendingPathComponent("catalog.json.sig")
