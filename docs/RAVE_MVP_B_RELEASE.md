@@ -118,6 +118,29 @@ keeps a fooled trust contained). Decide custody before opening contrib.
 
 ---
 
+## 3a. Security review status (live-routing adversarial review)
+
+A 3-lens adversarial review of the now-live execution routing ran before this
+runbook. **All must-fix (1 CRITICAL + 3 HIGH) fail-opens are FIXED** (see the
+`fix(tierb): close the live-routing review's must-fixes` commit): the trampoline
+dev-override is now DEBUG-only + value-pinned (M1), the team-pin fails closed in
+release (M2), MCP routing gates on registration not error-type (M3), `plugin
+test` uses an in-process flag not a leaky `setenv` (M4), plus an operator
+kill-switch (S4), staleness reconcile on CLI runs (S2-lite), the staging-override
+gate (S5), and kill-switch-blocks-sideload (S1-local).
+
+**Remaining should-fix (recommend landing this RC cycle; not fail-open):**
+- **S2-full** — fetch a fresh signed `revocations.json` on a runtime timer (not
+  just install-time); today runtime reconcile is staleness-only. A plugin revoked
+  AFTER install is caught by the staleness sweep + quarantine-before-verify, but
+  an explicit-revocation runtime refresh would be tighter.
+- **S3-full** — validate the trampoline once by fd (O_NOFOLLOW) and spawn from
+  that fd (fexecve-style) to close the check→spawn TOCTOU. The argv[0] vector is
+  already removed and the signature is team-pinned; this closes the residual race.
+- **Nits (accept for RC):** the deny-default base allows `file-read-metadata`
+  globally (a `stat()` side channel — content still brokered); `--local` is a
+  documented no-op (routing is auto-detected). Feed these to the pentest (§2b).
+
 ## 4. Remaining app-side polish (NON-blocking; after RC test)
 
 These are UX, not safety, and the engine is complete without them:

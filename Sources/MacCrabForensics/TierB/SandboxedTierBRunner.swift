@@ -121,7 +121,14 @@ public struct SandboxedTierBRunner: Sendable {
     /// executable. Returns the path even if it does not exist — `isRuntimeAvailable`
     /// is the gate; this just computes the candidate.
     public static func defaultTrampolinePath() -> String {
-        let exe = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments.first ?? "/")
+        // Resolve ONLY from Bundle.main (the real executable image), never argv[0]
+        // — a launching parent controls argv[0] and could steer the sibling
+        // candidate to an attacker-writable dir (S3). If Bundle.main has no
+        // executable URL, return a non-existent path so isRuntimeAvailable
+        // fail-closes rather than trusting parent-supplied input.
+        guard let exe = Bundle.main.executableURL else {
+            return "/nonexistent/maccrab-tierb-sandbox-host"
+        }
         let dir = exe.deletingLastPathComponent()
         let name = "maccrab-tierb-sandbox-host"
         let candidates = [
