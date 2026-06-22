@@ -54,6 +54,23 @@ public struct TierBManifest: Codable, Sendable {
     /// ignoring the manifest entirely — the "decorative capability" gap.)
     public let allowProcessFork: Bool
 
+    // MARK: - Consent disclosure (signature-bound author labels)
+    //
+    // These are AUTHOR-DECLARED human-readable labels for the consent sheet. They
+    // are NOT the authority — the authoritative read-set / network-set / TCC
+    // exposure is DERIVED from the ENFORCED capability fields above (see
+    // `consentSummary`), so a plugin cannot under-declare here while its enforced
+    // caps read chat.db. Because they live in the signed manifest, a tampered
+    // catalog cannot soften them either.
+
+    /// Declared highest privacy class emitted ("metadata"|"content"|
+    /// "personalComms"|"credentialAdjacent"|"secret"); nil = undeclared.
+    public let privacyClass: String?
+    /// Declared human-readable read-set, e.g. ["Messages chat.db", "Safari history"].
+    public let dataSources: [String]
+    /// Declared TCC services / protected stores required, e.g. ["FullDiskAccess"].
+    public let tccRequirements: [String]
+
     public init(
         id: String,
         displayName: String,
@@ -66,7 +83,10 @@ public struct TierBManifest: Codable, Sendable {
         networkConnectAllowlist: [String] = [],
         machServiceConnects: [String] = [],
         processExecPaths: [String] = [],
-        allowProcessFork: Bool = false
+        allowProcessFork: Bool = false,
+        privacyClass: String? = nil,
+        dataSources: [String] = [],
+        tccRequirements: [String] = []
     ) {
         self.id = id
         self.displayName = displayName
@@ -80,6 +100,9 @@ public struct TierBManifest: Codable, Sendable {
         self.machServiceConnects = machServiceConnects
         self.processExecPaths = processExecPaths
         self.allowProcessFork = allowProcessFork
+        self.privacyClass = privacyClass
+        self.dataSources = dataSources
+        self.tccRequirements = tccRequirements
     }
 
     // Lenient decode: only id/displayName/version/schemaVersion/description are
@@ -90,6 +113,7 @@ public struct TierBManifest: Codable, Sendable {
         case id, displayName, version, schemaVersion, description, kind
         case fileReadSubpaths, fileWriteSubpaths, networkConnectAllowlist
         case machServiceConnects, processExecPaths, allowProcessFork
+        case privacyClass, dataSources, tccRequirements
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -106,6 +130,9 @@ public struct TierBManifest: Codable, Sendable {
         processExecPaths = try c.decodeIfPresent([String].self, forKey: .processExecPaths) ?? []
         // Fail-closed default: a manifest that omits the field gets NO fork.
         allowProcessFork = try c.decodeIfPresent(Bool.self, forKey: .allowProcessFork) ?? false
+        privacyClass = try c.decodeIfPresent(String.self, forKey: .privacyClass)
+        dataSources = try c.decodeIfPresent([String].self, forKey: .dataSources) ?? []
+        tccRequirements = try c.decodeIfPresent([String].self, forKey: .tccRequirements) ?? []
     }
 
     /// Produce the SandboxProfileSpec this manifest declares.
@@ -130,5 +157,83 @@ public struct TierBManifest: Codable, Sendable {
         let url = URL(fileURLWithPath: bundlePath).appendingPathComponent("manifest.json")
         let data = try Data(contentsOf: url)
         return try JSONDecoder().decode(TierBManifest.self, from: data)
+    }
+
+    /// The AUTHORITATIVE consent disclosure, DERIVED from the enforced capability
+    /// fields (not the declared labels). The storefront consent sheet renders
+    /// this so a user always sees the real read-set / network-set / TCC exposure.
+    /// `home` resolves which declared reads are TCC-protected (brokered, never
+    /// read live).
+    public func consentSummary(home: String = NSHomeDirectory()) -> TierBConsentSummary {
+        let tcc = fileReadSubpaths.filter { TCCProtectedPaths.isProtected($0, home: home) }
+        let derived: String
+        if !tcc.isEmpty { derived = "personalComms" }            // conservative: TCC read → high friction
+        else if !fileReadSubpaths.isEmpty { derived = "content" }
+        else { derived = "metadata" }
+        let underdeclared = TierBConsentSummary.privacyRank(privacyClass) < TierBConsentSummary.privacyRank(derived)
+        return TierBConsentSummary(
+            fileReads: fileReadSubpaths,
+            tccReads: tcc,
+            networkEndpoints: networkConnectAllowlist,
+            execPaths: processExecPaths,
+            allowsFork: allowProcessFork,
+            derivedHighestPrivacy: derived,
+            declaredPrivacyClass: privacyClass,
+            declaredDataSources: dataSources,
+            declaredTccRequirements: tccRequirements,
+            privacyUnderdeclared: underdeclared)
+    }
+}
+
+/// Authoritative, signature-bound consent disclosure derived from a Tier-B
+/// manifest's ENFORCED capabilities — the storefront renders this, never an
+/// under-declared author label.
+public struct TierBConsentSummary: Sendable, Equatable {
+    public let fileReads: [String]
+    public let tccReads: [String]
+    public let networkEndpoints: [String]
+    public let execPaths: [String]
+    public let allowsFork: Bool
+    public let derivedHighestPrivacy: String
+    public let declaredPrivacyClass: String?
+    public let declaredDataSources: [String]
+    public let declaredTccRequirements: [String]
+    /// True when the declared class is LOWER than what the caps actually expose —
+    /// the UI shows the derived class and flags the mismatch.
+    public let privacyUnderdeclared: Bool
+
+    public var readsPersonalComms: Bool { !tccReads.isEmpty }
+    public var hasNetwork: Bool { !networkEndpoints.isEmpty }
+    /// The high-friction grant (binding decision): a personal-comms reader that
+    /// ALSO declares network egress is a disclosed exfil surface — consent must
+    /// show read-set + network-set together and require a separate confirmation.
+    public var isDisclosedExfilSurface: Bool { readsPersonalComms && hasNetwork }
+
+    static func privacyRank(_ c: String?) -> Int {
+        switch (c ?? "metadata").lowercased() {
+        case "secret": return 4
+        case "credentialadjacent": return 3
+        case "personalcomms": return 2
+        case "content": return 1
+        default: return 0
+        }
+    }
+
+    public init(
+        fileReads: [String], tccReads: [String], networkEndpoints: [String],
+        execPaths: [String], allowsFork: Bool, derivedHighestPrivacy: String,
+        declaredPrivacyClass: String?, declaredDataSources: [String],
+        declaredTccRequirements: [String], privacyUnderdeclared: Bool
+    ) {
+        self.fileReads = fileReads
+        self.tccReads = tccReads
+        self.networkEndpoints = networkEndpoints
+        self.execPaths = execPaths
+        self.allowsFork = allowsFork
+        self.derivedHighestPrivacy = derivedHighestPrivacy
+        self.declaredPrivacyClass = declaredPrivacyClass
+        self.declaredDataSources = declaredDataSources
+        self.declaredTccRequirements = declaredTccRequirements
+        self.privacyUnderdeclared = privacyUnderdeclared
     }
 }
