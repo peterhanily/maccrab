@@ -51,7 +51,11 @@ public struct SandboxedTierBRunner: Sendable {
 
         public init(
             cpuSeconds: UInt64 = 300,
-            addressSpaceBytes: UInt64 = 2 * 1024 * 1024 * 1024,   // 2 GB
+            // RLIMIT_AS is unreliable on macOS — the dyld shared-cache mapping
+            // needs a large address space, so a finite cap aborts startup (the
+            // corpus confirmed setrlimit(RLIMIT_AS, 2GB) fails). 0 = don't set;
+            // tune on device if a hard AS bound is ever needed.
+            addressSpaceBytes: UInt64 = 0,
             // Per-real-uid soft cap, applied while running as the operator uid —
             // so =1 is a backstop, NOT the real fork-deny. Actual fork-deny is the
             // SBPL `(deny default)` (no process-fork unless the manifest declares
@@ -138,6 +142,16 @@ public struct SandboxedTierBRunner: Sendable {
         return fm.isExecutableFile(atPath: trampolinePath)
     }
 
+    /// realpath(3) — resolves all symlinks (esp. /var → /private/var) so the SBPL
+    /// self-exec literal matches the path the kernel checks at exec time. Falls
+    /// back to the input if realpath fails (the verified temp always exists).
+    static func canonicalPath(_ p: String) -> String {
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        return p.withCString { cstr in
+            realpath(cstr, &buf) != nil ? String(cString: buf) : p
+        }
+    }
+
     /// Build the trampoline argv (pure + testable). The host owns every value —
     /// none is plugin-named except the verified-temp paths the host generated.
     public static func trampolineArguments(
@@ -195,10 +209,17 @@ public struct SandboxedTierBRunner: Sendable {
             home: NSHomeDirectory())
         let brokerPolicy = readPlan.brokerPolicy(scratchDir: scratchDir)
 
+        // Canonicalize the verified-binary path: NSTemporaryDirectory() lives
+        // under /var/folders, but /var is a symlink to /private/var, and the
+        // kernel checks the sandbox process-exec rule against the RESOLVED path.
+        // The SBPL self-exec literal + the execv target must both use the
+        // canonical /private/var path or exec is denied. (Corpus finding.)
+        let canonicalExec = Self.canonicalPath(verified.binaryPath)
+
         // Build + write the Model-B deny-default SBPL the trampoline applies to
         // itself (reads brokered, not in the profile). 0o400 owner-read-only temp.
         let spec = verified.manifest.toBrokeredSandboxProfileSpec(scratchDir: scratchDir)
-        let profile = SandboxProfileBuilder.compileTrampolineDenyDefault(spec, selfExecPath: verified.binaryPath)
+        let profile = SandboxProfileBuilder.compileTrampolineDenyDefault(spec, selfExecPath: canonicalExec)
         let profilePath = NSTemporaryDirectory() + "maccrab-tier-b-profile-\(UUID().uuidString).sb"
         do {
             try profile.write(toFile: profilePath, atomically: true, encoding: .utf8)
@@ -223,7 +244,7 @@ public struct SandboxedTierBRunner: Sendable {
         let argvStrings = Self.trampolineArguments(
             trampolinePath: trampolinePath,
             profilePath: profilePath,
-            execPath: verified.binaryPath,
+            execPath: canonicalExec,
             limits: limits
         )
 
@@ -341,7 +362,11 @@ public struct SandboxedTierBRunner: Sendable {
         timer.resume()
 
         // Deliver the request (one JSON line) then close stdin. Tolerate EPIPE.
-        if let reqData = try? JSONEncoder().encode(TierBCollectRequest(
+        // withoutEscapingSlashes: paths in the request must NOT be JSON-escaped
+        // (`/`→`\/`), or a plugin's path comparison / a crude parser breaks.
+        let reqEncoder = JSONEncoder()
+        reqEncoder.outputFormatting = [.withoutEscapingSlashes]
+        if let reqData = try? reqEncoder.encode(TierBCollectRequest(
             pluginID: verified.pluginID,
             pluginVersion: verified.manifest.version,
             scratchDir: scratchDir,

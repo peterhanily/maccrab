@@ -170,7 +170,9 @@ public struct FirstPartyTierBRunner: Sendable {
         timer.resume()
 
         // Deliver the request (one JSON line) then close stdin. Tolerate EPIPE.
-        if let reqData = try? JSONEncoder().encode(TierBCollectRequest(
+        let reqEncoder = JSONEncoder()
+        reqEncoder.outputFormatting = [.withoutEscapingSlashes]   // unescaped paths in the request
+        if let reqData = try? reqEncoder.encode(TierBCollectRequest(
             pluginID: verified.pluginID,
             pluginVersion: verified.manifest.version,
             scratchDir: scratchDir,

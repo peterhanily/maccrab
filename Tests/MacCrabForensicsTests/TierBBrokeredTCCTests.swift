@@ -176,3 +176,15 @@ struct TierBBrokeredTCCTests {
         }
     }
 }
+
+@Suite("Broker scratch-read resolution (corpus regression)")
+struct BrokerScratchResolveTests {
+    @Test("a scratch read resolves through the prepared broker policy")
+    func scratchResolves() {
+        let scratch = "/var/folders/hf/x/T/corpus-ABC"
+        let plan = BrokeredTCC.prepare(manifestReadPaths: [], snapshotDir: URL(fileURLWithPath: "/tmp/snap"), home: "/Users/x")
+        let policy = plan.brokerPolicy(scratchDir: scratch)
+        let r = TierBFileBroker.resolve(scratch + "/allowed.txt", policy: policy)
+        #expect(r?.root == scratch, "roots=\(policy.allowedReadRoots)")
+    }
+}

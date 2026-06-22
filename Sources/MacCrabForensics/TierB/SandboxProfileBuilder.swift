@@ -211,6 +211,14 @@ public enum SandboxProfileBuilder {
         lines.append("(allow file-read-metadata)")
         lines.append("(allow file-read* (subpath \"/usr/lib\"))")
         lines.append("(allow file-read* (subpath \"/System/Library\"))")
+        // The dyld shared cache on macOS 13+ lives under the Cryptexes paths, not
+        // /usr/lib — without these, dyld cannot map the cache and the binary
+        // SIGABRTs at startup. (Corpus finding, macOS 26.) Read-only.
+        lines.append("(allow file-read* (subpath \"/System/Volumes/Preboot/Cryptexes\"))")
+        lines.append("(allow file-read* (subpath \"/private/preboot/Cryptexes\"))")
+        lines.append("(allow file-read* (subpath \"/System/Cryptexes\"))")
+        lines.append("(allow file-read* (subpath \"/System/DriverKit\"))")
+        lines.append("(allow file-read* (literal \"/\"))")   // dyld stats the root
         lines.append("(allow file-read* (literal \"/dev/null\") (literal \"/dev/random\") (literal \"/dev/urandom\"))")
         lines.append("")
         // Manifest-declared allowlist. Anything not listed stays denied by the

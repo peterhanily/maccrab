@@ -79,11 +79,19 @@ struct SandboxedTierBRunnerTests {
         #expect(argv.first == "/T")
         #expect(argv.contains("--profile")); #expect(argv.contains("/P.sb"))
         #expect(argv.contains("--exec")); #expect(argv.contains("/E"))
-        for flag in ["--rlimit-cpu", "--rlimit-as", "--rlimit-fsize", "--rlimit-nofile", "--rlimit-nproc"] {
+        // Default limits set every rlimit EXCEPT AS (0 by default — RLIMIT_AS is
+        // unreliable on macOS, the corpus showed a finite cap aborts startup).
+        for flag in ["--rlimit-cpu", "--rlimit-fsize", "--rlimit-nofile", "--rlimit-nproc"] {
             #expect(argv.contains(flag), "missing \(flag)")
         }
+        #expect(!argv.contains("--rlimit-as"))   // AS not set by default
         // fork-deny default is NPROC=1
         if let i = argv.firstIndex(of: "--rlimit-nproc") { #expect(argv[i + 1] == "1") }
+        // …but an explicit AS limit IS carried.
+        let withAS = SandboxedTierBRunner.trampolineArguments(
+            trampolinePath: "/T", profilePath: "/P.sb", execPath: "/E",
+            limits: SandboxedTierBRunner.ResourceLimits(addressSpaceBytes: 1 << 30))
+        #expect(withAS.contains("--rlimit-as"))
     }
 
     @Test("trampolineArguments omits a flag whose limit is 0 (leave inherited)")

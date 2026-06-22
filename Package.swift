@@ -33,6 +33,12 @@ let package = Package(
         // A tiny C program so the deprecated sandbox_init lives in a binary we
         // own + sign. Release bundling/signing is a build-release.sh follow-up.
         .executable(name: "maccrab-tierb-sandbox-host", targets: ["maccrab-tierb-sandbox-host"]),
+        // The reference Tier-B forensic collector — the contributor "hello world"
+        // speaking the TierBIPC contract; doubles as the corpus benign-run fixture.
+        .executable(name: "maccrab-tierb-example", targets: ["maccrab-tierb-example"]),
+        // Adversarial containment-corpus probe (test/operator tooling, not shipped):
+        // probes the sandbox boundary so the corpus runs against the real runtime.
+        .executable(name: "maccrab-tierb-corpus-probe", targets: ["maccrab-tierb-corpus-probe"]),
     ],
     dependencies: [
         // Test-only dep. Pinned to an exact tagged release rather than a
@@ -205,6 +211,18 @@ let package = Package(
         .executableTarget(
             name: "maccrab-tierb-sandbox-host",
             path: "Sources/maccrab-tierb-sandbox-host"
+        ),
+        // Reference Tier-B collector (C; no deps — only stdout). Shipped as the
+        // contributor example + bundled next to the trampoline by build-release.
+        .executableTarget(
+            name: "maccrab-tierb-example",
+            path: "Sources/maccrab-tierb-example"
+        ),
+        // Corpus probe (C) — links the SCM_RIGHTS transport to do a brokered read.
+        .executableTarget(
+            name: "maccrab-tierb-corpus-probe",
+            dependencies: ["CTierBBroker"],
+            path: "Sources/maccrab-tierb-corpus-probe"
         ),
         .testTarget(
             name: "MacCrabCoreTests",
