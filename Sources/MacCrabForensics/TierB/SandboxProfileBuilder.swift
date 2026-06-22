@@ -192,22 +192,66 @@ public enum SandboxProfileBuilder {
     /// proved containment holds: an allow-listed read succeeds, a non-listed
     /// read returns EPERM.
     ///
-    /// PENDING (corpus work, Stream 0-1): the runtime base below is the spike
-    /// base (broad `mach-lookup`, which must be tightened to the specific
-    /// services the Swift runtime needs), and the exact base for full Swift
-    /// plugins must be proven against the adversarial corpus AS A CLIENT TEST
-    /// before this is wired into any execution path. It is intentionally NOT
-    /// wired yet — third-party execution stays fail-closed.
+    /// Named base set of system Mach services a sandbox_init'd process is likely to
+    /// need to start (notifications, directory/identity, launch services, trust).
+    /// Replaces the former unscoped `(allow mach-lookup)` — a contained plugin can
+    /// now reach ONLY this base + its manifest-declared `machServiceConnects`, not
+    /// arbitrary `com.apple.*` services (audit #4: broad mach-lookup is a classic
+    /// macOS sandbox-escape surface). DEVICE-TUNE: if a Swift plugin SIGABRTs at
+    /// startup needing another service, ADD it here and re-run the corpus — never
+    /// restore the global allow. Deliberately excludes exfil-adjacent services
+    /// (pasteboard, screen capture, etc.).
+    static let runtimeBaseMachServices: [String] = [
+        "com.apple.system.notification_center",
+        "com.apple.system.opendirectoryd.libinfo",
+        "com.apple.system.opendirectoryd.membership",
+        "com.apple.CoreServices.coreservicesd",
+        "com.apple.coreservices.launchservicesd",
+        "com.apple.lsd.mapdb",
+        "com.apple.logd",
+        "com.apple.diagnosticd",
+        "com.apple.trustd",
+        "com.apple.trustd.agent",
+        "com.apple.SecurityServer",
+        "com.apple.cfprefsd.daemon",
+    ]
+
+    /// User crown-jewels whose METADATA (existence/size/mtime) a contained plugin
+    /// must not learn via `stat()`, even though their CONTENT is brokered. Denied
+    /// AFTER the global `file-read-metadata` allow (last-match-wins). User-sensitive
+    /// paths ONLY — never system runtime dirs dyld must stat at startup. (audit #4)
+    static func metadataDenyCrownJewels(home: String) -> [String] {
+        [home + "/Library/Keychains",
+         home + "/Library/Application Support/com.apple.TCC",
+         home + "/Library/Messages",
+         home + "/Library/Mail",
+         home + "/Library/Safari",
+         home + "/.ssh",
+         home + "/.aws",
+         home + "/.config",
+         "/Library/Keychains",
+         "/Library/Application Support/com.apple.TCC"]
+    }
+
+    /// DEVICE-TUNE (corpus work, Stream 0-1): the runtime base below (the named
+    /// `runtimeBaseMachServices` + the file-read base) must be proven to START a
+    /// full Swift plugin against the adversarial corpus AS A CLIENT TEST on a
+    /// physical macOS host. If a plugin SIGABRTs at startup needing another system
+    /// service, ADD it to `runtimeBaseMachServices` and re-run the corpus — do NOT
+    /// restore a global `(allow mach-lookup)`. This lane is reached live via
+    /// TierBCollectorExecutor; first-party / sideload execution is trust-gated
+    /// (FirstPartyTrustRoot / signed-catalog / TOFU), not gated on this profile
+    /// being final.
     public static func compileDenyDefault(_ spec: SandboxProfileSpec) -> String {
         var lines: [String] = []
         lines.append("(version 1)")
         lines.append("(deny default)")
         lines.append("")
         lines.append(";; Minimal runtime base — applied POST-STARTUP by the signed trampoline.")
-        lines.append(";; TODO(corpus): tighten mach-lookup to the specific runtime services.")
-        lines.append("(allow process-info*)")
+        lines.append("(allow process-info* (target self))")   // self only — no system-wide process enumeration
         lines.append("(allow sysctl-read)")
-        lines.append("(allow mach-lookup)")
+        lines.append(";; Named runtime Mach services (NOT a global allow — audit #4). DEVICE-TUNE.")
+        for svc in runtimeBaseMachServices { lines.append("(allow mach-lookup (global-name \(quoted(svc))))") }
         lines.append("(allow file-read-metadata)")
         lines.append("(allow file-read* (subpath \"/usr/lib\"))")
         lines.append("(allow file-read* (subpath \"/System/Library\"))")
@@ -243,12 +287,21 @@ public enum SandboxProfileBuilder {
             lines.append(";; Manifest opted into fork/posix_spawn.")
             lines.append("(allow process-fork)")
         }
-        // NOTE: spec.machServiceConnects is decoded + install-validated but NOT
-        // yet ENFORCED here — the runtime base above allows broad mach-lookup
-        // (needed to launch; see the TODO). The corpus-tightening step replaces
-        // that broad allow with a minimal runtime set AND emits per-service
-        // (allow mach-lookup (global-name ...)) from spec.machServiceConnects.
-        // Recorded + deferred, NOT silently dropped.
+        // Manifest mach-service allowlist — ENFORCED (audit #4). The runtime base
+        // above is the only OTHER mach-lookup grant; everything else stays denied
+        // by the (deny default) baseline. (Was previously decoded + validated but
+        // not emitted, while a global allow made the allowlist meaningless.)
+        if !spec.machServiceConnects.isEmpty {
+            lines.append(";; Manifest mach-service allowlist (else only the runtime base resolves).")
+            for s in spec.machServiceConnects { lines.append("(allow mach-lookup (global-name \(quoted(s))))") }
+        }
+        // Crown-jewel metadata denies LAST so they win under SBPL last-match over
+        // both the global file-read-metadata allow and any (allow file-read*) above.
+        lines.append("")
+        lines.append(";; Deny stat()/metadata on user crown-jewels (last-match-wins).")
+        for p in metadataDenyCrownJewels(home: NSHomeDirectory()) {
+            lines.append("(deny file-read-metadata (subpath \(quoted(p))))")
+        }
         return lines.joined(separator: "\n") + "\n"
     }
 

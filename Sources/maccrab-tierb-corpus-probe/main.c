@@ -15,9 +15,12 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <mach/mach.h>
+#include <servers/bootstrap.h>
 
 #include "cmaccrab_tierb_broker.h"
 
@@ -98,6 +101,27 @@ int main(void) {
         pid_t pid = fork();
         if (pid == 0) { _exit(0); }
         if (pid > 0) { emit("leak.fork", "fork succeeded"); int st; waitpid(pid, &st, 0); }
+    }
+
+    // F-META: stat() a metadata-denied crown-jewel — the existence/size/mtime side
+    // channel the deny-default profile must close even though content is brokered.
+    // /Library/Keychains exists on every Mac and the profile denies
+    // file-read-metadata on it (audit #4).
+    {
+        struct stat st;
+        if (stat("/Library/Keychains", &st) == 0)
+            emit("leak.metadata", "stat() of a metadata-denied crown-jewel succeeded");
+    }
+
+    // F-MACH: look up a com.apple Mach service that is NOT in the runtime base or
+    // the manifest allowlist (sandbox-escape surface). The pasteboard is
+    // exfil-relevant and must be unreachable from a contained forensic plugin —
+    // under the former global (allow mach-lookup) it resolved; now it must not.
+    {
+        mach_port_t port = MACH_PORT_NULL;
+        kern_return_t kr = bootstrap_look_up(bootstrap_port, "com.apple.pasteboard.1", &port);
+        if (kr == KERN_SUCCESS && port != MACH_PORT_NULL)
+            emit("leak.mach", "reached an undeclared com.apple Mach service");
     }
 
     printf("{\"kind\":\"result\",\"result\":{\"status\":\"ok\",\"notes\":[\"corpus probe complete\"]}}\n");

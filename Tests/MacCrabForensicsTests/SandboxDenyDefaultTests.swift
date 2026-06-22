@@ -110,4 +110,43 @@ struct SandboxDenyDefaultTests {
         #expect(!out.contains("\n(allow default)"))
         #expect(out.contains("(deny default)"))
     }
+
+    // MARK: - audit #4 — tightened runtime base (no escape/enumeration surface)
+
+    @Test("no unscoped mach-lookup or system-wide process-info; named runtime base only (audit #4)")
+    func tightenedRuntimeBase() {
+        let out = SandboxProfileBuilder.compileDenyDefault(SandboxProfileSpec())
+        // The former global escape surfaces are GONE (the named/scoped forms never
+        // contain these bare substrings — they're followed by " (global"/" (target").
+        #expect(!out.contains("(allow mach-lookup)"))
+        #expect(!out.contains("(allow process-info*)"))
+        // process-info is scoped to self; mach is a named base set.
+        #expect(out.contains("(allow process-info* (target self))"))
+        #expect(out.contains(#"(allow mach-lookup (global-name "com.apple.system.notification_center"))"#))
+        #expect(out.contains(#"(allow mach-lookup (global-name "com.apple.trustd"))"#))
+        // Exfil-adjacent services are NOT in the base.
+        #expect(!out.contains("pasteboard"))
+    }
+
+    @Test("manifest mach services are ENFORCED as global-name allows (audit #4)")
+    func machServicesEnforced() {
+        let s = SandboxProfileSpec(machServiceConnects: ["com.acme.helper"])
+        let out = SandboxProfileBuilder.compileDenyDefault(s)
+        #expect(out.contains(#"(allow mach-lookup (global-name "com.acme.helper"))"#))
+    }
+
+    @Test("metadata is denied on user crown-jewels, AFTER the global allow (last-match-wins) (audit #4)")
+    func crownJewelMetadataDenied() {
+        let out = SandboxProfileBuilder.compileDenyDefault(SandboxProfileSpec())
+        #expect(out.contains(#"(deny file-read-metadata (subpath "/Library/Keychains"))"#))
+        let home = NSHomeDirectory()
+        #expect(out.contains("(deny file-read-metadata (subpath \"\(home)/Library/Messages\"))"))
+        #expect(out.contains("(deny file-read-metadata (subpath \"\(home)/.ssh\"))"))
+        // The deny must come AFTER the global metadata allow so it wins.
+        guard let allowR = out.range(of: "(allow file-read-metadata)"),
+              let denyR = out.range(of: "(deny file-read-metadata") else {
+            Issue.record("expected both the global metadata allow and a crown-jewel deny"); return
+        }
+        #expect(allowR.lowerBound < denyR.lowerBound)
+    }
 }

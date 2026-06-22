@@ -3,8 +3,10 @@
 // trampoline (never a prototype). It proves, on a real macOS host, that:
 //   - a benign plugin runs and emits under the deny-default sandbox (ALLOW);
 //   - a DECLARED read is served through the broker over fd 3 (ALLOW);
-//   - an undeclared file open, undeclared network egress, and fork are all
-//     DENIED by the OS (DENY) — the host commits ZERO leak.* artifacts.
+//   - an undeclared file open, undeclared network egress, fork, a stat() of a
+//     metadata-denied crown-jewel, and an undeclared com.apple Mach-service
+//     lookup are all DENIED by the OS (DENY) — the host commits ZERO leak.*
+//     artifacts (audit #4 added the metadata + mach-escape probes).
 //
 // GATED: the live-spawn tests run only when MACCRAB_CORPUS is set in the env AND
 // the signed trampoline + fixtures are present — so normal `swift test`/CI stays
@@ -81,7 +83,7 @@ struct ContainmentCorpusTests {
         #expect(out.artifacts.contains { $0.contentType == "example.heartbeat" })
     }
 
-    @Test("ALLOW F2 + DENY F4/F9/F11: brokered read works; file/network/fork denied", .enabled(if: ContainmentCorpusTests.corpusEnabled))
+    @Test("ALLOW F2 + DENY F4/F9/F11/META/MACH: brokered read works; file/network/fork/metadata/mach denied", .enabled(if: ContainmentCorpusTests.corpusEnabled))
     func containment() async throws {
         let scratch = try Self.tempDir(); defer { try? FileManager.default.removeItem(atPath: scratch) }
         try "BROKER-OK".write(toFile: scratch + "/allowed.txt", atomically: true, encoding: .utf8)
