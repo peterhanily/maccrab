@@ -241,17 +241,17 @@ struct RaveInstallConsentSheet: View {
                 .cornerRadius(6)
             }
 
-            // C-D: honest capability/enforcement disclosure. Plugin execution is
-            // NOT yet sandboxed, so be explicit about what installing grants.
+            // C-D: honest capability/enforcement disclosure reflecting the
+            // sandboxed third-party lane (deny-default; brokered reads).
             VStack(alignment: .leading, spacing: 4) {
-                Label("What installing this grants", systemImage: "lock.open.trianglebadge.exclamationmark")
+                Label("How this plugin runs", systemImage: "shield.lefthalf.filled")
                     .font(.caption.weight(.semibold))
-                Text("MacCrab does not yet sandbox plugins. A plugin you install can run with the same access MacCrab has — including any Full-Disk-Access or privacy permissions granted to it. Install only plugins from a publisher you trust.")
+                Text("Third-party plugins run SANDBOXED (deny-default): they can read only the paths they declare — served through a host broker — and cannot reach the network or launch processes unless they declare it and you consent. Personal/TCC stores (Messages, Mail, …) are served as frozen snapshots, never your live data. First-party (MacCrab-signed) plugins run with MacCrab's own access. Install only from a publisher you trust.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(8)
-            .background(Color.orange.opacity(0.08))
+            .background(Color.secondary.opacity(0.08))
             .cornerRadius(6)
 
             // C-E: warn when the client's revocation data is stale/never-fetched.
