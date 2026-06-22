@@ -1548,13 +1548,41 @@ def _snapshot_previous_output(output_dir: str, archive_root: str, keep: int = 5)
         pass
 
 
+def _prune_orphans(output_dir: str, written: set) -> int:
+    """Delete compiled JSON outputs whose source rule no longer exists, so the
+    output dir is an EXACT mirror of the current rule corpus. A lingering orphan
+    (a renamed/deleted rule's stale .json) otherwise masks a loaded != compiled
+    drift — the detection corpus review's `det1` finding.
+
+    Scoped to the files THIS compiler produces — top-level `*.json` and
+    `sequences/*.json` — and never touches `graph/` (authored JSON, not compiled
+    here), `auto_generated/` (runtime-generated rules), the `.archive` sibling, or
+    the rule-bundle `manifest.json`."""
+    pruned = 0
+    for d in (output_dir, os.path.join(output_dir, "sequences")):
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".json") or name == "manifest.json":
+                continue
+            path = os.path.join(d, name)
+            if not os.path.isfile(path):
+                continue   # never recurse into graph/ or auto_generated/
+            if os.path.abspath(path) not in written:
+                os.remove(path)
+                pruned += 1
+                print(f"  PRUNE {os.path.relpath(path, output_dir)} (no source rule)")
+    return pruned
+
+
 def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
     """
     Compile all Sigma YAML rules from input_dir and write JSON to output_dir.
 
     Before overwriting output_dir, snapshot its previous contents into
     `<output_dir>.archive/<timestamp>/` — keeps the last 5 snapshots so
-    a bad compile can be rolled back with `cp -R`.
+    a bad compile can be rolled back with `cp -R`. After compiling, prunes
+    orphaned outputs so the dir mirrors the current corpus exactly.
 
     Returns (total_found, compiled, skipped).
     """
@@ -1568,6 +1596,7 @@ def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
     total = len(yaml_files)
     compiled = 0
     skipped = 0
+    written: set = set()
 
     for filepath in yaml_files:
         rel_path = os.path.relpath(filepath, input_dir)
@@ -1614,10 +1643,15 @@ def compile_all(input_dir: str, output_dir: str) -> tuple[int, int, int]:
             with open(out_path, "w", encoding="utf-8") as out_f:
                 json.dump(result, out_f, indent=2, ensure_ascii=False)
                 out_f.write("\n")
+            written.add(os.path.abspath(out_path))
 
             compiled += 1
             tag = "SEQ" if is_sequence else "OK "
             print(f"  {tag} {rel_path} -> {out_name}")
+
+    pruned = _prune_orphans(output_dir, written)
+    if pruned:
+        print(f"  Pruned {pruned} orphaned compiled rule(s) with no source.")
 
     return total, compiled, skipped
 
