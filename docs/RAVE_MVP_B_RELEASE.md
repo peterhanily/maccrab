@@ -49,9 +49,14 @@ These cannot be done by a code session. They are the gates between "code complet
 and "store live".
 
 ### 2a. On-device containment proof (run the corpus on macOS 26)
-The corpus passed for C plugins on the dev host. Re-run it against the **release**
-build and a **Swift** plugin (a real plugin is Swift; the runtime base may need
-extra tuning):
+The corpus passes for BOTH the C fixtures and a **Swift** fixture
+(`maccrab-tierb-corpus-probe-swift` — the real shipped workload: Swift runtime +
+Foundation + dyld shared cache) on the dev host (macOS 26): the Swift runtime
+starts under the tightened deny-default base, the broker works, and every
+boundary probe is OS-denied. Re-run it against the **exact release build** to
+confirm the bundled trampoline + signed runner reproduce it (if a future macOS
+or a heavier plugin SIGABRTs at startup, widen `runtimeBaseMachServices` and
+re-run — never restore a global mach-lookup):
 ```
 make test-corpus      # MACCRAB_CORPUS=1 MACCRAB_BIN_DIR=$(swift build --show-bin-path) swift test --filter ContainmentCorpus
 ```

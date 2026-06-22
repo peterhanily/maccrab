@@ -39,6 +39,9 @@ let package = Package(
         // Adversarial containment-corpus probe (test/operator tooling, not shipped):
         // probes the sandbox boundary so the corpus runs against the real runtime.
         .executable(name: "maccrab-tierb-corpus-probe", targets: ["maccrab-tierb-corpus-probe"]),
+        // SWIFT containment-corpus probe — proves the Swift runtime + Foundation
+        // start contained (the real shipped-plugin workload), not just C fixtures.
+        .executable(name: "maccrab-tierb-corpus-probe-swift", targets: ["maccrab-tierb-corpus-probe-swift"]),
     ],
     dependencies: [
         // Test-only dep. Pinned to an exact tagged release rather than a
@@ -223,6 +226,13 @@ let package = Package(
             name: "maccrab-tierb-corpus-probe",
             dependencies: ["CTierBBroker"],
             path: "Sources/maccrab-tierb-corpus-probe"
+        ),
+        // Corpus probe (SWIFT) — the same battery from a Foundation/Swift-runtime
+        // binary, proving the SBPL base starts the real shipped workload (audit #3).
+        .executableTarget(
+            name: "maccrab-tierb-corpus-probe-swift",
+            dependencies: ["CTierBBroker"],
+            path: "Sources/maccrab-tierb-corpus-probe-swift"
         ),
         .testTarget(
             name: "MacCrabCoreTests",

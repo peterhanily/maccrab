@@ -37,6 +37,7 @@ struct ContainmentCorpusTests {
     static var trampoline: String { binDir + "/maccrab-tierb-sandbox-host" }
     static var exampleBin: String { binDir + "/maccrab-tierb-example" }
     static var probeBin: String { binDir + "/maccrab-tierb-corpus-probe" }
+    static var swiftProbeBin: String { binDir + "/maccrab-tierb-corpus-probe-swift" }
 
     /// True only when the operator opts in AND the runtime is genuinely present.
     static var corpusEnabled: Bool {
@@ -44,6 +45,12 @@ struct ContainmentCorpusTests {
             && SandboxedTierBRunner.isRuntimeAvailable(trampolinePath: trampoline)
             && FileManager.default.isExecutableFile(atPath: probeBin)
             && FileManager.default.isExecutableFile(atPath: exampleBin)
+    }
+
+    /// The Swift-fixture proof additionally needs the Swift probe built — it is the
+    /// real-workload gate (Swift runtime + Foundation under the SBPL base).
+    static var swiftCorpusEnabled: Bool {
+        corpusEnabled && FileManager.default.isExecutableFile(atPath: swiftProbeBin)
     }
 
     /// Install + sign `binaryPath` as a Tier-B bundle, resolve it into the
@@ -98,5 +105,30 @@ struct ContainmentCorpusTests {
         // DENY: the OS denied every boundary probe → no leak.* artifacts.
         let leaks = out.artifacts.filter { $0.contentType.hasPrefix("leak.") }.map { $0.contentType }
         #expect(leaks.isEmpty, "containment FAILED — leaks: \(leaks)")
+    }
+
+    @Test("ALLOW + DENY (SWIFT): the Swift runtime starts contained; brokered read works; boundary denied",
+          .enabled(if: ContainmentCorpusTests.swiftCorpusEnabled))
+    func swiftContainment() async throws {
+        // The real shipped workload is Swift (Swift runtime + Foundation + dyld
+        // shared cache) — a far broader SBPL surface than the C fixtures. If the
+        // base is too tight the binary SIGABRTs at startup and this test fails,
+        // which is the exact signal to widen runtimeBaseMachServices. (audit #3)
+        let scratch = try Self.tempDir(); defer { try? FileManager.default.removeItem(atPath: scratch) }
+        try "BROKER-OK".write(toFile: scratch + "/allowed.txt", atomically: true, encoding: .utf8)
+        try "TOP-SECRET".write(toFile: "/tmp/maccrab-corpus-secret", atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: "/tmp/maccrab-corpus-secret") }
+
+        let out = try await Self.run(binaryPath: Self.swiftProbeBin, id: "corpus.probe.swift", reads: [], scratch: scratch)
+
+        // ALLOW: the Swift runtime STARTED under the deny-default sandbox and emitted.
+        #expect(out.result?.status == "ok",
+                "swift plugin did not emit a terminal result (SBPL base may be too tight) — exit=\(out.exitCode) stderr=\(out.stderrTail)")
+        // ALLOW: the declared (scratch) read came back through the broker from Swift.
+        #expect(out.artifacts.contains { $0.contentType == "broker.read.ok" },
+                "no broker.read.ok — exit=\(out.exitCode) artifacts=\(out.artifacts.map { $0.contentType }) stderr=\(out.stderrTail)")
+        // DENY: file/network/fork+exec/metadata all denied → no leak.* artifacts.
+        let leaks = out.artifacts.filter { $0.contentType.hasPrefix("leak.") }.map { $0.contentType }
+        #expect(leaks.isEmpty, "Swift containment FAILED — leaks: \(leaks)")
     }
 }
