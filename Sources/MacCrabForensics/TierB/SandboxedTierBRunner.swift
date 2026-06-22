@@ -342,171 +342,46 @@ public struct SandboxedTierBRunner: Sendable {
             limits: limits
         )
 
-        // ---- Spawn machinery (forked from FirstPartyTierBRunner.run) ----
-        // Pipes (raw fds): child stdin <- in[0], stdout -> out[1], stderr -> err[1].
-        var inFds: [Int32] = [-1, -1]
-        var outFds: [Int32] = [-1, -1]
-        var errFds: [Int32] = [-1, -1]
-        guard pipe(&inFds) == 0, pipe(&outFds) == 0, pipe(&errFds) == 0 else {
-            throw RunnerError.spawnFailed(pluginID: verified.pluginID, message: "pipe() failed")
-        }
-
-        var fileActions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_adddup2(&fileActions, inFds[0], 0)
-        posix_spawn_file_actions_adddup2(&fileActions, outFds[1], 1)
-        posix_spawn_file_actions_adddup2(&fileActions, errFds[1], 2)
-        posix_spawn_file_actions_addclose(&fileActions, inFds[1])
-        posix_spawn_file_actions_addclose(&fileActions, outFds[0])
-        posix_spawn_file_actions_addclose(&fileActions, errFds[0])
-        // Pass the broker child end as fd 3. dup2 clears CLOEXEC on fd 3, so it
-        // survives the trampoline's execv to the plugin; the original brokerChildFd
-        // (CLOEXEC) and brokerHostFd (CLOEXEC) are closed at exec.
-        posix_spawn_file_actions_adddup2(&fileActions, brokerChildFd, 3)
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
-
-        var attr: posix_spawnattr_t?
-        posix_spawnattr_init(&attr)
-        // Own process group with the child as leader → whole subtree reachable
-        // via kill(-pid). Even with fork-deny, the group reap stays correct.
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
-        posix_spawnattr_setpgroup(&attr, 0)
-        defer { posix_spawnattr_destroy(&attr) }
-
-        let argv: [UnsafeMutablePointer<CChar>?] = argvStrings.map { strdup($0) } + [nil]
-        let envp: [UnsafeMutablePointer<CChar>?] = [
-            strdup("PATH=/usr/bin:/bin"),
-            strdup("HOME=\(NSHomeDirectory())"),
-            nil,
-        ]
-        defer {
-            for p in argv where p != nil { free(p) }
-            for p in envp where p != nil { free(p) }
-        }
-
-        var pid: pid_t = 0
-        // Spawn the TRAMPOLINE (not the plugin). The trampoline applies the
-        // sandbox then execv's the verified plugin in the same process.
-        let spawnRC = posix_spawn(&pid, trampolinePath, &fileActions, &attr, argv, envp)
-        // Parent closes the child ends of every pipe + the broker child end.
-        close(inFds[0]); close(outFds[1]); close(errFds[1]); close(brokerChildFd)
-        guard spawnRC == 0 else {
-            close(inFds[1]); close(outFds[0]); close(errFds[0]); close(brokerHostFd)
-            throw RunnerError.spawnFailed(
-                pluginID: verified.pluginID,
-                message: "posix_spawn: \(String(cString: strerror(spawnRC)))")
-        }
-        _ = fcntl(inFds[1], F_SETNOSIGPIPE, 1)
-
-        // Serve the per-invocation broker on the host end. It exits when the child
-        // closes fd 3 (EOF) or the serve deadline fires; teardown closes the host
-        // end + joins it after reap so no blocked thread leaks into the long-lived host.
+        // Spawn the TRAMPOLINE (not the plugin) under the SHARED hardened machinery
+        // (TierBSubprocess — audit #9, one source of truth across both lanes). The
+        // lane-specific extras attach the broker: dup the child end onto fd 3 (dup2
+        // clears CLOEXEC so it survives the trampoline's execv to the plugin), serve
+        // it on a dedicated thread after spawn, and tear it down after reap (close
+        // the host end → EOF the serve loop → bounded join) so no blocked broker
+        // thread leaks into the long-lived host.
         let broker = TierBFileBroker()
         let brokerDone = DispatchSemaphore(value: 0)
-        Thread { broker.serve(hostSocket: brokerHostFd, policy: brokerPolicy); brokerDone.signal() }.start()
+        let extras = TierBSubprocess.Extras(
+            fileActions: { fa in posix_spawn_file_actions_adddup2(fa, brokerChildFd, 3) },
+            parentCloseAfterSpawn: [brokerChildFd],   // child inherited it; parent's copy closes
+            parentCloseOnFailure: [brokerHostFd],     // spawn failed → host end never served
+            afterSpawn: { _ in
+                Thread { broker.serve(hostSocket: brokerHostFd, policy: brokerPolicy); brokerDone.signal() }.start()
+            },
+            afterReap: {
+                close(brokerHostFd)
+                _ = brokerDone.wait(timeout: .now() + 3.0)
+            })
 
-        let inWrite = FileHandle(fileDescriptor: inFds[1], closeOnDealloc: true)
-        let outHandle = FileHandle(fileDescriptor: outFds[0], closeOnDealloc: true)
-        let errHandle = FileHandle(fileDescriptor: errFds[0], closeOnDealloc: true)
-
-        let lock = NSLock()
-        var outBuf = Data()
-        var truncated = false
-        var errBuf = Data()
-        let readQ = DispatchQueue(label: "com.maccrab.tierb.sandboxed.stdout")
-        let errQ = DispatchQueue(label: "com.maccrab.tierb.sandboxed.stderr")
-        let outDone = DispatchSemaphore(value: 0)
-        let errDone = DispatchSemaphore(value: 0)
-
-        readQ.async {
-            while true {
-                let chunk = outHandle.availableData
-                if chunk.isEmpty { break }
-                lock.lock()
-                if outBuf.count + chunk.count > TierBIPC.maxStdoutBytes {
-                    let room = max(0, TierBIPC.maxStdoutBytes - outBuf.count)
-                    if room > 0 { outBuf.append(chunk.prefix(room)) }
-                    truncated = true
-                    lock.unlock()
-                    kill(-pid, SIGKILL)
-                    break
-                }
-                outBuf.append(chunk)
-                lock.unlock()
-            }
-            outDone.signal()
+        do {
+            return try TierBSubprocess.spawnAndStream(
+                executable: trampolinePath,
+                argv: argvStrings,
+                request: TierBCollectRequest(
+                    pluginID: verified.pluginID,
+                    pluginVersion: verified.manifest.version,
+                    scratchDir: scratchDir,
+                    windowStartUnix: windowStartUnix,
+                    windowEndUnix: windowEndUnix),
+                timeout: timeout,
+                extras: extras)
+        } catch let e as TierBSubprocessError {
+            // A failure BEFORE spawn (pipe()) never consumed the broker fds → close
+            // them so they don't leak. A spawn() failure already closed brokerChildFd
+            // (unconditional) + brokerHostFd (parentCloseOnFailure), so only the
+            // pre-spawn case needs cleanup here.
+            if case .pipeFailed = e { close(brokerHostFd); close(brokerChildFd) }
+            throw RunnerError.spawnFailed(pluginID: verified.pluginID, message: e.description)
         }
-        errQ.async {
-            while true {
-                let chunk = errHandle.availableData
-                if chunk.isEmpty { break }
-                if errBuf.count < 64 * 1024 { errBuf.append(chunk.prefix(64 * 1024 - errBuf.count)) }
-            }
-            errDone.signal()
-        }
-
-        var timedOut = false
-        let timer = DispatchSource.makeTimerSource()
-        timer.schedule(deadline: .now() + timeout)
-        timer.setEventHandler {
-            timedOut = true
-            kill(-pid, SIGTERM)
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) { kill(-pid, SIGKILL) }
-        }
-        timer.resume()
-
-        // Deliver the request (one JSON line) then close stdin. Tolerate EPIPE.
-        // withoutEscapingSlashes: paths in the request must NOT be JSON-escaped
-        // (`/`→`\/`), or a plugin's path comparison / a crude parser breaks.
-        let reqEncoder = JSONEncoder()
-        reqEncoder.outputFormatting = [.withoutEscapingSlashes]
-        if let reqData = try? reqEncoder.encode(TierBCollectRequest(
-            pluginID: verified.pluginID,
-            pluginVersion: verified.manifest.version,
-            scratchDir: scratchDir,
-            windowStartUnix: windowStartUnix,
-            windowEndUnix: windowEndUnix
-        )) {
-            try? inWrite.write(contentsOf: reqData)
-            try? inWrite.write(contentsOf: Data([0x0A]))
-        }
-        try? inWrite.close()
-
-        var si = siginfo_t()
-        _ = waitid(P_PID, id_t(pid), &si, WEXITED | WNOWAIT)
-        kill(-pid, SIGKILL)
-        var status: Int32 = 0
-        waitpid(pid, &status, 0)
-        timer.cancel()
-
-        // Tear down the broker: closing the host end EOFs the serve loop; bounded
-        // wait so a wedged thread can't outlive the invocation in the host.
-        close(brokerHostFd)
-        _ = brokerDone.wait(timeout: .now() + 3.0)
-
-        _ = outDone.wait(timeout: .now() + 3.0)
-        _ = errDone.wait(timeout: .now() + 3.0)
-
-        lock.lock()
-        let finalOut = outBuf
-        let didTruncate = truncated
-        let finalErr = errBuf
-        lock.unlock()
-
-        // Reuse the first-party runner's pure, hardened JSONL parser (identical
-        // caps); the wire contract is the same.
-        let parsed = FirstPartyTierBRunner.parseOutputLines(finalOut)
-        let stderrTail = String(data: finalErr, encoding: .utf8) ?? ""
-        let exitCode: Int32 = (status & 0x7f) == 0 ? ((status >> 8) & 0xff) : -(status & 0x7f)
-
-        return TierBRunOutcome(
-            artifacts: parsed.artifacts,
-            result: parsed.result,
-            exitCode: exitCode,
-            timedOut: timedOut,
-            stdoutTruncated: didTruncate || parsed.truncated,
-            decodeErrors: parsed.decodeErrors,
-            stderrTail: String(stderrTail.prefix(4096))
-        )
     }
 }

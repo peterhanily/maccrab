@@ -22,7 +22,6 @@
 // (host stamps identity, recomputes size) — see the Phase 2c bridge.
 
 import Foundation
-import Darwin
 
 public struct TierBRunOutcome: Sendable {
     public let artifacts: [TierBArtifactDTO]
@@ -67,159 +66,23 @@ public struct FirstPartyTierBRunner: Sendable {
             throw FirstPartyTierBRunnerError.notFirstParty(pluginID: verified.pluginID)
         }
 
-        // Pipes (raw fds): child stdin <- in[0], stdout -> out[1], stderr -> err[1].
-        var inFds: [Int32] = [-1, -1]
-        var outFds: [Int32] = [-1, -1]
-        var errFds: [Int32] = [-1, -1]
-        guard pipe(&inFds) == 0, pipe(&outFds) == 0, pipe(&errFds) == 0 else {
-            throw FirstPartyTierBRunnerError.spawnFailed(pluginID: verified.pluginID, message: "pipe() failed")
+        // First-party: spawn the verified binary directly (no sandbox, no broker).
+        // The hardened spawn/drain/reap/timeout machinery is the shared
+        // TierBSubprocess (audit #9: one source of truth across both lanes).
+        do {
+            return try TierBSubprocess.spawnAndStream(
+                executable: verified.binaryPath,
+                argv: [verified.binaryPath],
+                request: TierBCollectRequest(
+                    pluginID: verified.pluginID,
+                    pluginVersion: verified.manifest.version,
+                    scratchDir: scratchDir,
+                    windowStartUnix: windowStartUnix,
+                    windowEndUnix: windowEndUnix),
+                timeout: timeout)
+        } catch let e as TierBSubprocessError {
+            throw FirstPartyTierBRunnerError.spawnFailed(pluginID: verified.pluginID, message: e.description)
         }
-
-        var fileActions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_adddup2(&fileActions, inFds[0], 0)
-        posix_spawn_file_actions_adddup2(&fileActions, outFds[1], 1)
-        posix_spawn_file_actions_adddup2(&fileActions, errFds[1], 2)
-        posix_spawn_file_actions_addclose(&fileActions, inFds[1])
-        posix_spawn_file_actions_addclose(&fileActions, outFds[0])
-        posix_spawn_file_actions_addclose(&fileActions, errFds[0])
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
-
-        var attr: posix_spawnattr_t?
-        posix_spawnattr_init(&attr)
-        // Own process group with the child as leader (pgid == child pid) → the
-        // whole subtree is reachable via kill(-pid, ...).
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
-        posix_spawnattr_setpgroup(&attr, 0)
-        defer { posix_spawnattr_destroy(&attr) }
-
-        let argv: [UnsafeMutablePointer<CChar>?] = [strdup(verified.binaryPath), nil]
-        let envp: [UnsafeMutablePointer<CChar>?] = [
-            strdup("PATH=/usr/bin:/bin"),
-            strdup("HOME=\(NSHomeDirectory())"),
-            nil,
-        ]
-        defer {
-            for p in argv where p != nil { free(p) }
-            for p in envp where p != nil { free(p) }
-        }
-
-        var pid: pid_t = 0
-        let spawnRC = posix_spawn(&pid, verified.binaryPath, &fileActions, &attr, argv, envp)
-        // Parent closes the child ends of every pipe.
-        close(inFds[0]); close(outFds[1]); close(errFds[1])
-        guard spawnRC == 0 else {
-            close(inFds[1]); close(outFds[0]); close(errFds[0])
-            throw FirstPartyTierBRunnerError.spawnFailed(
-                pluginID: verified.pluginID,
-                message: "posix_spawn: \(String(cString: strerror(spawnRC)))")
-        }
-        // Per-fd SIGPIPE suppression (audit HIGH#1).
-        _ = fcntl(inFds[1], F_SETNOSIGPIPE, 1)
-
-        let inWrite = FileHandle(fileDescriptor: inFds[1], closeOnDealloc: true)
-        let outHandle = FileHandle(fileDescriptor: outFds[0], closeOnDealloc: true)
-        let errHandle = FileHandle(fileDescriptor: errFds[0], closeOnDealloc: true)
-
-        let lock = NSLock()
-        var outBuf = Data()
-        var truncated = false
-        var errBuf = Data()
-        let readQ = DispatchQueue(label: "com.maccrab.tierb.stdout")
-        let errQ = DispatchQueue(label: "com.maccrab.tierb.stderr")
-        let outDone = DispatchSemaphore(value: 0)
-        let errDone = DispatchSemaphore(value: 0)
-
-        // Background drain of stdout with a running cap (no pipe-buffer deadlock / OOM).
-        readQ.async {
-            while true {
-                let chunk = outHandle.availableData
-                if chunk.isEmpty { break }     // EOF
-                lock.lock()
-                if outBuf.count + chunk.count > TierBIPC.maxStdoutBytes {
-                    let room = max(0, TierBIPC.maxStdoutBytes - outBuf.count)
-                    if room > 0 { outBuf.append(chunk.prefix(room)) }
-                    truncated = true
-                    lock.unlock()
-                    kill(-pid, SIGKILL)        // stop the producer(s): the whole group
-                    break
-                }
-                outBuf.append(chunk)
-                lock.unlock()
-            }
-            outDone.signal()
-        }
-        errQ.async {
-            while true {
-                let chunk = errHandle.availableData
-                if chunk.isEmpty { break }
-                if errBuf.count < 64 * 1024 { errBuf.append(chunk.prefix(64 * 1024 - errBuf.count)) }
-            }
-            errDone.signal()
-        }
-
-        // Wall-clock timeout → SIGTERM the GROUP, then SIGKILL the GROUP after a grace.
-        var timedOut = false
-        let timer = DispatchSource.makeTimerSource()
-        timer.schedule(deadline: .now() + timeout)
-        timer.setEventHandler {
-            timedOut = true
-            kill(-pid, SIGTERM)
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) { kill(-pid, SIGKILL) }
-        }
-        timer.resume()
-
-        // Deliver the request (one JSON line) then close stdin. Tolerate EPIPE.
-        let reqEncoder = JSONEncoder()
-        reqEncoder.outputFormatting = [.withoutEscapingSlashes]   // unescaped paths in the request
-        if let reqData = try? reqEncoder.encode(TierBCollectRequest(
-            pluginID: verified.pluginID,
-            pluginVersion: verified.manifest.version,
-            scratchDir: scratchDir,
-            windowStartUnix: windowStartUnix,
-            windowEndUnix: windowEndUnix
-        )) {
-            try? inWrite.write(contentsOf: reqData)
-            try? inWrite.write(contentsOf: Data([0x0A]))
-        }
-        try? inWrite.close()
-
-        // Await the leader's exit WITHOUT reaping (WNOWAIT keeps the zombie, so the
-        // pgid stays valid + the pid can't be reused), THEN SIGKILL the whole GROUP
-        // to reap any forked descendant, THEN reap the leader for its exit status.
-        // The timer bounds this wait (it SIGKILLs the group on timeout).
-        var si = siginfo_t()
-        _ = waitid(P_PID, id_t(pid), &si, WEXITED | WNOWAIT)
-        kill(-pid, SIGKILL)
-        var status: Int32 = 0
-        waitpid(pid, &status, 0)
-        timer.cancel()
-
-        // The group is dead now, so EOF should arrive promptly; keep the bound as a
-        // safety net against any unexpected fd holder.
-        _ = outDone.wait(timeout: .now() + 3.0)
-        _ = errDone.wait(timeout: .now() + 3.0)
-
-        lock.lock()
-        let finalOut = outBuf
-        let didTruncate = truncated
-        let finalErr = errBuf
-        lock.unlock()
-
-        let parsed = Self.parseOutputLines(finalOut)
-        let stderrTail = String(data: finalErr, encoding: .utf8) ?? ""
-        // exit status: WIFEXITED → code; WIFSIGNALED → -signal.
-        let exitCode: Int32 = (status & 0x7f) == 0 ? ((status >> 8) & 0xff) : -(status & 0x7f)
-
-        return TierBRunOutcome(
-            artifacts: parsed.artifacts,
-            result: parsed.result,
-            exitCode: exitCode,
-            timedOut: timedOut,
-            stdoutTruncated: didTruncate || parsed.truncated,
-            decodeErrors: parsed.decodeErrors,
-            stderrTail: String(stderrTail.prefix(4096))
-        )
     }
 
     // MARK: - Pure parse (testable without spawning)
