@@ -141,11 +141,21 @@ gate (S5), and kill-switch-blocks-sideload (S1-local).
   globally (a `stat()` side channel — content still brokered); `--local` is a
   documented no-op (routing is auto-detected). Feed these to the pentest (§2b).
 
-## 4. Remaining app-side polish (NON-blocking; after RC test)
+## 4. Remaining app-side work
 
-These are UX, not safety, and the engine is complete without them:
-- Storefront consent sheet rendering the manifest-derived consent for catalog
-  third-party entries (the CLI already does; the SwiftUI surface is the follow-up).
-- Dashboard quarantine + revocation-freshness panel.
-- In-place install-success refresh; update changelog/diff disclosure; final
-  localization eyeball.
+The storefront UX polish is **done**: in-place install/update refresh (the
+Installed badge updates without a manual reload), the update diff + re-vetting
+disclosure (vOLD → vNEW), and the revocation-freshness panel; plus two
+consent-correctness fixes (the sheet no longer says plugins run with "full
+access" / are "not yet sandboxed" — it states the sandboxed model).
+
+The only remaining app-side item is the **localization translation pass** (the
+new + a number of pre-existing storefront strings are now `String(localized:)`
+with English defaults; translating them across the 13 locales + the on-device
+locale eyeball is the operator/translator pass). Strings ship correctly in
+English until then.
+
+Lower-priority storefront enhancement (deferred, not blocking): the consent sheet
+rendering catalog-declared capability CHIPS for not-yet-installed third-party
+entries (needs the resolver to surface catalog-entry capabilities; the CLI
+sideload + `plugin test` already show the full manifest-derived consent).
