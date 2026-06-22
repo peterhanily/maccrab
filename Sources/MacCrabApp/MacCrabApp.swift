@@ -396,17 +396,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("[MacCrab] Forensic scan retention: deleted \(result.deleted.count) scan(s) older than \(days)d")
             }
         }
-        // Tier-B revocation self-heal (Stream 5): reconcile installed third-party
-        // plugins against the revocation + staleness state at launch and on a
-        // 30-min timer, so an install-once box can't keep running a since-revoked
-        // or stale-unverifiable plugin. Offline → staleness escalation only.
-        Task.detached(priority: .utility) {
+        // Tier-B revocation self-heal (Stream 5 + S2-full): at launch and on a
+        // 30-min timer, reconcile installed third-party plugins against the
+        // revocation + staleness state, so an install-once box can't keep running a
+        // since-revoked or stale-unverifiable plugin.
+        //   S2-full: if any third-party plugin is installed, FIRST fetch a fresh
+        //   SIGNED revocations.json (throttled to ~1h, Ed25519-verified against the
+        //   bundled catalog key, anti-rollback) so a plugin revoked AFTER install is
+        //   caught promptly — not only by the 7-day staleness ceiling. Fail-soft:
+        //   offline / bad-sig / rollback keeps the prior state, then the staleness
+        //   sweep runs as the fallback. No installed third-party plugin → NO network
+        //   (the marketplace stays opt-in; nothing leaves the machine by default).
+        @Sendable func reconcileRevocations() async {
+            let client = RaveCatalogClient()
+            if !(await client.installedPlugins()).isEmpty {
+                _ = try? await client.refreshRevocationsIfStale()
+            }
             if let recs = try? await RevocationReverifyService.reconcileDefaults(), !recs.isEmpty {
                 NSLog("[MacCrab] Tier-B revocation reconcile: quarantined \(recs.count) plugin(s)")
             }
         }
+        Task.detached(priority: .utility) { await reconcileRevocations() }
         Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { _ in
-            Task.detached(priority: .utility) { _ = try? await RevocationReverifyService.reconcileDefaults() }
+            Task.detached(priority: .utility) { await reconcileRevocations() }
         }
         // v1.18: one-time migration off the noisy "informational" notification
         // floor. The OS-banner floor defaults to "critical" (SettingsView
