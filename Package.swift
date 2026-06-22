@@ -26,6 +26,13 @@ let package = Package(
         // full Xcode — the bundle layout is just a directory with
         // Info.plist + MacOS/<binary> + codesign-generated _CodeSignature.
         .executable(name: "MacCrabAgent", targets: ["MacCrabAgent"]),
+        // maccrab-tierb-sandbox-host: the signed self-sandboxing trampoline that
+        // runs an UNTRUSTED third-party Tier-B plugin under a manifest-derived
+        // deny-default profile (sandbox_init post-startup, then execv — the
+        // Stream-0-spike-validated mechanism). Spawned by SandboxedTierBRunner.
+        // A tiny C program so the deprecated sandbox_init lives in a binary we
+        // own + sign. Release bundling/signing is a build-release.sh follow-up.
+        .executable(name: "maccrab-tierb-sandbox-host", targets: ["maccrab-tierb-sandbox-host"]),
     ],
     dependencies: [
         // Test-only dep. Pinned to an exact tagged release rather than a
@@ -183,6 +190,14 @@ let package = Package(
         .executableTarget(
             name: "MacCrabAgent",
             dependencies: ["MacCrabAgentKit"]
+        ),
+        // The third-party Tier-B sandbox trampoline (C executable). No deps:
+        // it links only libSystem (sandbox_init, setrlimit, execv). The SBPL it
+        // applies is written by the host at spawn time; this binary just reads
+        // it, sets rlimits, applies the sandbox to itself, and execs the plugin.
+        .executableTarget(
+            name: "maccrab-tierb-sandbox-host",
+            path: "Sources/maccrab-tierb-sandbox-host"
         ),
         .testTarget(
             name: "MacCrabCoreTests",
