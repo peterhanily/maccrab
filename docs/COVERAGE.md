@@ -10,13 +10,13 @@ ATT&CK technique tags from each rule's `tags:` block.
 
 | Metric | Count |
 |---|---|
-| Rules total | **478** |
+| Rules total | **477** |
 | Status: stable | 90 |
-| Status: experimental | 377 |
-| Status: deprecated | 8 |
+| Status: experimental | 374 |
+| Status: deprecated | 10 |
 | Severity: critical | 19 |
 | Severity: high | 111 |
-| Severity: medium | 227 |
+| Severity: medium | 226 |
 | Severity: low | 112 |
 | Severity: informational | 9 |
 | Distinct MITRE ATT&CK techniques covered | 170 |
@@ -131,7 +131,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `docker_socket_mount.yml`<br/>Docker Socket Mounted Into Container | experimental | medium | T1611 |
 | `kubernetes_service_account_token.yml`<br/>Kubernetes Service Account Token Read from Unexpected Process | experimental | medium | T1552 T1552.007 |
 
-### Credential Access (TA0006) (39 rules)
+### Credential Access (TA0006) (37 rules)
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
@@ -145,13 +145,12 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `crypto_wallet_data_access.yml`<br/>Cryptocurrency Wallet Data Accessed by Untrusted Process | experimental | high | T1555 |
 | `gcore_keychain_exploit.yml`<br/>gcore Keychain Key Extraction (CVE-2025-24204) | experimental | critical | T1003.007 T1555.001 |
 | `git_credential_helper_abuse.yml`<br/>Git Credential Helper Invoked by Non-Git Process | experimental | medium | T1555 |
-| `keychain_cli_extract.yml`<br/>Keychain Password Extraction via security CLI | experimental | medium | T1555.001 |
+| `keychain_cli_extract.yml`<br/>Keychain Password Extraction via security CLI | deprecated | medium | T1555.001 |
 | `keychain_db_direct_read.yml`<br/>Direct Keychain Database File Access | experimental | high | T1555.001 |
 | `keychain_dump_via_security.yml`<br/>Keychain Dump via security CLI | stable | medium | T1555.001 |
 | `keychain_file_accessed.yml`<br/>login.keychain or System.keychain Database Opened by Non-Apple Process | experimental | high | T1555.001 |
 | `keychain_unlock_by_non_system.yml`<br/>Keychain Unlock by Non-System Process | experimental | medium | T1003 T1555.001 |
 | `mail_database_access.yml`<br/>Mail.app Database Accessed by Non-Mail Process | experimental | medium | T1114.001 |
-| `malicious_git_hook.yml`<br/>Git Hook Execution from Suspicious Directory | experimental | medium | T1204.002 |
 | `memory_dump_credential_tools.yml`<br/>Memory Dump Tool Attached to Credential Process | experimental | high | T1003 |
 | `memory_read_of_high_value_process.yml`<br/>Memory Read / Trace of a High-Value Credential Process | experimental | high | T1003 T1555 T1555.001 |
 | `messages_database_access.yml`<br/>Messages.app Database Accessed by Non-Messages Process | stable | medium | T1005 |
@@ -167,7 +166,6 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `securityd_memory_access.yml`<br/>securityd Process Memory Access via Mach APIs | experimental | low | T1003 |
 | `sensitive_file_read_untrusted.yml`<br/>Untrusted Process Reads macOS Local Directory Service Data | experimental | high | T1003 |
 | `shadow_hash_access.yml`<br/>macOS Shadow Hash Plist Access | experimental | high | T1003 |
-| `ssh_agent_access_suspicious.yml`<br/>SSH Agent Socket Accessed by Suspicious Process | experimental | medium | T1563.001 |
 | `ssh_key_access.yml`<br/>SSH Private Key Accessed by Unusual Process | experimental | medium | T1552.004 |
 | `ssh_key_file_read.yml`<br/>SSH Private Key File Accessed | experimental | medium | T1552.004 |
 | `ssh_launched_security_dump.yml`<br/>Keychain or Credential Dump over SSH Session | experimental | high | T1003 T1555.001 |
@@ -280,7 +278,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `wifi_attack_tool.yml`<br/>Wi-Fi Attack or Reconnaissance Tool Detected | experimental | medium | T1557 |
 | `wifi_ssid_change.yml`<br/>Wi-Fi Network SSID Changed or Evil Twin Indicator | experimental | low | T1204 T1204.001 T1557 |
 
-### Execution (TA0002) (33 rules)
+### Execution (TA0002) (34 rules)
 
 | Rule | Status | Severity | MITRE Techniques |
 |---|---|---|---|
@@ -298,6 +296,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `installer_pkg_script_execution.yml`<br/>Installer Package Pre/Post-Install Script Execution | stable | medium | T1059.004 T1204.002 |
 | `jxa_execution.yml`<br/>Suspicious JXA (JavaScript for Automation) Invocation | experimental | medium | T1059.007 |
 | `launchctl_submit.yml`<br/>launchctl Job Registration or Bootstrap | stable | medium | T1569.001 |
+| `malicious_git_hook.yml`<br/>Git Hook Execution from Suspicious Directory | experimental | medium | T1204.002 |
 | `mdfind_spotlight_recon.yml`<br/>mdfind Spotlight Query by Unsigned Process | experimental | medium | T1083 |
 | `nscript_suspicious.yml`<br/>osascript Loading Script from Mounted Volume or Network URL | experimental | medium | T1059.002 |
 | `open_command_url_handler.yml`<br/>macOS `open` Command Invoking Custom or File URL Handler | experimental | low | T1204.001 |
@@ -329,7 +328,7 @@ benchmark + FP-rate publication is on the v1.9 roadmap.
 | `curl_file_upload.yml`<br/>File Upload via curl Form or Upload Flag | stable | low | T1048.002 |
 | `dns_tunneling_large_txt.yml`<br/>Potential DNS Tunneling via Large TXT Queries | experimental | medium | T1048 |
 | `exfil_compress_and_stage.yml`<br/>Bulk Archive of Sensitive Directories Before Exfiltration | experimental | medium | T1560.001 |
-| `exfil_git_push_sensitive.yml`<br/>Git Push from Sensitive Data Directories | experimental | low | T1567.003 |
+| `exfil_git_push_sensitive.yml`<br/>Git Push from Sensitive Data Directories | deprecated | low | T1567.003 |
 | `exfil_via_email_cli.yml`<br/>Data Exfiltration via CLI Mail Tools | experimental | medium | T1048 |
 | `exfil_via_ftp.yml`<br/>FTP/SFTP Outbound Data Transfer to External Host | experimental | medium | T1048.002 |
 | `exfil_webhook_post.yml`<br/>Potential Data Exfiltration via Webhook POST | experimental | medium | T1567.001 |

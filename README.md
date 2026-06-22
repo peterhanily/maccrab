@@ -691,7 +691,7 @@ v1.3 is the biggest architectural change since v1.0. MacCrab now runs as a nativ
 - **SystemExtension activation** -- no more `sudo maccrabd`; open MacCrab.app and click Enable Protection. `sysextd` manages the lifecycle from there.
 - **Native ES client** -- `com.apple.developer.endpoint-security.client` approved under bundle ID `com.maccrab.agent`. The 3-level fallback chain (eslogger → kdebug → FSEvents) is still first-class for developer builds.
 - **Network-convergence hardening (1.3.4)** -- unresolved destination IPs no longer bucket benign HTTPS traffic under `:443`; new trusted-helper fan-out gate; 49-entry trusted-cloud suffix list.
-- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **2446 tests in 442 suites**, FP regressions blocked at CI.
+- **False-positive regression harness** -- every real FP observed in a live install now has a one-line `@Test`. **2539 tests in 457 suites**, FP regressions blocked at CI.
 - **Noise reduction arc (1.2.1 → 1.2.4)** -- reference workstation dropped from 2,856 alerts/24h to ~3/day (99.9% reduction) without degrading detection fidelity.
 - **Notarized Developer ID distribution** -- signed DMG, Homebrew cask tap (`peterhanily/maccrab`), reproducible release pipeline.
 - **Sparkle auto-update (1.3.5)** -- EdDSA-signed `appcast.xml` served from Cloudflare Pages at `maccrab.com`; "Check for Updates…" in the status-bar menu and Settings.

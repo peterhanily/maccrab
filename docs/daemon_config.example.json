@@ -36,7 +36,7 @@
   "_comment_storage": "Per-tier retention + size caps (since v1.8; tracegraph_*/traces_* tunable since v1.18). All keys optional; omitted keys use the in-source default shown.",
   "storage": {
     "events_hot_tier_minutes": 30,
-    "events_max_size_mb": 200,
+    "events_max_size_mb": 350,
     "events_size_cap_interval_minutes": 60,
     "aggregate_days": 90,
     "alerts_retention_days": 365,

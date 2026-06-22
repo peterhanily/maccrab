@@ -5,7 +5,7 @@ This is the operator/keyholder handoff — the steps that need your keychain, Ap
 credentials, Cloudflare/GitHub access, or a release decision.
 
 ## State going in (2026-06-17)
-- Branch `v1.19.0`, full suite **2408 tests / 437 suites green**, working tree
+- Branch `v1.19.0`, full suite **2539 tests / 457 suites green**, working tree
   clean at HEAD `33a69aa`. 4 commits past the prior RC state (NOT pushed): prod
   fake-data purge (`7e5b6c1`), drop fixture label (`d02323a`), hide pre-release
   catalog entries (`d670922`), release-docs (`33a69aa`).

@@ -54,7 +54,7 @@ struct SettingsView: View {
     // DaemonConfig.StorageConfig in MacCrabAgentKit. Legacy keys are
     // migrated onto these on first appear via `migrateLegacyStorageKeys`.
     @AppStorage("storage.eventsHotTierMinutes") private var eventsHotTierMinutes: Int = 30
-    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 200
+    @AppStorage("storage.eventsMaxSizeMB")       private var eventsMaxSizeMB: Int = 350  // match DaemonConfig default
     @AppStorage("storage.alertsRetentionDays")   private var alertsRetentionDays: Int = 365
     @AppStorage("storage.alertsMaxSizeMB")       private var alertsMaxSizeMB: Int = 100
     @AppStorage("storage.campaignsRetentionDays") private var campaignsRetentionDays: Int = 365

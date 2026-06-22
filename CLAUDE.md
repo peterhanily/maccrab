@@ -14,7 +14,7 @@ make compile-rules             # Compile YAML rules to JSON
 ## Test Commands
 
 ```bash
-swift test                     # Unit tests (2165 tests in 403 suites)
+swift test                     # Unit tests (2539 tests in 457 suites)
 make test                      # Unit tests (summary only)
 make test-full                 # Full test suite
 make test-integration          # Integration test (starts daemon, triggers actions)
@@ -64,7 +64,7 @@ Rules/            436 single-event Sigma-compatible YAML rules (19 tactic direct
 Compiler/         Python rule compiler (YAML -> JSON) with duplicate key and field validation
 fleet/            Python fleet collector server
 scripts/          Build, test, install, red team simulation, and CI scripts
-Tests/            Swift Testing unit tests (2165 tests in 403 suites)
+Tests/            Swift Testing unit tests (2539 tests in 457 suites)
 ```
 
 ## Detection Stack (5 tiers)
@@ -288,7 +288,7 @@ All keys are optional — missing keys use defaults from `DaemonConfig.swift`. N
 
 - **System Extension / root daemon:** `/Library/Application Support/MacCrab/` (release builds use this via sysextd-granted privileges; dev `sudo maccrabd` writes here too)
 - **Non-root dev daemon:** `~/Library/Application Support/MacCrab/` (dev `swift run maccrabd` without sudo)
-- Database: `events.db` (SQLite with WAL mode, 64MB cache, 256MB mmap)
+- Database: `events.db` (SQLite with WAL mode, ~16MB cache, 64MB mmap — per-store; see `StoragePragmas.swift`)
 - Compiled rules: `compiled_rules/*.json` (dir `0o755`, files `0o644` — world-readable: the non-root MacCrab.app reads them for rule display + integrity hashing; this is intentional, not `0o700`)
 - Auto-generated rules: `compiled_rules/auto_generated/`
 
