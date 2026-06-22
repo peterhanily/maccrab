@@ -134,6 +134,33 @@ static void set_one_rlimit(int resource, rlim_t value, const char *what) {
     if (setrlimit(resource, &rl) != 0) die(EX_USAGE_, what);
 }
 
+// Validate the plugin exec target by fd before running it: O_NOFOLLOW (no symlink
+// swap of the final component), a single-link regular file, owned by our uid, and
+// not group/other-writable. macOS has neither fexecve NOR exec of /dev/fd/N, so we
+// cannot exec the fd directly to inode-pin — but this refuses a symlinked /
+// hardlinked / cross-uid / world-writable swap of the host-created 0o500 plugin
+// temp (the residual same-uid-owner rewrite carries no privilege crossing — this
+// runs at the operator's own uid). Fail-closed before applying the sandbox.
+static void validate_exec_target(const char *path) {
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) die(EX_USAGE_, "cannot open --exec (O_NOFOLLOW)");
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); die(EX_USAGE_, "cannot fstat --exec"); }
+    close(fd);
+    if (!S_ISREG(st.st_mode)) die(EX_USAGE_, "--exec is not a regular file");
+    if (st.st_nlink != 1) die(EX_USAGE_, "--exec is hardlinked (st_nlink != 1)");
+    if (st.st_uid != geteuid()) die(EX_USAGE_, "--exec not owned by the trampoline uid");
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) die(EX_USAGE_, "--exec is group/other-writable");
+}
+
+// Close every inherited fd above the three std streams + the reserved broker fd 3,
+// so the untrusted plugin inherits ONLY 0/1/2/3 — never a stray host descriptor.
+// (macOS has no closefrom(); loop to the current descriptor-table cap.)
+static void close_inherited_fds(void) {
+    int cap = getdtablesize();
+    for (int fd = 4; fd < cap; fd++) (void)close(fd);
+}
+
 int main(int argc, char *argv[]) {
     const char *profile_path = NULL;
     const char *exec_path = NULL;
@@ -159,6 +186,11 @@ int main(int argc, char *argv[]) {
     if (!profile_path) die(EX_USAGE_, "--profile is required (refusing to run uncontained)");
     if (!exec_path)    die(EX_USAGE_, "--exec is required");
     if (exec_path[0] != '/') die(EX_USAGE_, "--exec must be an absolute path");
+
+    // Validate the plugin exec target by fd (O_NOFOLLOW + ownership/mode) BEFORE
+    // applying the sandbox — fail-closed on a symlinked / hardlinked / cross-uid /
+    // world-writable swap of the verified temp (S3).
+    validate_exec_target(exec_path);
 
     // Read the SBPL BEFORE applying the sandbox (the profile temp is outside the
     // deny-default allow set; after sandbox_init we could not read it).
@@ -191,9 +223,11 @@ int main(int argc, char *argv[]) {
         _exit(EX_SANDBOX_);   // fail-closed: contained-or-nothing
     }
 
-    // Sandbox is live and inherited across exec. Run the verified plugin with a
-    // clean argv[0] == the plugin path; inherit the (host-scrubbed) environ and
-    // all open fds (0/1/2 + the reserved broker fd 3).
+    // Sandbox is live and inherited across exec. Close every inherited fd above the
+    // std streams + the reserved broker fd 3, so the untrusted plugin inherits ONLY
+    // 0/1/2/3 — never a stray host descriptor. Then run the verified plugin with a
+    // clean argv[0] == the plugin path; inherit the (host-scrubbed) environ.
+    close_inherited_fds();
     char *child_argv[2] = { (char *)exec_path, NULL };
     execv(exec_path, child_argv);
 

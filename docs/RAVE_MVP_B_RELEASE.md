@@ -140,17 +140,30 @@ test` uses an in-process flag not a leaky `setenv` (M4), plus an operator
 kill-switch (S4), staleness reconcile on CLI runs (S2-lite), the staging-override
 gate (S5), and kill-switch-blocks-sideload (S1-local).
 
-**Remaining should-fix (recommend landing this RC cycle; not fail-open):**
-- **S2-full** — fetch a fresh signed `revocations.json` on a runtime timer (not
-  just install-time); today runtime reconcile is staleness-only. A plugin revoked
-  AFTER install is caught by the staleness sweep + quarantine-before-verify, but
-  an explicit-revocation runtime refresh would be tighter.
-- **S3-full** — validate the trampoline once by fd (O_NOFOLLOW) and spawn from
-  that fd (fexecve-style) to close the check→spawn TOCTOU. The argv[0] vector is
-  already removed and the signature is team-pinned; this closes the residual race.
-- **Nits (accept for RC):** the deny-default base allows `file-read-metadata`
-  globally (a `stat()` side channel — content still brokered); `--local` is a
-  documented no-op (routing is auto-detected). Feed these to the pentest (§2b).
+**Should-fix — LANDED (post-audit hardening pass):**
+- **S2-full** — DONE. The launch + 30-min timer now fetches a fresh signed
+  `revocations.json` (Ed25519-verified, anti-rollback) via
+  `RaveCatalogClient.refreshRevocationsIfStale`, gated on an installed third-party
+  plugin (no network otherwise), then runs the staleness sweep as the offline
+  fallback. A plugin revoked AFTER install is caught promptly, not only by the
+  7-day ceiling.
+- **S3-full** — DONE (within macOS limits). The trampoline gate now requires the
+  binary AND its parent dir to be non-(group/other)-writable, opened `O_NOFOLLOW`
+  (`trampolinePathIsTamperResistant`), on top of the team-pinned signature; the
+  trampoline validates the plugin exec target by fd (O_NOFOLLOW + owner/mode) and
+  closes every inherited fd above 0/1/2/3 before exec. macOS has **neither
+  `fexecve` NOR exec of `/dev/fd/N`** (both empirically refused), so the spawn
+  cannot be inode-pinned; in the canonical root-owned, non-user-writable app
+  bundle the non-writable checks make the trampoline + plugin temp unswappable by a
+  same-uid non-root process. The residual (a same-uid-root or writable-install
+  swap) carries **no privilege crossing** — this lane is uid-501 only, never the
+  root sysext. Corpus-validated (C + Swift).
+- **`file-read-metadata` side channel — DONE.** The deny-default base now denies
+  `file-read-metadata` on the user crown-jewels (Keychains/.ssh/TCC/Messages/…)
+  and `mach-lookup` is a named base + manifest allowlist, not a global allow
+  (audit #4; corpus probes the metadata + mach denials).
+- **Nit (accept for RC):** `--local` is a documented no-op (routing is
+  auto-detected). Feed to the pentest (§2b).
 
 ## 4. Remaining app-side work
 

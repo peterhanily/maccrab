@@ -149,11 +149,16 @@ public struct SandboxedTierBRunner: Sendable {
     ///
     /// The trampoline is the signed binary that enforces containment, so in
     /// RELEASE this requires a valid Developer-ID signature anchored to Apple AND
-    /// the host's team (`isTrampolineSignatureTrusted`) — a swapped/user-planted
-    /// trampoline is refused before any untrusted code runs; build-release.sh
-    /// installs it Developer-ID-signed under the app bundle. REMAINING hardening:
-    /// validate once by fd and spawn from that fd (fexecve-style) to close the
-    /// residual check→spawn TOCTOU (same-uid only today — no privilege crossing).
+    /// the host's team (`isTrampolineSignatureTrusted`). It must ALSO be
+    /// tamper-resistant on disk (`trampolinePathIsTamperResistant`): opened
+    /// `O_NOFOLLOW`, a single-link regular file, and neither the binary NOR its
+    /// parent dir group/other-writable — so a same-uid attacker cannot swap it
+    /// between this check and the spawn. macOS has neither `fexecve` nor exec of
+    /// `/dev/fd/N` (both refused), so the spawn cannot be inode-pinned; in the
+    /// canonical root-owned, non-user-writable app bundle the non-writable check
+    /// makes the trampoline unswappable by a same-uid non-root process. The
+    /// residual (a same-uid-root or writable-install swap) carries no privilege
+    /// crossing — this lane is uid-501 CLI/MCP/app only, never the root sysext.
     public var isRuntimeAvailable: Bool {
         Self.isRuntimeAvailable(
             trampolinePath: trampolinePath,
@@ -186,12 +191,40 @@ public struct SandboxedTierBRunner: Sendable {
         let fm = FileManager.default
         guard fm.fileExists(atPath: trampolinePath, isDirectory: &isDir), !isDir.boolValue,
               fm.isExecutableFile(atPath: trampolinePath) else { return false }
+        // S3: the trampoline + its install dir must be non-(group/other)-writable so
+        // a same-uid attacker can't swap the binary between this check and the
+        // spawn. Applied in dev too (the .build bin dir is 0755). See the doc above
+        // for why macOS leaves a same-uid-root residual (no fexecve / no /dev/fd exec).
+        guard trampolinePathIsTamperResistant(trampolinePath) else { return false }
         if allowUnsigned { return true }
         // Release: the trampoline is the signed binary that enforces containment.
         // Require a valid signature anchored to Apple AND the SAME team as the
         // host, so a swapped/user-planted trampoline is refused before any
         // untrusted code runs.
         return isTrampolineSignatureTrusted(trampolinePath)
+    }
+
+    /// True iff `path` opens cleanly under `O_NOFOLLOW`, is a single-link regular
+    /// file, and neither the file NOR its parent dir is group/other-writable — i.e.
+    /// a same-uid non-root process cannot swap or replace it in place. The
+    /// load-bearing S3 control given macOS cannot inode-pin the spawn (no fexecve /
+    /// no /dev/fd exec). Pure filesystem check.
+    static func trampolinePathIsTamperResistant(_ path: String) -> Bool {
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return false }      // ELOOP if the final component is a symlink
+        defer { close(fd) }
+        var st = Darwin.stat()
+        guard fstat(fd, &st) == 0 else { return false }
+        let mode = UInt32(st.st_mode)
+        guard (mode & UInt32(S_IFMT)) == UInt32(S_IFREG), st.st_nlink == 1 else { return false }
+        let groupOtherWrite = UInt32(S_IWGRP) | UInt32(S_IWOTH)
+        guard (mode & groupOtherWrite) == 0 else { return false }   // binary not group/other-writable
+        // The parent dir must not be writable either — a writable dir lets an
+        // attacker replace the file via rename even if the file itself is read-only.
+        let parent = (path as NSString).deletingLastPathComponent
+        var pst = Darwin.stat()
+        guard stat(parent.isEmpty ? "/" : parent, &pst) == 0 else { return false }
+        return (UInt32(pst.st_mode) & groupOtherWrite) == 0
     }
 
     static func isTrampolineSignatureTrusted(_ path: String) -> Bool {

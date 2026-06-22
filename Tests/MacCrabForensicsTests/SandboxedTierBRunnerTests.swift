@@ -103,6 +103,39 @@ struct SandboxedTierBRunnerTests {
         #endif
     }
 
+    @Test("trampolinePathIsTamperResistant: accepts 0755-in-0700; rejects writable file / writable parent / symlink (S3)")
+    func tamperResistance() throws {
+        let fm = FileManager.default
+        // A 0700 dir holding a 0755 regular file → tamper-resistant.
+        let dir = NSTemporaryDirectory() + "s3-\(UUID().uuidString)"
+        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir)
+        defer { try? fm.removeItem(atPath: dir) }
+        let ok = dir + "/tramp"
+        try Data("x".utf8).write(to: URL(fileURLWithPath: ok))
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ok)
+        #expect(SandboxedTierBRunner.trampolinePathIsTamperResistant(ok))
+        // Other-writable binary → rejected (swappable in place).
+        let ww = dir + "/tramp-ww"
+        try Data("x".utf8).write(to: URL(fileURLWithPath: ww))
+        try fm.setAttributes([.posixPermissions: 0o757], ofItemAtPath: ww)
+        #expect(!SandboxedTierBRunner.trampolinePathIsTamperResistant(ww))
+        // A symlink as the final component → rejected (O_NOFOLLOW).
+        let sym = dir + "/tramp-sym"
+        try fm.createSymbolicLink(atPath: sym, withDestinationPath: ok)
+        #expect(!SandboxedTierBRunner.trampolinePathIsTamperResistant(sym))
+        // World-writable PARENT dir → rejected even if the file is read-only
+        // (a writable dir lets an attacker replace the file via rename).
+        let wdir = NSTemporaryDirectory() + "s3w-\(UUID().uuidString)"
+        try fm.createDirectory(atPath: wdir, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o777], ofItemAtPath: wdir)
+        defer { try? fm.removeItem(atPath: wdir) }
+        let inWdir = wdir + "/tramp"
+        try Data("x".utf8).write(to: URL(fileURLWithPath: inWdir))
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: inWdir)
+        #expect(!SandboxedTierBRunner.trampolinePathIsTamperResistant(inWdir))
+    }
+
     // MARK: - Trampoline argv construction (pure)
 
     @Test("trampolineArguments carries --profile, --exec and every set rlimit")
