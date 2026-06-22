@@ -14,6 +14,8 @@ struct RaveInstallConsentSheet: View {
     /// it for an installed entry with a newer catalog version). The deep-link
     /// path leaves it false. Drives the --force re-install + the button copy.
     var isUpdate: Bool = false
+    /// The currently-installed version, for the update diff disclosure (P6.2).
+    var installedVersion: String? = nil
 
     @State private var facts: RaveInstallConsentFacts?
     @State private var loadError: String?
@@ -70,7 +72,7 @@ struct RaveInstallConsentSheet: View {
                 if let facts, facts.canConfirm {
                     if installing {
                         ProgressView().controlSize(.small)
-                        Text("Installing…").font(.caption).foregroundStyle(.secondary)
+                        Text(String(localized: "rave.consent.installing", defaultValue: "Installing…")).font(.caption).foregroundStyle(.secondary)
                     } else {
                         Button {
                             installing = true
@@ -168,9 +170,37 @@ struct RaveInstallConsentSheet: View {
     @ViewBuilder
     private func factsBody(_ f: RaveInstallConsentFacts) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("You're about to install a \(f.kind.rawValue) from the MacCrab catalog. Review the verified details below before confirming.")
+            Text(isUpdate
+                 ? String(localized: "rave.consent.introUpdate", defaultValue: "You're about to update a \(f.kind.rawValue) from the MacCrab catalog. Review the changes + verified details below before confirming.")
+                 : String(localized: "rave.consent.introInstall", defaultValue: "You're about to install a \(f.kind.rawValue) from the MacCrab catalog. Review the verified details below before confirming."))
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            // P6.2: update diff + re-vetting disclosure. An update re-installs over
+            // the existing copy and re-runs every trust gate; surface the version
+            // change + that the capabilities below are the NEW version's.
+            if isUpdate, let old = installedVersion {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(String(localized: "rave.consent.updatingTitle", defaultValue: "Updating this plugin"),
+                          systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption.weight(.semibold))
+                    HStack(spacing: 6) {
+                        Text("v\(old)").foregroundStyle(.secondary)
+                        Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
+                        Text("v\(f.resolvedVersion)").fontWeight(.semibold)
+                        if old == f.resolvedVersion {
+                            Text(String(localized: "rave.consent.reinstall", defaultValue: "(re-install)"))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.font(.callout)
+                    Text(String(localized: "rave.consent.updateRevet", defaultValue: "The update is re-verified against the signed catalog and re-vetted. The capabilities and access shown below are for the NEW version — review them as you would a fresh install."))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.blue.opacity(0.06))
+                .cornerRadius(6)
+            }
 
             row("Plugin", f.id)
             row("Version", "v\(f.resolvedVersion)")
@@ -198,7 +228,7 @@ struct RaveInstallConsentSheet: View {
             if !f.officialSource {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
-                    Text("Catalog source is NOT the official rave.maccrab.com.")
+                    Text(String(localized: "rave.consent.nonOfficial", defaultValue: "Catalog source is NOT the official rave.maccrab.com."))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -244,9 +274,10 @@ struct RaveInstallConsentSheet: View {
             // C-D: honest capability/enforcement disclosure reflecting the
             // sandboxed third-party lane (deny-default; brokered reads).
             VStack(alignment: .leading, spacing: 4) {
-                Label("How this plugin runs", systemImage: "shield.lefthalf.filled")
+                Label(String(localized: "rave.consent.howItRuns.title", defaultValue: "How this plugin runs"),
+                      systemImage: "shield.lefthalf.filled")
                     .font(.caption.weight(.semibold))
-                Text("Third-party plugins run SANDBOXED (deny-default): they can read only the paths they declare — served through a host broker — and cannot reach the network or launch processes unless they declare it and you consent. Personal/TCC stores (Messages, Mail, …) are served as frozen snapshots, never your live data. First-party (MacCrab-signed) plugins run with MacCrab's own access. Install only from a publisher you trust.")
+                Text(String(localized: "rave.consent.howItRuns.body", defaultValue: "Third-party plugins run SANDBOXED (deny-default): they can read only the paths they declare — served through a host broker — and cannot reach the network or launch processes unless they declare it and you consent. Personal/TCC stores (Messages, Mail, …) are served as frozen snapshots, never your live data. First-party (MacCrab-signed) plugins run with MacCrab's own access. Install only from a publisher you trust."))
                     .font(.caption2).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -268,7 +299,7 @@ struct RaveInstallConsentSheet: View {
             // C-B: a non-first-party install requires explicit acknowledgement.
             if f.requiresThirdPartyConsent {
                 Toggle(isOn: $thirdPartyAck) {
-                    Text("This is not a first-party MacCrab plugin. I trust “\(f.signerIdentity.isEmpty ? f.trustTier : f.signerIdentity)” and understand it will run with full access.")
+                    Text(String(localized: "rave.consent.thirdPartyAck", defaultValue: "This is not a first-party MacCrab plugin. I trust “\(f.signerIdentity.isEmpty ? f.trustTier : f.signerIdentity)” and understand it runs sandboxed — reading only what it declares (brokered), with no network or process launch unless declared."))
                         .font(.caption)
                 }
                 .toggleStyle(.checkbox)

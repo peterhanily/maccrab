@@ -45,6 +45,9 @@ struct V2RaveCatalogBrowserView: View {
     /// update-vs-fresh decision the pill showed — never re-resolved at present
     /// time (which could diverge across an async reload between tap and present).
     @State private var pendingIsUpdate = false
+    /// The currently-installed version, passed to the consent sheet for an update
+    /// so it can disclose the vOLD → vNEW diff (P6.2).
+    @State private var pendingInstalledVersion: String?
     /// Phase-0 honest catalog states. Set on each reload so the pane can tell
     /// loading / offline / trust-failure / verified-but-empty / live apart, and
     /// surface the trust the verified fetch already earns (serial + revocation
@@ -201,7 +204,18 @@ struct V2RaveCatalogBrowserView: View {
         }
         .task { await reload() }
         .sheet(item: $installLink) { link in
-            RaveInstallConsentSheet(link: link, isUpdate: pendingIsUpdate) { installLink = nil }
+            // P6.1: reload installed-state when the sheet closes so a just-installed
+            // (or updated) plugin's Installed badge + state refresh in place, with
+            // no manual reload. reload() is idempotent, so a cancelled install is a
+            // cheap no-op.
+            RaveInstallConsentSheet(
+                link: link,
+                onClose: {
+                    installLink = nil
+                    Task { await reload() }
+                },
+                isUpdate: pendingIsUpdate,
+                installedVersion: pendingInstalledVersion)
         }
     }
 
@@ -939,6 +953,7 @@ struct V2RaveCatalogBrowserView: View {
                     // every trust gate is still re-enforced by maccrabctl. Capture
                     // the decision now so the sheet matches what this pill showed.
                     pendingIsUpdate = isUpdate
+                    pendingInstalledVersion = isUpdate ? installedByID[e.id] : nil
                     installLink = RaveInstallLink(kind: .plugin, id: e.id)
                 } label: {
                     Label(isUpdate ? String(localized: "rave.install.updateTo", defaultValue: "Update to v\(e.currentVersion)")

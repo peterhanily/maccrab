@@ -127,11 +127,11 @@ struct V2ForensicsSettingsSheet: View {
         let store = RaveTrustStateStore.default(supportDir: RevocationReverifyService.defaultSupportDir().path)
         switch store.revocationFreshness() {
         case .never:
-            return ("Revocation data never fetched — third-party plugins quarantine until verified.", true)
+            return (String(localized: "forensicsSettings.revocation.never", defaultValue: "Revocation data never fetched — third-party plugins quarantine until verified."), true)
         case .fresh(let age):
-            return ("Revocation data fresh (verified \(Int(age / 3600))h ago).", false)
+            return (String(localized: "forensicsSettings.revocation.fresh", defaultValue: "Revocation data fresh (verified \(Int(age / 3600))h ago)."), false)
         case .stale(let age):
-            return ("Revocation data stale (\(Int(age / 86_400))d) — third-party plugins quarantined pending re-verify.", true)
+            return (String(localized: "forensicsSettings.revocation.stale", defaultValue: "Revocation data stale (\(Int(age / 86_400))d) — third-party plugins quarantined pending re-verify."), true)
         }
     }
 
