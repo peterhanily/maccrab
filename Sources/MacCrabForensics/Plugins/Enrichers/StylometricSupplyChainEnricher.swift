@@ -20,7 +20,7 @@ public struct StylometricSupplyChainEnricher: Enricher {
         id: "com.maccrab.enricher.stylometric-supply-chain",
         version: "1.0.0",
         displayName: "Stylometric Supply Chain",
-        description: "Heuristic stylometric flags for supply-chain risk: obfuscation markers, base64 / hex blob density, mixed-language signatures. Drift-vs-baseline integration with MacCrabCore.StylometricFingerprinter is shape-wired but requires operator baselines (deferred CLI affordance).",
+        description: "Heuristic stylometric flags for supply-chain risk: eval/exec markers, base64 / hex blob density. Drift-vs-baseline integration with MacCrabCore.StylometricFingerprinter is shape-wired but requires operator baselines (deferred CLI affordance).",
         type: .enricher,
         runtime: .tierA,
         tccRequirements: [],

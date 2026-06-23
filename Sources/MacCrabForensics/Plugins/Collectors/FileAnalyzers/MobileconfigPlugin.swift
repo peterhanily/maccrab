@@ -15,7 +15,7 @@ public struct MobileconfigPlugin: Collector {
         id: "com.maccrab.forensics.mobileconfig-inspector",
         version: "1.0.0",
         displayName: "Mobileconfig Inspector",
-        description: "Analyzes a .mobileconfig MDM profile: declared payloads (cert / DNS / VPN / restrictions), signing posture (CMS-signed or not), declared content.",
+        description: "Scans Managed Preferences profiles for declared payloads (certificate / DNS / VPN presence flags), top-level keys, and CMS-signed posture.",
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],
@@ -36,7 +36,7 @@ public struct MobileconfigPlugin: Collector {
         mcpTools: [
             MCPToolDescriptor(
                 name: "mobileconfig_analyze_path",
-                description: "Analyze a .mobileconfig profile: payload types, signing, restrictions.",
+                description: "Analyze a Managed Preferences profile: payload types, certificate / DNS / VPN presence, CMS-signed flag.",
                 exposesPrivacyClass: .metadata
             ),
         ],

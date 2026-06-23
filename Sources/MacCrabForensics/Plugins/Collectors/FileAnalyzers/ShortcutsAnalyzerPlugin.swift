@@ -14,7 +14,7 @@ public struct ShortcutsAnalyzerPlugin: Collector {
         id: "com.maccrab.forensics.shortcuts-analyzer",
         version: "1.0.0",
         displayName: "Shortcuts Analyzer",
-        description: "Catalogs Shortcuts library: shortcut names + step-action counts + sharing posture. Privacy class metadata.",
+        description: "Catalogs loose Shortcuts files: name + path + size + mtime + sha256. Does not decode the internal action graph. Privacy class metadata.",
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],

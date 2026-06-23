@@ -23,7 +23,7 @@ public struct MachOAnalyzerPlugin: Collector {
         id: "com.maccrab.forensics.macho-analyzer",
         version: "1.0.0",
         displayName: "Mach-O Analyzer",
-        description: "Operator-supplied Mach-O analysis: arch, load commands, codesign posture, entitlements, declared dylib dependencies. Run via `maccrabctl plugin run com.maccrab.forensics.macho-analyzer --path=<binary>` or the macho_analyze_path MCP tool.",
+        description: "Operator-supplied Mach-O analysis: arch, declared dylib dependencies, codesign posture, entitlement key names. Run via `maccrabctl plugin run com.maccrab.forensics.macho-analyzer --path=<binary>` or the macho_analyze_path MCP tool.",
         type: .collector,
         runtime: .tierA,
         tccRequirements: [],
@@ -60,7 +60,7 @@ public struct MachOAnalyzerPlugin: Collector {
         mcpTools: [
             MCPToolDescriptor(
                 name: "macho_analyze_path",
-                description: "Analyze a Mach-O binary at the supplied path. Returns arch, load commands, codesign team_id / signing status, entitlements key list, dylib dependencies.",
+                description: "Analyze a Mach-O binary at the supplied path. Returns arch, dylib dependencies, codesign team_id / signing status, entitlements key list.",
                 exposesPrivacyClass: .metadata
             ),
         ],

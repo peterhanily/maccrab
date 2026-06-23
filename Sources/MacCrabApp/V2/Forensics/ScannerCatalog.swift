@@ -97,14 +97,14 @@ public enum ScannerCatalog {
         ),
         "com.maccrab.forensics.safari-deep": ScannerFact(
             pluginID: "com.maccrab.forensics.safari-deep",
-            purpose: "Pulls Safari LocalStorage + IndexedDB contents — what websites have stored locally. Page-content class, requires encrypted scan.",
+            purpose: "Discovers (does not read) LocalStorage + IndexedDB databases per origin — names, paths, sizes. No stored values are read.",
             dataSources: [
                 "~/Library/Safari/LocalStorage/",
-                "~/Library/Safari/Databases/Databases.db",
+                "~/Library/Safari/Databases/___IndexedDB/",
             ],
             tccRequirements: ["Full Disk Access"],
             emits: ["safari.localstorage", "safari.indexeddb"],
-            privacyClass: .content
+            privacyClass: .metadata
         ),
         "com.maccrab.forensics.mail": ScannerFact(
             pluginID: "com.maccrab.forensics.mail",
@@ -138,20 +138,19 @@ public enum ScannerCatalog {
         ),
         "com.maccrab.forensics.imessage-bodies": ScannerFact(
             pluginID: "com.maccrab.forensics.imessage-bodies",
-            purpose: "Full iMessage / SMS message text bodies. Personal comms — requires encrypted scan and opt-in.",
+            purpose: "Full iMessage / SMS message text bodies. Content class — requires encrypted scan and opt-in.",
             dataSources: [
                 "~/Library/Messages/chat.db (SQLite)",
-                "~/Library/Messages/Attachments/ (linked files)",
             ],
             tccRequirements: ["Full Disk Access"],
             emits: ["imessage.message_body"],
-            privacyClass: .personalComms
+            privacyClass: .content
         ),
         "com.maccrab.forensics.facetime": ScannerFact(
             pluginID: "com.maccrab.forensics.facetime",
             purpose: "FaceTime call history — peers, durations, connection state. Personal comms.",
             dataSources: [
-                "~/Library/CallHistoryDB/CallHistory.storedata",
+                "~/Library/Application Support/CallHistoryDB/CallHistory.storedata",
             ],
             tccRequirements: ["Full Disk Access"],
             emits: ["facetime.call"],
@@ -162,7 +161,6 @@ public enum ScannerCatalog {
             purpose: "Reads CoreDuet's KnowledgeC database — Apple's activity-bundle store: app usage, focus mode, screen time, where the user was when they did what.",
             dataSources: [
                 "~/Library/Application Support/Knowledge/knowledgeC.db",
-                "/private/var/db/CoreDuet/Knowledge/knowledgeC.db (system)",
             ],
             tccRequirements: ["Full Disk Access"],
             emits: ["knowledgec.event"],
@@ -170,7 +168,7 @@ public enum ScannerCatalog {
         ),
         "com.maccrab.forensics.biome": ScannerFact(
             pluginID: "com.maccrab.forensics.biome",
-            purpose: "Reads the Biome stream store — app usage, location, focus mode, notifications. Newer (Ventura+) replacement for parts of KnowledgeC.",
+            purpose: "Discovers Biome stream names + sizes; does not yet decode per-event app-usage/location. Newer (Ventura+) replacement for parts of KnowledgeC.",
             dataSources: [
                 "~/Library/Biome/",
             ],
@@ -208,7 +206,7 @@ public enum ScannerCatalog {
             pluginID: "com.maccrab.forensics.codesigning-graph",
             purpose: "Builds a signer-to-binary graph for installed apps and CLI tools. Used to spot unfamiliar Team IDs and signer reuse patterns.",
             dataSources: [
-                "/Applications/, ~/Applications/, /usr/local/bin/, ~/.local/bin/",
+                "/Applications/, ~/Applications/, /usr/local/bin/, /opt/homebrew/bin/, /opt/homebrew/sbin/, /Library/PrivilegedHelperTools/",
                 "codesign(1) per binary",
             ],
             tccRequirements: ["Full Disk Access"],
@@ -217,7 +215,7 @@ public enum ScannerCatalog {
         ),
         "com.maccrab.forensics.macho-analyzer": ScannerFact(
             pluginID: "com.maccrab.forensics.macho-analyzer",
-            purpose: "Deep Mach-O header inspection: dyld bindings, load commands, missing hardened-runtime, suspicious dylib injection paths.",
+            purpose: "Mach-O inspection: architecture, linked dylib list (otool -L), codesign status, entitlement key names.",
             dataSources: [
                 "Mach-O binaries on disk (path-driven)",
             ],
@@ -227,7 +225,7 @@ public enum ScannerCatalog {
         ),
         "com.maccrab.forensics.dmg-pkg-analyzer": ScannerFact(
             pluginID: "com.maccrab.forensics.dmg-pkg-analyzer",
-            purpose: "Inspects DMG and PKG installer payloads for unsigned components and pre-install scripts. Useful when an installer landed in Quarantine.",
+            purpose: "Inspects DMG and PKG installers for signed + notarized posture (hdiutil imageinfo / pkgutil --check-signature + codesign + sha256). Useful when an installer landed in Quarantine.",
             dataSources: [
                 "DMG / PKG files (path-driven)",
             ],
@@ -237,12 +235,152 @@ public enum ScannerCatalog {
         ),
         "com.maccrab.forensics.plist-analyzer": ScannerFact(
             pluginID: "com.maccrab.forensics.plist-analyzer",
-            purpose: "Walks plist files for suspicious entitlement, LSEnvironment, or login-item patterns.",
+            purpose: "Dumps the top-level key names (plus format + size) of the inspected plist files.",
             dataSources: [
-                "Plist files on disk (path-driven, kit-supplied targets)",
+                "/System/Library/LaunchDaemons/com.apple.notifyd.plist, /Library/Preferences/com.apple.PowerManagement.plist",
             ],
             tccRequirements: [],
             emits: ["plist.analysis"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.forensics.fsevents": ScannerFact(
+            pluginID: "com.maccrab.forensics.fsevents",
+            purpose: "Enumerates /.fseventsd/ log files (UUID, size, mtime) and parses their gzipped binary records into per-path file-system events with decoded flags (≤1000 per log file).",
+            dataSources: [
+                "/.fseventsd/ (gzipped FSEvents log files)",
+            ],
+            tccRequirements: ["Full Disk Access"],
+            emits: ["fsevents.log_file", "fsevents.record"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.forensics.image-metadata": ScannerFact(
+            pluginID: "com.maccrab.forensics.image-metadata",
+            purpose: "Extracts image metadata via ImageIO: dimensions, GPS lat/long, camera make/model/software, and presence flags for EXIF / IPTC / XMP.",
+            dataSources: [
+                "~/Downloads/ (or an operator-supplied --path image)",
+            ],
+            tccRequirements: [],
+            emits: ["image.metadata"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.forensics.mobileconfig-inspector": ScannerFact(
+            pluginID: "com.maccrab.forensics.mobileconfig-inspector",
+            purpose: "Scans Managed Preferences profiles: top-level keys, declared PayloadContent types, CMS-signed flag, and certificate / DNS / VPN payload presence.",
+            dataSources: [
+                "/Library/Managed Preferences/, ~/Library/Managed Preferences/ (.mobileconfig / .plist)",
+            ],
+            tccRequirements: [],
+            emits: ["mobileconfig.analysis"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.forensics.shortcuts-analyzer": ScannerFact(
+            pluginID: "com.maccrab.forensics.shortcuts-analyzer",
+            purpose: "Catalogs loose Shortcuts files: name, path, size, mtime, sha256. Does not decode the internal action graph.",
+            dataSources: [
+                "~/Library/Shortcuts/, ~/Library/Mobile Documents/.../Documents/ (.shortcut / .wflow)",
+            ],
+            tccRequirements: [],
+            emits: ["shortcuts.shortcut"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.forensics.archive-walker": ScannerFact(
+            pluginID: "com.maccrab.forensics.archive-walker",
+            purpose: "Lists archive contents without extraction (.zip via unzip -l, .tar/.tar.gz/.tgz via tar -t): entry count, format, size, sha256, capped filename preview.",
+            dataSources: [
+                "~/Downloads/ (.zip / .tar / .tar.gz / .tgz)",
+            ],
+            tccRequirements: [],
+            emits: ["archive.listing"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.forensics.document-analyzer": ScannerFact(
+            pluginID: "com.maccrab.forensics.document-analyzer",
+            purpose: "PDF dissection via PDFKit: page count, document metadata (author / producer / creator / dates), and embedded JavaScript / embedded-file detection. Office formats deferred.",
+            dataSources: [
+                "~/Downloads/ (.pdf)",
+            ],
+            tccRequirements: [],
+            emits: ["document.analysis"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.forensics.office-document-analyzer": ScannerFact(
+            pluginID: "com.maccrab.forensics.office-document-analyzer",
+            purpose: "Parses Office OPC packages (.docx/.xlsx/.pptx + macro variants): core.xml metadata (creator, lastModifiedBy, created/modified) and macro presence (vbaProject.bin).",
+            dataSources: [
+                "~/Downloads/ (.docx / .docm / .xlsx / .xlsm / .pptx / .pptm)",
+            ],
+            tccRequirements: [],
+            emits: ["office.document"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.enricher.geoip-asn": ScannerFact(
+            pluginID: "com.maccrab.enricher.geoip-asn",
+            purpose: "Classifies an IPv4 address into its range type — loopback, private class A/B/C, CGNAT, link-local, or public. No ASN, no country (no MaxMind MMDB bundled).",
+            dataSources: [
+                "IPv4 host on the URL / path subject (no files read)",
+            ],
+            tccRequirements: [],
+            emits: ["geoip.range_token"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.enricher.dns-passive-reputation": ScannerFact(
+            pluginID: "com.maccrab.enricher.dns-passive-reputation",
+            purpose: "Heuristic domain reputation: suspicious TLD, Cyrillic homoglyph, mixed-script, and brand-impersonation patterns. No live passive-DNS API.",
+            dataSources: [
+                "Domain host on the URL / path / process subject (no files read)",
+            ],
+            tccRequirements: [],
+            emits: ["dns_reputation.suspicious_overall"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.enricher.threatintel-domain": ScannerFact(
+            pluginID: "com.maccrab.enricher.threatintel-domain",
+            purpose: "Checks a domain against the live daemon IOC cache (URLhaus / MalwareBazaar / Feodo) and labels a match with feed source + malware family.",
+            dataSources: [
+                "<app-support>/MacCrab/threat_intel/feed_cache.json (daemon-maintained IOC cache)",
+            ],
+            tccRequirements: [],
+            emits: ["threatintel.is_known_malicious"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.enricher.threatintel-ip": ScannerFact(
+            pluginID: "com.maccrab.enricher.threatintel-ip",
+            purpose: "Checks an IP against the live daemon IOC cache (URLhaus / MalwareBazaar / Feodo) and labels a match with feed source + malware family.",
+            dataSources: [
+                "<app-support>/MacCrab/threat_intel/feed_cache.json (daemon-maintained IOC cache)",
+            ],
+            tccRequirements: [],
+            emits: ["threatintel.ip_is_known_malicious"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.enricher.codesign-resolve": ScannerFact(
+            pluginID: "com.maccrab.enricher.codesign-resolve",
+            purpose: "Resolves a binary's codesign posture: signing status, team id, bundle id, notarization, hardened-runtime flag. Cached per path.",
+            dataSources: [
+                "Binary at the event / alert / path subject (via codesign)",
+            ],
+            tccRequirements: [],
+            emits: ["codesign.signing_status"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.enricher.codesigning-anomaly": ScannerFact(
+            pluginID: "com.maccrab.enricher.codesigning-anomaly",
+            purpose: "Flags surprising codesign postures by path heuristics: unsigned in a system path, Developer-ID in /System/, ad-hoc outside the dev tree, unnotarized Dev-ID in a system area.",
+            dataSources: [
+                "Binary at the event / alert / path subject (via codesign)",
+            ],
+            tccRequirements: [],
+            emits: ["codesigning_anomaly.has_anomalies"],
+            privacyClass: .metadata
+        ),
+        "com.maccrab.enricher.stylometric-supply-chain": ScannerFact(
+            pluginID: "com.maccrab.enricher.stylometric-supply-chain",
+            purpose: "Heuristic supply-chain text flags: eval/exec markers, long base64 runs, long hex blobs. Drift-vs-baseline integration is shape-wired but deferred.",
+            dataSources: [
+                "First 16 KB of the path subject's file (path subjects only)",
+            ],
+            tccRequirements: [],
+            emits: ["stylometric.suspicious_overall"],
             privacyClass: .metadata
         ),
     ]
