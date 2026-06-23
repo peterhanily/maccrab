@@ -39,6 +39,8 @@ struct V2ForensicsScansView: View {
     @State private var thirdPartyScanners: [InstalledPlugin] = []
     @State private var thirdPartyManifests: [String: TierBManifest] = [:]
     @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a scanner → inspector
+    @State private var scanBuiltinShowAll = false
+    private let scannerPageSize = 8
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
     @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
 
@@ -283,12 +285,19 @@ struct V2ForensicsScansView: View {
             }
             // Issue #3: every scanner is individually runnable, sectioned by origin.
             if !builtinScanners.isEmpty {
+                let shown = scanBuiltinShowAll ? builtinScanners : Array(builtinScanners.prefix(scannerPageSize))
                 scannerSection("Built-in scanners", count: builtinScanners.count) {
-                    ForEach(builtinScanners, id: \.id) { m in
+                    ForEach(shown, id: \.id) { m in
                         scannerRow(icon: scannerIcon(m.type), name: m.displayName,
-                                   subtitle: m.description.isEmpty ? m.type.rawValue.capitalized : m.description,
+                                   subtitle: scannerSubtitle(m),
                                    badge: nil,
                                    detail: { detailModel = .builtIn(m) }) { Task { await runBuiltinScanner(m) } }
+                    }
+                    if builtinScanners.count > scannerPageSize {
+                        Button(scanBuiltinShowAll ? "Show fewer" : "Show all \(builtinScanners.count)") {
+                            withAnimation(.easeInOut(duration: 0.15)) { scanBuiltinShowAll.toggle() }
+                        }
+                        .buttonStyle(.plain).scaledSystem(11, weight: .medium).foregroundStyle(.tint).padding(.top, 2)
                     }
                 }
             }
@@ -358,15 +367,20 @@ struct V2ForensicsScansView: View {
                 }
                 Text(subtitle).scaledSystem(10).foregroundStyle(.secondary).lineLimit(1)
             }
-            Spacer()
-            Image(systemName: "info.circle").scaledSystem(12).foregroundStyle(.tertiary)
-                .help("Plugin details")
-            Button("Run", action: run).controlSize(.small)
+            Spacer(minLength: 8)
+            Button("Details", action: detail).buttonStyle(.bordered).controlSize(.small)
+            Button("Run", action: run).buttonStyle(.borderedProminent).controlSize(.small)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color(NSColor.controlBackgroundColor)).cornerRadius(6)
         .contentShape(Rectangle())
-        .onTapGesture(perform: detail)   // tap the row (not the Run button) → details
+        .onTapGesture(perform: detail)   // tap the row (not a button) → details
+    }
+
+    private func scannerSubtitle(_ m: PluginManifest) -> String {
+        if let p = ScannerCatalog.fact(forPluginID: m.id)?.purpose { return p }
+        if !m.description.isEmpty { return m.description }
+        return m.type.rawValue.capitalized
     }
 
     private func scannerIcon(_ type: PluginType) -> String {
