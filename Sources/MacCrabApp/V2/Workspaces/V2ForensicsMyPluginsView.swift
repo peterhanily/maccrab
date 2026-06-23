@@ -27,6 +27,7 @@ struct V2ForensicsMyPluginsView: View {
     @State private var loading = true
     @State private var reverifying = false
     @State private var actionMessage: String? = nil
+    @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a plugin → inspector
 
     private let installer = PluginInstaller()
     private let bootstrap = TierBBootstrap()
@@ -58,6 +59,21 @@ struct V2ForensicsMyPluginsView: View {
             }
         }
         .task { await reload() }
+        .sheet(item: $detailModel) { PluginDetailInspector(model: $0) }
+    }
+
+    /// Detail model for an installed (verified) plugin — manifest from its bundle,
+    /// "added" date from the install-root creation time.
+    private func verifiedDetail(_ v: TierBBootstrap.VerifiedSummary) -> PluginDetailModel {
+        var installed = "Installed"
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: v.bundleRoot),
+           let d = attrs[.creationDate] as? Date {
+            let f = DateFormatter(); f.dateStyle = .medium
+            installed = "Added \(f.string(from: d))"
+        }
+        return .thirdParty(pluginID: v.pluginID, publicKeyHex: v.publicKeyHex,
+                           manifest: try? TierBManifest.load(fromBundlePath: v.bundleRoot),
+                           provenance: v.provenance, installedLabel: installed)
     }
 
     // MARK: - Header
@@ -105,9 +121,12 @@ struct V2ForensicsMyPluginsView: View {
                                 .scaledSystem(10).foregroundStyle(.tertiary)
                         }
                         Spacer()
+                        Image(systemName: "info.circle").scaledSystem(11).foregroundStyle(.tertiary)
                         provenanceLabel(.builtIn)
                     }
                     .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+                    .onTapGesture { detailModel = .builtIn(m) }
                     Divider()
                 }
             }
@@ -136,6 +155,8 @@ struct V2ForensicsMyPluginsView: View {
                 ForEach(visibleVerified, id: \.pluginID) { v in
                     installedRow(pluginID: v.pluginID, subtitle: "v\(v.version)",
                                  state: .verified, provenance: v.provenance)
+                        .contentShape(Rectangle())
+                        .onTapGesture { detailModel = verifiedDetail(v) }
                     Divider()
                 }
                 ForEach(visibleFailed, id: \.pluginID) { f in

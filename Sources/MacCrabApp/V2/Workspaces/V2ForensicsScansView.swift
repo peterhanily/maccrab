@@ -38,6 +38,7 @@ struct V2ForensicsScansView: View {
     @State private var builtinScanners: [PluginManifest] = []
     @State private var thirdPartyScanners: [InstalledPlugin] = []
     @State private var thirdPartyManifests: [String: TierBManifest] = [:]
+    @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a scanner → inspector
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
     @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
 
@@ -286,7 +287,8 @@ struct V2ForensicsScansView: View {
                     ForEach(builtinScanners, id: \.id) { m in
                         scannerRow(icon: scannerIcon(m.type), name: m.displayName,
                                    subtitle: m.description.isEmpty ? m.type.rawValue.capitalized : m.description,
-                                   badge: nil) { Task { await runBuiltinScanner(m) } }
+                                   badge: nil,
+                                   detail: { detailModel = .builtIn(m) }) { Task { await runBuiltinScanner(m) } }
                     }
                 }
             }
@@ -296,11 +298,36 @@ struct V2ForensicsScansView: View {
                         let m = thirdPartyManifests[p.pluginID]
                         scannerRow(icon: "puzzlepiece.extension", name: m?.displayName ?? p.pluginID,
                                    subtitle: (m?.description.isEmpty == false ? m!.description : "Third-party plugin"),
-                                   badge: "Third-party") { runThirdPartyScanner(p) }
+                                   badge: "Third-party",
+                                   detail: { detailModel = thirdPartyDetail(p) }) { runThirdPartyScanner(p) }
                     }
                 }
             }
         }
+        .sheet(item: $detailModel) { m in
+            PluginDetailInspector(model: m, onRun: m.runnable ? { runScanner(id: m.id) } : nil)
+        }
+    }
+
+    /// Build the third-party detail model (provenance from receipts, "added" date
+    /// from the install-root creation time).
+    private func thirdPartyDetail(_ p: InstalledPlugin) -> PluginDetailModel {
+        let receiptsDir = URL(fileURLWithPath: (PluginInstaller().pluginsRootPath as NSString).deletingLastPathComponent)
+            .appendingPathComponent("plugin_receipts")
+        let prov = PluginProvenance.forInstalled(pluginID: p.pluginID, receiptsDir: receiptsDir)
+        var installed = "Installed"
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: p.installRoot),
+           let d = attrs[.creationDate] as? Date {
+            let f = DateFormatter(); f.dateStyle = .medium
+            installed = "Added \(f.string(from: d))"
+        }
+        return .thirdParty(pluginID: p.pluginID, publicKeyHex: p.publicKeyHex,
+                           manifest: thirdPartyManifests[p.pluginID], provenance: prov, installedLabel: installed)
+    }
+
+    private func runScanner(id: String) {
+        if let bm = builtinScanners.first(where: { $0.id == id }) { Task { await runBuiltinScanner(bm) } }
+        else if let p = thirdPartyScanners.first(where: { $0.pluginID == id }) { runThirdPartyScanner(p) }
     }
 
     private func scannerSection<Content: View>(_ title: String, count: Int, @ViewBuilder _ rows: () -> Content) -> some View {
@@ -314,7 +341,8 @@ struct V2ForensicsScansView: View {
         }
     }
 
-    private func scannerRow(icon: String, name: String, subtitle: String, badge: String?, run: @escaping () -> Void) -> some View {
+    private func scannerRow(icon: String, name: String, subtitle: String, badge: String?,
+                            detail: @escaping () -> Void, run: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon).scaledSystem(16).foregroundStyle(.tint)
                 .frame(width: 22).accessibilityHidden(true)
@@ -331,10 +359,14 @@ struct V2ForensicsScansView: View {
                 Text(subtitle).scaledSystem(10).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            Image(systemName: "info.circle").scaledSystem(12).foregroundStyle(.tertiary)
+                .help("Plugin details")
             Button("Run", action: run).controlSize(.small)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color(NSColor.controlBackgroundColor)).cornerRadius(6)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: detail)   // tap the row (not the Run button) → details
     }
 
     private func scannerIcon(_ type: PluginType) -> String {
