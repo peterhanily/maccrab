@@ -1,20 +1,21 @@
 // ThreatIntelIPEnricher — com.maccrab.enricher.threatintel-ip.
 //
-// Plan §13.8. Annotates the subject's IP addresses with built-in
-// threat-intel reputation labels. Mirrors the shape of
-// ThreatIntelDomainEnricher but operates on IPs instead.
-// Static IOC set for v1.16.0-rc.12; live feed integration is the
-// natural follow-up.
+// Mirrors ThreatIntelDomainEnricher for IPs: checks an IP in the subject against
+// the LIVE threat-intel IOC cache (<app-support>/MacCrab/threat_intel/
+// feed_cache.json) and labels a known-malicious match with its feed source +
+// malware family. Previously shipped a static fixture set of RFC-5737
+// documentation IPs (192.0.2.66, …) that never route — i.e. it never fired.
 
 import Foundation
+import MacCrabCore
 
 public struct ThreatIntelIPEnricher: Enricher {
 
     public static let manifest = PluginManifest(
         id: "com.maccrab.enricher.threatintel-ip",
-        version: "1.0.0",
+        version: "1.1.0",
         displayName: "Threat-Intel IP",
-        description: "Annotates the subject's payload IPs with built-in threat-intel reputation. Static IOC set; live feed integration deferred. Pass 2026-C idempotent.",
+        description: "Checks an IP in the subject against the live threat-intel IOC cache (URLhaus / MalwareBazaar / Feodo, refreshed by the daemon) and labels a known-malicious match with its feed source + malware family. Reports no IOCs loaded honestly when the feed cache is empty.",
         type: .enricher,
         runtime: .tierA,
         tccRequirements: [],
@@ -27,23 +28,29 @@ public struct ThreatIntelIPEnricher: Enricher {
 
     public var stages: Set<EnrichmentStage> { [.postEmission, .onDemand] }
 
-    private static let knownMaliciousIPs: Set<String> = [
-        "192.0.2.66",       // RFC 5737 documentation prefix used as test marker
-        "203.0.113.99",
-    ]
-    private static let knownC2IPs: Set<String> = [
-        "198.51.100.42",
-    ]
+    private let malicious: [String: ThreatIntelDomainEnricher.Match]   // ip → match
 
-    public init() async throws {}
+    public init() async throws { self.init(cacheDir: ThreatIntelDomainEnricher.defaultCacheDir()) }
+
+    public init(cacheDir: String) {
+        var map: [String: ThreatIntelDomainEnricher.Match] = [:]
+        if let ioc = ThreatIntelFeed.cachedIOCs(at: cacheDir) {
+            for r in ioc.ips { map[r.value] = .init(source: r.source, family: r.malwareFamily) }
+        }
+        self.malicious = map
+    }
 
     public func enrich(_ subject: EnrichmentSubject, stage: EnrichmentStage) async throws -> Enrichment {
-        let ip = GeoIPASNEnricher.extractIP(from: subject)
         var fields: [String: EnrichmentValue] = [:]
-        if let addr = ip {
+        if let addr = GeoIPASNEnricher.extractIP(from: subject) {
             fields["threatintel.ip"] = .string(addr)
-            fields["threatintel.ip_is_known_malicious"] = .bool(Self.knownMaliciousIPs.contains(addr))
-            fields["threatintel.ip_is_known_c2"] = .bool(Self.knownC2IPs.contains(addr))
+            if let m = malicious[addr] {
+                fields["threatintel.ip_is_known_malicious"] = .bool(true)
+                fields["threatintel.ip_source"] = .string(m.source)
+                if let fam = m.family { fields["threatintel.ip_malware_family"] = .string(fam) }
+            } else {
+                fields["threatintel.ip_is_known_malicious"] = .bool(false)
+            }
         } else {
             fields["threatintel.ip_present"] = .bool(false)
         }

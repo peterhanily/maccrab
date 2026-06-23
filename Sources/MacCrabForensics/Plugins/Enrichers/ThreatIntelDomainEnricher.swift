@@ -1,22 +1,23 @@
 // ThreatIntelDomainEnricher — com.maccrab.enricher.threatintel-domain.
 //
-// Plan §13.8. Annotates an enrichment subject with threat-intel
-// reputation for any domains observed in the subject's payload.
-// v1.16.0-rc.8 ships a static-built-in IOC set; future iterations
-// can pivot to live MacCrabCore.ThreatIntelFeed reads.
-//
-// Pure function on subject → byte-identical-on-re-run is the
-// Pass 2026-C invariant; the paired test verifies.
+// Checks any domain in the subject against the LIVE threat-intel IOC cache the
+// daemon maintains (URLhaus / MalwareBazaar / Feodo, written to
+// <app-support>/MacCrab/threat_intel/feed_cache.json) and labels a known-malicious
+// match with its feed source + malware family. Previously this shipped a static
+// fixture set of RFC-2606 documentation domains (evil.example.com, …) that can
+// never appear in real traffic — i.e. it never fired. The IOC set is loaded once
+// at init, so re-running enrich on the same subject is byte-identical (Pass 2026-C).
 
 import Foundation
+import MacCrabCore
 
 public struct ThreatIntelDomainEnricher: Enricher {
 
     public static let manifest = PluginManifest(
         id: "com.maccrab.enricher.threatintel-domain",
-        version: "1.0.0",
+        version: "1.1.0",
         displayName: "Threat-Intel Domain",
-        description: "Annotates the subject's payload domains with built-in threat-intel reputation labels (known-malicious / known-phishing / known-benign). Pure function on subject — Pass 2026-C idempotency.",
+        description: "Checks a domain in the subject against the live threat-intel IOC cache (URLhaus / MalwareBazaar / Feodo, refreshed by the daemon) and labels a known-malicious match with its feed source + malware family. Reports no IOCs loaded honestly when the feed cache is empty.",
         type: .enricher,
         runtime: .tierA,
         tccRequirements: [],
@@ -29,31 +30,41 @@ public struct ThreatIntelDomainEnricher: Enricher {
 
     public var stages: Set<EnrichmentStage> { [.postEmission, .onDemand] }
 
-    /// Built-in static IOC set. Future iteration: read from
-    /// MacCrabCore.ThreatIntelFeed.cachedIOCs() so updates land
-    /// without recompiling. Holding small + static here keeps the
-    /// idempotency contract trivially provable.
-    private static let knownMalicious: Set<String> = [
-        "evil.example.com",
-        "phishing.example.net",
-    ]
-    private static let knownPhishing: Set<String> = [
-        "phishing.example.net",
-        "credentials-grab.example.org",
-    ]
+    struct Match: Sendable, Equatable { let source: String; let family: String? }
+    private let malicious: [String: Match]   // domain.lowercased → match
 
-    public init() async throws {}
+    /// Protocol init — reads the daemon-written IOC cache.
+    public init() async throws { self.init(cacheDir: Self.defaultCacheDir()) }
+
+    /// Testable init — point at a controlled `threat_intel` cache dir.
+    public init(cacheDir: String) {
+        var map: [String: Match] = [:]
+        if let ioc = ThreatIntelFeed.cachedIOCs(at: cacheDir) {
+            for r in ioc.domains { map[r.value.lowercased()] = Match(source: r.source, family: r.malwareFamily) }
+        }
+        self.malicious = map
+    }
+
+    static func defaultCacheDir() -> String {
+        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support"))
+            .appendingPathComponent("MacCrab/threat_intel").path
+    }
 
     public func enrich(
         _ subject: EnrichmentSubject,
         stage: EnrichmentStage
     ) async throws -> Enrichment {
-        let domain = Self.extractDomain(from: subject)
         var fields: [String: EnrichmentValue] = [:]
-        if let d = domain {
+        if let d = Self.extractDomain(from: subject)?.lowercased() {
             fields["threatintel.domain"] = .string(d)
-            fields["threatintel.is_known_malicious"] = .bool(Self.knownMalicious.contains(d))
-            fields["threatintel.is_known_phishing"] = .bool(Self.knownPhishing.contains(d))
+            if let m = malicious[d] {
+                fields["threatintel.is_known_malicious"] = .bool(true)
+                fields["threatintel.source"] = .string(m.source)
+                if let fam = m.family { fields["threatintel.malware_family"] = .string(fam) }
+            } else {
+                fields["threatintel.is_known_malicious"] = .bool(false)
+            }
         } else {
             fields["threatintel.domain_present"] = .bool(false)
         }
@@ -61,7 +72,7 @@ public struct ThreatIntelDomainEnricher: Enricher {
             pluginID: Self.manifest.id,
             pluginVersion: Self.manifest.version,
             schemaVersion: Self.manifest.schemaVersion,
-            producedAt: Date(),  // not part of the byte-identical guarantee
+            producedAt: Date(),  // excluded from the byte-identical guarantee
             fields: fields,
             confidence: .observed,
             privacyClass: .metadata
@@ -70,12 +81,10 @@ public struct ThreatIntelDomainEnricher: Enricher {
 
     static func extractDomain(from subject: EnrichmentSubject) -> String? {
         switch subject {
-        case .path(let url):
-            return url.host
-        case .event(let p):
-            return p.processExecutablePath.flatMap { URL(string: $0)?.host }
-        case .alert(let p):
-            return p.processExecutablePath.flatMap { URL(string: $0)?.host }
+        case .path(let url): return url.host
+        // A process event/alert carries no network host in the enrichment payload;
+        // domain reputation runs on URL/path subjects (operator / agent on-demand).
+        case .event, .alert: return nil
         }
     }
 }

@@ -1,10 +1,11 @@
 // GeoIPASNEnricher — com.maccrab.enricher.geoip-asn.
 //
-// Plan §13.8. Future-flex: a real iteration plugs a local MMDB
-// (MaxMind GeoIP2 or similar) into the resolution path. v1.16.0-
-// rc.8 ships the API shape with a hardcoded private/loopback +
-// CGNAT mapping so the integration point is stable for tests
-// without bundling a multi-megabyte MMDB.
+// Classifies an IPv4 address into its RFC address-range type (loopback / private
+// A-B-C / CGNAT / link-local / public) — a cheap "is this internal or routable"
+// signal with no external dependency. It does NOT resolve ASN or geo-country: that
+// needs a bundled MaxMind GeoIP2/ASN MMDB, which we deliberately do not ship. The
+// previous build advertised ASN+country it never emitted; this is the honest shape.
+// Pure function on subject — Pass 2026-C idempotency.
 
 import Foundation
 
@@ -12,9 +13,9 @@ public struct GeoIPASNEnricher: Enricher {
 
     public static let manifest = PluginManifest(
         id: "com.maccrab.enricher.geoip-asn",
-        version: "1.0.0",
-        displayName: "GeoIP / ASN",
-        description: "Annotates the subject's payload with ASN + country for any IP found. v1.16.0-rc.8 ships a small private-range / loopback / CGNAT map; the live MMDB binding lands when the operator opts into the MaxMind license. Pure function on subject — Pass 2026-C idempotency.",
+        version: "1.1.0",
+        displayName: "IP Range Classifier",
+        description: "Classifies an IPv4 address into its address-range type — loopback, private (class A/B/C), CGNAT, link-local, or public — a no-dependency internal-vs-routable signal. Does not resolve ASN or geo-country (no MaxMind MMDB is bundled). Pure function on subject — Pass 2026-C idempotency.",
         type: .enricher,
         runtime: .tierA,
         tccRequirements: [],
@@ -62,8 +63,9 @@ public struct GeoIPASNEnricher: Enricher {
         let host: String?
         switch subject {
         case .path(let url): host = url.host
-        case .event(let p): host = p.processExecutablePath.flatMap { URL(string: $0)?.host }
-        case .alert(let p): host = p.processExecutablePath.flatMap { URL(string: $0)?.host }
+        // A process event/alert carries no network destination in the enrichment
+        // payload; IP-range classification runs on URL/path subjects (on-demand).
+        case .event, .alert: host = nil
         }
         guard let h = host else { return nil }
         // crude IPv4 check.
