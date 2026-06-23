@@ -15,7 +15,8 @@ struct PluginDetailModel: Identifiable, Equatable {
     let provenance: PluginProvenance     // built-in / third-party / store
     let version: String
     let publisher: String
-    let reads: [String]                  // declared read-set (third-party)
+    let reads: [String]                  // declared read-set / data sources
+    let emits: [String]                  // artifact types it produces
     let networkLabel: String
     let privacyLabel: String
     let tcc: [String]                    // TCC requirements / personal-comms
@@ -23,17 +24,23 @@ struct PluginDetailModel: Identifiable, Equatable {
     let runnable: Bool
 
     static func builtIn(_ m: PluginManifest) -> PluginDetailModel {
-        PluginDetailModel(
+        // Prefer the curated ScannerCatalog fact (rich purpose / data-sources /
+        // emits) over the bare manifest description so the panel has substance.
+        let fact = ScannerCatalog.fact(forPluginID: m.id)
+        let summary = fact?.purpose ?? (m.description.isEmpty ? "First-party \(m.type.rawValue)." : m.description)
+        let tcc = fact?.tccRequirements ?? m.tccRequirements.map { $0.rawValue }
+        return PluginDetailModel(
             id: m.id,
             displayName: m.displayName,
-            summary: m.description.isEmpty ? "First-party \(m.type.rawValue)." : m.description,
+            summary: summary,
             provenance: .builtIn,
             version: m.version,
             publisher: "MacCrab — first-party, ships in the app",
-            reads: [],
+            reads: fact?.dataSources ?? [],
+            emits: fact?.emits ?? m.outputs.map { $0.contentType },
             networkLabel: "Runs in-process (no third-party network)",
-            privacyLabel: m.type.rawValue.capitalized,
-            tcc: m.tccRequirements.map { $0.rawValue },
+            privacyLabel: (fact?.privacyClass.rawValue ?? m.type.rawValue).capitalized,
+            tcc: tcc,
             installedLabel: "Ships with MacCrab",
             runnable: m.type == .collector || m.type == .analyzer)
     }
@@ -52,6 +59,7 @@ struct PluginDetailModel: Identifiable, Equatable {
                 ? "Catalog (signed) · key \(publicKeyHex.prefix(12))…"
                 : "Operator-trusted · key \(publicKeyHex.prefix(12))…",
             reads: consent?.fileReads ?? [],
+            emits: [],
             networkLabel: endpoints.isEmpty ? "No network egress" : "Network: " + endpoints.joined(separator: ", "),
             privacyLabel: (consent?.derivedHighestPrivacy ?? "metadata").capitalized,
             tcc: consent?.tccReads ?? [],
@@ -128,7 +136,10 @@ struct PluginDetailInspector: View {
                 chipRow(model.provenance == .builtIn ? "Needs" : "Personal data", model.tcc.joined(separator: ", "))
             }
             if !model.reads.isEmpty {
-                chipRow("Reads", model.reads.prefix(6).joined(separator: ", ") + (model.reads.count > 6 ? " …" : ""))
+                chipRow("Reads", model.reads.joined(separator: "\n"))
+            }
+            if !model.emits.isEmpty {
+                chipRow("Emits", model.emits.joined(separator: ", "))
             }
         }
     }

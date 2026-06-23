@@ -28,6 +28,8 @@ struct V2ForensicsMyPluginsView: View {
     @State private var reverifying = false
     @State private var actionMessage: String? = nil
     @State private var detailModel: PluginDetailModel? = nil   // issue #5: tap a plugin → inspector
+    @State private var builtinShowAll = false                   // pagination in the built-in section
+    private let builtinPageSize = 8
 
     private let installer = PluginInstaller()
     private let bootstrap = TierBBootstrap()
@@ -113,21 +115,25 @@ struct V2ForensicsMyPluginsView: View {
             if builtins.isEmpty {
                 emptyHint(String(localized: "myPlugins.builtin.empty", defaultValue: "No built-in scanners registered."))
             } else {
-                ForEach(builtins, id: \.id) { m in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(friendlyName(m.id)).scaledSystem(13, weight: .semibold)
-                            Text("\(m.type.rawValue.capitalized) · v\(m.version)")
-                                .scaledSystem(10).foregroundStyle(.tertiary)
-                        }
-                        Spacer()
-                        Image(systemName: "info.circle").scaledSystem(11).foregroundStyle(.tertiary)
-                        provenanceLabel(.builtIn)
+                let shown = builtinShowAll ? builtins : Array(builtins.prefix(builtinPageSize))
+                VStack(spacing: 5) {
+                    ForEach(shown, id: \.id) { m in
+                        pluginRow(name: friendlyName(m.id),
+                                  subtitle: scannerSubtitle(m),
+                                  icon: scannerIcon(m.type), iconColor: .blue,
+                                  remove: nil) { detailModel = .builtIn(m) }
                     }
-                    .padding(.vertical, 3)
-                    .contentShape(Rectangle())
-                    .onTapGesture { detailModel = .builtIn(m) }
-                    Divider()
+                }
+                if builtins.count > builtinPageSize {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { builtinShowAll.toggle() }
+                    } label: {
+                        Text(builtinShowAll
+                             ? String(localized: "myPlugins.showFewer", defaultValue: "Show fewer")
+                             : String(localized: "myPlugins.showAll", defaultValue: "Show all \(builtins.count)"))
+                            .scaledSystem(11, weight: .medium)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.tint).padding(.top, 2)
                 }
             }
         }
@@ -152,46 +158,69 @@ struct V2ForensicsMyPluginsView: View {
             if visibleVerified.isEmpty && visibleFailed.isEmpty {
                 emptyHint(String(localized: "myPlugins.installed.empty", defaultValue: "Nothing installed yet. MacCrab ships with the built-in scanners above."))
             } else {
-                ForEach(visibleVerified, id: \.pluginID) { v in
-                    installedRow(pluginID: v.pluginID, subtitle: "v\(v.version)",
-                                 state: .verified, provenance: v.provenance)
-                        .contentShape(Rectangle())
-                        .onTapGesture { detailModel = verifiedDetail(v) }
-                    Divider()
-                }
-                ForEach(visibleFailed, id: \.pluginID) { f in
-                    installedRow(pluginID: f.pluginID, subtitle: f.reason,
-                                 state: .failed, provenance: provenance(for: f.pluginID))
-                    Divider()
+                VStack(spacing: 5) {
+                    ForEach(visibleVerified, id: \.pluginID) { v in
+                        pluginRow(name: friendlyName(v.pluginID),
+                                  subtitle: "Verified · v\(v.version) · \(v.provenance.displayName)",
+                                  icon: "checkmark.seal.fill", iconColor: .green,
+                                  remove: { Task { await remove(v.pluginID) } }) { detailModel = verifiedDetail(v) }
+                    }
+                    ForEach(visibleFailed, id: \.pluginID) { f in
+                        pluginRow(name: friendlyName(f.pluginID),
+                                  subtitle: "Failed · \(f.reason)",
+                                  icon: "xmark.octagon.fill", iconColor: .red,
+                                  remove: { Task { await remove(f.pluginID) } }, detail: nil)
+                    }
                 }
             }
         }
     }
 
-    private enum RowState { case verified, failed }
-
-    private func installedRow(pluginID: String, subtitle: String, state: RowState, provenance: PluginProvenance) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: state == .verified ? "checkmark.seal.fill" : "xmark.octagon.fill")
-                .scaledSystem(12)
-                .foregroundStyle(state == .verified ? .green : .red)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(friendlyName(pluginID)).scaledSystem(13, weight: .semibold)
-                Text(subtitle)
-                    .scaledSystem(10)
-                    .foregroundStyle(state == .verified ? Color.secondary : Color.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                provenanceLabel(provenance)
+    /// Dense, clear plugin row with a prominent Details button. The old rows were
+    /// spaced out with an invisible whole-row tap as the only detail affordance.
+    /// `detail` nil → no Details button / not tappable (failed installs);
+    /// `remove` nil → no Remove button (built-ins).
+    private func pluginRow(name: String, subtitle: String, icon: String, iconColor: Color,
+                           remove: (() -> Void)?, detail: (() -> Void)?) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).scaledSystem(13).foregroundStyle(iconColor)
+                .frame(width: 18).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name).scaledSystem(12, weight: .semibold).lineLimit(1)
+                Text(subtitle).scaledSystem(10).foregroundStyle(.secondary).lineLimit(1)
             }
-            Spacer()
-            Button(role: .destructive) {
-                Task { await remove(pluginID) }
-            } label: {
-                Text(String(localized: "myPlugins.remove", defaultValue: "Remove"))
+            Spacer(minLength: 8)
+            if let detail {
+                Button(String(localized: "myPlugins.details", defaultValue: "Details"), action: detail)
+                    .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderless).controlSize(.small)
+            if let remove {
+                Button(role: .destructive, action: remove) {
+                    Text(String(localized: "myPlugins.remove", defaultValue: "Remove"))
+                }
+                .buttonStyle(.bordered)
+            }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture { detail?() }
+    }
+
+    private func scannerSubtitle(_ m: PluginManifest) -> String {
+        if let p = ScannerCatalog.fact(forPluginID: m.id)?.purpose { return p }
+        if !m.description.isEmpty { return m.description }
+        return m.type.rawValue.capitalized
+    }
+
+    private func scannerIcon(_ type: PluginType) -> String {
+        switch type {
+        case .collector:     return "tray.and.arrow.down"
+        case .analyzer:      return "magnifyingglass"
+        case .enricher:      return "sparkles"
+        case .fingerprinter: return "barcode.viewfinder"
+        }
     }
 
     // MARK: - Quarantine
