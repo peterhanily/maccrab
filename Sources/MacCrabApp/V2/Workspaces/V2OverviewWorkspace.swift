@@ -76,6 +76,11 @@ struct V2OverviewWorkspace: View {
 
             let buckets = await state.provider.alertHistogram(rangeKey: rangeKey)
             await MainActor.run { self.histogramBuckets = buckets }
+
+            // Populate the AI Guard + Threat Intel tiles (both @Published on
+            // appState; mtime-gated so a tight refresh tick is cheap).
+            await appState.refreshThreatIntelStats()
+            await appState.refreshAgentLineage()
         }
     }
 
@@ -245,9 +250,9 @@ struct V2OverviewWorkspace: View {
             )
             V2KpiCard(
                 title: "AI Guard",
-                value: "—",
-                trend: "via daemon",
-                trendKind: .neutral,
+                value: aiGuardValue,
+                trend: aiGuardTrend,
+                trendKind: aiGuardTrendKind,
                 icon: "brain.head.profile",
                 iconColor: V2Theme.aiAccent,
                 action: V2KpiAction("View AI Guard") {
@@ -258,9 +263,9 @@ struct V2OverviewWorkspace: View {
             )
             V2KpiCard(
                 title: "Threat Intel",
-                value: "—",
-                trend: "via daemon",
-                trendKind: .neutral,
+                value: threatIntelValue,
+                trend: threatIntelTrend,
+                trendKind: threatIntelTrendKind,
                 icon: "globe.americas.fill",
                 iconColor: V2Theme.dataAccent,
                 action: V2KpiAction("View Intelligence") {
@@ -295,6 +300,40 @@ struct V2OverviewWorkspace: View {
         if rate >= 1000 { return String(format: "%.1fK", rate / 1000) }
         if rate >= 10   { return String(format: "%.0f", rate) }
         return String(format: "%.1f", rate)
+    }
+
+    // MARK: - AI Guard + Threat Intel tiles (bound to live AppState, not '—')
+
+    private func compactCount(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000     { return String(format: "%.1fk", Double(n) / 1_000) }
+        return "\(n)"
+    }
+
+    private var aiGuardValue: String { "\(appState.aiSessions.count)" }
+    private var aiGuardTrend: String {
+        let n = appState.aiSessions.count
+        return n == 0 ? "no agent sessions" : (n == 1 ? "agent session" : "agent sessions")
+    }
+    private var aiGuardTrendKind: V2ChipKind { appState.aiSessions.isEmpty ? .neutral : .ai }
+
+    private var threatIntelTotal: Int {
+        let s = appState.threatIntelStats
+        return s.hashes + s.ips + s.domains + s.urls
+    }
+    private var threatIntelValue: String { threatIntelTotal > 0 ? compactCount(threatIntelTotal) : "—" }
+    private var threatIntelTrend: String {
+        guard threatIntelTotal > 0 else { return "no indicators loaded" }
+        guard let updated = appState.threatIntelStats.lastUpdate else { return "indicators loaded" }
+        let rel = RelativeDateTimeFormatter()
+        rel.unitsStyle = .abbreviated
+        return "updated \(rel.localizedString(for: updated, relativeTo: Date()))"
+    }
+    private var threatIntelTrendKind: V2ChipKind {
+        guard threatIntelTotal > 0 else { return .neutral }
+        guard let updated = appState.threatIntelStats.lastUpdate else { return .neutral }
+        // 6h freshness ceiling, matching V2LiveDataProvider's staleness rule.
+        return Date().timeIntervalSince(updated) < 6 * 3600 ? .healthy : .warning
     }
 
     private var postureTimelineCard: some View {

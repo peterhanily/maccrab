@@ -163,6 +163,9 @@ public struct V2DetectionWorkspace: View {
             let sess = await state.provider.agentSessions(limit: 50)
             await MainActor.run { self.agentSessions = sess }
 
+            // Live AI-Guard tile metrics (appState.aiSessions snapshot).
+            await appState.refreshAgentLineage()
+
             // Composite (sequence + graph) rule labels — for the
             // empty-table explanation when an alert deep-links a
             // non-single-event detection id.
@@ -941,23 +944,35 @@ public struct V2DetectionWorkspace: View {
         }
     }
 
+    // AI Guard metrics from the live agent-lineage snapshot (appState.aiSessions),
+    // replacing the old '—'/'via daemon' placeholders.
+    private var trackedToolCount: Int { Set(appState.aiSessions.map { $0.toolType }).count }
+    private var toolCalls24h: Int {
+        let cutoff = Date().addingTimeInterval(-24 * 3600)
+        return appState.aiSessions.filter { $0.lastActivity >= cutoff }.reduce(0) { $0 + $1.eventCount }
+    }
+    private var aiAlerts7d: Int {
+        let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
+        return appState.aiSessions.filter { $0.lastActivity >= cutoff }.reduce(0) { $0 + $1.kindCounts.alerts }
+    }
+
     private var aiGuardOverview: some View {
         HStack(spacing: 12) {
             metricCard(title: "MCP servers", value: "\(mcpServers.count)",
                        trend: mcpServers.isEmpty ? "none configured" : "discovered configs",
                        trendKind: mcpServers.isEmpty ? .neutral : .ai,
                        icon: "server.rack", iconColor: V2Theme.medium)
-            metricCard(title: "Tracked tools", value: "—",
-                       trend: "via daemon",
-                       trendKind: .neutral,
+            metricCard(title: "Tracked tools", value: "\(trackedToolCount)",
+                       trend: trackedToolCount == 0 ? "no agent sessions" : "AI tools seen",
+                       trendKind: trackedToolCount == 0 ? .neutral : .ai,
                        icon: "brain.head.profile", iconColor: V2Theme.aiAccent)
-            metricCard(title: "Tool calls (24h)", value: "—",
-                       trend: "via daemon",
-                       trendKind: .neutral,
+            metricCard(title: "Tool calls (24h)", value: "\(toolCalls24h)",
+                       trend: toolCalls24h == 0 ? "none in 24h" : "agent activity",
+                       trendKind: toolCalls24h == 0 ? .neutral : .ai,
                        icon: "wand.and.stars", iconColor: V2Theme.aiAccent)
-            metricCard(title: "AI alerts (7d)", value: "—",
-                       trend: "via daemon",
-                       trendKind: .neutral,
+            metricCard(title: "AI alerts (7d)", value: "\(aiAlerts7d)",
+                       trend: aiAlerts7d == 0 ? "none in 7d" : "flagged",
+                       trendKind: aiAlerts7d == 0 ? .healthy : .warning,
                        icon: "exclamationmark.shield.fill", iconColor: V2Theme.aiAccent)
         }
     }
