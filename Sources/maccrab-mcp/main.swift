@@ -948,12 +948,14 @@ private let sharedTierBBootstrap = TierBBootstrap()
 
 func handleTierBListPlugins() async -> Any {
     let status = await sharedTierBBootstrap.status(force: false)
-    return ["content": [["type": "text", "text": jsonStringify(tierBStatusPayload(status))]]]
+    let builtinIDs = Set(await PluginRegistry.shared.manifests().map { $0.id })
+    return ["content": [["type": "text", "text": jsonStringify(tierBStatusPayload(status, builtinIDs: builtinIDs))]]]
 }
 
 func handleTierBVerify() async -> Any {
     let status = await sharedTierBBootstrap.refresh()
-    return ["content": [["type": "text", "text": jsonStringify(tierBStatusPayload(status))]]]
+    let builtinIDs = Set(await PluginRegistry.shared.manifests().map { $0.id })
+    return ["content": [["type": "text", "text": jsonStringify(tierBStatusPayload(status, builtinIDs: builtinIDs))]]]
 }
 
 // tierb.run_installed (subprocess spawn) is research-only and
@@ -961,14 +963,16 @@ func handleTierBVerify() async -> Any {
 // tierb.list_plugins + tierb.verify (the discovery surface);
 // spawn ships when NSXPCConnection + XPC service bundling lands.
 
-private func tierBStatusPayload(_ status: TierBBootstrap.Status) -> [String: Any] {
+private func tierBStatusPayload(_ status: TierBBootstrap.Status, builtinIDs: Set<String> = []) -> [String: Any] {
     let isoFmt = ISO8601DateFormatter()
+    // Hide dev/test/rehearsal residue from agents, same classifier the dashboard uses.
+    func visible(_ id: String) -> Bool { PluginVisibility.isOperatorVisible(pluginID: id, builtinIDs: builtinIDs) }
     return [
         "plugins_root": status.pluginsRoot,
         "verified_at": isoFmt.string(from: status.verifiedAt),
         "trusted_key_count": status.trustedKeyCount,
         "revoked_key_count": status.revokedKeyCount,
-        "verified": status.verified.map { v -> [String: Any] in
+        "verified": status.verified.filter { visible($0.pluginID) }.map { v -> [String: Any] in
             [
                 "plugin_id": v.pluginID,
                 "version": v.version,
@@ -979,7 +983,7 @@ private func tierBStatusPayload(_ status: TierBBootstrap.Status) -> [String: Any
                 "provenance": v.provenance.rawValue,
             ]
         },
-        "failed": status.failed.map { f -> [String: Any] in
+        "failed": status.failed.filter { visible($0.pluginID) }.map { f -> [String: Any] in
             [
                 "plugin_id": f.pluginID,
                 "reason": f.reason,
@@ -987,7 +991,7 @@ private func tierBStatusPayload(_ status: TierBBootstrap.Status) -> [String: Any
         },
         // O2: installed plugins quarantined by a signed revocation. On disk
         // (evidence preserved) but refused load.
-        "quarantined": status.quarantined.map { q -> [String: Any] in
+        "quarantined": status.quarantined.filter { visible($0.pluginID) }.map { q -> [String: Any] in
             var entry: [String: Any] = [
                 "plugin_id": q.pluginID,
                 "installed_version": q.installedVersion,

@@ -17,17 +17,16 @@ import MacCrabForensics
 
 public enum OperatorVisibilityFilter {
 
-    /// Plugin ids that should never appear in operator-facing UI.
-    /// Patterns:
-    ///   com.test.*          — manual test plugins
-    ///   com.research.*      — research / preview plugins
-    ///   *-fixture           — test fixtures
-    public static func isOperatorVisible(pluginID: String) -> Bool {
-        if pluginID.hasPrefix("com.test.") { return false }
-        if pluginID.hasPrefix("com.research.") { return false }
-        if pluginID.hasSuffix("-fixture") { return false }
-        if pluginID.contains(".test.") { return false }
-        return true
+    /// Plugin ids that should never appear in operator-facing UI. Delegates to the
+    /// shared MacCrabForensics classifier so the dashboard, CLI, and MCP agree.
+    public static func isOperatorVisible(pluginID: String, builtinIDs: Set<String> = []) -> Bool {
+        PluginVisibility.isOperatorVisible(pluginID: pluginID, builtinIDs: builtinIDs)
+    }
+
+    /// True iff the id is dev/test/rehearsal residue (for the Settings cleanup,
+    /// which must offer to delete exactly what we hide).
+    public static func isResidue(pluginID: String, builtinIDs: Set<String> = []) -> Bool {
+        PluginVisibility.isResidue(pluginID: pluginID, builtinIDs: builtinIDs)
     }
 
     /// Filter applied to scan names. Hides scans whose name
@@ -50,18 +49,12 @@ public enum OperatorVisibilityFilter {
         return true
     }
 
-    /// Filter for InstalledPlugin items returned by
-    /// PluginInstaller.list(). PluginInstaller returns directory
-    /// entries; some end up being trust/revocation JSON files
-    /// rather than actual plugin directories. Skip those.
-    public static func filter(_ installed: [InstalledPlugin]) -> [InstalledPlugin] {
-        installed.filter { p in
-            // Reject .json entries (trusted-keys.json etc.) that
-            // the installer rendered as bogus plugin rows.
-            if p.pluginID.hasSuffix(".json") { return false }
-            // Apply name filter.
-            return isOperatorVisible(pluginID: p.pluginID)
-        }
+    /// Filter for InstalledPlugin items returned by PluginInstaller.list().
+    /// Delegates to the shared classifier. Pass `builtinIDs` (registry ids) to
+    /// enable the positive `com.maccrab.*`-impersonation rule; the denylist
+    /// (com.acme.*, the rehearsal id, .json trust files, …) applies regardless.
+    public static func filter(_ installed: [InstalledPlugin], builtinIDs: Set<String> = []) -> [InstalledPlugin] {
+        PluginVisibility.filterInstalled(installed, builtinIDs: builtinIDs)
     }
 
     /// Filter for CaseManifest entries. Used by Scans tab.

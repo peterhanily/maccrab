@@ -322,9 +322,12 @@ public actor RaveCatalogClient {
     public func installedPlugins() async -> [String: String] {
         let installer = PluginInstaller()
         guard let installed = try? await installer.list() else { return [:] }
+        // Never badge dev/test residue as "installed" in the catalog.
+        let builtinIDs = Set(await PluginRegistry.shared.manifests().map { $0.id })
+        let visible = PluginVisibility.filterInstalled(installed, builtinIDs: builtinIDs)
         var map: [String: String] = [:]
-        map.reserveCapacity(installed.count)
-        for p in installed {
+        map.reserveCapacity(visible.count)
+        for p in visible {
             let version = (try? TierBManifest.load(fromBundlePath: p.installRoot))?.version ?? ""
             map[p.pluginID] = version
         }

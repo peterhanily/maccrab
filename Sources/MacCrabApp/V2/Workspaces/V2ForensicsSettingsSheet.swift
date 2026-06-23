@@ -210,12 +210,12 @@ struct V2ForensicsSettingsSheet: View {
     private func reload() async {
         loading = true
         let allInstalled = (try? await installer.list()) ?? []
-        let filtered = OperatorVisibilityFilter.filter(allInstalled)
-        // Anything that the filter dropped is dev / test residue.
-        let visibleIDs = Set(filtered.map { $0.pluginID })
+        // Removable residue = exactly what the shared classifier hides (decoupled
+        // from the display filter), minus .json trust files we must not uninstall.
+        let builtinIDs = Set(await PluginRegistry.shared.manifests().map { $0.id })
         devResidue = allInstalled
             .map { $0.pluginID }
-            .filter { !visibleIDs.contains($0) && !$0.hasSuffix(".json") }
+            .filter { OperatorVisibilityFilter.isResidue(pluginID: $0, builtinIDs: builtinIDs) && !$0.hasSuffix(".json") }
         let trusted = await installer.currentTrustedKeys()
         let revoked = await installer.currentRevokedKeys()
         trustedKeys = Array(trusted).sorted()

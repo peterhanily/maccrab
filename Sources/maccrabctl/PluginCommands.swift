@@ -139,11 +139,14 @@ private func pluginList(args: [String] = []) async {
     // separate first-party (Tier A) plugins from third-party
     // (installed via PluginInstaller). Default is `all`.
     var filter: String = "all"
+    var includeResidue = false
     var i = 0
     while i < args.count {
         switch args[i] {
         case "--filter" where i + 1 < args.count:
             filter = args[i + 1]; i += 2
+        case "--include-residue":
+            includeResidue = true; i += 1   // engineering escape hatch: show dev/test leftovers
         default:
             i += 1
         }
@@ -181,7 +184,12 @@ private func pluginList(args: [String] = []) async {
     if showInstalled {
         do {
             let installer = PluginInstaller()
-            let installed = try await installer.list()
+            let rawInstalled = try await installer.list()
+            // Hide dev/test/rehearsal residue by default (same classifier the
+            // dashboard + MCP use); `--include-residue` shows it for engineering.
+            let builtinIDs = Set(await PluginRegistry.shared.manifests().map { $0.id })
+            let installed = includeResidue ? rawInstalled
+                : PluginVisibility.filterInstalled(rawInstalled, builtinIDs: builtinIDs)
             if installed.isEmpty {
                 if filter == "installed" {
                     print("No third-party plugins installed.")
