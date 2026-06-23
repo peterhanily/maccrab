@@ -34,6 +34,10 @@ struct V2ForensicsScansView: View {
     @State private var pendingEncryptedKit: Kit? = nil
     @State private var detailKit: Kit? = nil
     @State private var fdaStatus: FullDiskAccessStatus = .unknown
+    // Issue #3: the full scanner inventory, sectioned built-in vs third-party.
+    @State private var builtinScanners: [PluginManifest] = []
+    @State private var thirdPartyScanners: [InstalledPlugin] = []
+    @State private var thirdPartyManifests: [String: TierBManifest] = [:]
     @AppStorage("forensics.encryptedKitWarningSeen") private var encryptedWarningSeen = false
     @AppStorage("forensics.fdaBannerDismissed") private var fdaBannerDismissed = false
 
@@ -261,21 +265,97 @@ struct V2ForensicsScansView: View {
     // MARK: - Run a new scan (kits)
 
     private var runNewScanSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(scans.isEmpty ? "Pick a kit to start a scan" : "Run a new scan")
-                    .font(.headline)
-                Spacer()
-                Text("\(kits.count) kit\(kits.count == 1 ? "" : "s")")
-                    .scaledSystem(11)
-                    .foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 18) {
+            // Recommended kits (the curated headline).
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(scans.isEmpty ? "Pick a kit to start a scan" : "Run a new scan")
+                        .font(.headline)
+                    Spacer()
+                    Text("\(kits.count) kit\(kits.count == 1 ? "" : "s")")
+                        .scaledSystem(11)
+                        .foregroundStyle(.tertiary)
+                }
+                VStack(spacing: 10) {
+                    ForEach(kits, id: \.id) { kit in kitCard(kit) }
+                }
             }
-            VStack(spacing: 10) {
-                ForEach(kits, id: \.id) { kit in
-                    kitCard(kit)
+            // Issue #3: every scanner is individually runnable, sectioned by origin.
+            if !builtinScanners.isEmpty {
+                scannerSection("Built-in scanners", count: builtinScanners.count) {
+                    ForEach(builtinScanners, id: \.id) { m in
+                        scannerRow(icon: scannerIcon(m.type), name: m.displayName,
+                                   subtitle: m.description.isEmpty ? m.type.rawValue.capitalized : m.description,
+                                   badge: nil) { Task { await runBuiltinScanner(m) } }
+                    }
+                }
+            }
+            if !thirdPartyScanners.isEmpty {
+                scannerSection("Third-party plugins", count: thirdPartyScanners.count) {
+                    ForEach(thirdPartyScanners, id: \.pluginID) { p in
+                        let m = thirdPartyManifests[p.pluginID]
+                        scannerRow(icon: "puzzlepiece.extension", name: m?.displayName ?? p.pluginID,
+                                   subtitle: (m?.description.isEmpty == false ? m!.description : "Third-party plugin"),
+                                   badge: "Third-party") { runThirdPartyScanner(p) }
+                    }
                 }
             }
         }
+    }
+
+    private func scannerSection<Content: View>(_ title: String, count: Int, @ViewBuilder _ rows: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.headline)
+                Spacer()
+                Text("\(count)").scaledSystem(11).foregroundStyle(.tertiary)
+            }
+            VStack(spacing: 6) { rows() }
+        }
+    }
+
+    private func scannerRow(icon: String, name: String, subtitle: String, badge: String?, run: @escaping () -> Void) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).scaledSystem(16).foregroundStyle(.tint)
+                .frame(width: 22).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(name).scaledSystem(12, weight: .semibold)
+                    if let badge {
+                        Text(badge).scaledSystem(9, weight: .medium)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.15)).cornerRadius(3)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(subtitle).scaledSystem(10).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Button("Run", action: run).controlSize(.small)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor)).cornerRadius(6)
+    }
+
+    private func scannerIcon(_ type: PluginType) -> String {
+        switch type {
+        case .collector:     return "tray.and.arrow.down"
+        case .analyzer:      return "magnifyingglass"
+        case .enricher:      return "sparkles"
+        case .fingerprinter: return "barcode.viewfinder"
+        }
+    }
+
+    @MainActor private func runBuiltinScanner(_ m: PluginManifest) async {
+        guard let reg = await PluginRegistry.shared.registration(forID: m.id) else { return }
+        runOrConfirm(Kit.adHoc(pluginID: m.id, name: m.displayName, encrypted: deriveEncrypted(reg)))
+    }
+
+    private func runThirdPartyScanner(_ p: InstalledPlugin) {
+        let m = thirdPartyManifests[p.pluginID]
+        let name = m?.displayName ?? p.pluginID
+        let encrypted = (m?.consentSummary().derivedHighestPrivacy ?? "metadata") != "metadata"
+        runOrConfirm(Kit.adHoc(pluginID: p.pluginID, name: name, encrypted: encrypted))
     }
 
     private func kitCard(_ kit: Kit) -> some View {
@@ -536,6 +616,24 @@ struct V2ForensicsScansView: View {
     private func reload() async {
         loading = true
         kits = KitLoader.loadBundledKits()
+        // The full scanner inventory (Issue #3): built-in collectors/analyzers +
+        // operator-visible third-party plugins (residue filtered via the shared
+        // classifier). Kits stay the recommended headline; these are the
+        // individually-runnable scanners.
+        let mans = await PluginRegistry.shared.manifests()
+        builtinScanners = mans
+            .filter { $0.type == .collector || $0.type == .analyzer }
+            .sorted { $0.displayName < $1.displayName }
+        let builtinIDs = Set(mans.map { $0.id })
+        let rawInstalled = (try? await PluginInstaller().list()) ?? []
+        let visible = OperatorVisibilityFilter.filter(rawInstalled, builtinIDs: builtinIDs)
+            .sorted { $0.pluginID < $1.pluginID }
+        thirdPartyScanners = visible
+        var tpm: [String: TierBManifest] = [:]
+        for p in visible {
+            if let m = try? TierBManifest.load(fromBundlePath: p.installRoot) { tpm[p.pluginID] = m }
+        }
+        thirdPartyManifests = tpm
         do {
             let mgr = CaseManager(
                 casesRoot: CaseDirectoryLayout.defaultCasesRoot,
