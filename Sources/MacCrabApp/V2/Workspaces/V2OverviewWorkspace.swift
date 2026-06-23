@@ -2,6 +2,7 @@
 // Spec §7.1 — single-screen operational summary. No tabs.
 
 import SwiftUI
+import MacCrabForensics
 
 struct V2OverviewWorkspace: View {
 
@@ -13,6 +14,10 @@ struct V2OverviewWorkspace: View {
     @State private var histogramBuckets: [V2OverviewBucket] = []
     @State private var rangeKey: String = "6h"
     @State private var showingSecurityFactors: Bool = false
+    // Issue #2: surface forensics/plugins on Overview.
+    @State private var forensicsBuiltinCount = 0
+    @State private var forensicsInstalledCount = 0
+    @State private var forensicsLastScan: CaseManifest? = nil
 
     init(state: V2DashboardState, appState: AppState) {
         self.state = state
@@ -44,6 +49,7 @@ struct V2OverviewWorkspace: View {
                     recentActivityCard
                     quickActionsCard
                 }
+                forensicsCard
             }
             .padding(16)
         }
@@ -81,6 +87,7 @@ struct V2OverviewWorkspace: View {
             // appState; mtime-gated so a tight refresh tick is cheap).
             await appState.refreshThreatIntelStats()
             await appState.refreshAgentLineage()
+            await loadForensicsCard()
         }
     }
 
@@ -411,6 +418,76 @@ struct V2OverviewWorkspace: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Range: \(label)")
         .accessibilityAddTraits(on ? [.isSelected] : [])
+    }
+
+    // MARK: - Forensics & plugins (issue #2)
+
+    private var forensicsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Forensics & plugins").font(V2Theme.sectionTitle()).foregroundStyle(V2Theme.primaryText)
+                Spacer()
+                Button { state.switchWorkspace(.forensics) } label: {
+                    Text("Open →").font(V2Theme.meta()).foregroundStyle(V2Theme.dataAccent)
+                }
+                .buttonStyle(.plain)
+            }
+            HStack(spacing: 24) {
+                forensicsStat("\(forensicsBuiltinCount)", "Built-in scanners")
+                forensicsStat("\(forensicsInstalledCount)", "Installed plugins")
+            }
+            if let s = forensicsLastScan {
+                HStack(spacing: 8) {
+                    Image(systemName: "clock.arrow.circlepath").scaledSystem(11).foregroundStyle(V2Theme.mutedText)
+                    Text("Last scan: \(s.name)").font(V2Theme.body()).foregroundStyle(V2Theme.primaryText).lineLimit(1)
+                    Spacer()
+                    Text(V2TimeFormat.relative(s.createdAt)).font(V2Theme.meta()).foregroundStyle(V2Theme.tertiaryText)
+                }
+            } else {
+                Text("No scans yet — run one to inventory this Mac.")
+                    .font(V2Theme.body()).foregroundStyle(V2Theme.mutedText)
+            }
+            HStack(spacing: 8) {
+                Button {
+                    state.goto(V2NavigationDestination(workspace: .forensics, tab: .forensicsScans))
+                } label: {
+                    Label("Run a scan", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                Button {
+                    state.goto(V2NavigationDestination(workspace: .forensics, tab: .forensicsMyPlugins))
+                } label: {
+                    Text("My plugins")
+                }
+                .controlSize(.small)
+            }
+        }
+        .v2Panel()
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func forensicsStat(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(value).scaledSystem(22, weight: .semibold).foregroundStyle(V2Theme.primaryText)
+            Text(label).font(V2Theme.meta()).foregroundStyle(V2Theme.mutedText)
+        }
+    }
+
+    private func loadForensicsCard() async {
+        let mans = await PluginRegistry.shared.manifests()
+        let builtinCount = mans.filter { $0.type == .collector || $0.type == .analyzer }.count
+        let builtinIDs = Set(mans.map { $0.id })
+        let installed = OperatorVisibilityFilter.filter((try? await PluginInstaller().list()) ?? [], builtinIDs: builtinIDs)
+        var lastScan: CaseManifest? = nil
+        let mgr = CaseManager(casesRoot: CaseDirectoryLayout.defaultCasesRoot, dekVault: KeychainDEKVault())
+        if let raw = try? await mgr.listCases() {
+            lastScan = OperatorVisibilityFilter.filter(raw.sorted { $0.createdAt > $1.createdAt }).first
+        }
+        await MainActor.run {
+            forensicsBuiltinCount = builtinCount
+            forensicsInstalledCount = installed.count
+            forensicsLastScan = lastScan
+        }
     }
 
     private var recentActivityCard: some View {
